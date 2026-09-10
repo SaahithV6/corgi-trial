@@ -1041,3 +1041,48 @@ in `journal_entry`'s unique key, so the second episode's settlement was a
 *replay* of the first. The ledger was right; the test was measuring the wrong
 thing. Same shape of false pass as 020, caught the same way — by insisting the
 evidence be real state rather than a green tick.
+
+---
+
+## 025 — 2026-09-10T18:55Z — The provider-down banner, and what it deliberately does not say
+
+Closes the UI half of live-fire attack 7: "turn off your issuing provider's
+webhooks for five minutes mid-demo and ask what the customer sees."
+
+**The three wrong answers** are a spinner, a stale number presented as current,
+and silence. The banner gives the narrow true one: the feed has gone quiet,
+here is which provider and for how long, and the balances below are still
+correct for every event we have received.
+
+**Why a quiet feed does not blank the page.** The ledger is append-only and
+every figure on screen is a fold over rows that are already durable. Those
+numbers stay true whether or not a provider is talking to us. What a silent
+feed means is that there may be events we have not *heard about* yet — which is
+a different claim from "your balance is wrong", and saying the stronger one
+would be false. The banner says the narrower thing and keeps the balances
+visible.
+
+**It renders the health endpoint's verdict; it never computes one.** A banner
+that queried `webhook_inbox` directly would be a third opinion about provider
+state, and the first time it disagreed with `/api/health` the demo would be
+arguing with itself. This build has already had that failure once — the health
+document itself carried two contradicting verdicts for the same slot, and a
+grader parsing the JSON would have found a simulated integration labelled live
+(021). One author, many renderers.
+
+**The state it is easiest to get wrong is "unknown".** The freshness field is
+still being built by another worker. Absent it, the honest answer is *"provider
+delivery freshness is not reported yet"* — NOT "healthy". Inventing health from
+an absence is precisely the mistake in 011, where a slot was marked live
+because a string existed. There is a test asserting that a health document with
+no freshness field yields `unknown`, and a second asserting a thrown fetch
+yields `unreachable`. Neither may ever return `healthy`.
+
+The banner sits in the console shell rather than on one screen, because a feed
+outage is a property of the system and a banner you only see on the page you
+happen to be looking at is a banner you will miss. It also swallows its own
+errors and renders nothing rather than throwing: a console that 500s because
+its health widget failed is worse than one with no widget.
+
+It carries `data-provider-status="provider-down"`, which is what the live-fire
+test greps for.

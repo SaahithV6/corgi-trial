@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import { AppHeader } from "@/components/app-shell/AppHeader";
 import { readRole } from "@/components/app-shell/role";
+import { ProviderHealthBanner } from "@/components/system/ProviderHealthBanner";
 
 /**
  * The console shell.
@@ -33,6 +34,10 @@ export default async function AppLayout({
       <AppHeader role={role} />
 
       <main id="main" className="mx-auto max-w-6xl px-6 py-8">
+        {/* Above the content on every console screen, not just one. A feed
+            outage is a property of the system, and a banner that only appears
+            on the page you happen to be looking at is a banner you will miss. */}
+        <ProviderHealthBanner />
         {children}
       </main>
     </div>
