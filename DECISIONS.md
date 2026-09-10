@@ -1553,7 +1553,7 @@ to
 
 The probe tested for the first string and treated **anything else** as
 parameter validation, therefore entitled, therefore `live`. Within seconds
-`/api/health` was reporting **7 of 7 live** with `business_registry: live`,
+`/api/health` briefly reported **7 of 7 live** with `business_registry: live`,
 while the registry leg was still the simulator and `KYB_FORCE_SIMULATED` was
 still set.
 
