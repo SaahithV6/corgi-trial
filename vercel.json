@@ -14,7 +14,7 @@
   "crons": [
     {
       "path": "/api/drain",
-      "schedule": "0 * * * *"
+      "schedule": "17 4 * * *"
     }
   ]
 }

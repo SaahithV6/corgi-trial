@@ -879,3 +879,47 @@ event becomes a journal line there. The card consumer is being built now. Until
 it lands, "money moves end to end" is not true on the deployed system, and the
 T+24h email says so in a paragraph rather than implying otherwise. The brief is
 explicit that an honest paragraph is recoverable and silence is not.
+
+---
+
+## 022 — 2026-09-10T19:10Z — The drain, and an honest limit on its guarantee
+
+**The gap.** The webhook route verified deliveries and persisted them, and
+nothing ever drained the inbox. Rows sat there — verified, durable, and never
+turned into a journal line. On the deployed system, money did not move. The
+route's contract was right (a provider needs its 2xx in seconds; Plaid retries
+for twenty-four hours without one, so no consumer may run inline) but a
+half-pipeline that stores and never processes is worse than one that is
+obviously missing, because it looks healthy.
+
+**Three triggers, chosen because each fails differently.**
+
+1. `after()` in the webhook route — the fast path. Runs once the response is
+   already on its way, so the provider waits for nothing. Explicitly a NUDGE,
+   never the mechanism: `after()` can be dropped when an instance is recycled,
+   and something that *usually* runs is the worst kind of delivery, because it
+   works right up until the day it matters.
+2. A cron on `/api/drain` — the guarantee.
+3. A bearer-token POST to `/api/drain` — the demo and the debrief. Being able
+   to say "watch, I will drain it now" beats waiting for a timer.
+
+The inbox row is durable before any of them runs. Losing all three loses
+latency; it cannot lose money.
+
+**The limit, stated rather than hidden.** This is a Vercel Hobby account, and
+Hobby caps cron jobs at once per day. The hourly schedule I wanted was rejected
+at deploy time:
+
+    Hobby accounts are limited to daily cron jobs.
+
+So the backstop runs daily, not hourly. What that actually costs: if every
+`after()` nudge for a delivery were lost — an instance recycled at exactly the
+wrong moment — that row waits for the daily tick instead of the hourly one. It
+is not lost, because the dispatcher re-claims rows whose lease has expired and
+the row stays `pending` until a consumer succeeds. Worst-case latency, not
+worst-case correctness.
+
+The fix is one line of `vercel.json` and a paid plan, and it is in the cut list
+rather than smuggled into the README as though the guarantee were tighter than
+it is. If the panel asks "what if the nudge is lost", the honest answer is "up
+to twenty-four hours on this plan, and here is the line that changes it".
