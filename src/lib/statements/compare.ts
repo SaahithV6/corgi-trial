@@ -122,6 +122,8 @@ export async function compareStatement(
     published,
     publishedDocument: verification.document,
     reproduced: verification.reproduced,
+    recomputedHash: verification.recomputedHash,
+    formatChanged: verification.formatChanged,
     correctedDocument,
     deltaCents:
       correctedDocument.closingBalanceCents - verification.document.closingBalanceCents,

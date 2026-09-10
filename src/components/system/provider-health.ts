@@ -52,10 +52,22 @@ function extractFreshness(doc: unknown): ProviderFreshness[] | null {
       const v = container[key];
       if (Array.isArray(v)) return v as ProviderFreshness[];
       if (v && typeof v === "object") {
-        return Object.entries(v as Record<string, unknown>).map(([provider, val]) => ({
-          provider,
-          ...(val as object),
-        })) as ProviderFreshness[];
+        const obj = v as Record<string, unknown>;
+        // The endpoint publishes { source, measuredAt, providers: [...] }.
+        // Prefer that array. Treating the wrapper as a provider-keyed map
+        // invents providers called "source" and "measuredAt", none of which
+        // is ever stale — so the banner would report healthy for a reason
+        // that has nothing to do with any provider. Found on the deployed
+        // system: the field was present and the banner was silent.
+        if (Array.isArray(obj["providers"])) {
+          return obj["providers"] as ProviderFreshness[];
+        }
+        // Otherwise it really is a map of provider -> freshness. Keep only
+        // entries whose value is an object, so scalar metadata keys cannot
+        // masquerade as providers.
+        return Object.entries(obj)
+          .filter(([, val]) => val !== null && typeof val === "object" && !Array.isArray(val))
+          .map(([provider, val]) => ({ provider, ...(val as object) })) as ProviderFreshness[];
       }
     }
   }

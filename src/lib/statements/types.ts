@@ -214,6 +214,22 @@ export interface StatementComparison {
    * changed, which is a deployment question and not a ledger question.
    */
   readonly reproduced: boolean;
+  /**
+   * The hash the re-derivation actually produced.
+   *
+   * Equal to `published.contentHash` when `reproduced` is true. Carried
+   * separately rather than recomputed by the caller so the screen can show
+   * BOTH values side by side when they disagree — "expected X, got Y" is an
+   * incident report; "verification failed" is a shrug.
+   */
+  readonly recomputedHash: string;
+  /**
+   * The stored row was rendered by a different renderer than the one running.
+   *
+   * When true, `reproduced` being false is a deployment fact and not a ledger
+   * fact: the two hashes were never comparable. See `statement.format` (0009).
+   */
+  readonly formatChanged: boolean;
   /** The same period at the CURRENT watermark. What we now know the day to be. */
   readonly correctedDocument: StatementDocument;
   /** `corrected.closing - published.closing`. Zero when nothing landed late. */
