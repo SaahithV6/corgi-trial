@@ -255,6 +255,15 @@ export const CHART: readonly ChartAccount[] = [
     postable: true,
     why: "Where income and expense close at period end, so the balance sheet balances without a stored figure anywhere.",
   },
+  {
+    code: "3200",
+    name: "Contributed capital — testnet funding",
+    type: "equity",
+    book: "financial",
+    parent: "3000",
+    postable: true,
+    why: "The credit side of assets that arrive from outside the business without being earned or owed — the 20.00 USDC this wallet was funded with by the Circle faucet, and the Base Sepolia gas. Without it 1140 carried a payout it had never been funded for and read -$0.50 against a wallet holding 19.50 USDC: an asset that appeared with no corresponding credit, which is the one thing double-entry exists to make impossible. A faucet grant is not income and it is not a liability; nobody will ask for it back and we did not earn it, so it is a capital contribution and it is labelled as testnet so it can never be confused with real money raised.",
+  },
 
   // =========================================================================
   // 4000 INCOME — credit-normal. What we earn.
