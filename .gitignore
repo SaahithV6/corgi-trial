@@ -1,4 +1,7 @@
 # secrets — never committed, see .env.example
+# *.local.md is the key-handoff scratch pad. Listed FIRST and before the file
+# is ever created, so there is no window in which a paste could be committed.
+*.local.md
 .env
 .env.local
 .env*.local
