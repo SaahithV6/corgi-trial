@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Design tokens.
+
+   A financial ops console. The palette is deliberately narrow: one neutral
+   ramp, one positive, one negative. Colour carries meaning here — a green or
+   a red on this surface means money moved in a direction, so nothing else is
+   allowed to be green or red.
+
+   Light is the default. Dark is served from prefers-color-scheme, and every
+   token is redefined there rather than inverted, so contrast stays deliberate.
+--------------------------------------------------------------------------- */
+
+:root {
+  /* Neutrals */
+  --color-background: #f7f7f5;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-border: #e0dfda;
+  --color-border-strong: #c8c6bf;
+
+  /* Text */
+  --color-text: #1b1b19;
+  --color-muted: #6b6a64;
+
+  /* Semantics — money direction only */
+  --color-positive: #176b3f;
+  --color-negative: #a3231d;
+
+  /* Type */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "SFMono-Regular", "Menlo", "Consolas",
+    "Liberation Mono", "DejaVu Sans Mono", monospace;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background: #121211;
+    --color-surface: #1a1a18;
+    --color-surface-raised: #222220;
+    --color-border: #2e2e2b;
+    --color-border-strong: #43433f;
+
+    --color-text: #ebeae6;
+    --color-muted: #9b9a93;
+
+    --color-positive: #5ec98d;
+    --color-negative: #f0837c;
+
+    color-scheme: dark;
+  }
+}
+
+/* Expose the tokens to Tailwind v4 so `bg-surface`, `text-muted`,
+   `border-border`, `font-mono` etc. resolve to the same values. */
+@theme inline {
+  --color-background: var(--color-background);
+  --color-surface: var(--color-surface);
+  --color-surface-raised: var(--color-surface-raised);
+  --color-border: var(--color-border);
+  --color-border-strong: var(--color-border-strong);
+  --color-text: var(--color-text);
+  --color-muted: var(--color-muted);
+  --color-positive: var(--color-positive);
+  --color-negative: var(--color-negative);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+html {
+  background-color: var(--color-background);
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Money is always tabular and always monospaced: columns of figures have to
+   line up on the decimal, and a digit must never change width when it changes
+   value. Amounts are integer cents everywhere upstream of this class. */
+.money {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 1;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.money-positive {
+  color: var(--color-positive);
+}
+
+.money-negative {
+  color: var(--color-negative);
+}

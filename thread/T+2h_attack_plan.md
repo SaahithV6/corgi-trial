@@ -1,25 +1,4 @@
-Subject: Work trial: 4. Lithic cannot originate a force post, and I would rather say so now than
-   have it come up in the debrief. I enumerated every simulate path in their
-   OpenAPI spec: there is no force-post endpoint, and /simulate/clearing
-   requires a parent authorisation token, so it cannot produce an unmatched
-   clearing. What I am building instead: the matcher does not require an
-   authorisation to exist, so an unmatched clearing posts and opens a
-   reconciliation break; FINANCIAL_AUTHORIZATION exercises the same
-   no-hold-to-release path; and the scheme file simulator ships genuine
-   unmatched clearings. If you know a way to originate a real one in their
-   sandbox, I would rather hear it than ship the substitute.
-
-One thing already measured rather than assumed, since it shaped the schema.
-Lithic's transaction status flips to SETTLED while a partial hold is still
-outstanding — a 1000 authorisation cleared for 600 reports SETTLED with 400
-still held — and amounts.hold.amount is signed negative. Releasing a hold on
-status == SETTLED, which is the obvious implementation, frees money that is
-still authorised. So the hold is computed as a pure function of the event set,
-max(authorised - cleared, 0), which reproduces their arithmetic in every case I
-measured including over-capture, and agrees with the network precisely where
-their status field does not.
-
-Saahith Veeramaneni, Track 3
+Subject: Work trial: Saahith Veeramaneni, Track 3
 
 Track 3, neobank. T0 17:13 PDT 9 Sep, freeze 17:13 PDT 11 Sep.
 
