@@ -187,13 +187,16 @@ export interface StatementDay {
 }
 
 /**
- * Closed days for one account, newest first.
+ * Closed days this account has something to show for, newest first.
  *
- * Days with nothing on them for this account are kept rather than filtered
- * out. A closed day with no activity is a real answer to "show me Tuesday" and
- * the screen renders it as an empty statement; dropping it would leave an
- * operator unable to tell "we closed and nothing happened" from "we never
- * closed", which are different facts and only one of them is a problem.
+ * "Something to show for" means a published statement OR at least one posting.
+ * A day the entity closed on which this particular customer did nothing is
+ * excluded — not because it is unanswerable (its statement is an opening
+ * balance, no lines, the same closing balance, and it is derivable on demand
+ * like any other) but because a book with a nightly close has hundreds of them
+ * and they would crowd out every day worth opening. The date is still URL
+ * state, so a day off this list is one query-string edit away rather than
+ * unreachable.
  */
 export async function listStatementDays(
   args: {
@@ -230,6 +233,13 @@ export async function listStatementDays(
                AND l.booking_seq > bd.booking_watermark)       AS late_posting_count
       FROM book_day bd
      WHERE bd.entity_id = ${args.entityId}::uuid
+       AND (EXISTS (SELECT 1 FROM statement s
+                     WHERE s.account_id   = ${args.accountId}::uuid
+                       AND s.period_start = bd.business_date
+                       AND s.period_end   = bd.business_date)
+            OR EXISTS (SELECT 1 FROM journal_line l
+                        WHERE l.account_id = ${args.accountId}::uuid
+                          AND l.value_date = bd.business_date))
      ORDER BY bd.business_date DESC
      LIMIT ${limit}`;
 

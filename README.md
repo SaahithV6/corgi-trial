@@ -36,7 +36,7 @@ Read at 2026-09-10T17:41:58Z. `integrations.live` **5** of `integrations.total`
 | Slot | Provider | Verdict | Evidence string returned by the probe |
 | --- | --- | --- | --- |
 | `card_issuing` *(must be live)* | Lithic sandbox | **live** | `GET /v1/cards -> 200` |
-| `card_webhooks` | Lithic | **live** | `no probe defined for this slot` |
+| `card_webhooks` | Lithic | **simulated** | `credential present but NOT probed — no round trip proves this slot works` |
 | `director_kyc` *(must be live)* | Persona sandbox, or Stripe Identity | **live** | `Stripe Identity enabled (Persona not configured)` |
 | `business_registry` | Stripe Connect (gated) — simulated | **simulated** | `Connect not enabled. Every KYB option the brief lists (Middesk, Persona KYB, Sumsub KYB) is gated behind sales or business verification; registry runs simulated and is labelled so.` |
 | `open_banking` | Plaid sandbox | **live** | `POST /institutions/get -> 200` |
@@ -48,7 +48,8 @@ are live.
 
 ### The one row in that table that is weaker than the others
 
-`card_webhooks` says `live` and its evidence says `no probe defined for this
+`card_webhooks` says `simulated`. It previously said `live`, and its evidence
+said `no probe defined for this
 slot`. That verdict is **not** earned by a round trip. `probeIntegrations()`
 has no probe for the slot, so it falls back to the environment-derived status,
 which is true when `LITHIC_WEBHOOK_SECRET` is set. A present string is not

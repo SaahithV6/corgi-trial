@@ -26,21 +26,36 @@
  * we missed and retrying it, which is what providers do after an outage.
  * ============================================================================
  *
- * WHAT PASSES TODAY: the money claim. Through the dark window nothing is
- * invented — the trial balance does not move and no customer's ledger or
- * available balance changes. On recovery nothing is lost and nothing is
- * double-counted: the held delivery posts exactly once however many times it
- * arrives.
+ * THE MONEY CLAIM. Through the dark window nothing is invented — the trial
+ * balance does not move and no customer's ledger or available balance changes.
+ * On recovery nothing is lost and nothing is double-counted: the held delivery
+ * posts exactly once however many times it arrives.
  *
- * WHAT DOES NOT: the two visibility claims. `/api/health` reports per-provider
- * CREDENTIAL and CAPABILITY liveness (a real probe round trip) and says nothing
- * about webhook DELIVERY freshness, so this outage is invisible to it; and no
- * component renders a provider-down state. Both tests check for the thing they
- * would need and SKIP naming it, rather than asserting something weaker and
- * calling it a pass.
+ * THE TWO VISIBILITY CLAIMS are now testable, and are INDUCED rather than
+ * waited for. `/api/health` publishes `integrations.webhookHealth` — a
+ * per-provider last-delivery instant, a lag in seconds and a verdict — and the
+ * console shell renders a banner from that verdict. Neither reports anything at
+ * rest, on purpose: a feed nobody has poked reads `quiet` or `never`, and
+ * neither is an outage (delivery-health.ts, ALARM_WINDOW_MULTIPLE; DECISIONS
+ * 025). So the second test opens a genuine, deliberate silence measured from
+ * the real delivery the first test just made, watches Lithic cross its own 180s
+ * threshold from `fresh` to `stale`, and cross-checks the published instant
+ * against `MAX(webhook_inbox.received_at)` in the live database; the third
+ * reads the deployed console inside that same window. If the silence cannot be
+ * induced, both SKIP naming what stopped it rather than asserting something
+ * weaker.
+ *
+ * ONE LIMIT, RECORDED ON THE SCOREBOARD RATHER THAN ASSERTED AWAY. A stale
+ * Lithic feed is REPORTED by `webhookHealth` but does not ESCALATE: the
+ * top-level `status` stays `ok`, because escalation is gated on the provider's
+ * integration being probed live and `route.ts` derives that as EVERY Lithic
+ * slot reading `live` — while `card_webhooks` is permanently `unprobed` and so
+ * labelled `simulated` (DECISIONS 026). The test asserts the claim the attack
+ * makes (the endpoint reports it) and records the escalation gap as evidence.
  */
 import { createHmac, randomUUID } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -56,6 +71,12 @@ const NAME = "Issuing-provider webhook outage degrades visibly, and invents no m
 function record(kind: "evidence" | "skip", text: string): void {
   const path = process.env["LIVEFIRE_EVIDENCE"];
   if (path === undefined || path === "") return;
+  // Recreate the directory if something removed it under us. A run has already
+  // lost its evidence to a concurrent `next build` wiping the folder it was
+  // written into: every record() after that threw ENOENT and an attack whose
+  // assertions had all passed was scored as a failure with a filesystem error
+  // as its reason. Evidence must never be the thing that fails a live-fire run.
+  mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, `${JSON.stringify({ attack: ATTACK, name: NAME, kind, text })}\n`, "utf8");
 }
 
@@ -331,49 +352,272 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     );
   });
 
-  it("the health endpoint reports the issuing provider's webhook outage", async (ctx) => {
-    const response = await fetch(`${BASE_URL}/api/health`, { cache: "no-store" });
-    expect(response.status).toBe(200);
-    const health = (await response.json()) as Record<string, unknown>;
-    const serialised = JSON.stringify(health);
+  // ==========================================================================
+  // THE TWO VISIBILITY CLAIMS
+  //
+  // Both are now buildable, because `/api/health` publishes
+  // `integrations.webhookHealth` and the console shell renders a banner from
+  // it. Neither is provable AT REST, and that is deliberate on both sides: a
+  // feed nobody has poked reads `quiet` or `never`, and the banner renders
+  // NOTHING for either, because "nobody used this integration today" is not an
+  // outage (delivery-health.ts, ALARM_WINDOW_MULTIPLE; DECISIONS 025).
+  //
+  // So these two tests INDUCE the outage rather than waiting to find one. The
+  // money test above ends by delivering a real Lithic body to the deployed
+  // endpoint, which sets `webhook_inbox.received_at` to now. From that instant
+  // we deliver NOTHING — the published attack's five minutes — and watch the
+  // endpoint cross its own 180s threshold from `fresh` to `stale`. The silence
+  // is the outage; nothing is faked, and the anchor is checked so that a
+  // delivery arriving mid-window restarts the clock instead of being papered
+  // over.
+  // ==========================================================================
 
-    // What would satisfy this claim: a field on the health body reporting
-    // webhook DELIVERY health for a provider — a last-delivery instant, a lag
-    // in seconds, or an explicit degraded verdict derived from one. Credential
-    // liveness is not it: the credential is perfectly valid during a webhook
-    // outage, which is exactly why the outage would go unreported.
-    const reportsDeliveryHealth =
-      /lastDelivery|last_delivery|deliveryLag|secondsSinceLastDelivery|webhookHealth|webhook_health|feedStale|stalest/.test(
-        serialised,
+  interface ProviderDelivery {
+    readonly provider: string;
+    readonly label?: string;
+    readonly lastDelivery: string | null;
+    readonly secondsSinceLastDelivery: number | null;
+    readonly staleAfterSeconds: number;
+    readonly quietAfterSeconds: number;
+    readonly verdict: string;
+    readonly gatesDeploymentStatus: boolean;
+    readonly degradesDeployment: boolean;
+    readonly note: string;
+  }
+
+  interface WebhookHealth {
+    readonly source?: string;
+    readonly measured?: boolean;
+    readonly error?: string | null;
+    readonly measuredAt?: string;
+    readonly degradedBy?: readonly string[];
+    readonly providers?: readonly ProviderDelivery[];
+  }
+
+  interface HealthDoc {
+    readonly status?: string;
+    readonly integrations?: { readonly webhookHealth?: WebhookHealth };
+  }
+
+  async function readHealth(): Promise<{ status: number; doc: HealthDoc }> {
+    const response = await fetch(`${BASE_URL}/api/health`, { cache: "no-store" });
+    const raw = await response.text();
+    let doc: HealthDoc = {};
+    try {
+      doc = JSON.parse(raw) as HealthDoc;
+    } catch {
+      throw new Error(`/api/health did not answer JSON: ${raw.slice(0, 200)}`);
+    }
+    return { status: response.status, doc };
+  }
+
+  const lithicOf = (doc: HealthDoc): ProviderDelivery | undefined =>
+    doc.integrations?.webhookHealth?.providers?.find((p) => p.provider === "lithic");
+
+  /** Set by the health test so the UI test knows a stale feed actually exists. */
+  let induced: { lagSeconds: number; lastDelivery: string; staleAfter: number } | null = null;
+
+  it(
+    "the health endpoint reports the issuing provider's webhook outage",
+    async (ctx) => {
+      let current = await readHealth();
+      expect(current.status).toBe(200);
+
+      const webhookHealth = current.doc.integrations?.webhookHealth;
+      if (webhookHealth === undefined || !Array.isArray(webhookHealth.providers)) {
+        const reason =
+          "/api/health answers 200 but carries no integrations.webhookHealth.providers array, so a webhook outage is invisible to it. Missing: a per-provider last-delivery instant (or lag in seconds) on the health body — webhook_inbox.received_at already has the data — plus a verdict derived from it.";
+        record("skip", reason);
+        ctx.skip(reason);
+        return;
+      }
+      if (webhookHealth.measured !== true) {
+        const reason = `/api/health publishes integrations.webhookHealth but could not measure it this time (${String(webhookHealth.error)}), so every verdict in it is 'unknown' and the outage is still unreported.`;
+        record("skip", reason);
+        ctx.skip(reason);
+        return;
+      }
+
+      let lithic = lithicOf(current.doc);
+      if (lithic === undefined) {
+        const reason =
+          "integrations.webhookHealth.providers carries no entry for 'lithic', which is the issuing provider this attack turns off.";
+        record("skip", reason);
+        ctx.skip(reason);
+        return;
+      }
+
+      const staleAfter = lithic.staleAfterSeconds;
+      const quietAfter = lithic.quietAfterSeconds;
+
+      // Neither of these can be walked into a `stale` verdict by waiting, and
+      // neither is an outage. Say which one it is rather than asserting
+      // something weaker.
+      if (lithic.lastDelivery === null || lithic.verdict === "never") {
+        const reason =
+          "no Lithic delivery has ever been recorded, so there is no feed to fall silent and nothing to report as an outage. Run the whole attack (node scripts/livefire.mjs --only 7) — its first test delivers a real Lithic body and starts the clock this one measures.";
+        record("skip", reason);
+        ctx.skip(reason);
+        return;
+      }
+      if (lithic.verdict === "quiet") {
+        const reason = `Lithic has been silent for ${String(lithic.secondsSinceLastDelivery)}s, past its own ${quietAfter}s alarm window, so /api/health reports 'quiet' — deliberately not an outage (ALARM_WINDOW_MULTIPLE). Waiting longer cannot produce staleness; a genuine delivery has to land first. Run the whole attack (node scripts/livefire.mjs --only 7), whose first test delivers one.`;
+        record("skip", reason);
+        ctx.skip(reason);
+        return;
+      }
+
+      // ---- the deliberate silence -----------------------------------------
+      const openedAt = Date.now();
+      let anchor: string | null = lithic.lastDelivery;
+      let restarts = 0;
+      const startedVerdict = lithic.verdict;
+      const startedLag = lithic.secondsSinceLastDelivery ?? 0;
+      // Must cross `staleAfter` well before `quietAfter`, or the window has
+      // been lost to something delivering underneath us. Capped under this
+      // test's own timeout so the honest outcome is a SKIP naming what kept
+      // delivering, never a timeout dressed up as an assertion failure.
+      const deadline = openedAt + Math.min(quietAfter - staleAfter, 300) * 1_000;
+
+      while (lithic.verdict === "fresh") {
+        if (lithic.lastDelivery !== anchor) {
+          // The feed spoke while we were being quiet. That is a real delivery,
+          // not our outage; restart the clock rather than paper over it.
+          anchor = lithic.lastDelivery;
+          restarts += 1;
+        }
+        if (Date.now() > deadline) {
+          const reason = `Lithic never crossed its ${staleAfter}s staleness threshold within ${Math.round((Date.now() - openedAt) / 1000)}s of deliberate silence (${restarts} restart(s) — something is still delivering), so the outage could not be induced and the endpoint's report of it is unproven.`;
+          record("skip", reason);
+          ctx.skip(reason);
+          return;
+        }
+        const remaining = staleAfter - (lithic.secondsSinceLastDelivery ?? 0) + 3;
+        await new Promise((r) => setTimeout(r, Math.min(Math.max(remaining, 5) * 1_000, 30_000)));
+
+        current = await readHealth();
+        expect(current.status).toBe(200);
+        const next = lithicOf(current.doc);
+        if (next === undefined) {
+          const reason =
+            "integrations.webhookHealth.providers stopped carrying 'lithic' part-way through the outage window.";
+          record("skip", reason);
+          ctx.skip(reason);
+          return;
+        }
+        lithic = next;
+      }
+
+      // ---- the report ------------------------------------------------------
+      // A STEP CHANGE: the feed was delivering, we stopped delivering, and the
+      // endpoint says so on its own.
+      expect(lithic.verdict).toBe("stale");
+      expect(lithic.gatesDeploymentStatus).toBe(true);
+      expect(typeof lithic.secondsSinceLastDelivery).toBe("number");
+      const lag = lithic.secondsSinceLastDelivery as number;
+      expect(lag).toBeGreaterThan(staleAfter);
+      expect(lag).toBeLessThanOrEqual(quietAfter);
+      expect(lithic.lastDelivery).not.toBeNull();
+      expect(lithic.note).toMatch(/silent for longer than/i);
+
+      // And the figure is the real row, not a number the endpoint made up:
+      // MAX(received_at) read straight out of the live inbox as the restricted
+      // app role, compared against what the deployment published.
+      // Epoch milliseconds, not `::text`: postgres renders a timestamptz as
+      // `2026-09-10 18:24:14.825+00`, which `new Date()` does not parse the
+      // same way in every runtime, and a NaN comparison here would fail this
+      // test for a formatting reason rather than a financial one.
+      const [row] = await sql<{ last_ms: string | null }[]>`
+        SELECT (extract(epoch from max(received_at)) * 1000)::bigint::text AS last_ms
+          FROM webhook_inbox WHERE provider = 'lithic'`;
+      const dbLastMs = row?.last_ms ?? null;
+      expect(dbLastMs).not.toBeNull();
+      const published = new Date(lithic.lastDelivery as string).getTime();
+      const observed = Number(dbLastMs);
+      expect(Number.isFinite(observed)).toBe(true);
+      expect(Math.abs(published - observed)).toBeLessThan(2_000);
+
+      induced = {
+        lagSeconds: lag,
+        lastDelivery: lithic.lastDelivery as string,
+        staleAfter,
+      };
+
+      const degradedBy = current.doc.integrations?.webhookHealth?.degradedBy ?? [];
+      record(
+        "evidence",
+        `induced outage: after the money test's delivery at ${lithic.lastDelivery} we delivered nothing for ${Math.round((Date.now() - openedAt) / 1000)}s (started '${startedVerdict}' at ${startedLag}s, ${restarts} restart(s)). /api/health then reports lithic verdict '${lithic.verdict}', secondsSinceLastDelivery ${lag} inside its own ${staleAfter}-${quietAfter}s alarm band, note "${lithic.note}". The published lastDelivery matches MAX(webhook_inbox.received_at) for lithic read directly from the live database (${new Date(observed).toISOString()}), so the figure is the real row.`,
       );
 
-    if (!reportsDeliveryHealth) {
+      // Reported, but NOT escalated — and the scoreboard says which, because a
+      // report a monitor watching `status` never sees is a weaker thing than
+      // the attack's wording implies.
+      if (lithic.degradesDeployment !== true) {
+        record(
+          "evidence",
+          `LIMIT OF THIS PASS — the outage is REPORTED but does not ESCALATE: degradesDeployment=false, degradedBy=[${degradedBy.join(", ")}], top-level status="${String(current.doc.status)}" while lithic is stale. delivery-health.ts gates escalation on the provider's integration being probed live, and route.ts derives that as EVERY lithic slot reading 'live'; card_webhooks is permanently 'unprobed' -> 'simulated' (DECISIONS 026), so that clause can never be satisfied and no webhook outage can move the top-level status on this deployment. A reader of webhookHealth sees the outage; a monitor watching status alone does not.`,
+        );
+      } else {
+        record(
+          "evidence",
+          `escalated: degradesDeployment=true, degradedBy=[${degradedBy.join(", ")}], top-level status="${String(current.doc.status)}".`,
+        );
+      }
+    },
+    420_000,
+  );
+
+  it("the account UI shows a provider-down state", async (ctx) => {
+    if (induced === null) {
       const reason =
-        "/api/health answers 200 and reports credential and capability liveness per slot, but carries NO webhook delivery-freshness field, so a webhook outage is invisible to it. Missing: a per-provider last-delivery instant (or lag in seconds) on the health body — webhook_inbox.received_at already has the data — plus a degraded verdict derived from it. Looked for: lastDelivery, deliveryLag, secondsSinceLastDelivery, webhookHealth, feedStale.";
+        "the health test above did not establish a stale Lithic feed, so there is no provider-down state for the console to render — the banner is a renderer of /api/health's verdict and never an author of one (DECISIONS 025). Its skip reason above is the missing thing.";
       record("skip", reason);
       ctx.skip(reason);
       return;
     }
 
-    record("evidence", `/api/health reports webhook delivery health: ${serialised.slice(0, 300)}`);
-  });
+    // Read the verdict the banner will read, at the moment the banner reads it.
+    const health = await readHealth();
+    expect(health.status).toBe(200);
+    const lithic = lithicOf(health.doc);
+    if (lithic === undefined || lithic.verdict !== "stale") {
+      const reason = `the induced silence stopped being 'stale' before the console could be read (now '${String(lithic?.verdict)}' at ${String(lithic?.secondsSinceLastDelivery)}s), so there was no provider-down state to render at that instant.`;
+      record("skip", reason);
+      ctx.skip(reason);
+      return;
+    }
 
-  it("the account UI shows a provider-down state", async (ctx) => {
     const response = await fetch(`${BASE_URL}/accounts`, { cache: "no-store" });
     expect(response.status).toBe(200);
     const html = await response.text();
 
-    const showsProviderState =
-      /data-provider-status|provider-down|provider unavailable|issuing provider/i.test(html);
+    // The attribute alone is not enough: the 'cannot reach the health endpoint'
+    // banner carries the same one, and a banner that fires because health was
+    // unreachable would prove the opposite of this claim.
+    expect(html).toContain('data-provider-status="provider-down"');
+    expect(html).toMatch(/Issuing provider feed is quiet/);
+    expect(html).not.toMatch(/Cannot reach the health endpoint/);
+    expect(html).not.toMatch(/Provider delivery freshness is not reported yet/);
+    expect(html).toMatch(/lithic/);
 
-    if (!showsProviderState) {
-      const reason =
-        'no provider-down state is rendered on the deployed account screen. The account data contract (src/components/account/data-contract.ts) carries balances, holds and postings but no provider or feed health field, and no component renders one. Missing: a provider-health field on that contract plus a banner that shows it. Looked for: data-provider-status, provider-down, "issuing provider".';
-      record("skip", reason);
-      ctx.skip(reason);
-      return;
-    }
+    // It RENDERS the endpoint's number rather than computing a second opinion.
+    const minutes = /no delivery for (\d+) minutes?/.exec(html);
+    const seconds = /no delivery for (\d+)s/.exec(html);
+    expect(minutes ?? seconds).not.toBeNull();
+    const renderedSeconds =
+      minutes !== null ? Number(minutes[1]) * 60 : Number((seconds as RegExpExecArray)[1]);
+    const publishedSeconds = lithic.secondsSinceLastDelivery as number;
+    // Same source, read a moment apart: allow one minute of drift and no more.
+    expect(Math.abs(renderedSeconds - publishedSeconds)).toBeLessThanOrEqual(120);
 
-    record("evidence", "the deployed account screen renders a provider-down state");
+    // And it does NOT blank the console. Every figure below the banner is a
+    // fold over rows that are already durable, and they stay true while a feed
+    // is silent; hiding them would be the stronger, false claim.
+    expect(html).toContain("Deposit accounts");
+
+    record(
+      "evidence",
+      `the deployed console at ${BASE_URL}/accounts renders data-provider-status="provider-down" while lithic is stale: "Issuing provider feed is quiet — lithic", detail "${(minutes ?? seconds)?.[0] ?? ""}" against /api/health's ${publishedSeconds}s, and the deposit-account balances are still rendered underneath rather than blanked.`,
+    );
   });
 });

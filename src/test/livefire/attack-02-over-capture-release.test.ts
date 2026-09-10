@@ -36,7 +36,8 @@
  * property — does not depend on the gap, and the value dates the pipeline
  * records come from the provider's own payload either way.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -53,6 +54,12 @@ const NAME =
 function record(kind: "evidence" | "skip", text: string): void {
   const path = process.env["LIVEFIRE_EVIDENCE"];
   if (path === undefined || path === "") return;
+  // Recreate the directory if something removed it under us. A run has already
+  // lost its evidence to a concurrent `next build` wiping the folder it was
+  // written into: every record() after that threw ENOENT and an attack whose
+  // assertions had all passed was scored as a failure with a filesystem error
+  // as its reason. Evidence must never be the thing that fails a live-fire run.
+  mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, `${JSON.stringify({ attack: ATTACK, name: NAME, kind, text })}\n`, "utf8");
 }
 

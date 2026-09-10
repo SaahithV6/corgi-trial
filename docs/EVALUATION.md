@@ -36,7 +36,7 @@ working tree and `.gitignore` only, and I flag it as incompletely verified.
 | Recon vs live DB | (auto-enabled by `APP_DATABASE_URL`) | **17 passed / 17** |
 | **Full suite with DB** | `set -a; . ./.env; set +a; RUN_DB_TESTS=1 pnpm test` | **RED, and non-deterministic.** Run 1: 2 failed / 746 passed. Run 2: **4 failed** / 745 passed — *a different set of tests*. |
 | Ledger invariants | `node scripts/dbcheck.mjs` | **14 passed, 0 failed** — UPDATE/DELETE/TRUNCATE refused on `journal_entry`, `journal_line`, `card_auth_event`, `hold_closure`; grants are INSERT,SELECT only; every entry sums to zero; trial balance zero; no stored balance column; zero denormalised-clock drift. |
-| `/api/health` | live | 200, `status: ok`, DB reachable 12–167ms, **5 of 7 integration slots live** with round-trip evidence per slot |
+| `/api/health` | live | 200, `status: ok`, DB reachable 12–167ms, **5 of 7 integration slots live** *(as at that reading; now 4 of 7 — see Iteration 1)* with round-trip evidence per slot |
 | `/accounts`, `/approvals`, `/reconciliation`, `/` | live | all **200** |
 | `/api/mcp` | live | **401 `not_configured`** — see §2 and §6 |
 
@@ -322,7 +322,7 @@ and it is ranked #2 in §6.
 | 6 | Delete one row from the scheme file, ask the breaks screen where it went | **IMPLEMENTED** ✅ | `src/lib/recon/planted-break.test.ts` is written for this attack by name and **passes against the live database**: "finds the row the graders deleted: `in_ledger_not_file`, right reference, right amount", plus the inverse, the amount mismatch carrying **both** numbers, re-run producing a *new* run without touching the previous one, and the reversal-and-rebook edge case that explains a break without erasing it. Production `/reconciliation` renders all three kinds with aging and drill-through. |
 | 7 | Turn off the issuing provider's webhooks for five minutes mid-demo | **MISSING** ❌ | Nothing recovers. There is no consumer, no drain invocation, no cron in `vercel.json`, no `/api/cron` route, and no polling backfill — `research/lithic/NOTES.md:521` documents Lithic's `replay_missing` and `recover` endpoints and neither is implemented. When webhooks resume, the provider re-delivers into `webhook_inbox` (where dedup works correctly) and then nothing consumes them, exactly as before the outage. The honest answer during the demo is "nothing was being consumed before the outage either", which is worse than the attack. |
 
-**2 of 7 survivable. Both of the two are survivable convincingly, against the real database.**
+**2 of 7 live-fire attacks survivable at that commit.** *(Now 6 of 8 — see Iteration 1. This line scores ATTACKS, not integration slots.)*
 
 ---
 

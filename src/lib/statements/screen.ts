@@ -147,11 +147,23 @@ function toDayOption(day: StatementDay): DayOption {
   };
 }
 
-async function listAccounts(conn: Sql): Promise<readonly AccountOption[]> {
+interface AccountRow extends AccountOption {
+  /** Newest period this account has a published statement for, or `null`. */
+  readonly newestStatementPeriod: string | null;
+}
+
+async function listAccounts(conn: Sql): Promise<readonly AccountRow[]> {
   const rows = await conn<
-    { account_id: string; legal_name: string; account_name: string }[]
+    {
+      account_id: string;
+      legal_name: string;
+      account_name: string;
+      newest_statement: string | null;
+    }[]
   >`
-    SELECT a.id AS account_id, b.legal_name, a.name AS account_name
+    SELECT a.id AS account_id, b.legal_name, a.name AS account_name,
+           (SELECT to_char(MAX(s.period_end), 'YYYY-MM-DD')
+              FROM statement s WHERE s.account_id = a.id) AS newest_statement
       FROM account a
       JOIN business b ON b.id = a.business_id
      WHERE a.code = '2100'
@@ -163,7 +175,46 @@ async function listAccounts(conn: Sql): Promise<readonly AccountOption[]> {
     accountId: r.account_id,
     legalName: r.legal_name,
     accountName: r.account_name,
+    newestStatementPeriod: r.newest_statement,
   }));
+}
+
+/**
+ * Which account to open on, when the URL does not say.
+ *
+ * The one with the most recently STATED business day, not the first
+ * alphabetically. Ordering the picker alphabetically and defaulting to its
+ * head landed the live screen on a suite's own fixture company whose newest
+ * statement was for a synthetic day in 2011 — a real document, correctly
+ * rendered, and the wrong thing to open a statements screen on.
+ *
+ * Accounts with no published statement sort last but are still LISTED. Hiding
+ * them would be the wrong fix: "this customer has no statements" is an answer
+ * the picker should be able to give.
+ */
+function pickAccount(
+  accounts: readonly AccountRow[],
+  wanted: string | undefined,
+): AccountRow | undefined {
+  if (wanted !== undefined) {
+    const named = accounts.find((a) => a.accountId === wanted);
+    if (named !== undefined) return named;
+  }
+  return [...accounts].sort((a, b) => {
+    const left = a.newestStatementPeriod ?? "";
+    const right = b.newestStatementPeriod ?? "";
+    if (left !== right) return left < right ? 1 : -1;
+    return a.legalName < b.legalName ? -1 : a.legalName > b.legalName ? 1 : 0;
+  })[0];
+}
+
+/** Strip the ordering hint before the row crosses the contract. */
+function toAccountOption(row: AccountRow): AccountOption {
+  return {
+    accountId: row.accountId,
+    legalName: row.legalName,
+    accountName: row.accountName,
+  };
 }
 
 async function readActorNames(
@@ -209,14 +260,11 @@ export async function loadStatementsView(
     const conn = await statementConnection();
     const asOf = new Date().toISOString();
 
-    const accounts = await listAccounts(conn);
-    const accountId =
-      query.accountId !== undefined &&
-      accounts.some((a) => a.accountId === query.accountId)
-        ? query.accountId
-        : accounts[0]?.accountId;
+    const accountRows = await listAccounts(conn);
+    const accounts = accountRows.map(toAccountOption);
+    const selected = pickAccount(accountRows, query.accountId);
 
-    if (accountId === undefined) {
+    if (selected === undefined) {
       return ok({
         source: "live",
         asOf,
@@ -228,7 +276,8 @@ export async function loadStatementsView(
       });
     }
 
-    const account = accounts.find((a) => a.accountId === accountId) ?? null;
+    const accountId = selected.accountId;
+    const account = toAccountOption(selected);
     const resolved = await readStatementAccount(accountId, conn);
     if (resolved === null) {
       return fail("STATEMENT_ACCOUNT_UNKNOWN", `no deposit account ${accountId}`);

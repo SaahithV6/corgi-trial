@@ -27,8 +27,8 @@ import type { BookDay, PublishedStatement } from "./types";
  *      — that is the whole requirement, and `reverseAndRebook` in
  *      `src/lib/ledger/post.ts` is what enforces it.
  *   5. v1 still renders byte-identically, because its watermark did not move.
- *   6. Statement v2 is issued at a later watermark and shows the corrected
- *      position.
+ *   6. A new version is issued at a later watermark and shows the corrected
+ *      position. Both documents exist; neither replaced the other.
  *
  * ---------------------------------------------------------------------------
  * IT IS IDEMPOTENT, AND THAT IS NOT AN ACCIDENT
@@ -46,8 +46,12 @@ import type { BookDay, PublishedStatement } from "./types";
  *   - `closeDay` returns the existing `book_day` row; a day is closed once.
  *   - `publishStatement` re-renders the same watermark, finds the same hash,
  *     and returns the existing version rather than issuing a new one.
- *   - `reissueStatement` finds the latest version already says exactly this
- *     and writes nothing.
+ *   - `reissueStatement` re-renders at the LOWEST watermark that yields the
+ *     current content, finds the latest version already pinned there, and
+ *     writes nothing. (Pinning to `MAX(booking_seq)` instead made this step
+ *     issue a fresh version on every run, because the watermark is part of the
+ *     content hash and other customers' activity moves it. The integration
+ *     suite caught it; `contentWatermark` in `read.ts` is the fix.)
  *
  * So this doubles as the seeder for the `/statements` screen's default state:
  * the screen has something real to show because this ran, not because a
@@ -57,17 +61,27 @@ import type { BookDay, PublishedStatement } from "./types";
  * WHY THIS BUSINESS DATE
  * ---------------------------------------------------------------------------
  *
- * `2026-07-24` is chosen, not arbitrary. It is the newest business date that
+ * `2026-07-25` is chosen, not arbitrary. It is the newest business date that
  * was not already closed by another worker's seed, and closing it cannot
  * disturb anything: `v_recon_break.closes_crossed` counts closes with
  * `business_date >= break.value_date`, every break in the book has a value
- * date of 2026-07-27 or later, and 2026-07-24 is before all of them. Closing a
+ * date of 2026-07-27 or later, and 2026-07-25 is before all of them. Closing a
  * day is permanent — `book_day` is append-only — so "which day is safe to
  * close" is a question that has to be answered before the write, not after.
+ *
+ * It is also the NEWEST safe date, which matters for a second reason found the
+ * hard way. Everything backdated to on or before this day and booked after its
+ * close moves its opening balance and earns it a new version — correctly, but
+ * the integration suite's own synthetic settlement days sit decades in the
+ * past, so a demo day behind them collected a fresh correction on every test
+ * run and the one act worth demonstrating was buried in nine that were not.
+ * The suite now runs its proof on a different deposit account for the same
+ * reason. Choosing the newest safe date is what keeps this day's difference
+ * equal to exactly the reversal and the re-book.
  */
 
 /** The settlement day. See the note above on why this date and not another. */
-export const DEMO_BUSINESS_DATE = "2026-07-24";
+export const DEMO_BUSINESS_DATE = "2026-07-25";
 
 /** The inbound ACH credit that opens the day. */
 export const DEMO_CREDIT_CENTS = 120_000n;
@@ -76,7 +90,7 @@ export const DEMO_CLEARING_CENTS = 24_850n;
 /** The card clearing, as re-presented after the reversal. */
 export const DEMO_REBOOK_CENTS = 19_850n;
 
-const KEY = "statements:demo:2026-07-24";
+const KEY = "statements:demo:2026-07-25";
 
 export interface StatementDemoResult {
   readonly accountId: string;
@@ -92,8 +106,16 @@ export interface StatementDemoResult {
   readonly correctionGroupId: string;
   /** The as-published document: pinned to the close watermark, forever. */
   readonly v1: PublishedStatement;
-  /** The corrected document: a later watermark, a different figure. */
-  readonly v2: PublishedStatement;
+  /**
+   * The newest version: a later watermark, a different figure.
+   *
+   * Deliberately not called `v2`. It IS v2 the first time, and it is v3 or v4
+   * on a book where something else has since been backdated to on or before
+   * this day — a later posting that moves the opening balance is a real change
+   * to what this day closed at, and it earns a real version. Naming it `v2`
+   * would have hard-coded an assumption the ledger does not make.
+   */
+  readonly current: PublishedStatement;
 }
 
 /**
@@ -241,9 +263,9 @@ export async function seedStatementDemo(
     sql,
   );
 
-  /* ---- 5 & 6. v1 is untouched; v2 shows the corrected position ---------- */
+  /* ---- 5 & 6. v1 is untouched; the new version shows the correction ----- */
 
-  const v2 = await reissueStatement(
+  const current = await reissueStatement(
     { accountId, businessDate: DEMO_BUSINESS_DATE, actorId },
     sql,
   );
@@ -260,6 +282,6 @@ export async function seedStatementDemo(
     rebookEntryId: correction.rebookEntryId,
     correctionGroupId: correction.correctionGroupId,
     v1: v1.statement,
-    v2: v2.statement,
+    current: current.statement,
   };
 }

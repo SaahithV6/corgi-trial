@@ -28,15 +28,23 @@ INTEGRATIONS
 
 Start with /api/health. Every label on it was earned by a live authenticated
 call, and the evidence string beside each slot names the call. If anything below
-disagrees with that page, believe the page. It reports 5 live of 7.
+disagrees with that page, believe the page. It reports 4 live of 7.
 
   LIVE       card_issuing       Lithic sandbox      GET /v1/cards -> 200
-  LIVE       card_webhooks      Lithic              verified deliveries on Neon
   LIVE       ach_rail           Increase sandbox    GET /accounts -> 200
   LIVE       open_banking       Plaid sandbox       POST /institutions/get -> 200
   LIVE       director_kyc       Stripe Identity     Stripe Identity enabled
   SIMULATED  business_registry  Stripe Connect      Connect not enabled
   SIMULATED  stablecoin         USDC, Base Sepolia  0 wei gas, cannot send
+  SIMULATED  card_webhooks      Lithic              credential present, never probed
+
+card_webhooks reads simulated for a reason worth stating. It said live until an
+hour ago, off the back of the webhook secret being a non-empty string: a slot
+with no probe inherited the environment's opinion. That is the same mistake as
+labelling any integration live because a credential exists, and I had already
+fixed it in four other probes without noticing the fallback underneath them.
+The deliveries themselves are real and verified. The label is not something I
+had earned, so it now says so.
 
 The two simulated ones, said plainly. Business registry is simulated because
 every KYB provider on your menu is gated. Middesk and Sumsub want a sales
@@ -230,7 +238,7 @@ Applied to the draft above, in order of how much each one cut.
     Y". One deliberate exception survives: "Not 'does not', cannot" — it is a
     precise distinction about database privileges, not a flourish.
 11. **Concrete nouns and real numbers over adjectives.** Every claim carries a
-    figure, an endpoint or a timestamp: 5 of 7, available 1,133,733, 84 holds,
+    figure, an endpoint or a timestamp: 4 of 7 live, and every count in this mail,
     hold -400, 16:13:21, 390000000000 wei, 14 of 14.
 12. **One specific thing only the author could write.** The one-line fix that
     was written and reverted, and the eleven parked cards.

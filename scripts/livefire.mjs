@@ -204,7 +204,14 @@ if (selected.length === 0) {
   process.exit(2);
 }
 
-const tmpDir = resolve(ROOT, ".next", "livefire");
+// NOT `.next/`. A concurrent `next build` in this repo removes that directory
+// wholesale, and a run of this suite has already lost its evidence file
+// mid-flight to exactly that: the file vanished under an open handle, every
+// `record()` after it threw ENOENT, and an attack whose assertions had all
+// passed was reported as a failure with a filesystem error for a reason.
+// `node_modules/.cache` is gitignored, is owned by nothing that wipes it on a
+// build, and is where a tool's scratch space belongs.
+const tmpDir = resolve(ROOT, "node_modules", ".cache", "livefire");
 mkdirSync(tmpDir, { recursive: true });
 const evidencePath = resolve(tmpDir, "evidence.jsonl");
 const resultPath = resolve(tmpDir, "vitest.json");

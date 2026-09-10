@@ -145,13 +145,14 @@ are what was on screen at 2026-09-10T17:56Z and are given so you can see what
 
 Every live-versus-simulated label in the README is computed here, by a real
 authenticated call, at the moment you load the page. Read `integrations.slots[]`
-and the `evidence` string beside each one. It reports **5 live of 7**, with
+and the `evidence` string beside each one. It reports **4 live of 7**, with
 `business_registry` and `stablecoin` simulated and the reason for each written
 out. The README says it and it is worth repeating: **if the README ever
 disagrees with this page, the page is right.**
 
 One row deserves your suspicion and gets an answer in the README:
-`card_webhooks` says `live` with evidence `no probe defined for this slot`. That
+`card_webhooks` reports SIMULATED with evidence `credential present but NOT
+probed — no round trip proves this slot works`. That
 verdict is not earned by a round trip; it is earned by a credential being
 present. See "The one row in that table that is weaker than the others".
 
@@ -322,9 +323,9 @@ started    2026-09-10T17:56:26.860Z
 ------------------------------------------------------------------------------
 
    1. PASS  /api/health answers, the database is reachable, and it reports its slots
-        status ok · commit cb3b4f6 · db 152ms · 5 live of 7
+        status ok · db reachable · 4 live of 7
         LIVE      card_issuing       GET /v1/cards -> 200
-        LIVE      card_webhooks      no probe defined for this slot
+        SIMULATED card_webhooks      credential present but NOT probed
         LIVE      director_kyc       Stripe Identity enabled (Persona not configured)
         SIMULATED business_registry  Connect not enabled. Every KYB option the brief lists (Middesk, Persona KYB, Sumsub KYB) is gated behind sales or business verification; registry runs simulated and is labelled so.
         LIVE      open_banking       POST /institutions/get -> 200

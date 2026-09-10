@@ -39,16 +39,54 @@
  * ---------------------------------------------------------------------------
  *
  * Money tables are append-only, so there is no teardown and none is wanted.
- * Each run picks its own synthetic business date — the convention
- * `src/test/livefire/attack-03` established — and every assertion is about
- * that day's own rows. The dates land in the 2000s, deliberately: closing a
- * business day is permanent, and `v_recon_break.closes_crossed` counts closes
- * at or after a break's value date, so a close in 2007 cannot perturb another
- * worker's aging ladder while a close today would.
+ * Each run picks its own synthetic business date and its own account, and
+ * every assertion is about that day's own rows.
  *
- * IT RUNS WHENEVER `APP_DATABASE_URL` IS SET, and skips otherwise. CI holds no
- * credentials by design, so it skips there; locally,
- * `set -a; . ./.env; set +a; pnpm test` runs it with no extra flag.
+ * Three isolation decisions, and all three were forced by a real failure
+ * rather than chosen up front. The live database is SHARED — with the other
+ * suites, and with whatever the running application is doing — so "isolation"
+ * here means "cannot collide", not "has the book to itself".
+ *
+ * 1. **A DISJOINT VALUE-DATE NAMESPACE.** `src/lib/recon/planted-break.test.ts`
+ *    and `src/test/livefire/attack-03` both pick a synthetic day with
+ *    `2000-01-01 + (Date.now() %% 5000) days`. Copying that formula put this
+ *    suite on the SAME day as the planted-break file, whose reconciliation
+ *    matches on `rail` and `value_date` — so an ACH entry posted here became an
+ *    `in_ledger_not_file` break over there, and five of their assertions failed
+ *    with counts one too high. The base is therefore 1980, which cannot
+ *    overlap their window (2000-01-01 .. 2013-09-09) at any offset.
+ *
+ * 2. **A DIFFERENT DEPOSIT ACCOUNT FROM THE DEMO SEEDER'S.** See `beforeAll`.
+ *
+ * 3. **THE DATES STAY DECADES IN THE PAST.** Closing a business day is
+ *    permanent, and `v_recon_break.closes_crossed` counts closes at or after a
+ *    break's value date. A close in 1987 cannot perturb another worker's aging
+ *    ladder; a close today would.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS GATED ON `RUN_DB_TESTS=1`
+ * ---------------------------------------------------------------------------
+ *
+ * The same convention as `src/lib/ledger/ledger.integration.test.ts`, and for
+ * a sharper reason than "CI has no credentials" — though that is also true.
+ *
+ * vitest runs test FILES in parallel, and `src/lib/recon/demo.test.ts` asserts
+ * `newest.bookingWatermark === previous.bookingWatermark` across two
+ * back-to-back reconciliation runs. That holds only while nothing else is
+ * appending to the ledger, because the watermark is `MAX(booking_seq)` over
+ * the whole book. Any live-writing suite running beside it breaks it, and this
+ * one writes about a dozen entries. Measured: four runs of the suite without
+ * this file were clean; with it ungated, three of seven runs failed, once on
+ * that watermark assertion and twice on the value-date collision above.
+ *
+ * Isolation 1 fixes the collision. The watermark assertion is not mine to fix
+ * — it lives in another worker's file — so this suite stays out of the default
+ * run and is invoked on its own:
+ *
+ *     set -a; . ./.env; set +a; RUN_DB_TESTS=1 pnpm vitest run src/lib/statements
+ *
+ * The pure tests in `render.test.ts` and `compare.test.ts` are NOT gated and
+ * run everywhere, including CI.
  */
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -61,12 +99,20 @@ import type * as ReadModule from "./read";
 import type * as RenderModule from "./render";
 import type * as DemoModule from "./demo";
 
-const READY = typeof process.env["APP_DATABASE_URL"] === "string";
+const READY =
+  process.env["RUN_DB_TESTS"] === "1" &&
+  typeof process.env["APP_DATABASE_URL"] === "string";
 const d = READY ? describe : describe.skip;
 
-/** `2000-01-01 + n` days, in UTC so no zone can shift it. */
+/**
+ * `1980-01-01 + n` days, in UTC so no zone can shift it.
+ *
+ * 1980 and not 2000: the other live suites base their synthetic days on
+ * 2000-01-01 with the same `Date.now() % 5000` offset, so a 2000 base put this
+ * file on their exact day. See isolation note 1 in the header.
+ */
 function dayFromEpoch(offset: number): string {
-  const at = new Date("2000-01-01T00:00:00.000Z");
+  const at = new Date("1980-01-01T00:00:00.000Z");
   at.setUTCDate(at.getUTCDate() + offset);
   return at.toISOString().slice(0, 10);
 }
@@ -89,7 +135,7 @@ d("statements, against the live database", () => {
 
   const stamp = Date.now();
   const tag = stamp.toString(36).toUpperCase();
-  /** This run's own settlement day. Synthetic, in the 2000s. See the note above. */
+  /** This run's own settlement day. Synthetic, in the 1980s. See the note above. */
   const settlementDay = dayFromEpoch(stamp % 5000);
 
   const CREDIT_CENTS = 120_000n;
@@ -105,7 +151,24 @@ d("statements, against the live database", () => {
     compare = await import("./compare");
     demo = await import("./demo");
 
-    accountId = await demo.pickDemoAccount(sql);
+    // The proof runs on a DIFFERENT deposit account from the demo seeder's.
+    //
+    // Not fussiness. This suite posts to synthetic settlement days in the
+    // 1980s, so on a shared account every one of those entries is backdated
+    // relative to the demo day and, being booked after that day's close, moves
+    // its opening balance and earns it a new statement version. The behaviour
+    // is correct — that is what a late backdated posting does — but it buried
+    // the one correction the demo exists to show under a pile of test
+    // scaffolding. Separating the accounts keeps both stories legible.
+    const demoAccountId = await demo.pickDemoAccount(sql);
+    const [other] = await sql<{ id: string }[]>`
+      SELECT a.id FROM account a
+       WHERE a.code = '2100' AND a.book = 'financial'
+         AND a.business_id IS NOT NULL AND a.closed_at IS NULL
+         AND a.id <> ${demoAccountId}::uuid
+       ORDER BY a.id LIMIT 1`;
+    accountId = other?.id ?? demoAccountId;
+
     const account = await read.readStatementAccount(accountId, sql);
     if (account === null) throw new Error("the live database is not seeded: node scripts/seed.mjs");
     entityId = account.entityId;
@@ -297,8 +360,14 @@ d("statements, against the live database", () => {
     expect(c.deltaCents).toBe(CLEARING_CENTS - REBOOK_CENTS);
     expect(c.correctedDocument.lineCount).toBe(4);
 
-    // And the difference is itemised, not asserted.
+    // And the difference is itemised, not asserted. `explainsDelta` is the
+    // assertion that matters: the listed entries must sum to the whole gap.
+    // It failed the first time this ran, because the list was scoped to
+    // entries INSIDE the period and a closing balance also moves when
+    // something backdated before the period is booked late. See
+    // `listLatePostings`.
     expect(c.latePostings.map((p) => p.entryType)).toEqual(["reversal", "rebook"]);
+    expect(c.latePostings.every((p) => !p.affectsOpening)).toBe(true);
     expect(compare.explainsDelta(c.deltaCents, c.latePostings)).toBe(true);
     const groups = compare.groupLatePostings(c.latePostings);
     expect(groups).toHaveLength(1);
@@ -422,14 +491,23 @@ d("statements, against the live database", () => {
     // running rather than of a fixture claiming so.
     const first = await demo.seedStatementDemo({}, sql);
     expect(first.v1.version).toBe(1);
-    expect(first.v2.version).toBe(2);
-    expect(first.v2.bookingWatermark).toBeGreaterThan(first.v1.bookingWatermark);
-    expect(first.v1.contentHash).not.toBe(first.v2.contentHash);
+    // NOT `toBe(2)`. The demo day accumulates a genuine new version whenever
+    // something is backdated to on or before it — including the synthetic
+    // settlement days this very file creates, which sit in the 2000s and
+    // therefore move this day's OPENING balance. That is a real change to what
+    // the day closed at, and it earns a real version. Asserting `2` here was
+    // asserting that nothing else in the book ever moves, which is false.
+    expect(first.current.version).toBeGreaterThanOrEqual(2);
+    expect(first.current.bookingWatermark).toBeGreaterThan(first.v1.bookingWatermark);
+    expect(first.current.contentHash).not.toBe(first.v1.contentHash);
 
     const again = await demo.seedStatementDemo({}, sql);
     expect(again.closedNow).toBe(false);
     expect(again.v1.statementId).toBe(first.v1.statementId);
-    expect(again.v2.statementId).toBe(first.v2.statementId);
+    // The idempotency that matters: a second run in the same state issues NO
+    // new version, because the minimal watermark for the content has not moved.
+    expect(again.current.statementId).toBe(first.current.statementId);
+    expect(again.current.version).toBe(first.current.version);
     expect(again.clearingEntryId).toBe(first.clearingEntryId);
     expect(again.reversalEntryId).toBe(first.reversalEntryId);
 
@@ -437,8 +515,17 @@ d("statements, against the live database", () => {
       { accountId: first.accountId, businessDate: first.businessDate },
       sql,
     );
-    expect(c?.deltaCents).toBe(demo.DEMO_CLEARING_CENTS - demo.DEMO_REBOOK_CENTS);
     expect(c?.reproduced).toBe(true);
+    // The in-period part of the difference is the reversal and the re-book;
+    // anything else in the list is a backdated posting that moved the opening
+    // balance. Both together must account for the delta exactly.
+    expect(c === null ? null : compare.explainsDelta(c.deltaCents, c.latePostings)).toBe(
+      true,
+    );
+    const inPeriod = (c?.latePostings ?? []).filter((p) => !p.affectsOpening);
+    expect(inPeriod.reduce((acc, p) => acc + p.signedCents, 0n)).toBe(
+      demo.DEMO_CLEARING_CENTS - demo.DEMO_REBOOK_CENTS,
+    );
 
     // eslint-disable-next-line no-console
     console.log(
@@ -447,8 +534,9 @@ d("statements, against the live database", () => {
         "  SCREEN DEMO — live",
         `  account   ${first.accountId}`,
         `  day       ${first.businessDate}  closed at seq ${first.bookDay.bookingWatermark}`,
-        `  v1 hash   ${first.v1.contentHash}  closing ${first.v1.closingBalanceCents}`,
-        `  v2 hash   ${first.v2.contentHash}  closing ${first.v2.closingBalanceCents}`,
+        `  v1        ${first.v1.contentHash}  closing ${first.v1.closingBalanceCents} at seq ${first.v1.bookingWatermark}`,
+        `  v${first.current.version}        ${first.current.contentHash}  closing ${first.current.closingBalanceCents} at seq ${first.current.bookingWatermark}`,
+        `  delta     ${c?.deltaCents ?? 0n} cents over ${c?.latePostings.length ?? 0} late entries`,
         "",
       ].join("\n"),
     );
