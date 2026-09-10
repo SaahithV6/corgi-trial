@@ -20,22 +20,65 @@ git diff --cached --name-only | grep -qE '^\.env$' && fail ".env is staged."
 # literal "sk_live_", so on its first run the scanner flagged itself and
 # blocked the commit that introduced it. Funny, and also the correct
 # behaviour for everything that is not this file.
-SECRET_RE='(npg_[A-Za-z0-9]{16,}|sk''_live_|whsec_[A-Za-z0-9]{16,}|0x[a-fA-F0-9]{64})'
-# Public blockchain transaction hashes, which are the SAME SHAPE as an
-# Ethereum private key: 0x + 64 hex. There is no pattern that separates them,
-# so the separation is evidence. Every hash below was verified public with
+# --- EXACT: no staged line may contain a real value from .env -------------
 #
-#   eth_getTransactionByHash -> a transaction, not null
+# This is the check that actually protects the keys, and it replaced a proxy.
+# The proxy was a shape rule, 0x + 64 hex, aimed at USDC_SENDER_PRIVATE_KEY.
+# It worked until this repo started doing secp256k1 arithmetic, at which point
+# the curve order, the field prime, both generator coordinates, every keccak
+# vector and the published EIP-155 signature all matched it. A rule that fires
+# on twenty-four innocent constants gets switched off by whoever is in a hurry,
+# and then it protects nothing.
 #
-# before it was added, and a private key returns null. Cite the block. The
-# burden is on whoever adds a line, exactly as in .secretscanignore.
+# Comparing against the literal values instead has no false positives at all,
+# and it is strictly stronger for every secret this project actually holds: it
+# catches a leaked key in ANY encoding position, prefix or not, hex or not.
+if [ -f .env ]; then
+  # Values only, quotes stripped, 16 chars or longer. Short values like "true"
+  # would match half the tree.
+  #
+  # Not every value in .env is a secret. A wallet address, a token contract
+  # address and a public RPC endpoint all live there, all exceed the length
+  # floor, and all appear legitimately in documentation and scripts. Matching
+  # on them would fire on every honest file that names the wallet the payout
+  # sends from, which is exactly the noise that gets a gate disabled.
+  #
+  # So the classification is by KEY NAME, and the burden is the same as in
+  # .secretscanignore: to add a pattern here you must show the value cannot
+  # authenticate anything. Note what is deliberately NOT public: DATABASE_URL
+  # and DIRECT_URL end in _URL and carry a password in the userinfo.
+  PUBLIC_KEY_RE='(_ADDRESS|_RPC_URL|_CHAIN_ID|_BASE_URL|_WEBHOOK_URL|^NEXT_PUBLIC_)'
+  SECRET_VALUES=$(grep -E '^[A-Z0-9_]+=.+' .env \
+    | grep -vE "^[A-Z0-9_]*${PUBLIC_KEY_RE}[A-Z0-9_]*=" \
+    | sed 's/^[A-Z0-9_]*=//' | sed 's/^"//; s/"$//' \
+    | awk 'length($0) >= 16' | sort -u)
+  if [ -n "$SECRET_VALUES" ]; then
+    LEAKED=""
+    for f in $(git diff --cached --name-only --diff-filter=d); do
+      [ -f "$f" ] || continue
+      case "$f" in scripts/precommit.sh) continue ;; esac
+      if grep -aqFf <(printf '%s\n' "$SECRET_VALUES") "$f"; then LEAKED="$LEAKED $f"; fi
+    done
+    if [ -n "$LEAKED" ]; then
+      echo "--- staged files containing a literal value from .env:$LEAKED" >&2
+      # Deliberately does NOT print the matching line. A gate that echoes the
+      # secret it caught puts it in a terminal scrollback and a CI log.
+      fail "a staged file contains a real credential from .env."
+    fi
+  fi
+fi
+
+# --- SHAPE: provider key prefixes, which are unambiguous ------------------
 #
-#   0x279c3f9d... CDP faucet funding this wallet, Base Sepolia block 46650546
-KNOWN_PUBLIC_TX='0x279c3f9d734310e6a49b7de79ef69b3545f9df5c69f3126d88fe89133a31eb69'
+# These carry their own namespace, so unlike bare hex they cannot collide with
+# a mathematical constant. This file is excluded from its own scan: the pattern
+# list contains the literal "sk_live_", so on its first run it flagged itself
+# and blocked the commit that introduced it.
+SECRET_RE='(npg_[A-Za-z0-9]{16,}|sk''_live_|whsec_[A-Za-z0-9]{16,})'
 if git diff --cached -U0 -- . ':(exclude)scripts/precommit.sh' 2>/dev/null \
-     | grep -E "^\+.*${SECRET_RE}" | grep -vF "$KNOWN_PUBLIC_TX" | grep -q .; then
+     | grep -qE "^\+.*${SECRET_RE}"; then
   echo "--- offending staged lines:" >&2
-  git diff --cached -U0 -- . ':(exclude)scripts/precommit.sh' | grep -nE "^\+.*${SECRET_RE}" | cut -c1-160 >&2
+  git diff --cached -U0 -- . ':(exclude)scripts/precommit.sh' | grep -nE "^\+.*${SECRET_RE}" | head -3 >&2
   fail "a staged line looks like a live secret. Check the diff above."
 fi
 
