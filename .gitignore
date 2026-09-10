@@ -1,0 +1,23 @@
+# secrets — never committed, see .env.example
+.env
+.env.local
+.env*.local
+*.pem
+*.key
+
+# deps / build
+node_modules/
+.next/
+out/
+dist/
+build/
+.vercel/
+.turbo/
+
+# misc
+.DS_Store
+*.log
+npm-debug.log*
+coverage/
+.idea/
+.vscode/
