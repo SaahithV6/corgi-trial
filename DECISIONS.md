@@ -341,3 +341,53 @@ prove the widening had not undone layer 1. It had not — 14 of 14 still pass.
 The general rule: any blanket `GRANT` is followed by the explicit `REVOKE` and
 then by the prover. A privilege model you cannot re-verify after every change
 is a privilege model you do not have.
+
+---
+
+## 010 — 2026-09-10T03:20Z — Security review of our own write path, plus a self-inflicted runner bug
+
+**Finding: `ledger_append()` is SECURITY DEFINER with an unpinned
+`search_path`.** That combination is the textbook privilege-escalation shape.
+A definer function executes with the owner's privileges but resolves
+unqualified names — `digest`, `nextval`, `format` — through the *caller's*
+search path. A caller who can create an object earlier in that path shadows
+one of those names and runs its own code as the owner, inside the single
+function in this system that writes to the journal.
+
+**Is it exploitable here? No, and I checked rather than assuming.** This is
+Postgres 18, where `public` no longer grants `CREATE` to `PUBLIC`, and
+`has_schema_privilege('corgi_app','public','CREATE')` returns false. The hole
+is latent, not live.
+
+**Closed anyway, in migration 0003.** "Not exploitable today" rests on a
+default that one future `GRANT` would silently undo, and the blast radius is
+the ledger. `SET search_path = public, pg_temp` costs one statement.
+`pg_temp` is named explicitly and placed LAST on purpose: omit it and Postgres
+searches it first, so a caller can shadow the same names with a temp object
+and the hole reopens. `CREATE` on schema public is also revoked from
+`corgi_app` explicitly rather than relied upon as a version default.
+
+**Separate bug, mine.** `migrate.mjs` computed each file's hash with pgcrypto's
+`digest()` — an extension that migration 0001 itself creates and that
+`DROP SCHEMA CASCADE` removes. So after a reset it recorded a placeholder hash
+on one pass and a real hash on the next, then refused its own unchanged files.
+A migration runner must not depend on the database it is migrating. Hashing
+moved to `node:crypto`. Verified: three migrations apply, and a second run is
+all-skip.
+
+**Postscript to 010.** The secret scanner added in 007 blocked its own
+introducing commit: one of the prefixes it looks for is Stripe's live-key
+prefix, written as a literal in the pattern list, so the scanner matched
+itself. It is now excluded from its own scan.
+
+It then blocked the commit again, because this very entry described the match
+by quoting that prefix. That second block is the scanner working exactly as
+intended — a documentation file is not an exemption, and widening the rule to
+skip Markdown would be a genuine hole, since a pasted key in a README is still
+a leaked key. The entry is reworded instead. Note the shape of the fix: when a
+guard fires on something legitimate, change the legitimate thing or narrow the
+guard to the single file that must be exempt. Do not broaden the guard.
+
+It also now prints the offending lines rather than only asserting that some
+exist. A guard that says "something is wrong" without saying what is a guard
+people learn to bypass.

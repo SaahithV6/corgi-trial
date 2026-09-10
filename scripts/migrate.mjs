@@ -4,6 +4,7 @@
 // schema_migrations, nothing that could reorder or silently skip a file.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import postgres from "postgres";
 
 // Migrations run on the DIRECT (unpooled) connection. Neon's pooler is
@@ -29,11 +30,16 @@ await sql`CREATE TABLE IF NOT EXISTS schema_migrations (
 
 for (const f of files) {
   const body = readFileSync(join(dir, f), "utf8");
-  const sha = await sql`SELECT encode(digest(${body}, 'sha256'), 'hex') AS h`
-    .catch(() => [{ h: "pgcrypto-not-ready" }]);
+  // Hash in Node, never in Postgres. The first version of this used
+  // digest() from pgcrypto -- which is an EXTENSION THIS MIGRATION CREATES,
+  // and which DROP SCHEMA CASCADE removes. So a reset made the runner record
+  // a placeholder hash on one pass and a real one on the next, then refuse
+  // its own unchanged files. A migration runner must not depend on the
+  // database it is migrating.
+  const sha = [{ h: createHash("sha256").update(body, "utf8").digest("hex") }];
   const [row] = await sql`SELECT sha256 FROM schema_migrations WHERE filename = ${f}`;
   if (row) {
-    if (row.sha256 !== sha[0].h && sha[0].h !== "pgcrypto-not-ready") {
+    if (row.sha256 !== sha[0].h) {
       console.error(`REFUSING: ${f} already applied but its contents changed.`);
       console.error("A migration is immutable once applied. Write a new one.");
       process.exit(1);
