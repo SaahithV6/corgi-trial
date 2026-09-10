@@ -242,23 +242,32 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
           signal,
         }),
       );
-      if (!res) return { liveness: "unreachable", detail: err ?? "no response", ms };
-      if (res.ok) return { liveness: "live", detail: "Persona: GET /inquiries -> 200", ms };
-      if (res.status !== 401 && res.status !== 403) {
+      if (res?.ok) return { liveness: "live", detail: "Persona: GET /inquiries -> 200", ms };
+      if (res && res.status !== 401 && res.status !== 403) {
         return { liveness: fromStatus(res.status), detail: `Persona -> ${res.status}`, ms };
       }
-      // Persona key present but rejected: fall through and try Stripe Identity
-      // rather than reporting simulated while a working alternative exists.
-      // Carry the rejection into the evidence string so the fallthrough is
+      // Persona key present and NOT usable — rejected, or the call never
+      // landed at all. Both fall through and try Stripe Identity rather than
+      // reporting simulated while a working alternative answers, and both
+      // carry the reason into the evidence string so the fallthrough is
       // visible rather than silent.
-      personaNote = `Persona key present but rejected: ${res.status}`;
+      //
+      // The unreachable leg used to return `unreachable` for the WHOLE slot
+      // without ever asking Stripe, which meant one Persona network blip
+      // flipped a mustBeLive slot to SIMULATED while the provider actually
+      // powering it was answering fine. The rationale already written for the
+      // 401 case — "rather than reporting simulated while a working
+      // alternative exists" — applies here word for word.
+      personaNote = res
+        ? `Persona key present but rejected: ${res.status}`
+        : `Persona key present but unreachable: ${err ?? "no response"}`;
     }
 
     const stripe = env.STRIPE_SECRET_KEY;
     if (!stripe) {
       return {
         liveness: persona ? "unauthorised" : "not_configured",
-        detail: persona ? "Persona key rejected and no Stripe fallback" : "no KYC provider configured",
+        detail: persona ? `${personaNote}; no Stripe fallback configured` : "no KYC provider configured",
         ms: 0,
       };
     }
@@ -275,7 +284,11 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
     if (res.ok) {
       return { liveness: "live", detail: `Stripe Identity enabled (${personaNote})`, ms };
     }
-    return { liveness: "unauthorised", detail: `Stripe Identity unavailable (${res.status})`, ms };
+    return {
+      liveness: "unauthorised",
+      detail: `Stripe Identity unavailable (${res.status}); ${personaNote}`,
+      ms,
+    };
   },
 
   stablecoin: async () => {

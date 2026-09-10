@@ -595,7 +595,7 @@ and returns one of five verdicts: `live`, `unauthorised`, `unreachable`,
 `delivery-health.ts` answers a *different* question — how long since this
 provider last delivered anything — from `webhook_inbox.received_at`.
 
-**Know the number before you quote it.** Everything now says **4 live of 7** —
+**Know the number before you quote it.** Everything now says **5 live of 7** —
 README, DEMO, the T+24h email and the endpoint — after `card_webhooks` moved
 from `live` to `unprobed` when the fallback bug was fixed. It briefly disagreed,
 which is the point: docs drift from systems, so read `/api/health` on the day.
@@ -1337,8 +1337,8 @@ evidence column is the string the probe returned. If the README ever disagrees
 with this page, the page is right."
 
 **Point at:** `integrations.live` — **read the number off the page, do not quote
-the README's 5**; it is 4 of 7 as of the last measured run, because
-`card_webhooks` moved to `unprobed`. Then the `simulated` rows and their evidence
+the README's 5**; it is 5 of 7 as of the last measured run. `card_webhooks`
+moved to `unprobed` and has since been earned back by a real probe. Then the `simulated` rows and their evidence
 strings — *"Connect not enabled…"* and *"holds 20.00 USDC but only
 0 wei gas; a transfer needs ~390000000000 — cannot send"*; then `webhookHealth`,
 which is a *different* question with a deliberately disjoint vocabulary

@@ -52,14 +52,44 @@ for (const f of files) {
   const text = readFileSync(f, "utf8");
   const lines = text.split("\n");
 
+  // Which lines sit under a dated log heading, e.g. "# ITERATION 2 —
+  // 2026-09-10T18:55Z". Everything below one is a RECORD of what was true at
+  // that timestamp, not a claim about now, and a record must be allowed to
+  // state a number that has since moved — otherwise the only way to keep this
+  // check green is to rewrite history, which is the opposite of what the log
+  // is for.
+  //
+  // This is block-level, deliberately. The per-line escape hatches below
+  // require every line of a measurement table to carry "as at" boilerplate,
+  // and a table that has to repeat its own date on every row stops being read.
+  const dated = new Array(lines.length).fill(false);
+  let underDatedHeading = false;
+  lines.forEach((line, i) => {
+    // Only a TOP-LEVEL heading opens or closes a dated block. Sub-headings
+    // inherit it. The first version reset on any "#{1,3}", so "## Measured,
+    // not assumed" inside a dated iteration cleared the flag and the table
+    // underneath it — the entire point of the exemption — was flagged anyway.
+    if (/^#\s/.test(line)) {
+      underDatedHeading = /\d{4}-\d{2}-\d{2}/.test(line);
+    }
+    dated[i] = underDatedHeading;
+  });
+
   // 1. A stated count that disagrees with the endpoint.
   lines.forEach((line, i) => {
-    const m = line.match(/(\d+)\s+(?:live of|of)\s+(\d+)\s*(live)?/i);
+    // "4 of 7", "4 live of 7", and "4/7 live". The last one was missed
+    // entirely until an iteration log written in that shorthand sailed past a
+    // check whose whole job is catching exactly that number. A guard that only
+    // understands one spelling of the claim it guards is not a guard.
+    const m =
+      line.match(/(\d+)\s+(?:live of|of)\s+(\d+)\s*(live)?/i) ??
+      line.match(/(\d+)\s*\/\s*(\d+)\s+live/i);
     if (m && Number(m[2]) === total && Number(m[1]) !== liveCount) {
       // Allow a line that is explicitly narrating history.
       // A line that dates itself is a record, not a claim. EVALUATION.md is a
       // log of what was true at each iteration and must be allowed to say so.
       if (
+        dated[i] ||
         /previously|used to|before|briefly|was read at|drift|as at|at that commit|at that reading|see Iteration/i.test(line) ||
         // A line that QUOTES a past claim while reporting it is a record too.
         // DECISIONS.md documents the bug where the email said "5 live of 7";
@@ -79,6 +109,7 @@ for (const f of files) {
       if (!line.includes(slot)) return;
       const claimsLive = /\|\s*\*\*live\*\*\s*\||^\s*LIVE\s+/i.test(line);
       if (!claimsLive) return;
+      if (dated[i]) return;
       if (/previously|used to|before|briefly|read \*\*LIVE\*\*|as at|at that commit/i.test(line)) return;
       console.log(`${f}:${i + 1}  presents SIMULATED slot '${slot}' as LIVE`);
       console.log(`   ${line.trim().slice(0, 100)}`);

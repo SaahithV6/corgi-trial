@@ -27,7 +27,7 @@ disagrees with that endpoint, the endpoint is right.
 | `ach_rail` | Increase sandbox | **live** | yes — §2 |
 | `open_banking` | Plaid sandbox | **live** | yes — §3 |
 | `director_kyc` | Stripe Identity (test mode) | **live** | yes — §4 |
-| `card_webhooks` | Lithic | simulated (`unprobed`) | **the label has none — the deliveries do, and they are §1** |
+| `card_webhooks` | Lithic | **live** | `GET /v1/event_subscriptions -> 200` and its `/attempts` log; the deliveries themselves are §1 |
 | `business_registry` | Stripe Connect | simulated (`unauthorised`) | **no — see §6** |
 | `stablecoin` | USDC on Base Sepolia | simulated (`unauthorised`) | **no — see §6** |
 
