@@ -69,7 +69,7 @@ const LIFECYCLE_EVENT = "card_transaction.updated";
  * it. It is also strictly safe: a double-encoded object parses to the object,
  * and a genuine object is returned untouched.
  */
-function payloadObject(payload: unknown): Record<string, unknown> | null {
+export function parseStoredPayload(payload: unknown): Record<string, unknown> | null {
   if (typeof payload === "string") {
     try {
       const parsed: unknown = JSON.parse(payload);
@@ -98,7 +98,7 @@ function payloadObject(payload: unknown): Record<string, unknown> | null {
  * consumer never reads them, so requiring them would reject payloads it can
  * process perfectly well.
  */
-function asTransaction(payload: Record<string, unknown>): Transaction | null {
+export function asCardTransaction(payload: Record<string, unknown>): Transaction | null {
   const token = payload["token"];
   const cardToken = payload["card_token"];
   const created = payload["created"];
@@ -120,12 +120,12 @@ export const lithicCardConsumer: WebhookConsumer = {
       return ignored(`not ${LIFECYCLE_EVENT} (${event.eventType ?? "no event type"})`);
     }
 
-    const payload = payloadObject(event.payload);
+    const payload = parseStoredPayload(event.payload);
     if (payload === null) {
       return ignored("payload is not a JSON object");
     }
 
-    const txn = asTransaction(payload);
+    const txn = asCardTransaction(payload);
     if (txn === null) {
       // A verified body we cannot use. Throwing would burn the retry budget on
       // something that will never parse; the honest answer is that we looked at
