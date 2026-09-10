@@ -26,6 +26,14 @@ export interface Screen {
 
 export const SCREENS: readonly Screen[] = [
   {
+    href: "/onboarding",
+    title: "Onboarding",
+    summary:
+      "KYB for every business on the book, and the gate that stops an unverified one transacting.",
+    why: "Director KYC runs live through Stripe Identity; the registry leg is simulated and the composite says so rather than averaging the two. Press \u201cTry to start a payment\u201d on a pending business to watch the refusal, with its code, from the server.",
+    external: false,
+  },
+  {
     href: "/accounts",
     title: "Accounts",
     summary:
@@ -46,6 +54,14 @@ export const SCREENS: readonly Screen[] = [
     summary:
       "Last night's scheme file against the ledger, with every break aged and categorised.",
     why: "Delete a row from the file and this screen finds it: the default state is a real query against the real book, not a fixture.",
+    external: false,
+  },
+  {
+    href: "/statements",
+    title: "Statements",
+    summary:
+      "A closed day, published as a frozen artefact and reproducible byte for byte.",
+    why: "Re-render one and the content hash is identical across processes and hundreds of intervening entries; correct a backdated entry and the as-published figure does not move, because a statement records what was believed on the day it closed.",
     external: false,
   },
   {

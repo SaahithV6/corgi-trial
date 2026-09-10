@@ -27,6 +27,7 @@
 import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
+import { transactGateForAccount } from "@/lib/kyb/wire";
 import { fail, ok, type Result } from "@/lib/result";
 
 import { contentHash } from "./hash";
@@ -237,6 +238,22 @@ export async function requestPayment(
           `No approval policy is in force for ${args.rail} on ${args.valueDate}. A payment cannot be raised without a policy version to cite.`,
         );
       }
+
+      // "Gate the account: unverified entities can look but not transact."
+      //
+      // Structurally this is already half-true — a pending business has no
+      // deposit account, so there is nowhere for money to land. That is a good
+      // defence and it is not this one. This is the readable refusal, with a
+      // code and a reason, at the one place both the console and the MCP write
+      // tool pass through.
+      //
+      // INSIDE the transaction, and before the INSERT, on purpose: read the
+      // KYB state under the same snapshot that writes the instruction, so
+      // nothing can be approved-then-revoked between the check and the write.
+      const gate = await transactGateForAccount(args.accountId, {
+        conn: tx as unknown as Sql,
+      });
+      if (!gate.allowed) return fail(gate.code, gate.message);
 
       const hash = contentHash({
         accountId: args.accountId,

@@ -47,3 +47,4 @@ coverage/
 .vercel
 .env*
 .scratch/
+__pycache__/

@@ -33,11 +33,13 @@ function routesUnder(dir: string, prefix: string): string[] {
 }
 
 describe("SCREENS", () => {
-  it("names the four things that exist", () => {
+  it("names the six things that exist", () => {
     expect(SCREENS.map((s) => s.href)).toEqual([
+      "/onboarding",
       "/accounts",
       "/approvals",
       "/reconciliation",
+      "/statements",
       "/api/health",
     ]);
   });

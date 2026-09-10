@@ -13,6 +13,9 @@ import { FOCUS_RING } from "../ui/primitives";
  * honest gap, and typed routes would not let it compile anyway.
  */
 const LIVE = [
+  // First, because a business exists before its account does — and because the
+  // gate this screen demonstrates runs before any of the others can move money.
+  { href: "/onboarding", label: "Onboarding" },
   { href: "/accounts", label: "Accounts" },
   { href: "/approvals", label: "Approvals" },
   { href: "/reconciliation", label: "Reconciliation" },
