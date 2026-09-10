@@ -19,8 +19,8 @@ The ledger balance does not move. Available drops by exactly 5,000 cents. That
 is your first published attack, passing on the deployed system rather than in a
 test file.
 
-Live state behind it, read a few minutes before sending: 70 webhook deliveries
-processed to done, 734 journal entries, 104 card authorisations, 45 live holds,
+Live state behind it, read a few minutes before sending: 102 webhook deliveries
+processed to done, 840 journal entries, 119 card authorisations, 63 live holds,
 trial balance 0, every invariant view returning zero rows including the one I
 added today, and pnpm db:check at 14 of 14.
 
@@ -36,7 +36,7 @@ disagrees with that page, believe the page. It reports 6 live of 7.
   LIVE       ach_rail           Increase sandbox    GET /accounts -> 200
   LIVE       open_banking       Plaid sandbox       POST /institutions/get -> 200
   LIVE       director_kyc       Stripe Identity     Stripe Identity enabled
-  LIVE       stablecoin         USDC, Base Sepolia  20.00 USDC and gas; a transfer is fundable
+  LIVE       stablecoin         USDC, Base Sepolia  0.50 USDC sent and confirmed on chain
   SIMULATED  business_registry  Stripe Connect      Connect not enabled
 
 card_webhooks took the longest route to that label and the route is the point.
@@ -65,9 +65,32 @@ than whether a balance exists. Gas arrived from the Coinbase faucet at
 0x279c3f9d734310e6a49b7de79ef69b3545f9df5c69f3126d88fe89133a31eb69, the wallet
 holds 100000000000000 wei against the roughly 390000000000 a transfer needs, and
 the slot flipped on the next health call with no deploy, because the probe
-recomputes rather than remembering. The payout itself is being wired now; if it
-has confirmed on chain by the time you read this I will send the hash, and if it
-has not, this slot means the wallet can pay and has not yet been asked to.
+recomputes rather than remembering.
+
+Then it actually paid. 0.500000 USDC, Base Sepolia, receipt status 0x1 in block
+46651201:
+
+  0xb47c5a368f79786f73947c4f1980615557ff1800cd92818bd33070f7ed7986a1
+  https://sepolia.basescan.org/tx/0xb47c5a368f79786f73947c4f1980615557ff1800cd92818bd33070f7ed7986a1
+
+The ledger entry carries that hash as both its external reference and its
+idempotency key, and the value date comes from the block timestamp rather than
+from the clock on the machine that sent it. The hash is computed BEFORE
+broadcast, which is the whole reason it can be the idempotency key: re-running
+recomputes the same key, and journal_entry.idempotency_key is UNIQUE, so the
+second run sends nothing and posts nothing. I ran it twice to check.
+
+The crash point I did not expect is the middle one. After broadcast but before
+the receipt, getTransactionCount(pending) already counts the in-flight
+transaction, so a naive retry builds a SECOND transfer at the next nonce and
+pays twice. It refuses instead while pending and latest disagree. Reading the
+chain for a Transfer log recovers the first one.
+
+Nothing was installed to do any of this. keccak-256, secp256k1, RLP and the
+EIP-1559 envelope are in the repo, checked against published vectors before the
+key was used - including the EIP-155 example transaction, whose exact r and s
+come back out, which only happens if address derivation, encoding, hashing and
+signing are all simultaneously right.
 
 That leaves one simulated, said plainly. Business registry is simulated because
 every KYB provider on your menu is gated. Middesk and Sumsub want a sales

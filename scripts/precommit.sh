@@ -37,19 +37,22 @@ if [ -f .env ]; then
   # Values only, quotes stripped, 16 chars or longer. Short values like "true"
   # would match half the tree.
   #
-  # Not every value in .env is a secret. A wallet address, a token contract
-  # address and a public RPC endpoint all live there, all exceed the length
-  # floor, and all appear legitimately in documentation and scripts. Matching
-  # on them would fire on every honest file that names the wallet the payout
-  # sends from, which is exactly the noise that gets a gate disabled.
+  # Which keys hold secrets is a WHITELIST, not a blacklist, and that direction
+  # is the whole point. You can enumerate your own credential names; you cannot
+  # enumerate every public value that might legitimately appear in a document.
+  # The blacklist version of this rule fired three times in one afternoon - on
+  # a wallet address, on a public RPC endpoint, and on the literal string
+  # "business_registry" from a feature flag, which appears in every document
+  # that discusses the slot.
   #
-  # So the classification is by KEY NAME, and the burden is the same as in
-  # .secretscanignore: to add a pattern here you must show the value cannot
-  # authenticate anything. Note what is deliberately NOT public: DATABASE_URL
-  # and DIRECT_URL end in _URL and carry a password in the userinfo.
-  PUBLIC_KEY_RE='(_ADDRESS|_RPC_URL|_CHAIN_ID|_BASE_URL|_WEBHOOK_URL|^NEXT_PUBLIC_)'
+  # Adding a credential to .env means naming it after one of these. That is
+  # already true of every key in the file, and `scripts/precommit.sh --audit`
+  # prints the classification so the assumption can be checked rather than
+  # trusted. Note DATABASE_URL and DIRECT_URL: they carry a password in the
+  # userinfo, so they are named explicitly rather than left to the _URL suffix.
+  SECRET_KEY_RE='(KEY|SECRET|TOKEN|PASSWORD|PRIVATE|CREDENTIAL|DSN|^DATABASE_URL|^DIRECT_URL|^APP_DATABASE_URL)'
   SECRET_VALUES=$(grep -E '^[A-Z0-9_]+=.+' .env \
-    | grep -vE "^[A-Z0-9_]*${PUBLIC_KEY_RE}[A-Z0-9_]*=" \
+    | grep -E "^[A-Z0-9_]*${SECRET_KEY_RE}[A-Z0-9_]*=" \
     | sed 's/^[A-Z0-9_]*=//' | sed 's/^"//; s/"$//' \
     | awk 'length($0) >= 16' | sort -u)
   if [ -n "$SECRET_VALUES" ]; then

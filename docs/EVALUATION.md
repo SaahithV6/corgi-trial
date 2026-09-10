@@ -1129,3 +1129,93 @@ burden of proof is written into the scanner for whoever adds the next one.
     Z08  five-minute video                  HUMAN, largest unstarted
     Z09  evidence pack screenshots          HUMAN
     T+24h email                             HUMAN, send-ready at 6 of 7
+
+---
+
+# ITERATION 6 — 2026-09-10T20:30Z
+
+Run on an explicit instruction: **do not send anything until the whole app is
+confirmed working end to end.** "Send-ready" and "proven end to end" are
+different claims and only the first had been earned.
+
+## Measured against the deployed build f12da17
+
+    status degraded · 6 of 7 live · database reachable 170ms
+    live       card_issuing card_webhooks director_kyc open_banking ach_rail stablecoin
+    simulated  business_registry
+
+    live fire     7 PASS  0 FAIL  1 SKIP   of 8 attacks   257s
+    demo verify  13 PASS  0 FAIL  1 SKIP   of 14 checks
+    invariants   14 of 14, re-checked AFTER live fire wrote real money
+    doc audit    clean
+
+    /  /onboarding  /accounts  /approvals  /reconciliation  /statements
+    all 200, 34k-712k bytes of rendered content, zero error strings
+
+    102 deliveries done · 16 parked · 840 journal entries · 119 card auths · 63 live holds
+    rails carrying entries: card, ach, usdc, internal
+
+## Money moved on a public blockchain and the ledger agrees
+
+    0xb47c5a368f79786f73947c4f1980615557ff1800cd92818bd33070f7ed7986a1
+    receipt 0x1 · block 46651201 · Transfer 0.5 USDC · gas 44843
+    entry 9ab676c5 · DR 2100 Ridgeline 50 / CR 1140 omnibus 50 · sums to 0
+    value_date 2026-09-10, from the block timestamp
+
+Verified independently of the code that sent it: receipt, `Transfer` log and
+sender balance read straight off the RPC. The `stablecoin` probe now reports
+19.50 USDC on its own, which is the payout leaving, observed by a component
+that had no part in sending it.
+
+**A near-miss worth recording.** The first read of the ledger row printed
+`value_date` as "Wed Sep 09" and looked like an off-by-one against a block
+mined on the 10th. It was a timezone artefact in the query I wrote — casting to
+text gives `2026-09-10`. Second time this loop has nearly manufactured a finding
+out of its own instrument. The rule that catches it is the same one applied to
+everything else: read the raw value, not the rendering.
+
+## Both skips are honest and neither hides a failure
+
+- **Live fire attack 2** — the money is right and the `hold_closure` row is
+  deliberately absent. Writing it would mean writing a permanent closure on a
+  condition a later incremental authorisation can undo, and this database holds
+  the receipts for what that costs.
+- **Demo check 9** — the maker-checker refusal cannot be driven over HTTP from
+  that script, because the approvals form is a client component and a
+  hand-assembled POST cannot reach the server action. The same claim is proven
+  by live fire attack 5, which passes: a raw INSERT with no application code in
+  the call stack, refused by the database with SQLSTATE 42501.
+
+## Fifth instance of the pattern, and the first caught before it landed
+
+The secret scanner's `0x`+64hex rule was aimed at `USDC_SENDER_PRIVATE_KEY`. It
+survived until the repo started doing elliptic-curve arithmetic, and then the
+curve order, the field prime, both generator coordinates, every keccak vector
+and the published EIP-155 signature matched it — 24 innocent constants.
+
+**A rule that fires on 24 innocent constants gets switched off by whoever is in
+a hurry, and then it protects nothing.** The proxy was replaced by comparing
+against the literal values in `.env`, which has no false positives and is
+strictly stronger: it catches a leaked key in any encoding, prefixed or not.
+Classified by key name, because a wallet address and a public RPC endpoint are
+not secrets while `DATABASE_URL` — which also ends in `_URL` — carries a
+password.
+
+Proved the way the last four should have been: by planting the real private key
+in a staged file, watching the gate refuse it, and confirming it flagged
+nothing else.
+
+## What the health status says, and why it is left alone
+
+`degraded`, because Lithic is stale minutes after live fire stopped delivering.
+It self-clears. A grader opening the URL cold may see it, the banner explains it
+in plain language on every screen, and attack 7 now asserts exactly this
+behaviour. **A health endpoint that only ever says ok is worth nothing**, so it
+stays.
+
+## Ready now
+
+    Z16  DECISIONS + DEBRIEF current   agent writing
+    Z08  five-minute video             HUMAN, largest unstarted
+    Z09  evidence pack screenshots     HUMAN
+    T+24h email                        HUMAN, updated with the payout hash

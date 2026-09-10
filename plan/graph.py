@@ -420,7 +420,7 @@ X01 X02 X03 X04 X05
 """.split()
 
 DOING = """
-LF10 LF11 Z13
+LF10 LF11 Z16
 """.split()
 
 # Landed since the last graph update.
@@ -433,7 +433,7 @@ O02 O03 O04 O08 O09 T01 T02 T03 T04 T05 T07
 W10 W14 E04 E06 E07 E09 E10 E11 E12 E13 K04
 X06 X07 X08 X09 X10 X11
 Y01 Y02 Y03 Y04 Y06 Y07 Y08
-LF07 Z01 Z02 Z03 Z04 Z05 Z06 Z07 Z11 Z12
+LF07 Z01 Z02 Z03 Z04 Z05 Z06 Z07 Z11 Z12 Z13 Z14 Z15
 """.split()
 
 # Discovered after the deploy went live.
@@ -514,6 +514,19 @@ def _iter5():
       "finish", 150, ["Z07"], "agent", ["lib/rails/stablecoin"], "doing",
       risk="I claimed this was already built. It was not - the probe reads balances, nothing sends")
 _iter5()
+
+# --- iteration 6: end-to-end verification, on the user's instruction ---
+def _iter6():
+    N("Z14", "Secret scanner: replace the 0x+64hex proxy with the exact .env check",
+      "discovered", 40, [], "claude", ["ops/gate"], "done",
+      risk="the proxy fired on 24 curve constants; a rule like that gets switched off")
+    N("Z15", "End-to-end verification against the deployed build before sending anything",
+      "finish", 45, ["Z13"], "claude", ["ops/verify"], "done",
+      risk="'send-ready' and 'proven end to end' are different claims")
+    N("Z16", "DECISIONS + DEBRIEF current with the payout, the scanner and 'every'",
+      "finish", 70, ["Z13","Z14"], "agent", ["docs/debrief"], "doing",
+      risk="'code you cannot explain line by line' is an automatic fail")
+_iter6()
 
 def apply_status():
     idx = {n["id"]: n for n in NODES}
