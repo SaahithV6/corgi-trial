@@ -2,32 +2,29 @@
  * Demo data behind the account screen's data contract.
  *
  * ============================================================================
- * TODO(ledger): this module is the swap point.
+ * The swap is done. This module is now demo data, plus the one-line choice of
+ * which source answers a given URL.
  *
- * `getAccountDataSource()` returns a fixture today. When the ledger's read
- * side is ready, the `default` branch returns the real implementation of
- * `AccountDataSource` and every other branch keeps returning a fixture,
- * because the demo states must stay reachable without writing rows to a real
- * ledger. No component changes: they depend on the interface.
+ * `getAccountDataSource()` returns the LIVE implementation for the default
+ * state — `createLiveAccountDataSource()`, reading the journal through
+ * `src/lib/ledger/queries.ts` — and a fixture for every `?state=` demo. No
+ * component changed when that happened, because both sides are the same
+ * interface, which was the entire point of the seam.
  *
- *   if (state === "default") return createLedgerDataSource();
+ * What is still fixture, and why:
  *
- * The adapter is thin. `src/lib/ledger/balances.ts` already exposes
- * `availableBalance(businessId)` returning
- * `{ ledgerCents, holdsCents, unclearedCents, availableCents }` as `bigint`,
- * which maps field for field onto `AccountSummary`:
+ *   ?state=loading   a genuinely slow read, so the real skeleton is visible
+ *   ?state=empty     an account with nothing booked to it
+ *   ?state=error     a failed balance query, so retry can be demonstrated
+ *   ?state=edge      the over-capture that drives available negative
+ *   ?auth=pending    the $50.00 fuel-pump authorisation, landed on demand
  *
- *   ledgerCents           <- Number(b.ledgerCents)
- *   activeHoldsCents      <- Number(b.holdsCents)
- *   unclearedCreditsCents <- Number(b.unclearedCents)
- *   availableCents        <- Number(b.availableCents)
- *   bookingWatermark      <- Number(await bookingWatermarkAt(now))
- *
- * `Number()` is exact for every cent count under 2^53 (~$90tn); see the note
- * on `Cents` in `data-contract.ts` for how to widen to `bigint` if that ever
- * stops being true. The two list methods need queries that do not exist yet —
- * holds with their `A(E)`/`C(E)` terms, and postings with a `book` column —
- * and those are the contract's ask of the ledger worker.
+ * None of those can be produced on a live account without writing rows, and
+ * this screen never writes — the interface is read-only by design and money
+ * movement goes through a route handler with maker-checker. The numbers below
+ * are not decorative either: they are the ones measured against the Lithic
+ * sandbox in DECISIONS 006, so the demo shows the trap that was avoided rather
+ * than an invented one.
  * ============================================================================
  *
  * The numbers here are not decorative. The over-capture figures ($50.00
@@ -47,6 +44,7 @@ import type {
   Posting,
 } from "./data-contract";
 import type { DemoState, DemoView } from "./demo-state";
+import { createLiveAccountDataSource } from "./live-data-source";
 
 /**
  * The instant every fixture is read as-of.
@@ -458,12 +456,47 @@ const QUERY_FAILURE = () =>
   );
 
 /**
- * Pick the fixture that answers the contract for a given demo state.
+ * Is this view answered by the journal, or by the fixtures below?
  *
- * TODO(ledger): `case "default"` returns the real `AccountDataSource` once
- * `src/lib/ledger/balances.ts` exists. Everything else stays a fixture.
+ * One predicate, used by `getAccountDataSource` to choose the source and by
+ * the page to badge which one it chose, so the label on the screen cannot
+ * drift from the code that decided it.
+ *
+ * The bare URL is live. `?state=…` is a fixture, deliberately: the five states
+ * have to be demonstrable in order, in front of a panel, without writing a row
+ * to a real ledger — an over-capture and a failed balance query are not things
+ * you seed on demand. `?auth=pending` is a fixture for the same reason. It is
+ * the "land a $50.00 authorisation and watch available move while ledger does
+ * not" demo, which needs an authorisation to land, and this screen never
+ * writes: money movement goes through a route handler with maker-checker,
+ * never through a render.
+ */
+export function isLiveView(view: DemoView): boolean {
+  return view.state === "default" && !view.authPending;
+}
+
+/**
+ * The swap point.
+ *
+ * The default state is the live journal — `createLiveAccountDataSource()`
+ * reads `src/lib/ledger/queries.ts` and nothing on this screen knows the
+ * difference, because both sides are the same interface. Every other view is a
+ * fixture, and the fixture DATA below is kept for exactly that reason.
  */
 export function getAccountDataSource(view: DemoView): AccountDataSource {
+  if (isLiveView(view)) return createLiveAccountDataSource();
+  return createFixtureSource(view);
+}
+
+/**
+ * The demo states, and only the demo states.
+ *
+ * `default` is still answered here — but only when it was reached through
+ * `?auth=pending`, which is a request for the fixture authorisation. The bare
+ * default state never arrives at this function; it is served by the live
+ * source above.
+ */
+export function createFixtureSource(view: DemoView): AccountDataSource {
   const { state, authPending } = view;
 
   return {
@@ -525,9 +558,13 @@ export type DemoAccountRef = {
 };
 
 /**
- * TODO(ledger): replace with a real `listAccounts` when the ledger exposes one.
+ * The demo rows of the directory. The live rows come from `listLiveAccounts()`
+ * in `live-data-source.ts`; these stay because each one opens the screen in
+ * the demo state whose figures it is quoting, so the directory can never
+ * disagree with the state it links to.
+ *
  * Deliberately not part of `AccountDataSource` — the account screen does not
- * need it, and the contract stays narrow.
+ * need a list, and the contract stays narrow.
  */
 export const DEMO_ACCOUNTS: readonly DemoAccountRef[] = [
   {

@@ -1,8 +1,20 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "regions": ["iad1"],
+  "regions": [
+    "iad1"
+  ],
   "functions": {
-    "src/app/api/webhooks/[provider]/route.ts": { "maxDuration": 15 },
-    "src/app/api/health/route.ts": { "maxDuration": 15 }
-  }
+    "src/app/api/webhooks/[provider]/route.ts": {
+      "maxDuration": 15
+    },
+    "src/app/api/health/route.ts": {
+      "maxDuration": 15
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/drain",
+      "schedule": "0 * * * *"
+    }
+  ]
 }

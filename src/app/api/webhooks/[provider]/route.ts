@@ -7,6 +7,9 @@
  * `@/lib/webhooks/route-handler`. See `../README.md` for the failure table.
  */
 
+import { after } from 'next/server';
+
+import { drain } from '@/lib/webhooks/drain';
 import { handleWebhookRequest, WEBHOOK_PROVIDERS } from '@/lib/webhooks/route-handler';
 
 /**
@@ -31,7 +34,33 @@ type Context = { params: Promise<{ provider: string }> };
 
 export async function POST(request: Request, context: Context): Promise<Response> {
   const { provider } = await context.params;
-  return handleWebhookRequest(request, provider);
+  const response = await handleWebhookRequest(request, provider);
+
+  // Drain AFTER the response is on its way. The provider gets its 2xx at the
+  // same speed it always did — Plaid retries for twenty-four hours without one
+  // — and the row it just stored becomes a journal line seconds later instead
+  // of waiting for the next cron tick.
+  //
+  // This is a NUDGE, not the delivery mechanism. `after()` can be dropped when
+  // an instance is recycled, and a mechanism that usually runs is the worst
+  // kind, because it works until the day it matters. The guarantee is the
+  // hourly cron on /api/drain; this only removes the latency. The inbox row is
+  // durable before either runs, so losing both loses time and never money.
+  //
+  // Only ack'd deliveries are worth draining for: a 401 stored nothing, and a
+  // 500 means the row is not there to process.
+  if (response.status >= 200 && response.status < 300) {
+    after(async () => {
+      try {
+        await drain({ maxBatches: 2 });
+      } catch {
+        // Swallowed on purpose. This path has already returned 2xx to the
+        // provider; throwing here cannot un-send that, and the cron will pick
+        // the row up regardless. The drain logs its own failures.
+      }
+    });
+  }
+  return response;
 }
 
 /**
