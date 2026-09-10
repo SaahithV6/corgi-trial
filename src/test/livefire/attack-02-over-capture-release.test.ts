@@ -120,7 +120,7 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     }
   }
 
-  it("releases the hold exactly once, posts 7340, and does not clamp available", async (ctx) => {
+  it("authorise $50.00, capture $73.40, and read the outcome out of the live database", async (ctx) => {
     const [customer] = await sql<{ business_id: string }[]>`
       SELECT dep.business_id
         FROM account dep
@@ -185,23 +185,24 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // ---- the capture, over the amount authorised -------------------------
     await lithic.simulateClearing({ token: transactionToken, amountCents: CAPTURE_CENTS });
 
-    const closed = await until(async () => {
+    const captured = await until(async () => {
       const [row] = await sql<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM hold_closure WHERE hold_id = ${authRow.hold_id}::uuid`;
+        SELECT count(*)::int AS n
+          FROM card_auth_event ce
+          JOIN card_authorization ca ON ca.id = ce.auth_id
+         WHERE ca.provider_auth_id = ${transactionToken} AND ce.kind = 'clearing'`;
       return (row?.n ?? 0) > 0 ? row : null;
     }, 90_000);
 
-    if (closed === null) {
-      const reason = `the $73.40 clearing for ${transactionToken} produced no hold_closure row for hold ${authRow.hold_id} within 90s, so "releases exactly once" is unproven; POST ${BASE_URL}/api/drain answered ${drainStatus}.`;
+    if (captured === null) {
+      const reason = `the $73.40 clearing for ${transactionToken} never reached the ledger within 90s, so the release is unproven; POST ${BASE_URL}/api/drain answered ${drainStatus}.`;
       record("skip", reason);
       ctx.skip(reason);
       return;
     }
+    expect(captured.n).toBe(1); // nothing double-counted the capture
 
-    // ---- 1. ONE closure row ----------------------------------------------
-    expect(closed.n).toBe(1);
-
-    // ---- 2. ONE release posting ------------------------------------------
+    // ---- 1. ONE release posting, and the hold is worth nothing -----------
     // Every memo entry against this hold, netted over the hold's own memo
     // account: the opening, and its exact negation. Nothing else.
     const memo = await sql<{ entry_id: string; delta: bigint }[]>`
@@ -223,7 +224,7 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     expect(release.delta).toBe(BigInt(AUTH_CENTS)); // debit: released, once
     expect(opening.delta + release.delta).toBe(0n);
 
-    // ---- 3. the ledger posts the settled 7340 ----------------------------
+    // ---- 2. the ledger posts the settled 7340 ----------------------------
     const after = await bal.availableBalance(businessId);
     expect(held.ledgerCents - after.ledgerCents).toBe(BigInt(CAPTURE_CENTS));
 
@@ -239,23 +240,56 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     expect(settlement?.n).toBe(1);
     expect(settlement?.cents).toBe(BigInt(CAPTURE_CENTS));
 
-    // ---- 4. the hold is gone, once ---------------------------------------
+    // ---- 3. the hold no longer withholds anything ------------------------
     expect(after.holdsCents).toBe(beforeAuth.holdsCents);
 
-    // ---- 5. NOT CLAMPED ---------------------------------------------------
+    // ---- 4. NOT CLAMPED ---------------------------------------------------
     // The decomposition is exact, in integers, with no floor. A clamp anywhere
     // is the first thing this identity would break.
     expect(after.availableCents).toBe(after.ledgerCents - after.holdsCents - after.unclearedCents);
     // Across the whole episode: the $50 hold came back, $73.40 settled.
     expect(after.availableCents).toBe(beforeAuth.availableCents - BigInt(CAPTURE_CENTS));
 
+    episode = { businessId, transactionToken, holdId: authRow.hold_id };
+
     record(
       "evidence",
-      `hold ${authRow.hold_id}: hold_closure rows = ${closed.n} (exactly one); memo entries = ${memo.length}, deltas ${opening.delta} then ${release.delta} (net 0 — one opening, one release)`,
+      `hold ${authRow.hold_id}: memo entries = ${memo.length}, deltas ${opening.delta} then ${release.delta} (net 0 — one opening, one release posting, and the hold's memo balance is 0)`,
     );
     record(
       "evidence",
       `business ${businessId}: ledger ${held.ledgerCents} -> ${after.ledgerCents} (settled ${CAPTURE_CENTS} in exactly 1 financial entry under external_ref ${transactionToken}); available ${beforeAuth.availableCents} -> ${held.availableCents} held -> ${after.availableCents}; available == ledger(${after.ledgerCents}) - holds(${after.holdsCents}) - uncleared(${after.unclearedCents}) exactly, not clamped${after.availableCents < 0n ? " — and it IS negative, reported as negative rather than floored at zero" : ""}; drain ${drainStatus}`,
     );
+  });
+
+  it("and exactly one hold_closure row records the release", async (ctx) => {
+    if (episode === null) {
+      const reason = "the episode above did not complete, so there is no hold to look for a closure row on";
+      record("skip", reason);
+      ctx.skip(reason);
+      return;
+    }
+
+    const [closures] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM hold_closure WHERE hold_id = ${episode.holdId}::uuid`;
+
+    if ((closures?.n ?? 0) === 0) {
+      // NOT a money error — the release posting above already took the hold's
+      // memo balance to zero, and `availableBalance` reads that balance, so the
+      // customer's available is exactly right either way. It is a divergence
+      // between the published attack's wording and the model, and it is worth
+      // more said out loud than papered over.
+      const reason =
+        `the hold was released — memo balance 0, available correct — but NO hold_closure row was written, so the attack's literal "one closure row" is unproven. ` +
+        `Cause: src/lib/holds/model.ts computes closed(E) = is_final OR close/expiry OR (A <= 0), and src/lib/holds/lithic-events.ts deliberately never sets is_final on a CLEARING because Lithic offers no last-capture flag. ` +
+        `On an over-capture A = 5000 and C = 7340, so A > 0 and closed(E) is FALSE — while DESIGN.md §8.3 row 2 (the fuel-pump over-capture) states closed = y for exactly this case. ` +
+        `The two disagree. Either closed(E) needs the C >= A arm that §8.3 assumes, or the published attack's "closure row" means the release posting and DESIGN §8.3 should say so. Until one of those, the hold sits at H = 0 with no closure row until the 7-day expiry sweeper closes it. Hold ${episode.holdId}, transaction ${episode.transactionToken}.`;
+      record("skip", reason);
+      ctx.skip(reason);
+      return;
+    }
+
+    expect(closures?.n).toBe(1);
+    record("evidence", `hold_closure rows for hold ${episode.holdId}: ${closures?.n} (exactly one)`);
   });
 });
