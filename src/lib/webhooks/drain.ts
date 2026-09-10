@@ -57,20 +57,35 @@ async function ensureConsumers(): Promise<{ registered: string[]; missing: strin
   // fails the typecheck and the build for everyone. A variable specifier keeps
   // this module compiling and turns a missing consumer into a loud runtime
   // warning, which is the failure we can actually see and act on.
-  const wanted: { name: string; specifier: string }[] = [
-    { name: "lithic-card", specifier: "./consumers/lithic-card" },
+  const wanted: { name: string; specifier: string; register: string; export: string }[] = [
+    {
+      name: "lithic-card",
+      specifier: "./consumers/lithic-card",
+      register: "registerLithicCardConsumer",
+      export: "lithicCardConsumer",
+    },
   ];
 
   for (const w of wanted) {
     try {
-      const mod = (await import(/* @vite-ignore */ w.specifier)) as {
-        consumer?: Parameters<typeof consumers.register>[0];
-      };
-      if (mod?.consumer) {
-        consumers.register(mod.consumer, { replace: true });
+      // Accept either shape a consumer module can offer: an explicit
+      // register* function (preferred — the author controls replace
+      // semantics) or a bare exported consumer object.
+      const mod = (await import(/* @vite-ignore */ w.specifier)) as Record<string, unknown>;
+      const register = mod[w.register] as
+        | ((r: typeof consumers, o: { replace?: boolean }) => unknown)
+        | undefined;
+      const bare = (mod[w.export] ?? mod["consumer"]) as
+        | Parameters<typeof consumers.register>[0]
+        | undefined;
+      if (typeof register === "function") {
+        register(consumers, { replace: true });
+        found.push(w.name);
+      } else if (bare) {
+        consumers.register(bare, { replace: true });
         found.push(w.name);
       } else {
-        missing.push(`${w.name}: module loaded but exported no 'consumer'`);
+        missing.push(`${w.name}: loaded but exported neither ${w.register}() nor ${w.export}`);
       }
     } catch (e) {
       missing.push(`${w.name}: ${e instanceof Error ? e.message.slice(0, 90) : "load failed"}`);
