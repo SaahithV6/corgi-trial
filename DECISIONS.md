@@ -792,3 +792,54 @@ the ACH row goes.
   dashboard replay — only by tests. That needs the webhook URLs registered.
 - "A stablecoin payout that actually confirms on a testnet is worth far more
   than a slide about one." Blocked on gas, not on code.
+
+---
+
+## 020 — 2026-09-10T18:10Z — Webhooks registered; three bugs only production could find
+
+Registered all three webhook endpoints via each provider's own API rather than
+their dashboards — Increase, Stripe (four identity events) and Lithic — with
+their signing secrets stored in .env and Vercel. Then fired a real Lithic
+authorisation to prove the loop.
+
+It worked, and it found three bugs in a row that every unit test had passed.
+
+**1. `inconsistent types deduced for parameter $9`, then `$7`.** Postgres
+deduces a parameter's type per use site and refuses the statement when two
+deductions disagree. `$7` appears three times (received_at, next_attempt_at,
+and the dead_lettered_at CASE) and `$9` twice; a bare NULL on one CASE arm
+leaves the other unpinned. Every reused parameter is now cast on every use.
+
+**2. `payload` and `headers` were stored as jsonb STRINGS, not objects.**
+
+    jsonb_typeof(payload) -> 'string'
+    headers::text         -> "{\"webhook-id\":\"msg_3J8y...\"}"
+
+They arrive already `JSON.stringify`'d, and a bare `::jsonb` makes the driver
+send them as JSON-typed parameters, so Postgres quotes them a second time.
+Every consumer reading `payload->>'field'` would have got nothing, and the
+stored headers were useless as replay evidence. Fixed with `::text::jsonb`,
+which forces a parse rather than a quote. Verified live: `jsonb_typeof` is now
+`object` and `payload->>'hello'` reads back.
+
+**Why none of these could be caught by tests.** The in-memory inbox store
+never parses SQL and stores JS objects directly, so a statement Postgres will
+not accept, and an encoding Postgres mangles, both pass the entire suite. That
+is not an argument against the double — it is fast and it isolates the
+dispatcher — but it means the SQL path needs at least one test against a real
+database, which recon and approvals both have and the inbox did not.
+
+**What went right, and it is the design working.** The route answered 500 on
+the failed insert. Lithic retried. When the cast was fixed, the event
+*recovered* — `msg_3J8yjFYaE5cor4TG…` landed at 16:23:23, minutes after its
+first delivery failed at 16:18:43. Nothing was lost. That is exactly why an
+inbox failure returns 500 rather than swallowing the delivery.
+
+**A correction I nearly published.** I tried to prove "twice is one" by
+replaying the stored raw body and headers, saw the row count stay at 1, and
+almost reported it as proof. It was not: both replays returned **401**, because
+the stored headers were the double-encoded ones and carried no signature. The
+count held because the requests were rejected before the inbox, not because the
+unique index deduped them. A test that passes for the wrong reason is worse
+than one that fails. The dedupe claim is still unproven against a real
+provider replay and is recorded as outstanding.

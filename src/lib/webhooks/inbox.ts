@@ -648,6 +648,21 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
       // if-statement: the unique index is the decision, and `rowCount` is how
       // we learn what it decided.
       //
+      // $4 and $5 are cast ::text::jsonb, not ::jsonb.
+      //
+      // They arrive already JSON.stringify'd. A bare ::jsonb makes the driver
+      // send them as JSON-typed parameters, so Postgres wraps the string a
+      // SECOND time and stores a jsonb *string* rather than an object:
+      //
+      //   jsonb_typeof(payload) -> 'string'
+      //   headers::text         -> "{\"webhook-id\":\"msg_...\"}"
+      //
+      // Every consumer reading payload->>'field' then gets nothing, and the
+      // stored headers are useless as replay evidence. Going through ::text
+      // forces Postgres to PARSE the JSON instead of quoting it. Found on the
+      // live database by inspecting jsonb_typeof, not by a test — the
+      // in-memory double stores JS objects and never round-trips through SQL.
+      //
       // EVERY reused parameter is cast explicitly, on every use.
       //
       // $7 appears three times (received_at, next_attempt_at, and the CASE for
@@ -667,7 +682,7 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
            (provider, provider_event_id, event_type, payload, headers, raw_body,
             received_at, signature_verified_at, state, next_attempt_at,
             processing_error, dead_lettered_at)
-         values ($1, $2, $3, $4::jsonb, $5::jsonb, $6,
+         values ($1, $2, $3, $4::text::jsonb, $5::text::jsonb, $6,
                  $7::timestamptz, $8::timestamptz,
                  $9::webhook_inbox_state,
                  $7::timestamptz, $10,
