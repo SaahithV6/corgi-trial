@@ -486,3 +486,41 @@ one I set myself with a real value, and it is the one that worked.
 Worth noting what did NOT happen: the app booted. Under the original contract
 where all fifteen keys were required, this deployment would have crash-looped
 instead of telling us precisely which fourteen values were blank.
+
+---
+
+## 013 — 2026-09-10T14:20Z — An editor swap file of the secrets scratch pad got committed
+
+**What happened.** `.SETUP.local.md.kate-swp` was tracked and landed in commit
+6ebfdac, which is pushed.
+
+**Did it leak anything?** No, and I checked rather than assuming. The committed
+blob is 847 bytes containing the literal string "Kate Swap File 2.0" and binary
+edit-journal data; grepping it for the database password, the Lithic key and
+the testnet private key returns zero matches.
+
+**Why it happened, which is the part worth fixing.** The ignore rule was
+`*.local.md`. Kate writes `.SETUP.local.md.kate-swp`, which does not match that
+pattern. The rule protected the document and not the artifacts an editor
+derives from it — and an editor swap file of a secrets document is exactly the
+kind of thing that holds a copy of what you were typing.
+
+The staged-secret scanner did not catch it either, because it greps the diff
+for credential-shaped strings and this blob is binary with none in it. Both
+guards were individually reasonable and the gap sat between them.
+
+**Fixed three ways.**
+
+1. `git rm --cached` and a widened ignore: `*.local.md.*`, `.*.local.md*`, plus
+   the general editor family (`*.swp`, `*.swo`, `*~`, `*.kate-swp`, `.#*`).
+2. The commit gate now refuses any staged file that looks like an editor
+   scratch file, and prints which one. Verified by staging a probe and watching
+   it block.
+3. The check uses `--diff-filter=d` so that REMOVING such a file is not itself
+   blocked. The first version refused its own fix, which is the same class of
+   bug as the secret scanner matching its own pattern list in 010.
+
+**The general lesson, recorded because it will recur.** An ignore rule written
+for a filename does not cover the filenames a tool derives from it. When the
+thing being protected is secrets, the pattern needs to cover the family, not
+the file.

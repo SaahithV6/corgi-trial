@@ -28,6 +28,15 @@ if git diff --cached -U0 -- . ':(exclude)scripts/precommit.sh' 2>/dev/null \
   fail "a staged line looks like a live secret. Check the diff above."
 fi
 
+# Editor scratch files must never be staged. This exists because a Kate swap
+# file for the gitignored secrets scratch pad was committed: the ignore rule
+# matched the document but not the artifacts an editor derives from it.
+if git diff --cached --name-only --diff-filter=d | grep -qE '(\.swp|\.swo|~|\.kate-swp|\.orig|\.rej)$|(^|/)\.#'; then
+  echo "--- offending staged files:" >&2
+  git diff --cached --name-only --diff-filter=d | grep -E '(\.swp|\.swo|~|\.kate-swp|\.orig|\.rej)$|(^|/)\.#' >&2
+  fail "an editor scratch file is staged. These can mirror the contents of files you never meant to commit."
+fi
+
 echo "typecheck..." && pnpm run --silent typecheck || fail "typecheck"
 echo "lint..."      && pnpm run --silent lint      || fail "lint"
 echo "test..."      && pnpm run --silent test      >/dev/null 2>&1 || fail "tests"

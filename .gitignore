@@ -2,6 +2,21 @@
 # *.local.md is the key-handoff scratch pad. Listed FIRST and before the file
 # is ever created, so there is no window in which a paste could be committed.
 *.local.md
+# ...and anything DERIVED from it. The original rule matched the file but not
+# its editor artifacts: Kate wrote `.SETUP.local.md.kate-swp`, which does not
+# match `*.local.md`, and it was committed. That blob turned out to hold no
+# secrets, but an editor swap file of a secrets document is a leak waiting to
+# happen and "secrets committed to the repo" is an automatic fail.
+*.local.md.*
+.*.local.md*
+# editor and OS scratch files, generally
+*.swp
+*.swo
+*~
+.*.kate-swp
+*.kate-swp
+.#*
+\#*\#
 .env
 .env.local
 .env*.local
@@ -29,3 +44,5 @@ coverage/
 # (next-env.d.ts is intentionally committed: CI typechecks without running
 #  next build, so the file must already be on disk)
 *.tsbuildinfo
+.vercel
+.env*
