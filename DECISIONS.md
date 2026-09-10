@@ -568,3 +568,45 @@ Live output across three seeded files, with the ladder actually exercised:
 Eight planted-break tests pass against the live database, including
 re-importing identical bytes as a hash-decided no-op and a prior run's breaks
 being physically immutable.
+
+---
+
+## 015 — 2026-09-10T15:40Z — Stripe Connect is gated too; and a probe that would have lied
+
+**Finding.** Stripe Connect cannot be enabled without completing "Verify your
+business". The dashboard states it plainly — "Your account is not set up as a
+Connect platform" — and the Connect onboarding guide's next step is business
+verification. This was the one item the KYB research flagged UNCONFIRMED and
+could not settle without an account.
+
+So both halves of the KYB slot turn out to be gated: Persona's business
+verification behind a sales conversation, Stripe's behind business
+verification. That is worth saying out loud in the debrief rather than
+discovering under questioning.
+
+**Decision: stop on Stripe Connect.** Two live integrations are already banked
+and this is depth, not survival. Persona is worth more per remaining hour — it
+is the outstanding `mustBeLive` slot, it is self-serve, and its
+`perform-simulate-actions` endpoint drives an inquiry to pending, declined and
+needs_review *while firing the real webhooks for each*, which is a better
+non-happy-path demo than anything Connect offers. The composite already
+degrades honestly and `KYB_FORCE_SIMULATED=business_registry` is the documented
+escape hatch.
+
+**The bug this exposed, which matters more than the finding.** My
+business_registry probe called `GET /v1/balance`. That proves the *credential*
+is accepted. It does not prove the *capability* exists — and this slot's job is
+the registry leg, which runs entirely through Connect. A valid test key with
+Connect disabled would have answered 200 on /v1/balance and marked the slot
+**LIVE while the thing it powers cannot function at all.**
+
+That is the automatic-fail dressed as a green check, and it is subtler than the
+placeholder-key case in 011 because the credential really is valid. Fixed: the
+probe now calls `GET /v1/accounts`, which is the call that fails when the
+account is not a Connect platform. A working key with no Connect reports
+`unauthorised` with the reason "Connect not enabled on this account".
+
+**The general rule, now applied to every probe.** Probe the capability the slot
+is claimed to provide, not the credential that would provide it. "The key
+works" and "the integration works" are different sentences, and only the second
+one is what LIVE means.
