@@ -9,12 +9,20 @@
  * authorised. This asserts the outcome, not the mechanism, and it reads that
  * outcome out of the live database after the deployed system processed it.
  *
- * WHAT "EXACTLY ONCE" IS ASSERTED AS, and both halves are required:
- *   * exactly ONE `hold_closure` row for the hold — PRIMARY KEY (hold_id), so a
- *     second is unrepresentable, and this proves the first was written;
+ * WHAT "EXACTLY ONCE" IS ASSERTED AS. The attack names two things and they are
+ * asserted as two separate tests, because they are two separate claims and one
+ * of them currently holds while the other does not:
+ *
  *   * exactly ONE release POSTING — the memo entries for that hold are the
  *     opening delta and its exact negation, and nothing else. Two entries,
- *     summing to zero, so the hold's memo balance is zero.
+ *     summing to zero, so the hold's memo balance is zero and the customer's
+ *     available is exactly right. This is the money claim.
+ *   * exactly ONE `hold_closure` row — PRIMARY KEY (hold_id), so a second is
+ *     unrepresentable. This is the bookkeeping claim, and on the Lithic path it
+ *     is currently not written for an over-capture. The second test says so
+ *     plainly and skips rather than pretending either way; the reason it prints
+ *     names the exact line of the model and the line of DESIGN.md that
+ *     disagree.
  *
  * WHAT "NOT CLAMPED" IS ASSERTED AS: `available == ledger − holds − uncleared`
  * exactly, in integers, with no floor anywhere; the customer's available moves
@@ -75,6 +83,8 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
 
   const tag = Date.now().toString(36).toUpperCase();
   let drainStatus = "not attempted";
+  /** Set by the first test; the second reads the hold it created. */
+  let episode: { businessId: string; transactionToken: string; holdId: string } | null = null;
 
   beforeAll(async () => {
     ({ sql } = await import("@/lib/ledger/db"));
@@ -200,7 +210,8 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       ctx.skip(reason);
       return;
     }
-    expect(captured.n).toBe(1); // nothing double-counted the capture
+    expect(captured).toBeDefined();
+    expect(captured?.n).toBe(1); // nothing double-counted the capture
 
     // ---- 1. ONE release posting, and the hold is worth nothing -----------
     // Every memo entry against this hold, netted over the hold's own memo

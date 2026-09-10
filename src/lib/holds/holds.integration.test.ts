@@ -759,6 +759,17 @@ d("card holds, against the live database", () => {
     const afterPosting = await bal.availableBalance(businessId);
     expect(afterPosting.availableCents).toBe(afterClosure.availableCents);
     expect(await store.memoHoldBalance(opened.holdId, memoAccountId)).toBe(0n);
+
+    // Tidy up after the simulation. Without this the row is left with a closure
+    // that no fact in `E` accounts for — the memo book and availability both
+    // agree, but a human reading `v_card_hold_live` would see a closed hold on
+    // an authorisation the event set still calls open, and be right to ask why.
+    // Recording the expiry is what the nightly sweep would have done anyway.
+    await expiry.expireOne(identity, {
+      now: new Date(Date.now() + 10 * 86_400_000),
+      actorId,
+      conn: sql,
+    });
   });
 
   // =========================================================================

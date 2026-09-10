@@ -10,32 +10,34 @@
  * authorisation token and there is no force-post endpoint (DECISIONS 004), so
  * no sequence of provider calls will make a clearing arrive first.
  *
- * So the SECOND episode is constructed: the two REAL delivery bodies from the
- * first episode are taken from `webhook_inbox`, given a fresh transaction
+ * So the second episode is CONSTRUCTED. The two real delivery bodies from the
+ * first episode are taken out of `webhook_inbox`, given a fresh transaction
  * token, split so the clearing body carries only its CLEARING event, re-signed
  * with THIS DEPLOYMENT'S OWN `LITHIC_WEBHOOK_SECRET` under the Standard
- * Webhooks scheme, and POSTed to production clearing-first.
+ * Webhooks scheme, and POSTed to the deployed endpoint clearing-first.
  *
  * That is a construction and it is labelled as one everywhere it appears. It is
  * not a mock of our system: the bodies are Lithic's own wire shape, the
- * signature is verified by the same verifier that verifies Lithic, and every
- * assertion below is read back out of the live database. What is simulated is
- * the ORDER, which is the only part the provider will not give us.
+ * signature is checked by the same verifier that checks Lithic, the events are
+ * processed by the deployed drain, and every assertion below is read back out
+ * of the live database. What is simulated is the ORDER, which is the only part
+ * the provider will not give us.
  * ============================================================================
  *
- * SKIPS TODAY for the same reason as attacks 1 and 2: nothing consumes the
- * delivery, so neither episode reaches the ledger and there is nothing to
- * compare.
+ * WHAT IS COMPARED. Both episodes are the same two facts — authorise $50.00,
+ * capture $73.40 — against the same customer. The comparison is the DELTA each
+ * episode leaves on that customer's ledger and available balance, plus the
+ * hold each ends holding. Equal deltas is the claim; it is measured, not
+ * assumed, and each episode is measured across its own window.
  */
-import { createHmac } from "node:crypto";
-import { appendFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
+import { appendFileSync } from "node:fs";
 
 import { beforeAll, describe, expect, it } from "vitest";
 
 import type * as BalancesModule from "@/lib/ledger/balances";
 import type { sql as SqlHandle } from "@/lib/ledger/db";
+import type * as Holds from "@/lib/holds";
 import type * as LithicClient from "@/lib/rails/lithic/client";
 
 const ATTACK = 4;
@@ -52,11 +54,6 @@ const BASE_URL = (
   process.env["LIVEFIRE_BASE_URL"] ?? "https://corgi-trial-psi.vercel.app"
 ).replace(/\/+$/, "");
 
-const PIPELINE_MISSING =
-  "the card authorisation pipeline does not exist yet. src/lib/holds/* is unwritten, so no webhook consumer is registered for Lithic 'card_transaction.updated' in src/lib/webhooks/dispatch.ts and nothing runs dispatchOnce() in production. Neither the in-order episode nor the clearing-first episode reaches the ledger, so there are no final balances to compare. Waiting on src/lib/holds/* plus a dispatcher run reachable from the deployment.";
-
-const PIPELINE_PRESENT = existsSync(resolve(process.cwd(), "src/lib/holds"));
-
 const MISSING: string[] = [];
 if (process.env["LIVEFIRE"] !== "1") MISSING.push("LIVEFIRE=1");
 if (typeof process.env["APP_DATABASE_URL"] !== "string") MISSING.push("APP_DATABASE_URL");
@@ -70,10 +67,8 @@ if (
   MISSING.push("LITHIC_WEBHOOK_SECRET (needed to re-sign the constructed clearing-first delivery)");
 }
 
-const READY = MISSING.length === 0 && PIPELINE_PRESENT;
-if (!READY) {
-  record("skip", MISSING.length > 0 ? `missing: ${MISSING.join(", ")}` : PIPELINE_MISSING);
-}
+const READY = MISSING.length === 0;
+if (!READY) record("skip", `missing: ${MISSING.join(", ")}; run scripts/livefire.mjs`);
 
 const d = READY ? describe : describe.skip;
 
@@ -100,21 +95,46 @@ function signStandardWebhook(
 }
 
 type Delivery = { headers: Record<string, string>; raw_body: string };
-type Effect = { ledgerCents: bigint; availableCents: bigint; holdsCents: bigint };
+type Position = { ledgerCents: bigint; availableCents: bigint; holdsCents: bigint };
 
 d(`ATTACK ${ATTACK} — ${NAME}`, () => {
   let sql: typeof SqlHandle;
   let bal: typeof BalancesModule;
+  let holds: typeof Holds;
   let lithic: typeof LithicClient;
 
   const tag = Date.now().toString(36).toUpperCase();
   const secret = process.env["LITHIC_WEBHOOK_SECRET"] ?? "";
+  let drainStatus = "not attempted";
 
   beforeAll(async () => {
     ({ sql } = await import("@/lib/ledger/db"));
     bal = await import("@/lib/ledger/balances");
+    holds = await import("@/lib/holds");
     lithic = await import("@/lib/rails/lithic/client");
   });
+
+  /** The operator's "watch, I will drain it now", against the DEPLOYED drain. */
+  async function nudgeDrain(): Promise<void> {
+    const token = process.env["DRAIN_TOKEN"];
+    if (token === undefined || token === "") {
+      drainStatus = "no DRAIN_TOKEN in the environment";
+      return;
+    }
+    try {
+      const response = await fetch(`${BASE_URL}/api/drain`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const body = (await response.json()) as Record<string, unknown>;
+      drainStatus =
+        response.status === 200
+          ? `HTTP 200 claimed=${String(body["claimed"])} processed=${String(body["processed"])} parked=${String(body["parked"])}`
+          : `HTTP ${response.status} ${JSON.stringify(body).slice(0, 160)}`;
+    } catch (thrown) {
+      drainStatus = `unreachable: ${thrown instanceof Error ? thrown.message : String(thrown)}`;
+    }
+  }
 
   async function until<T>(read: () => Promise<T | null>, ms: number): Promise<T | null> {
     const deadline = Date.now() + ms;
@@ -122,11 +142,33 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       const value = await read();
       if (value !== null) return value;
       if (Date.now() >= deadline) return null;
-      await new Promise((r) => setTimeout(r, 2_000));
+      await nudgeDrain();
+      await new Promise((r) => setTimeout(r, 3_000));
     }
   }
 
-  async function deliveryFor(token: string, kind: "AUTHORIZATION" | "CLEARING"): Promise<Delivery | null> {
+  async function positionOf(businessId: string): Promise<Position> {
+    const balance = await bal.availableBalance(businessId);
+    return {
+      ledgerCents: balance.ledgerCents,
+      availableCents: balance.availableCents,
+      holdsCents: balance.holdsCents,
+    };
+  }
+
+  function delta(before: Position, after: Position): Position {
+    return {
+      ledgerCents: after.ledgerCents - before.ledgerCents,
+      availableCents: after.availableCents - before.availableCents,
+      holdsCents: after.holdsCents - before.holdsCents,
+    };
+  }
+
+  /** The stored delivery for one transaction that carries an event of `kind`. */
+  async function deliveryFor(
+    token: string,
+    kind: "AUTHORIZATION" | "CLEARING",
+  ): Promise<Delivery | null> {
     return until(async () => {
       const [row] = await sql<Delivery[]>`
         SELECT headers, raw_body FROM webhook_inbox
@@ -137,27 +179,19 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
               WHERE ev->>'type' = ${kind})
          ORDER BY received_at DESC LIMIT 1`;
       return row ?? null;
-    }, 90_000);
-  }
-
-  async function effectOn(businessId: string): Promise<Effect> {
-    const balance = await bal.availableBalance(businessId);
-    return {
-      ledgerCents: balance.ledgerCents,
-      availableCents: balance.availableCents,
-      holdsCents: balance.holdsCents,
-    };
-  }
-
-  function delta(before: Effect, after: Effect): Effect {
-    return {
-      ledgerCents: after.ledgerCents - before.ledgerCents,
-      availableCents: after.availableCents - before.availableCents,
-      holdsCents: after.holdsCents - before.holdsCents,
-    };
+    }, 60_000);
   }
 
   it("the same events in both orders end in exactly the same place", async (ctx) => {
+    const [customer] = await sql<{ business_id: string }[]>`
+      SELECT dep.business_id
+        FROM account dep
+        JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
+       WHERE dep.code = '2100' AND dep.business_id IS NOT NULL
+       ORDER BY dep.business_id LIMIT 1`;
+    if (!customer) throw new Error("no business has a 2100/9100 pair: run node scripts/seed.mjs");
+    const businessId = customer.business_id;
+
     const card = await lithic.createCard({
       type: "VIRTUAL",
       memo: `livefire ordering ${tag}`,
@@ -169,8 +203,21 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     if (pan === undefined || pan === "") {
       throw new Error("Lithic returned a card with no PAN; the sandbox PCI shape has changed");
     }
+    await holds.registerCard(
+      {
+        provider: "lithic",
+        providerCardToken: card.token,
+        businessId,
+        lastFour: card.last_four,
+        nickname: `live-fire ordering ${tag}`,
+      },
+      sql,
+    );
 
     /* ---------------- Episode A: in order, entirely real ---------------- */
+
+    const beforeA = await positionOf(businessId);
+
     const auth = await lithic.simulateAuthorize({
       amount: AUTH_CENTS,
       descriptor: `CORGI ORDER ${tag}`.slice(0, 25),
@@ -182,66 +229,88 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     const transactionToken: string = auth.token;
 
     const authRowA = await until(async () => {
-      const [row] = await sql<{ account_id: string; hold_id: string }[]>`
-        SELECT account_id, hold_id FROM card_authorization
+      const [row] = await sql<{ hold_id: string; origin: string }[]>`
+        SELECT hold_id, origin FROM card_authorization
          WHERE provider = 'lithic' AND provider_auth_id = ${transactionToken}`;
       return row ?? null;
     }, 90_000);
 
     if (authRowA === null) {
-      const reason = `${PIPELINE_MISSING} Observed this run: Lithic transaction ${transactionToken} produced no card_authorization row within 90s.`;
+      const reason = `the in-order episode never reached the ledger, so there is nothing to compare against. Lithic transaction ${transactionToken} on registered card ${card.token} produced no card_authorization row within 90s; POST ${BASE_URL}/api/drain answered ${drainStatus}.`;
       record("skip", reason);
       ctx.skip(reason);
       return;
-    }
-
-    const [owner] = await sql<{ business_id: string | null }[]>`
-      SELECT business_id FROM account WHERE id = ${authRowA.account_id}::uuid`;
-    const businessId = owner?.business_id;
-    if (businessId === undefined || businessId === null) {
-      throw new Error(`card_authorization.account_id ${authRowA.account_id} has no business_id`);
     }
 
     const authBody = await deliveryFor(transactionToken, "AUTHORIZATION");
-    if (authBody === null) throw new Error(`no authorisation delivery captured for ${transactionToken}`);
-
-    // Measure episode A from BEFORE the authorisation was consumed is not
-    // possible after the fact, so A's effect is measured over the clearing leg
-    // and the hold it releases, which is the whole of A's remaining effect.
-    const beforeA = await effectOn(businessId);
-    await lithic.simulateClearing({ token: transactionToken, amountCents: CAPTURE_CENTS });
-
-    const clearingBody = await deliveryFor(transactionToken, "CLEARING");
-    if (clearingBody === null) throw new Error(`no clearing delivery captured for ${transactionToken}`);
-
-    const settledA = await until(async () => {
-      const [row] = await sql<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM hold_closure WHERE hold_id = ${authRowA.hold_id}::uuid`;
-      return (row?.n ?? 0) > 0 ? row : null;
-    }, 90_000);
-    if (settledA === null) {
-      const reason = `${PIPELINE_MISSING} Observed this run: the clearing for ${transactionToken} released no hold within 90s.`;
+    if (authBody === null) {
+      const reason = `no stored AUTHORIZATION delivery for ${transactionToken}, so the clearing-first episode cannot be constructed from a real body.`;
       record("skip", reason);
       ctx.skip(reason);
       return;
     }
-    const afterA = await effectOn(businessId);
+
+    await lithic.simulateClearing({ token: transactionToken, amountCents: CAPTURE_CENTS });
+
+    const clearedA = await until(async () => {
+      const [row] = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n
+          FROM card_auth_event ce
+          JOIN card_authorization ca ON ca.id = ce.auth_id
+         WHERE ca.provider_auth_id = ${transactionToken} AND ce.kind = 'clearing'`;
+      return (row?.n ?? 0) > 0 ? row : null;
+    }, 90_000);
+
+    if (clearedA === null) {
+      const reason = `the in-order clearing for ${transactionToken} never reached the ledger within 90s; POST ${BASE_URL}/api/drain answered ${drainStatus}.`;
+      record("skip", reason);
+      ctx.skip(reason);
+      return;
+    }
+
+    const clearingBody = await deliveryFor(transactionToken, "CLEARING");
+    if (clearingBody === null) {
+      const reason = `no stored CLEARING delivery for ${transactionToken}, so the clearing-first episode cannot be constructed from a real body.`;
+      record("skip", reason);
+      ctx.skip(reason);
+      return;
+    }
+
+    const afterA = await positionOf(businessId);
     const deltaA = delta(beforeA, afterA);
 
     /* ------- Episode B: the same events, clearing first (constructed) ---- */
+
     const tokenB = randomUUID();
     const authPayload = JSON.parse(authBody.raw_body) as Record<string, unknown>;
     const clearingPayload = JSON.parse(clearingBody.raw_body) as Record<string, unknown>;
 
-    const events = (clearingPayload["events"] ?? []) as { type?: string }[];
-    const clearingOnly = events.filter((e) => e.type === "CLEARING");
-    expect(clearingOnly.length).toBeGreaterThan(0);
+    // Fresh event tokens as well as a fresh transaction token, and this is
+    // load-bearing rather than tidiness: `financialPostingKey` is
+    // `card:<kind>:<provider event id>` and lands in `journal_entry`'s UNIQUE
+    // idempotency key. Re-using episode A's event tokens would make episode B's
+    // settlement a REPLAY of episode A's — the ledger would correctly refuse to
+    // post it twice, and the comparison would then be measuring the idempotency
+    // key rather than the ordering. (Measured: the first version of this test
+    // did exactly that and read a ledger delta of 0.)
+    const reissue = (list: unknown): { type?: string; token?: string }[] =>
+      (Array.isArray(list) ? list : []).map((event) => ({
+        ...(event as Record<string, unknown>),
+        token: randomUUID(),
+      })) as { type?: string; token?: string }[];
 
-    // The clearing, with NO authorisation event in it — which is what
+    const clearingEvents = reissue(clearingPayload["events"]).filter((e) => e.type === "CLEARING");
+    const authEvents = reissue(authPayload["events"]);
+    expect(clearingEvents.length).toBeGreaterThan(0);
+    expect(authEvents.length).toBeGreaterThan(0);
+
+    // The clearing with NO authorisation event in it — which is what
     // "settlement before its authorisation" actually looks like on the wire.
-    const bodyB1 = JSON.stringify({ ...clearingPayload, token: tokenB, events: clearingOnly });
+    const bodyB1 = JSON.stringify({ ...clearingPayload, token: tokenB, events: clearingEvents });
     // The authorisation, arriving afterwards.
-    const bodyB2 = JSON.stringify({ ...authPayload, token: tokenB });
+    const bodyB2 = JSON.stringify({ ...authPayload, token: tokenB, events: authEvents });
+
+    const beforeB = await positionOf(businessId);
 
     const posted: number[] = [];
     for (const body of [bodyB1, bodyB2]) {
@@ -252,26 +321,43 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
         body,
       });
       posted.push(response.status);
-      // NOTHING CRASHES: a 5xx here is the failure the attack is looking for.
+      // NOTHING CRASHES: a 5xx here is precisely what the attack is hunting.
       expect(response.status).toBeLessThan(500);
       expect([200, 202]).toContain(response.status);
     }
 
-    const beforeB = await effectOn(businessId);
     const authRowB = await until(async () => {
-      const [row] = await sql<{ id: string; hold_id: string; origin: string }[]>`
-        SELECT id, hold_id, origin FROM card_authorization
+      const [row] = await sql<{ hold_id: string; origin: string }[]>`
+        SELECT hold_id, origin FROM card_authorization
          WHERE provider = 'lithic' AND provider_auth_id = ${tokenB}`;
       return row ?? null;
     }, 90_000);
 
     if (authRowB === null) {
-      const reason = `${PIPELINE_MISSING} Observed this run: the constructed clearing-first delivery for ${tokenB} was accepted (HTTP ${posted.join(", ")}) but produced no card_authorization row within 90s.`;
+      const reason = `the constructed clearing-first delivery for ${tokenB} was accepted (HTTP ${posted.join(", ")}) but produced no card_authorization row within 90s; POST ${BASE_URL}/api/drain answered ${drainStatus}.`;
       record("skip", reason);
       ctx.skip(reason);
       return;
     }
-    const afterB = await effectOn(businessId);
+
+    // Both facts must have landed before the comparison is meaningful.
+    const bothB = await until(async () => {
+      const [row] = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n
+          FROM card_auth_event ce
+          JOIN card_authorization ca ON ca.id = ce.auth_id
+         WHERE ca.provider_auth_id = ${tokenB}`;
+      return (row?.n ?? 0) >= 2 ? row : null;
+    }, 90_000);
+
+    if (bothB === null) {
+      const reason = `the constructed episode ${tokenB} did not record both facts within 90s, so the two orders cannot be compared; POST ${BASE_URL}/api/drain answered ${drainStatus}.`;
+      record("skip", reason);
+      ctx.skip(reason);
+      return;
+    }
+
+    const afterB = await positionOf(businessId);
     const deltaB = delta(beforeB, afterB);
 
     /* ------------------------- the comparison --------------------------- */
@@ -279,16 +365,25 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // FINAL BALANCES EQUAL THE IN-ORDER CASE EXACTLY.
     expect(deltaB.ledgerCents).toBe(deltaA.ledgerCents);
     expect(deltaB.availableCents).toBe(deltaA.availableCents);
-    expect(deltaB.holdsCents).toBe(0n);
+    expect(deltaB.holdsCents).toBe(deltaA.holdsCents);
+    // And the settlement really did post: the whole comparison would also be
+    // satisfied by two episodes that both did nothing.
+    expect(deltaA.ledgerCents).toBe(-BigInt(CAPTURE_CENTS));
 
-    // NOTHING DOUBLE-COUNTS: one settlement per transaction, not two.
+    // NOTHING DOUBLE-COUNTS: one capture per transaction, not two.
     for (const token of [transactionToken, tokenB]) {
-      const [entries] = await sql<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM card_auth_event ce
+      const [captures] = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n
+          FROM card_auth_event ce
           JOIN card_authorization ca ON ca.id = ce.auth_id
          WHERE ca.provider_auth_id = ${token} AND ce.kind = 'clearing'`;
-      expect(entries?.n).toBe(1);
+      expect(captures?.n).toBe(1);
     }
+
+    // The clearing-first identity is recorded as such, and nothing branched on
+    // it: same numbers, different origin.
+    expect(authRowB.origin).toBe("clearing_first");
+    expect(authRowA.origin).toBe("authorization");
 
     // NOTHING WAS LOST OR POISONED: no dead letters from this run.
     const [dead] = await sql<{ n: number }[]>`
@@ -299,11 +394,15 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
 
     record(
       "evidence",
-      `in-order episode ${transactionToken}: ledger delta ${deltaA.ledgerCents}, available delta ${deltaA.availableCents}. Clearing-first episode ${tokenB} (constructed, re-signed with LITHIC_WEBHOOK_SECRET, HTTP ${posted.join(" then ")}): ledger delta ${deltaB.ledgerCents}, available delta ${deltaB.availableCents}, origin ${authRowB.origin}, hold delta ${deltaB.holdsCents}. Equal.`,
+      `in-order episode ${transactionToken} (origin ${authRowA.origin}): ledger delta ${deltaA.ledgerCents}, available delta ${deltaA.availableCents}, hold delta ${deltaA.holdsCents}`,
     );
     record(
       "evidence",
-      `one clearing event per transaction for both episodes; zero dead-lettered deliveries for msg_livefire_${tag}_*`,
+      `clearing-first episode ${tokenB} (origin ${authRowB.origin}; constructed from the real bodies above and re-signed with LITHIC_WEBHOOK_SECRET, POSTed clearing-first, HTTP ${posted.join(" then ")}): ledger delta ${deltaB.ledgerCents}, available delta ${deltaB.availableCents}, hold delta ${deltaB.holdsCents} — EQUAL`,
+    );
+    record(
+      "evidence",
+      `one clearing event per transaction in both episodes; zero dead-lettered deliveries for msg_livefire_${tag}_*; drain ${drainStatus}`,
     );
   });
 });

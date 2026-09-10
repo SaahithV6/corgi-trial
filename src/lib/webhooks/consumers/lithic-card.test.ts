@@ -17,8 +17,11 @@
  */
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
+import type { sql as SqlHandle } from "@/lib/ledger/db";
+
 import type { ConsumerContext } from "../dispatch";
 import type { InboxEvent } from "../inbox";
+import type { lithicCardConsumer as LithicCardConsumer } from "./lithic-card";
 
 // `env.ts` parses eagerly at import and APP_DATABASE_URL is the one variable
 // required to boot, while `postgres()` opens no socket until the first query.
@@ -173,8 +176,8 @@ describe("handle — the paths that answer without touching the ledger", () => {
 // ---------------------------------------------------------------------------
 
 d("the consumer against the live database", () => {
-  let sql: Awaited<typeof import("@/lib/ledger/db")>["sql"];
-  let consumer: Awaited<typeof import("./lithic-card")>["lithicCardConsumer"];
+  let sql: typeof SqlHandle;
+  let consumer: typeof LithicCardConsumer;
 
   beforeAll(async () => {
     ({ sql } = await import("@/lib/ledger/db"));
