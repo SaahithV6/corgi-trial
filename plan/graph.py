@@ -140,11 +140,12 @@ N("D07", "Over-capture (tip/fuel): settle above auth, hold still releases once",
   risk="the published fuel-pump attack. $50 auth, $73.40 clearing")
 N("D08", "Auth expiry sweeper: release stale holds, idempotent", "holds", 40, ["D03"], "agent", ["lib/holds"])
 N("D09", "Void / auth reversal releases the hold", "holds", 30, ["D03"], "agent", ["lib/holds"])
-N("D10", "Force post: clearing with no prior auth, no special-casing", "holds", 40, ["D05"], "claude", ["lib/holds"])
+N("D10", "Force post: unmatched clearing. NO Lithic endpoint exists - see 004", "holds", 45, ["D05"], "claude", ["lib/holds"],
+  risk="Lithic has no force-post simulate endpoint. model it in the scheme file + FINANCIAL_AUTHORIZATION")
 N("D11", "Out-of-order: settlement lands before its auth. park it.", "holds", 50, ["D10"], "claude", ["lib/holds"],
   risk="published attack. must not crash and must not double-count")
 N("D12", "Orphan matcher: reconcile parked settlements when auth arrives", "holds", 45, ["D11"], "claude", ["lib/holds"])
-N("D13", "Exactly-once hold release, proven by construction not by luck", "holds", 50, ["D07","D09","D12"], "claude", ["lib/holds"],
+N("D13", "Exactly-once hold release, proven by construction not by luck", "holds", 50, ["D07","D09","D12","D18"], "claude", ["lib/holds"],
   risk="graded hardest. must survive any arrival order")
 N("D14", "Available balance projection = ledger - active holds +/- policy", "holds", 45, ["D13","L11"], "claude", ["lib/balances"],
   risk="must be derived. a stored column here is an instant loss")
@@ -152,6 +153,12 @@ N("D15", "Uncleared-credit policy: inbound ACH not available until window passes
 N("D16", "Property test: random permutations of a lifecycle, invariants hold", "holds", 60, ["D13"], "agent", ["test/holds"],
   risk="this is what makes the live fire boring. worth every minute")
 N("D17", "Hold model ASCII state diagram in the docs", "holds", 25, ["D13"], "agent", ["docs/holds"])
+
+N("D18", "SETTLE partial-clearing arithmetic against the live sandbox", "holds", 30, ["A03"], "claude", ["lib/holds"],
+  risk="docs contradict themselves. clearing 600 of a 1000 auth: hold 400/PENDING or 0/SETTLED? "
+       "the hold model depends on the answer. measure it, do not assume it")
+N("D19", "Serial rate limiter: Lithic simulate writes are 1 RPS in sandbox", "holds", 30, ["A03"], "agent", ["lib/rails/lithic"],
+  risk="a 50-txn seed takes 100s. biggest operational constraint on the track")
 
 # ---------------------------------------------------------------------------
 # W — webhooks. Signature, idempotency, ordering, degradation.
@@ -307,7 +314,7 @@ N("T08", "Smoke suite runnable against prod in under 2 minutes", "tests", 40, ["
 # ---------------------------------------------------------------------------
 # O — ops, deployment, and the submission artifacts.
 # ---------------------------------------------------------------------------
-N("O01", "Seed script: believable demo data from zero", "ops", 60, ["L08","E11","E06"], "claude", ["scripts/seed"],
+N("O01", "Seed script: believable demo data from zero", "ops", 60, ["L08","E11","E06","D19"], "claude", ["scripts/seed"],
   risk="explicitly on the submission list. not optional")
 N("O02", ".env.example complete and accurate, every key documented", "ops", 25, ["S05","A08","A06"], "agent", ["env-docs"])
 N("O03", "README: integration honesty table finalised, live vs simulated", "ops", 40, ["A06","A07","A08","A04"], "claude", ["docs/readme"],

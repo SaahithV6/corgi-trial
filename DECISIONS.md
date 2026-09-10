@@ -125,3 +125,56 @@ that matters.
 **Caveat recorded honestly.** T1 has the higher ceiling and the offer to meet
 them in their own domain is genuine. With two weeks I would take it. With 34
 productive hours the variance is not worth the ceiling.
+
+---
+
+## 004 — 2026-09-10T01:20Z — Lithic has no force-post. Saying so rather than faking it.
+
+**Finding.** The Track 3 gauntlet asks for the force post: a clearing with no
+prior authorisation, "without special-casing its way into a corner". Lithic's
+sandbox cannot originate one. Every `simulate` path in their OpenAPI spec was
+enumerated: there is no `/v1/simulate/force_post`, no `force` anywhere, and
+`/v1/simulate/clearing` requires a prior authorisation token, so it cannot
+produce an unmatched clearing.
+
+**Decision.** Say this out loud in the README and the debrief rather than
+dressing something up as a force post. Three things instead:
+
+1. The domain model accepts an unmatched clearing as a first-class case. The
+   matcher does not require an authorisation to exist; a clearing with no
+   parent posts to the ledger and opens a break. That is the part being
+   graded, and it is testable without the provider.
+2. `/v1/simulate/authorize` with `status: "FINANCIAL_AUTHORIZATION"` is the
+   closest real thing Lithic offers — single-message, settles immediately, no
+   clearing — and it exercises the same no-hold-to-release path.
+3. The scheme-file simulator ships genuine unmatched clearings, which is
+   exactly the in-file-not-ledger break the reconciliation screen must catch.
+
+**Why this is the right call.** "A simulated integration presented as live is
+the fastest way to fail the entire trial." The honest version of this is worth
+more than a convincing fake, and the panel built this platform — they already
+know what Lithic's sandbox can and cannot do.
+
+## 005 — 2026-09-10T01:22Z — Two measurements to take before the hold model hardens
+
+**Partial-clearing arithmetic is unresolved and load-bearing.** Lithic's docs
+contradict themselves on repeat clearings. Clearing 600 against a 1000
+authorisation either leaves the hold at 400 and the transaction PENDING, or
+drops the hold to 0 and marks it SETTLED. The exactly-once hold release
+depends on which. Added D18: measure it against the live sandbox before D13
+hardens. Assumption until measured: hold reduces to 400, stays PENDING, since
+that is what multiple captures require to be coherent.
+
+**Lithic sandbox simulate writes are capped at 1 RPS.** An auth-plus-clear
+pair takes at least a second, so a fifty-transaction seed takes about a hundred
+seconds. Added D19 for a serial rate limiter and made the seed script depend on
+it. This is the single biggest operational constraint on the track and it would
+have been discovered at hour 40, mid-demo, as a mystery.
+
+**Increase has no settled status.** A settled transfer stays `submitted` and
+grows a `settlement.settled_at` timestamp. Keying hold release off `status`
+alone means never releasing one. The adapter promotes it explicitly.
+
+**Increase signup is self-serve** — confirmed by opening the dashboard, which
+offers "Sign up for Increase" rather than a sales form. That closes the
+open question in 002's fallback plan for the ACH slot.

@@ -33,6 +33,8 @@
  * a live sandbox key.
  */
 
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
 // ---------------------------------------------------------------------------
 // Money
 // ---------------------------------------------------------------------------
@@ -262,7 +264,7 @@ export interface AccountCorrection {
 // ---------------------------------------------------------------------------
 
 /** Common envelope so the ledger can dedupe and order without a per-rail switch. */
-interface RailEventBase {
+export interface RailEventBase {
   readonly provider: string;
   readonly railKind: RailKind;
   /** Provider's event id. UNIQUE — persist it and drop duplicates. Webhooks
@@ -321,21 +323,23 @@ export type WebhookVerification =
 // Errors
 // ---------------------------------------------------------------------------
 
+export interface RailErrorOptions {
+  readonly provider: string;
+  readonly code: string;
+  readonly httpStatus?: number;
+  /** True for 429/5xx/network — the caller may retry with the SAME
+   *  idempotency key. False for validation errors. */
+  readonly retryable: boolean;
+  readonly raw?: unknown;
+}
+
 export class RailError extends Error {
-  constructor(
-    message: string,
-    readonly opts: {
-      readonly provider: string;
-      readonly code: string;
-      readonly httpStatus?: number;
-      /** True for 429/5xx/network — the caller may retry with the SAME
-       *  idempotency key. False for validation errors. */
-      readonly retryable: boolean;
-      readonly raw?: unknown;
-    },
-  ) {
+  readonly opts: RailErrorOptions;
+
+  constructor(message: string, opts: RailErrorOptions) {
     super(message);
     this.name = 'RailError';
+    this.opts = opts;
   }
 }
 
@@ -394,8 +398,6 @@ export interface PaymentRail {
 // initiateDebit differ only in a sign.
 //
 // ---------------------------------------------------------------------------
-
-import { createHmac, timingSafeEqual } from 'node:crypto';
 
 export interface IncreaseConfig {
   readonly apiKey: string;
@@ -483,6 +485,9 @@ const INCREASE_RETURN_CODES: Record<string, { r: string; category: ReturnCategor
   account_sold_to_another_dfi: { r: 'R12', category: 'account_invalid', retryable: false },
 };
 
+/** Autocompletes the codes we've mapped, still accepts the ~50 we haven't. */
+export type IncreaseReturnReason = keyof typeof INCREASE_RETURN_CODES | (string & {});
+
 function mapReturnReason(ret: IncreaseReturn | null | undefined): RailReturnReason {
   if (!ret) {
     return { category: 'unknown', code: null, providerCode: null, retryable: false };
@@ -569,10 +574,12 @@ export class IncreaseAchRail implements PaymentRail {
     supportsAccountCorrection: true,
   };
 
+  private readonly cfg: IncreaseConfig;
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
 
-  constructor(private readonly cfg: IncreaseConfig) {
+  constructor(cfg: IncreaseConfig) {
+    this.cfg = cfg;
     this.baseUrl = cfg.baseUrl ?? 'https://sandbox.increase.com';
     this.fetchImpl = cfg.fetchImpl ?? fetch;
   }
@@ -813,7 +820,11 @@ export class IncreaseAchRail implements PaymentRail {
    *   simulateReturn(id, 'account_closed')     -> R02
    *   simulateReturn(id, 'no_account')         -> R03
    */
-  simulateReturn(transferId: string, reason: keyof typeof INCREASE_RETURN_CODES | string, addendaInformation?: string): Promise<IncreaseAchTransfer> {
+  simulateReturn(
+    transferId: string,
+    reason: IncreaseReturnReason,
+    addendaInformation?: string,
+  ): Promise<IncreaseAchTransfer> {
     return this.request('POST', `/simulations/ach_transfers/${encodeURIComponent(transferId)}/return`, {
       body: addendaInformation ? { reason, addenda_information: addendaInformation } : { reason },
     });

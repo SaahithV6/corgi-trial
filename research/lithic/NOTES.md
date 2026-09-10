@@ -610,6 +610,17 @@ secret body, `v1,` prefix stripped before comparison, 5-minute window.
 The exact same three headers and the exact same algorithm are used for **ASA requests**
 and **Tokenization Decisioning** requests.
 
+**Verified, not assumed.** I ran the algorithm above against the canonical Standard
+Webhooks test vector — secret `whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw`,
+id `msg_p5jXN8AQM9LWM0D4loKWxJek`, timestamp `1614265330`, body `{"test": 2432232314}` —
+and it reproduces `v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=`, which is the exact
+signature string Lithic prints in its own "example header with multiple signature" block.
+Re-serialising that same body with `JSON.stringify` (dropping the space after the colon)
+produces a completely different signature — concrete proof of why you must sign the raw
+body. `verifyLithicWebhook` in `adapter.draft.ts` was then exercised against valid,
+multi-signature, tampered-body, wrong-version, stale-timestamp, future-timestamp,
+missing-header, and prefix-less-secret cases; all eight behave correctly.
+
 ### Delivery retries
 
 `Immediate → +5s → +5m → +30m → +2h → +5h → +10h → +10h` (8 attempts total, then
