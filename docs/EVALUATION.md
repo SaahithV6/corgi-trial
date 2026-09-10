@@ -771,3 +771,63 @@ presenting a simulated integration as live the fastest way to fail.
 Never claim a capability that has not been proven by a real call. A skip is not
 a pass. Four probes have already reported LIVE for capabilities that did not
 exist, and each was caught only by measuring.
+
+---
+
+# ITERATION 2 — 2026-09-10T18:55Z
+
+## Measured
+
+    health 8beb825 · status degraded · 4/7 live · degradedBy ['lithic']
+    all five screens 200 · 939 tests · dbcheck 14/14
+    doc audit: no document contradicts the endpoint
+
+**The `degraded` is correct, not a fault.** Lithic last delivered 343 seconds
+ago, inside its own 180–900s stale band, because the live-fire run finished and
+nobody has swiped a card since. It self-clears to `quiet` in 9.3 minutes.
+Verified by reading the thresholds off the endpoint rather than assuming.
+
+## What moved since iteration 1
+
+- **Live fire re-earned: 7 PASS, 0 FAIL, 1 SKIP**, up from 6/0/2. Attack 7
+  flipped once delivery freshness and the provider-down banner shipped, and it
+  was proven by *inducing* an outage rather than waiting for one.
+- **The escalation gate could never fire.** `slots.every(status === 'live')`,
+  and Lithic owns two slots of which `card_webhooks` is permanently `unprobed`
+  since 026. So the fix that stopped a slot over-claiming liveness silently
+  disabled the alarm liveness gates. Changed to `some`. Now verified firing.
+- **A submission document presented a simulated integration as live.** The
+  checkpoint email said "5 live of 7" and listed `card_webhooks` as LIVE.
+  `scripts/audit-claims.mjs` now fails if any tracked Markdown contradicts the
+  endpoint, and it has been tested against an injected contradiction.
+- **`/statements` landed** with a three-generation reproducibility proof: the
+  same content hash before a backdated correction, after it, and across four
+  processes and ~200 intervening journal entries.
+
+## The two over-claims still open, and what was dispatched at them
+
+Both were found by workers refusing to reproduce a claim they could not
+justify, which is the behaviour worth keeping.
+
+1. **`rail_event_semantics` has 22 rows and zero readers.** The decision log
+   calls it the mechanism deciding correction-versus-new-event; the design calls
+   it the highest-risk artefact in the system. The behaviour is right because
+   the distinction is hard-coded in a consumer. Dispatched: wire it, or
+   establish it should not exist. Both outcomes acceptable; the over-claim is
+   not.
+2. **`src/lib/kyb/` is entirely unwired** — nothing outside it imports it.
+   Eight separately-tested routes for forging a `live` evidence label, on a
+   path no request reaches. Dispatched: an onboarding screen that runs Stripe
+   Identity live, keeps the registry leg simulated and labelled, and finally
+   calls `canTransact()` somewhere that matters.
+
+## Standing pattern, now three deep
+
+`v_hold_drift` excludes released holds, so a spurious closure row escapes it.
+The secret scanner used plain grep, so a NUL byte hid 1,206 lines silently.
+The escalation gate used `every`, so one honest `unprobed` disabled it.
+
+Each was an exclusion shaped exactly like the failure it existed to catch, and
+each reported healthy. **A guard must be tested against the thing it guards
+against, not merely run.** The doc auditor was the first guard built that way
+from the start.
