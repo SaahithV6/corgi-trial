@@ -193,26 +193,67 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
     const addr = env.USDC_SENDER_ADDRESS;
     if (!rpc || !token || !addr)
       return { liveness: "not_configured", detail: "USDC config incomplete", ms: 0 };
-    // balanceOf(address) — proves the chain answers AND the token exists.
-    const data = `0x70a08231000000000000000000000000${addr.slice(2)}`;
-    const { res, ms, err } = await timed((signal) =>
-      fetch(rpc, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0", id: 1, method: "eth_call",
-          params: [{ to: token, data }, "latest"],
+
+    // This slot's job is PAYOUTS, so the probe has to answer "can we send",
+    // not "can we read".
+    //
+    // The first version called balanceOf and reported LIVE on a 200. That was
+    // the same mistake as the Stripe probe: we hold 20 USDC and, with an empty
+    // gas balance, cannot move a cent of it. An ERC-20 transfer needs roughly
+    // 65,000 gas, and a wallet with 0 wei fails before the transaction is ever
+    // broadcast. Reporting LIVE there claims a capability we do not have.
+    //
+    // So: read the token balance AND the gas balance AND the gas price, and
+    // only claim live if a transfer could actually be paid for.
+    const call = (method: string, params: unknown[]) =>
+      timed((signal) =>
+        fetch(rpc, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+          signal,
         }),
-        signal,
-      }),
-    );
-    if (!res) return { liveness: "unreachable", detail: err ?? "no response", ms };
-    const body = (await res.json().catch(() => null)) as { result?: string } | null;
-    if (!body?.result) return { liveness: "unreachable", detail: "no result from eth_call", ms };
-    const units = BigInt(body.result);
+      );
+
+    const started = Date.now();
+    const [balRes, gasRes, priceRes] = await Promise.all([
+      call("eth_call", [{ to: token, data: `0x70a08231000000000000000000000000${addr.slice(2)}` }, "latest"]),
+      call("eth_getBalance", [addr, "latest"]),
+      call("eth_gasPrice", []),
+    ]);
+    const ms = Date.now() - started;
+
+    if (!balRes.res || !gasRes.res || !priceRes.res) {
+      return { liveness: "unreachable", detail: balRes.err ?? "rpc unreachable", ms };
+    }
+    const num = async (r: Response): Promise<bigint | null> => {
+      const b = (await r.json().catch(() => null)) as { result?: string } | null;
+      return b?.result ? BigInt(b.result) : null;
+    };
+    const [usdc, wei, price] = await Promise.all([num(balRes.res), num(gasRes.res), num(priceRes.res)]);
+    if (usdc === null || wei === null || price === null) {
+      return { liveness: "unreachable", detail: "rpc returned no result", ms };
+    }
+
+    const ERC20_TRANSFER_GAS = 65_000n;
+    const needed = ERC20_TRANSFER_GAS * price;
+    const usdcHuman = (Number(usdc) / 1e6).toFixed(2);
+
+    if (usdc === 0n) {
+      return { liveness: "unauthorised", detail: "no USDC to send — top up at faucet.circle.com", ms };
+    }
+    if (wei < needed) {
+      // The distinction that matters: the chain answers, the token exists, we
+      // hold funds. What is missing is the ability to pay for the transfer.
+      return {
+        liveness: "unauthorised",
+        detail: `holds ${usdcHuman} USDC but only ${wei} wei gas; a transfer needs ~${needed} — cannot send`,
+        ms,
+      };
+    }
     return {
       liveness: "live",
-      detail: `balanceOf -> ${(Number(units) / 1e6).toFixed(2)} USDC on Base Sepolia`,
+      detail: `${usdcHuman} USDC and ${wei} wei gas — a transfer is fundable`,
       ms,
     };
   },

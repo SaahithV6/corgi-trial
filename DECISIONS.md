@@ -610,3 +610,46 @@ account is not a Connect platform. A working key with no Connect reports
 is claimed to provide, not the credential that would provide it. "The key
 works" and "the integration works" are different sentences, and only the second
 one is what LIVE means.
+
+---
+
+## 016 — 2026-09-10T16:00Z — The same probe bug again, in my own favour this time
+
+Saahith asked whether we still need Coinbase. I had called it a stretch goal.
+That was wrong, and checking it exposed the *same* defect I had just fixed on
+Stripe — this time on a slot I was already reporting as LIVE.
+
+**Measured:**
+
+    USDC held    : 20.00 USDC   <- we have the money
+    ETH for gas  : 0 wei        <- we need this to MOVE it
+    transfer cost: ~390000000000 wei at current gas price
+    CAN WE SEND?   NO
+
+The stablecoin probe called `balanceOf` and reported LIVE on a 200. But the
+slot's job is **payouts**. An ERC-20 transfer costs roughly 65,000 gas, and a
+wallet holding 0 wei fails before the transaction is broadcast. We hold twenty
+dollars of USDC and cannot move a cent of it.
+
+**Fixed the same way as Stripe:** the probe now reads the token balance, the
+gas balance and the gas price together, and claims live only if a transfer is
+fundable. Short of gas it reports `unauthorised` with the actual numbers —
+"holds 20.00 USDC but only 0 wei gas; a transfer needs ~390000000000 — cannot
+send".
+
+**Why this one is worse than the Stripe case.** The Stripe probe overstated a
+slot I had already decided to leave simulated. This one overstated a slot I was
+*counting as one of my two live integrations*, in a README, in an email to
+Corgi, and in this document. It would have held up until the moment someone
+asked to see a payout confirm on chain — which is exactly what the brief says
+it wants to see, and exactly what the debrief would have asked for.
+
+**Coinbase CDP is therefore not optional.** It is the gas faucet, and without
+it the USDC rail can read the chain and never move money. Recorded as a
+correction to my own earlier advice: I told Saahith it was last on the list.
+
+**Third statement of the same rule, which is now clearly the load-bearing one
+in this build:** probe the capability the slot claims to provide, never the
+credential or the connection that would provide it. Three probes have now had
+this bug — placeholder keys (011), Stripe without Connect (015), USDC without
+gas (016). Each looked healthy and each was lying.
