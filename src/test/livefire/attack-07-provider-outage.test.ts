@@ -45,13 +45,46 @@
  * induced, both SKIP naming what stopped it rather than asserting something
  * weaker.
  *
- * ONE LIMIT, RECORDED ON THE SCOREBOARD RATHER THAN ASSERTED AWAY. A stale
- * Lithic feed is REPORTED by `webhookHealth` but does not ESCALATE: the
- * top-level `status` stays `ok`, because escalation is gated on the provider's
- * integration being probed live and `route.ts` derives that as EVERY Lithic
- * slot reading `live` — while `card_webhooks` is permanently `unprobed` and so
- * labelled `simulated` (DECISIONS 026). The test asserts the claim the attack
- * makes (the endpoint reports it) and records the escalation gap as evidence.
+ * ============================================================================
+ * THE LIMIT THAT USED TO BE HERE, AND WHAT RETIRED IT. Kept, because the shape
+ * of the bug is the interesting part and deleting the history would waste it.
+ *
+ * This attack shipped with a gap recorded on the scoreboard rather than
+ * asserted away: a stale Lithic feed was REPORTED by `webhookHealth` and did
+ * not ESCALATE. `degradesDeployment` was false, `degradedBy` was empty, and the
+ * top-level `status` stayed `ok` while the card rail was dark — so a monitor
+ * watching `status` alone saw nothing. Measured at the time: Lithic crossed its
+ * 180s threshold at 184s and `status` stayed "ok".
+ *
+ * The cause was not the alarm. `delivery-health.ts` gates escalation on the
+ * provider's integration being probed live; `route.ts` derived that as EVERY
+ * Lithic slot reading `live`; and Lithic owns two slots, of which
+ * `card_webhooks` had no probe and was therefore honestly `unprobed` and
+ * labelled `simulated` (DECISIONS 026). One honest absence of evidence made the
+ * clause unsatisfiable for ever. The guard's exclusion was shaped exactly like
+ * the failure it existed to catch, and it reported healthy — the fourth time
+ * that pattern has appeared in this repo.
+ *
+ * TWO THINGS RETIRED IT, and both are load-bearing here:
+ *
+ *   1. `card_webhooks` earned a real probe — `GET /v1/event_subscriptions` plus
+ *      that subscription's `/attempts` log showing Lithic's own record of our
+ *      endpoint answering HTTP 202. It is `live` now, not `unprobed`, and
+ *      `/api/health` reports 5 of 7 slots live.
+ *   2. The gate became `some` (DECISIONS 028), so no single slot's degradation
+ *      can silence the alarm.
+ *
+ * (2) is not made redundant by (1), which is why the second test below asserts
+ * BOTH the escalation and the gate's shape. That probe reads Lithic's own
+ * delivery log, so its verdict is a function of the delivery loop's health: an
+ * endpoint of ours rejecting deliveries reads `unauthorised` and an unreadable
+ * `/attempts` reads `unreachable`. Under `every`, either would disarm the alarm
+ * at the exact moment deliveries were being lost.
+ *
+ * So there is NO remaining limit to record, and the second test asserts the
+ * stronger claim the attack's wording implies: a webhook outage now moves the
+ * top-level status, proven by inducing one.
+ * ============================================================================
  */
 import { createHmac, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -59,6 +92,7 @@ import { dirname } from "node:path";
 
 import { beforeAll, describe, expect, it } from "vitest";
 
+import { webhookDeliveryHealth } from "@/lib/integrations/delivery-health";
 import type * as BalancesModule from "@/lib/ledger/balances";
 import type { sql as SqlHandle } from "@/lib/ledger/db";
 import type * as Holds from "@/lib/holds";
@@ -446,10 +480,30 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     readonly providers?: readonly ProviderDelivery[];
   }
 
+  interface SlotReport {
+    readonly slot: string;
+    readonly status?: string;
+    readonly evidence?: string | null;
+  }
+
   interface HealthDoc {
     readonly status?: string;
-    readonly integrations?: { readonly webhookHealth?: WebhookHealth };
+    readonly database?: { readonly reachable?: boolean };
+    readonly integrations?: {
+      readonly webhookHealth?: WebhookHealth;
+      readonly slots?: readonly SlotReport[];
+    };
   }
+
+  /** The two slots Lithic owns. The escalation gate folds over exactly these. */
+  const LITHIC_SLOTS = ["card_issuing", "card_webhooks"] as const;
+
+  const slotStatuses = (doc: HealthDoc): Record<string, string> =>
+    Object.fromEntries(
+      (doc.integrations?.slots ?? [])
+        .filter((s) => (LITHIC_SLOTS as readonly string[]).includes(s.slot))
+        .map((s) => [s.slot, s.status ?? "absent"]),
+    );
 
   async function readHealth(): Promise<{ status: number; doc: HealthDoc }> {
     const response = await fetch(`${BASE_URL}/api/health`, { cache: "no-store" });
@@ -601,20 +655,95 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
         `induced outage: after the money test's delivery at ${lithic.lastDelivery} we delivered nothing for ${Math.round((Date.now() - openedAt) / 1000)}s (started '${startedVerdict}' at ${startedLag}s, ${restarts} restart(s)). /api/health then reports lithic verdict '${lithic.verdict}', secondsSinceLastDelivery ${lag} inside its own ${staleAfter}-${quietAfter}s alarm band, note "${lithic.note}". The published lastDelivery matches MAX(webhook_inbox.received_at) for lithic read directly from the live database (${new Date(observed).toISOString()}), so the figure is the real row.`,
       );
 
-      // Reported, but NOT escalated — and the scoreboard says which, because a
-      // report a monitor watching `status` never sees is a weaker thing than
-      // the attack's wording implies.
-      if (lithic.degradesDeployment !== true) {
-        record(
-          "evidence",
-          `LIMIT OF THIS PASS — the outage is REPORTED but does not ESCALATE: degradesDeployment=false, degradedBy=[${degradedBy.join(", ")}], top-level status="${String(current.doc.status)}" while lithic is stale. delivery-health.ts gates escalation on the provider's integration being probed live, and route.ts derives that as EVERY lithic slot reading 'live'; card_webhooks is permanently 'unprobed' -> 'simulated' (DECISIONS 026), so that clause can never be satisfied and no webhook outage can move the top-level status on this deployment. A reader of webhookHealth sees the outage; a monitor watching status alone does not.`,
+      // ---- IT ESCALATES ----------------------------------------------------
+      // This is the claim that used to be a recorded LIMIT (see the header) and
+      // is now asserted. A monitor watching nothing but `status` sees the
+      // outage. All three, because any one of them alone is weaker: the
+      // provider says it is degrading the deployment, the endpoint names it as
+      // the reason, and the top-level verdict actually moved.
+      const slots = slotStatuses(current.doc);
+      expect(lithic.degradesDeployment).toBe(true);
+      expect(degradedBy).toContain("lithic");
+      expect(current.doc.status).toBe("degraded");
+      // ...and `degraded` for THIS reason, not for a coincidental one. The
+      // top-level status is `database.reachable && degradedBy.length === 0`, so
+      // a dead database would produce the same word for an unrelated fact and
+      // this assertion would pass while proving nothing.
+      expect(current.doc.database?.reachable).toBe(true);
+      expect(degradedBy).toEqual(["lithic"]);
+
+      record(
+        "evidence",
+        `ESCALATED — the outage is not merely reported, it moves the top-level verdict: degradesDeployment=true, degradedBy=[${degradedBy.join(", ")}], status="${String(current.doc.status)}" with database.reachable=true (so 'degraded' is the webhook feed, not a coincidental database failure). Lithic slots at that instant: ${LITHIC_SLOTS.map((s) => `${s}=${slots[s] ?? "absent"}`).join(", ")}. This is the limit attack 7 used to record instead of assert: escalation was gated on EVERY lithic slot reading 'live' while card_webhooks was permanently 'unprobed', so no webhook outage could move status (measured then: stale at 184s, status "ok"). card_webhooks now has a real probe and the gate is 'some' (DECISIONS 028).`,
+      );
+
+      // ---- AND THE GATE IS TESTED AGAINST WHAT IT GUARDS AGAINST -----------
+      // The escalation above is currently satisfied by BOTH lithic slots
+      // reading 'live', so it would also pass under the old `every`. That makes
+      // it silent about the actual regression risk, and a guard that only works
+      // while every slot happens to be probeable is exactly what broke here
+      // last time.
+      //
+      // `card_webhooks`'s probe reads Lithic's OWN /attempts log, so it goes
+      // not-live in precisely the conditions that are the outage: an endpoint
+      // of ours rejecting deliveries reads `unauthorised` (this account still
+      // holds two FAILED 500s at 16:18 from the DECISIONS 020 inbox bug), an
+      // unreadable /attempts reads `unreachable`. So the degraded case is
+      // re-derived here from the REAL published facts of the outage just
+      // induced, with card_webhooks forced not-live, through the same pure
+      // function `/api/health` calls. Both gate shapes are evaluated, because
+      // the point is not that `some` works — it is that `every` does not.
+      // The premise of the counterfactual, asserted rather than assumed: the
+      // OTHER Lithic slot really is live. `card_issuing` is `mustBeLive` and
+      // the money test above just created a card through it, so this is a
+      // statement about the deployment, not a convenience.
+      expect(slots["card_issuing"]).toBe("live");
+
+      const outage = {
+        ok: true as const,
+        latencyMs: 0,
+        rows: [
+          {
+            provider: "lithic",
+            lastDeliveryAt: new Date(lithic.lastDelivery as string),
+          },
+        ],
+      };
+      const measuredAt = new Date(
+        current.doc.integrations?.webhookHealth?.measuredAt ?? new Date().toISOString(),
+      );
+      const degraded: Record<string, string> = { ...slots, card_webhooks: "simulated" };
+      const gate = (shape: "some" | "every"): boolean =>
+        shape === "some"
+          ? LITHIC_SLOTS.some((s) => degraded[s] === "live")
+          : LITHIC_SLOTS.every((s) => degraded[s] === "live");
+      const rerun = (shape: "some" | "every"): { degrades: boolean; degradedBy: readonly string[] } => {
+        const health = webhookDeliveryHealth(
+          outage,
+          [{ provider: "lithic", integrationLive: gate(shape), verifierRegistered: true }],
+          measuredAt,
         );
-      } else {
-        record(
-          "evidence",
-          `escalated: degradesDeployment=true, degradedBy=[${degradedBy.join(", ")}], top-level status="${String(current.doc.status)}".`,
-        );
-      }
+        const p = health.providers.find((x) => x.provider === "lithic");
+        // Same silence, same instant, same threshold: only the gate changed.
+        expect(p?.verdict).toBe("stale");
+        return { degrades: p?.degradesDeployment === true, degradedBy: health.degradedBy };
+      };
+
+      const withSome = rerun("some");
+      const withEvery = rerun("every");
+      // THE ALARM SURVIVES a not-live card_webhooks. This is the assertion the
+      // header's retired limit is actually about.
+      expect(withSome.degrades).toBe(true);
+      expect(withSome.degradedBy).toEqual(["lithic"]);
+      // And it would NOT have, under the shape this gate used to have — so the
+      // clause above is load-bearing rather than incidentally true.
+      expect(withEvery.degrades).toBe(false);
+      expect(withEvery.degradedBy).toEqual([]);
+
+      record(
+        "evidence",
+        `gate tested against the thing it guards: replaying THIS outage's own published facts (lastDelivery ${lithic.lastDelivery}, measuredAt ${measuredAt.toISOString()}, verdict stale) through webhookDeliveryHealth with card_webhooks forced not-live — the verdict its probe genuinely returns when Lithic is delivering and our endpoint is refusing (unauthorised) or /attempts cannot be read (unreachable) — the alarm STAYS ARMED under 'some' (degradesDeployment=true, degradedBy=[lithic]) and is SILENCED under 'every' (degradesDeployment=false, degradedBy=[], status would read "ok" with deliveries being lost). 'some' is therefore not incidentally correct: it is the only one of the two that cannot be disarmed by the outage itself.`,
+      );
     },
     420_000,
   );

@@ -920,3 +920,125 @@ spendable-while-authorised is a loss.
 The critical path is now entirely historical: every node on it has landed. What
 remains is not dependency-bound, it is human-bound. Scheduling cannot compress
 it and neither can more agents.
+
+---
+
+# ITERATION 4 — 2026-09-10T19:45Z
+
+## Measured
+
+    health 8b65903 · integrations 5 of 7 live   (19:28-19:45Z)
+      live       card_issuing card_webhooks director_kyc open_banking ach_rail
+      simulated  business_registry stablecoin
+    livefire --only 7   PASS 1  FAIL 0  SKIP 0   3/3 assertions   216s
+    1054 tests passed, 96 skipped · dbcheck 14 of 14
+
+**Moved during this iteration.** At 19:52Z the endpoint reads **6 of 7**:
+`stablecoin` flipped to live — the wallet now holds 100000000000000 wei of gas
+against the ~390000000000 a transfer needs, so Z07 (the faucet) landed while
+this was being measured. Every figure above is a record of 19:28-19:45Z and is
+left as measured. Consequence for the auditor: `node scripts/audit-claims.mjs`
+now reports **5 contradictions**, all of them documents still saying "5 of 7" —
+`docs/DEBRIEF.md:1340`, `docs/DEMO.md:148`, `docs/DEMO.md:326`,
+`thread/T+24h_money_moves.md:31`, `thread/T+24h_money_moves.md:265`. None is
+caused by this iteration's changes and none is in a file it may touch; they
+under-claim rather than over-claim, and they need a pass before submitting.
+
+## The escalation gap is closed, and it was closed by measurement
+
+Attack 7 carried a recorded limit: a stale Lithic feed was REPORTED by
+`webhookHealth` and did not ESCALATE, so a monitor watching nothing but
+`status` saw an `ok` deployment while the card rail was dark. That limit was
+still printed by the live-fire suite this morning. It is no longer true, and
+the way it stopped being true was checked rather than assumed — the outage was
+INDUCED, the way the attack induces everything else, and the endpoint watched.
+
+    T0  baseline                      status ok        lithic quiet 2928s  degradesDeployment false  degradedBy []
+    T1  one genuine signed delivery   status ok        lithic fresh    5s  degradesDeployment false  degradedBy []
+    T2  after 215s of silence         status DEGRADED  lithic stale  221s  degradesDeployment TRUE   degradedBy [lithic]
+    T3  feed restored                 status ok        lithic fresh    5s  degradesDeployment false  degradedBy []
+
+`MAX(webhook_inbox.received_at)` read directly from the live database as the
+restricted role agrees with the published instant to the millisecond, so the
+number the endpoint escalated on is the real row. The full attack reproduced it
+end to end: stale at 184s, `status="degraded"`, `degradedBy=[lithic]`,
+`database.reachable=true` — degraded for the webhook feed and not for a
+coincidental database failure.
+
+Two changes retired the limit, and only one of them was the obvious one.
+`card_webhooks` stopped being `unprobed` (iteration 3), and the gate stopped
+being `every` (028). The second is the one worth keeping.
+
+## `some` vs `every`, decided on the counterfactual rather than on today
+
+Both gate shapes escalate today, because both Lithic slots read `live`. That
+makes the live assertion silent about the thing that actually breaks, so the
+counterfactual was measured through the same pure functions `/api/health` calls,
+using this account's own recorded history.
+
+`card_webhooks`'s probe is not an independent witness. It reads Lithic's OWN
+`/attempts` log, which means its verdict is a function of the delivery loop's
+health — the very thing the alarm is about. Fed the two degraded shapes this
+account has genuinely produced, `judgeWebhookSubscription` returns:
+
+| Real shape | Probe verdict |
+|---|---|
+| latest attempt `FAILED 500` — the 16:18 incident, still on record in the sandbox | `unauthorised` |
+| `/attempts` unreadable — Lithic's own API degraded | `unreachable` |
+
+Neither is `live`. Replaying those through `webhookDeliveryHealth` with Lithic
+stale at 221s:
+
+| Gate | `card_webhooks` | `degradesDeployment` | `degradedBy` | top-level |
+|---|---|---|---|---|
+| `some` | live | true | `[lithic]` | degraded |
+| `every` | live | true | `[lithic]` | degraded |
+| `some` | not live | **true** | `[lithic]` | **degraded** |
+| `every` | not live | **false** | `[]` | **ok** |
+
+Row four is the whole decision. Under `every`, an endpoint of ours rejecting
+Lithic's deliveries — deliveries being LOST, the exact condition the alarm
+exists for — flips `card_webhooks` to `unauthorised` and silences the alarm.
+The guard would be disarmed by the outage itself. That is the same blind spot
+028 removed, re-entering through a probe instead of through the absence of one.
+
+**`some` stays.** Not because `every` fails today; because `every` is the shape
+that can be disarmed and `some` is not. An alarm must not be switched off by an
+honest absence of evidence about a sibling, and this system deliberately
+produces honest absences of evidence. The comment in `route.ts` that justified
+`some` on `card_webhooks` being permanently `unprobed` has been rewritten to
+justify it on this measurement instead, since the old fact expired.
+
+## Guard number five, caught before it shipped
+
+The running table gets a row, and for the first time it is a row about a guard
+that was *stopped* rather than one discovered blind.
+
+| Guard | Exclusion | What it therefore could not see |
+|---|---|---|
+| `v_hold_drift` | `WHERE NOT is_released` | a wrong closure row — the thing it exists to catch |
+| secret scanner | plain `grep` | 1,206 lines after a NUL byte |
+| escalation gate | `slots.every(live)` | any outage, once one slot was honestly `unprobed` |
+| doc auditor | `"N of 7"` only | `"4/7 live"`, the shorthand its own log is written in |
+| escalation gate, again | reverting to `every` now that both slots probe live | an outage that degrades the probe it is gated on |
+
+Attack 7 now asserts both halves: the induced outage moves `status` to
+`degraded`, and the gate re-derived with `card_webhooks` forced not-live stays
+armed under `some` while going silent under `every`. Testing the guard against
+the thing it guards against, rather than merely running it.
+
+## What the test says now
+
+The SKIP-shaped "LIMIT OF THIS PASS" evidence line is gone, because the limit
+is gone. The history is not: the file header records what the limit WAS, what
+caused it, and the two things that retired it, because a guard that failed in a
+nameable shape is more useful documented than deleted. Attack 7 runs 3 of 3
+assertions with no skip.
+
+## Production left exactly as found
+
+Nothing was disabled at Lithic. The subscription `ep_3J8yb9…` is enabled at
+`https://corgi-trial-psi.vercel.app/api/webhooks/lithic` throughout, as it was
+before. The outage was induced the only reversible way — by delivering nothing
+— and closed by delivering a genuine signed body. `/api/health` reads `status:
+ok`, `degradedBy: []`, 5 of 7 live.

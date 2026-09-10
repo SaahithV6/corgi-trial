@@ -21,8 +21,19 @@ git diff --cached --name-only | grep -qE '^\.env$' && fail ".env is staged."
 # blocked the commit that introduced it. Funny, and also the correct
 # behaviour for everything that is not this file.
 SECRET_RE='(npg_[A-Za-z0-9]{16,}|sk''_live_|whsec_[A-Za-z0-9]{16,}|0x[a-fA-F0-9]{64})'
+# Public blockchain transaction hashes, which are the SAME SHAPE as an
+# Ethereum private key: 0x + 64 hex. There is no pattern that separates them,
+# so the separation is evidence. Every hash below was verified public with
+#
+#   eth_getTransactionByHash -> a transaction, not null
+#
+# before it was added, and a private key returns null. Cite the block. The
+# burden is on whoever adds a line, exactly as in .secretscanignore.
+#
+#   0x279c3f9d... CDP faucet funding this wallet, Base Sepolia block 46650546
+KNOWN_PUBLIC_TX='0x279c3f9d734310e6a49b7de79ef69b3545f9df5c69f3126d88fe89133a31eb69'
 if git diff --cached -U0 -- . ':(exclude)scripts/precommit.sh' 2>/dev/null \
-     | grep -qE "^\+.*${SECRET_RE}"; then
+     | grep -E "^\+.*${SECRET_RE}" | grep -vF "$KNOWN_PUBLIC_TX" | grep -q .; then
   echo "--- offending staged lines:" >&2
   git diff --cached -U0 -- . ':(exclude)scripts/precommit.sh' | grep -nE "^\+.*${SECRET_RE}" | cut -c1-160 >&2
   fail "a staged line looks like a live secret. Check the diff above."

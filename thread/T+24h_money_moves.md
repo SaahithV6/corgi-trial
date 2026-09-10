@@ -28,33 +28,54 @@ INTEGRATIONS
 
 Start with /api/health. Every label on it was earned by a live authenticated
 call, and the evidence string beside each slot names the call. If anything below
-disagrees with that page, believe the page. It reports 5 live of 7.
+disagrees with that page, believe the page. It reports 6 live of 7.
 
   LIVE       card_issuing       Lithic sandbox      GET /v1/cards -> 200
+  LIVE       card_webhooks      Lithic              GET /v1/event_subscriptions -> 200, and its
+                                                    /attempts log shows our endpoint answered 202
   LIVE       ach_rail           Increase sandbox    GET /accounts -> 200
   LIVE       open_banking       Plaid sandbox       POST /institutions/get -> 200
   LIVE       director_kyc       Stripe Identity     Stripe Identity enabled
+  LIVE       stablecoin         USDC, Base Sepolia  20.00 USDC and gas; a transfer is fundable
   SIMULATED  business_registry  Stripe Connect      Connect not enabled
-  SIMULATED  stablecoin         USDC, Base Sepolia  0 wei gas, cannot send
-  SIMULATED  card_webhooks      Lithic              credential present, never probed
 
-card_webhooks reads simulated for a reason worth stating. It said live until an
-hour ago, off the back of the webhook secret being a non-empty string: a slot
-with no probe inherited the environment's opinion. That is the same mistake as
-labelling any integration live because a credential exists, and I had already
-fixed it in four other probes without noticing the fallback underneath them.
-The deliveries themselves are real and verified. The label is not something I
-had earned, so it now says so.
+card_webhooks took the longest route to that label and the route is the point.
+It said live off the back of the webhook secret being a non-empty string: a slot
+with no probe inheriting the environment's opinion. I fixed that by making it
+say unprobed, which was honest and worth nothing. It is live now because Lithic
+exposes GET /v1/event_subscriptions and, per subscription, a delivery log.
 
-The two simulated ones, said plainly. Business registry is simulated because
+That log is the only evidence that can settle this slot at all. Every other
+probe reaches outward and reads its own answer. The webhook leg runs inward, and
+nothing on our side can tell "Lithic never sent it" from "Lithic sent it and we
+answered 500" - our inbox is empty either way. Theirs distinguishes them, and it
+still holds the receipts for a real outage of mine: two failed 500s at 16:18
+recovering to 202. So the verdict is end to end. Our handler verifies the
+Standard Webhooks signature before anything else and answers 401 when it cannot,
+which makes a SUCCESS attempt carrying our 202 a proof that Lithic signed with
+the secret it holds and this deployment verified with the secret we hold, as
+witnessed by a third party.
+
+stablecoin was simulated this morning for a good reason and is not any more. The
+wallet held 20.00 USDC and 0 wei of gas, so it could read the chain and could
+not move a cent, and its probe had previously reported LIVE off a balanceOf
+call - the same lie in a friendlier shape, and one of the worse bugs I have
+written this weekend. The probe now asks whether a transfer is fundable rather
+than whether a balance exists. Gas arrived from the Coinbase faucet at
+0x279c3f9d734310e6a49b7de79ef69b3545f9df5c69f3126d88fe89133a31eb69, the wallet
+holds 100000000000000 wei against the roughly 390000000000 a transfer needs, and
+the slot flipped on the next health call with no deploy, because the probe
+recomputes rather than remembering. The payout itself is being wired now; if it
+has confirmed on chain by the time you read this I will send the hash, and if it
+has not, this slot means the wallet can pay and has not yet been asked to.
+
+That leaves one simulated, said plainly. Business registry is simulated because
 every KYB provider on your menu is gated. Middesk and Sumsub want a sales
 conversation, Persona's own KYB guide opens with "contact your Persona team",
-and Stripe Connect needs business verification first. I stopped rather than
-invent a company to get past a form. The stablecoin wallet holds 20.00 USDC on
-Base Sepolia and 0 wei of gas; a transfer needs roughly 390000000000 wei, so it
-can read the chain and cannot move a cent. Its probe used to report LIVE off a
-balanceOf call, which is the same lie in a friendlier shape, and I count that as
-one of the worse bugs I have written this weekend.
+Persona's signup wants a business email address I do not have, and Stripe
+Connect needs business verification first - I re-ran POST /v1/accounts today and
+it still answers 400 with "you can only create new accounts if you've signed up
+for Connect". I stopped rather than invent a company to get past a form.
 
 HOW THE MONEY ACTUALLY GETS THERE
 
@@ -262,7 +283,7 @@ Applied to the draft above, in order of how much each one cut.
     Y". One deliberate exception survives: "Not 'does not', cannot" — it is a
     precise distinction about database privileges, not a flourish.
 11. **Concrete nouns and real numbers over adjectives.** Every claim carries a
-    figure, an endpoint or a timestamp: 5 of 7 live, and every count in this mail,
+    figure, an endpoint or a timestamp: 6 of 7 live, and every count in this mail,
     hold -400, 16:13:21, 390000000000 wei, 14 of 14.
 12. **One specific thing only the author could write.** The one-line fix that
     was written and reverted, and the eleven parked cards.

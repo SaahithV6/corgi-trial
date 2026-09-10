@@ -223,20 +223,55 @@ export async function GET(request: Request): Promise<Response> {
         provider: w.provider,
         // SOME, not EVERY.
         //
-        // A provider owns more than one slot. Lithic owns `card_issuing` (the
-        // rail, probed live) and `card_webhooks` (the delivery secret, which
-        // has no probe and is therefore reported `unprobed` — DECISIONS 026).
-        // With `every`, one unprobed slot made this false forever, so
-        // `degradesDeployment` could never be true and NO webhook outage could
-        // move the top-level status. Measured live: Lithic went stale at 184s
-        // and `status` stayed "ok".
+        // THE ORIGINAL REASON HAS EXPIRED, AND THE DECISION SURVIVES IT. This
+        // was `every` until DECISIONS 028. Lithic owns two slots —
+        // `card_issuing` (the outbound rail) and `card_webhooks` (the inbound
+        // delivery loop) — and `card_webhooks` had no probe, so it was honestly
+        // `unprobed` and therefore not `live` (DECISIONS 026). `every` was
+        // false forever, `degradesDeployment` could never be true, and no
+        // webhook outage could move the top-level status: measured live, Lithic
+        // went stale at 184s and `status` stayed "ok". `card_webhooks` is now
+        // genuinely probed and reads `live`, so that argument is gone and
+        // `every` would work today. It is still wrong, for a reason that is
+        // measured rather than historical.
         //
-        // That was a blind spot shaped exactly like the thing it should catch,
-        // introduced by the fix that made unprobed slots honest. The question
-        // this gate is actually asking is "do we have a working integration
-        // with this provider whose silence would mean something" — and one
-        // live slot answers it. An unprobed sibling is an absence of evidence
-        // about a secret, not evidence that the rail is dead.
+        // THE MEASURED REASON. `card_webhooks`'s probe is not an independent
+        // witness — it reads Lithic's own `/attempts` log, so its verdict is a
+        // FUNCTION OF THE DELIVERY LOOP'S HEALTH. Feed
+        // `judgeWebhookSubscription` the two degraded shapes this account has
+        // actually produced and it returns not-live for both:
+        //
+        //   latest attempt FAILED 500  -> `unauthorised`  (the real 16:18
+        //     incident: Lithic delivering, our endpoint refusing — deliveries
+        //     being LOST, which is exactly when the alarm must fire)
+        //   /attempts unreadable       -> `unreachable`   (Lithic's own API
+        //     degraded — again correlated with their delivery being degraded)
+        //
+        // Replaying those verdicts through `webhookDeliveryHealth` with Lithic
+        // stale at 221s, measured both ways:
+        //
+        //   some  + card_webhooks not live -> degradesDeployment true,  degraded
+        //   every + card_webhooks not live -> degradesDeployment false, "ok"
+        //
+        // So `every` is disarmed BY THE OUTAGE ITSELF. That is the same blind
+        // spot 028 removed, re-entering through a probe instead of through an
+        // absence of one: a guard whose exclusion is shaped exactly like the
+        // failure it exists to catch. `some` cannot acquire that shape, because
+        // no single slot's degradation can silence it.
+        //
+        // AND IT IS THE RIGHT QUESTION ANYWAY. What this gate asks is "do we
+        // have a working integration with this provider whose silence would
+        // mean something" — one live slot answers it. A sibling slot reading
+        // `unprobed`, `unreachable` or `unauthorised` is an absence of evidence
+        // about ONE leg, not evidence that the rail is dead; and this system
+        // deliberately produces honest absences of evidence. An alarm must not
+        // be disarmed by one. Whatever the sibling's verdict is, it is already
+        // reported once, in the slot table above.
+        //
+        // Asserted against the thing it guards against by
+        // attack-07-provider-outage.test.ts, which induces a real outage,
+        // watches `status` move to "degraded", and then re-derives the gate
+        // with `card_webhooks` forced not-live to prove the alarm stays armed.
         integrationLive: w.slots.some((s) => probedStatus.get(s.slot) === 'live'),
         verifierRegistered: w.webhookVerifierRegistered,
       })),
