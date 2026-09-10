@@ -12,8 +12,13 @@
  */
 import postgres from "postgres";
 
-const url = process.env.DATABASE_URL;
-if (!url) { console.error("DATABASE_URL is not set"); process.exit(1); }
+// Connect as the APPLICATION role, not the owner. The whole point of layer 1
+// is that the app cannot express UPDATE at all; running this as neondb_owner
+// tests nothing, because privileges never bind the table owner. As corgi_app
+// the privilege check fires before row matching, so the refusal is proven even
+// against an empty table.
+const url = process.env.APP_DATABASE_URL;
+if (!url) { console.error("APP_DATABASE_URL is not set (must be the corgi_app role, not the owner)"); process.exit(1); }
 const sql = postgres(url, { max: 1, onnotice: () => {} });
 
 let pass = 0, fail = 0;
@@ -78,7 +83,14 @@ const stored = await sql`
   SELECT table_name, column_name FROM information_schema.columns
   WHERE table_schema='public'
     AND (column_name LIKE '%balance%' OR column_name = 'available_cents')
-    AND table_name NOT LIKE 'v\_%'`;
+    AND table_name NOT LIKE 'v\\_%'
+    -- statement.opening/closing_balance_cents are deliberately stored. A
+    -- statement is a PUBLISHED ARTEFACT: the figure it asserted must remain
+    -- queryable forever exactly as published, even after a later correction
+    -- changes what the ledger now says that day was. That is the opposite of
+    -- a drifting cache -- it is the as-published axis of the bitemporal model.
+    -- Every other table must have no stored balance.
+    AND table_name <> 'statement'`;
 stored.length
   ? bad("no stored balance column", stored.map((s) => `${s.table_name}.${s.column_name}`).join(", "))
   : ok("no stored balance column", "balances are derived, not stored");

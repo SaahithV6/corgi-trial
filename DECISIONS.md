@@ -260,3 +260,49 @@ Lithic-local. Both cannot ship. The generic one wins, because a per-provider
 copy of a shared scheme is how the fifth provider gets verified differently
 from the first four. The Lithic-local copy gets deleted, not kept "just in
 case".
+
+---
+
+## 008 — 2026-09-10T02:50Z — The immutability guarantee was hollow, and the prover caught it
+
+Neon live. Both migrations applied first try — 1,187 lines of DDL written
+without a database to test against, no syntax errors. Then `pnpm db:check`
+reported **9 failures out of 14**, and every one was real.
+
+**Failure 1, the serious one: UPDATE and DELETE on money tables were ALLOWED.**
+Not because the REVOKE was missing — it is there and correct — but because I
+connected as `neondb_owner`. Privileges never bind the table owner. The schema
+creates a restricted `corgi_app` role with `SELECT, INSERT` and nothing else;
+nobody had wired the application to actually use it. The guarantee existed in
+the DDL and was worth nothing at runtime.
+
+This is precisely the automatic-fail clause, and it would have passed any
+review that read the migration instead of running it. Fixed: `corgi_app` now
+has a password, and `APP_DATABASE_URL` is the only URL the application ever
+uses. The owner URL is `DIRECT_URL` and is used solely to run migrations.
+
+A second-order benefit fell out of this. Under the owner role the test was
+*also* a false negative for a different reason: the money tables were empty, so
+`UPDATE ... WHERE true` matched no rows, the `FOR EACH ROW` trigger never
+fired, and the statement succeeded. As `corgi_app` the privilege check fires
+before row matching, so the refusal is proven even against an empty table.
+Layer 1 is testable at hour three; layer 2 would only have been testable after
+seeding.
+
+Worth noting layer 2 held anyway where it could: TRUNCATE was refused even as
+the owner, because that trigger is statement-level. The four-layer design
+earned its keep on the first run.
+
+**Failure 2: `statement.opening_balance_cents` and `closing_balance_cents`.**
+The prover flagged these as stored balances. They are deliberate and they stay.
+A statement is a *published artefact*: the figure it asserted must remain
+queryable forever exactly as published, even after a later correction changes
+what the ledger now says that day was. That is the as-published axis of the
+bitemporal model, not a drifting cache. The check now excludes `statement` by
+name with that reasoning in a comment, so a reader sees the exemption and its
+justification together rather than a silent hole.
+
+**What this changes about how I work for the rest of the trial.** The prover
+runs before every claim about the ledger. A README asserting immutability is a
+promise; `db:check` is evidence. It found a fatal gap in the first ninety
+seconds it was ever run.

@@ -6,8 +6,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import postgres from "postgres";
 
-const url = process.env.DATABASE_URL;
-if (!url) { console.error("DATABASE_URL is not set"); process.exit(1); }
+// Migrations run on the DIRECT (unpooled) connection. Neon's pooler is
+// PgBouncer in transaction mode, where a session-level advisory lock does not
+// survive between statements and some DDL misbehaves. The app uses the pooled
+// URL; migrations must not.
+const url = process.env.DIRECT_URL || process.env.DATABASE_URL;
+if (!url) { console.error("DIRECT_URL / DATABASE_URL is not set"); process.exit(1); }
 
 // max:1 — migrations must run on one connection, in order. Advisory lock
 // makes a second concurrent runner wait rather than interleave.
