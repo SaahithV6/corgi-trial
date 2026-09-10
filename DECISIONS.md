@@ -391,3 +391,55 @@ guard to the single file that must be exempt. Do not broaden the guard.
 It also now prints the offending lines rather than only asserting that some
 exist. A guard that says "something is wrong" without saying what is a guard
 people learn to bypass.
+
+---
+
+## 011 — 2026-09-10T02:05Z — "Live" now means a proven round trip, not a present string
+
+**What prompted it.** All fifteen environment variables were set in the
+hosting dashboard, including keys for four providers nobody has signed up for
+yet. The env layer marks a slot live when its key is non-empty, so the system
+was about to report four integrations LIVE that have never made a successful
+call. The brief names that outcome exactly: presenting a simulated integration
+as live is "the fastest way to fail the entire trial."
+
+**The bug is the definition, not the data.** Deleting the placeholder values
+would have fixed today's symptom and left the trap armed for whoever pastes a
+stale key tomorrow. A string's existence is not evidence of anything.
+
+**So liveness is now earned by a round trip.** `probeIntegrations()` makes the
+cheapest authenticated read each provider offers and distinguishes four
+outcomes that must never be collapsed:
+
+    live          a real authenticated call returned 2xx
+    unauthorised  the credential exists and the provider REJECTED it
+    unreachable   network or provider failure - we do not know
+    not_configured no key at all
+
+Only `live` earns the LIVE label. `unreachable` deliberately does not: saying
+"live" on a hopeful guess is the precise failure being guarded against. The
+distinction between `unauthorised` and `unreachable` is kept because they need
+different human responses — one is a wrong key, the other is a bad afternoon.
+
+**Every status code was measured, not assumed.** Against a deliberately wrong
+key: Lithic, Increase, Stripe and Persona all answer 401. Plaid answers 400.
+
+Plaid needed a second measurement, because Plaid validates request SHAPE before
+credentials:
+
+    correct credentials              -> 200
+    well-formed but wrong            -> 400 INVALID_API_KEYS / INVALID_INPUT
+    malformed, i.e. a placeholder    -> 400 INVALID_FIELD  / INVALID_REQUEST
+
+My first probe used a malformed body and got INVALID_FIELD for *everything*,
+which would have made a real key indistinguishable from a fake one. The probe
+now sends a fixed, well-formed body to /institutions/get, so the credentials
+are the only variable and any 400 is unambiguous.
+
+Verified live, end to end: a real Lithic key reports LIVE; the string
+"your_lithic_key_here" reports SIMULATED; Plaid placeholders report SIMULATED.
+
+**Consequence worth stating.** This makes the README's live-versus-simulated
+table something the system computes about itself and can be challenged on, in
+front of the panel, by hitting /api/health. It is no longer a claim I wrote
+down and hoped stayed true.
