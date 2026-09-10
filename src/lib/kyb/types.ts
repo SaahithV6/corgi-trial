@@ -29,16 +29,61 @@
 
 /**
  * `live`      a third party we do not control produced this answer. For the
- *             director leg that means a real Persona sandbox inquiry; for the
- *             registry leg a real Stripe Connect test-mode account. Sandbox is
- *             still live in the sense that matters here: we did not decide it.
+ *             director leg that means a real Stripe Identity session; for the
+ *             registry leg a real read of a real registry. Sandbox is still
+ *             live in the sense that matters here: we did not decide it.
+ * `manual`    a NAMED HUMAN decided it, with a written reason, on the record.
  * `simulated` WE produced this answer. Deterministic, reproducible, useful, and
  *             not admissible as verification of anything.
  *
- * There is deliberately no third value. "Partially live" is the state this
- * whole module exists to make unrepresentable.
+ * ===========================================================================
+ * WHY `manual` IS A THIRD VALUE AND NOT A FLAVOUR OF ONE OF THE OTHER TWO.
+ *
+ * The registry leg runs on GLEIF, and GLEIF's population is financial-market
+ * participants — so an ordinary small company is simply absent from it, and the
+ * honest registry answer is `needs_review`. That is a QUEUE, not a verdict, and
+ * a queue nobody can act on is an account permanently stuck behind a check that
+ * was working correctly.
+ *
+ * So an operator can decide a leg. The question is what to label their decision.
+ *
+ *   Labelling it `live` would be the exact forgery this module exists to
+ *   forbid: a human is not a third party, and the whole meaning of `live` is
+ *   "somebody we do not control said this".
+ *
+ *   Labelling it `simulated` would be a lie in the other direction. A
+ *   documented decision by a named, accountable person is not a simulator's
+ *   output, and collapsing the two would tell a reviewer that a real review and
+ *   a fixture are the same kind of thing.
+ *
+ * The order is what makes it work. `live` < `manual` < `simulated`, so the
+ * existing "worst wins" fold does the right thing with no special case: a live
+ * director leg plus a manually approved registry leg is a verification labelled
+ * `manual`, for ever, with no path back to `live`. The same order is the
+ * declaration order of the `kyb_evidence` enum in db/migrations/0013, which is
+ * what lets `v_business_kyb` express the rule as `max(evidence)`.
+ *
+ * "Partially live" is still the state this module makes unrepresentable. What
+ * is now representable is the difference between a machine's answer, a person's
+ * answer, and no answer at all — which is three things, and was always three
+ * things.
+ * ===========================================================================
  */
-export type Evidence = 'live' | 'simulated';
+export type Evidence = 'live' | 'manual' | 'simulated';
+
+/**
+ * Weakness rank, ascending. Same trick as `KYB_STATUS_STRICTNESS`, and the
+ * numbers are only meaningful relative to each other — they are duplicated,
+ * deliberately, as the declaration order of the `kyb_evidence` enum.
+ */
+export const EVIDENCE_WEAKNESS: Record<Evidence, number> = {
+  live: 0,
+  manual: 1,
+  simulated: 2,
+};
+
+/** Ascending weakness. Same order as the Postgres enum. */
+export const EVIDENCES: readonly Evidence[] = ['live', 'manual', 'simulated'];
 
 /**
  * Type-level evidence degradation.
@@ -53,19 +98,31 @@ export type Evidence = 'live' | 'simulated';
  * `'simulated' | 'live'` — which is why the type-level rule is not the only
  * defence. See `CompositeKybResult` in ./composite.ts for the value-level one.
  */
-export type DegradeEvidence<A extends Evidence, B extends Evidence> = [A, B] extends
-  ['live', 'live']
-  ? 'live'
-  : 'simulated';
+export type DegradeEvidence<A extends Evidence, B extends Evidence> = 'simulated' extends A | B
+  ? 'simulated'
+  : 'manual' extends A | B
+    ? 'manual'
+    : 'live';
 
-/** The runtime half of `DegradeEvidence`, over any number of legs. */
+/**
+ * The runtime half of `DegradeEvidence`, over any number of legs: the WEAKEST
+ * label any leg rests on.
+ *
+ * An EMPTY set is `simulated`, not `live` — a verification made of no legs
+ * rests on nobody's word, and the previous `every()` spelling of this function
+ * answered `live` for it, which was vacuously true and practically a hole.
+ */
 export function degradeEvidence(legs: readonly Evidence[]): Evidence {
-  return legs.every((e) => e === 'live') ? 'live' : 'simulated';
+  return legs.reduce<Evidence>(
+    (worst, e) => (EVIDENCE_WEAKNESS[e] >= EVIDENCE_WEAKNESS[worst] ? e : worst),
+    legs.length === 0 ? 'simulated' : 'live',
+  );
 }
 
 /** Human-facing label. The UI must render this next to any KYB status. */
 export const EVIDENCE_LABEL: Record<Evidence, string> = {
   live: 'verified by a third party',
+  manual: 'REVIEWED BY A NAMED OPERATOR — a person, not a third party',
   simulated: 'SIMULATED — not verified by anyone',
 };
 
@@ -399,6 +456,14 @@ export type TransactDenialCode =
   | 'KYB_REJECTED'
   /** Verified, but not by anyone real, and this deployment requires real. */
   | 'KYB_EVIDENCE_SIMULATED'
+  /**
+   * Approved by a named human rather than by a third party, under a policy
+   * that demands a third party. A DIFFERENT code from the simulated one on
+   * purpose: "a person decided this and here is their name and reason" and
+   * "nobody decided this" are not the same refusal, and a queue that could not
+   * tell them apart would be unusable for the reviewer who has to clear it.
+   */
+  | 'KYB_EVIDENCE_MANUAL'
   /** The stored state is not a value this build understands. Fail closed. */
   | 'KYB_STATE_UNREADABLE';
 
@@ -523,13 +588,21 @@ export function canTransact(
       evidence: null,
     };
   }
-  if (policy.requireLiveEvidence && evidence === 'simulated') {
+  if (policy.requireLiveEvidence && evidence !== 'live') {
+    // `requireLiveEvidence` means exactly what it says, and that INCLUDES
+    // refusing a manual override. A deployment can reasonably demand that a
+    // third party answered; the point of the separate code is that such a
+    // deployment is told which of the two non-live states it is looking at, so
+    // "a named operator approved this on 2026-09-10 for these reasons" is a
+    // conversation rather than a dead end.
     return {
       allowed: false,
       businessId: state.businessId,
-      code: 'KYB_EVIDENCE_SIMULATED',
+      code: evidence === 'manual' ? 'KYB_EVIDENCE_MANUAL' : 'KYB_EVIDENCE_SIMULATED',
       message:
-        'Verification passed on simulated evidence. This deployment requires a third-party verification before transacting.',
+        evidence === 'manual'
+          ? 'Verification was approved by a named operator, not by a third party. This deployment requires third-party evidence before transacting; the reviewer, the time and the written reason are on the evidence row.'
+          : 'Verification passed on simulated evidence. This deployment requires a third-party verification before transacting.',
       status,
       evidence,
     };
@@ -568,7 +641,7 @@ export function assertCanTransact(
 }
 
 export function isEvidence(value: unknown): value is Evidence {
-  return value === 'live' || value === 'simulated';
+  return typeof value === 'string' && Object.hasOwn(EVIDENCE_WEAKNESS, value);
 }
 
 export function asEvidence(value: unknown): Evidence | null {

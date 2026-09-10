@@ -81,6 +81,13 @@ import { verdictView } from "@/components/onboarding/verdict";
 
 import { CompositeKybProvider, CompositeKybResult, failedLeg } from "./composite";
 import { GLEIF_LIMITS, GLEIF_PROVIDER_NAME, isLeiFormat } from "./gleif";
+import {
+  isManualReview,
+  manualReviewLeg,
+  reviewRefusal,
+  type ManualDecision,
+  type Reviewer,
+} from "./manual-review";
 import { KYB_ENV, selectKybLegs } from "./index";
 import { chooseRegistryProvider, rungForProviderName } from "./registry-precedence";
 import { SimulatedDirectorKycProvider, SimulatedRegistryProvider } from "./simulated-registry";
@@ -753,6 +760,14 @@ export interface KybLegRow {
   readonly rawStatus: string | null;
   readonly checks: readonly KybCheck[];
   readonly observedAt: string;
+  /**
+   * Set on a review row and null on every provider observation, in both
+   * directions — `kyb_leg_manual_has_reviewer` in 0013 refuses either half
+   * without the other, so these three travel together or not at all.
+   */
+  readonly decidedByActorId: string | null;
+  readonly decidedByKind: string | null;
+  readonly decisionReason: string | null;
 }
 
 /**
@@ -766,7 +781,11 @@ export interface KybLegRow {
  * never be filed as live: `kyb_leg_simulated_reference` refuses any row that
  * claims `live` while carrying a `sim.` reference.
  */
-export function legRow(businessId: string, leg: KybLegResult): KybLegRow {
+export function legRow(
+  businessId: string,
+  leg: KybLegResult,
+  review: { readonly reviewer: Reviewer; readonly reason: string } | null = null,
+): KybLegRow {
   return {
     leg: leg.leg,
     provider: leg.provider,
@@ -777,6 +796,9 @@ export function legRow(businessId: string, leg: KybLegResult): KybLegRow {
     rawStatus: leg.rawStatus,
     checks: leg.checks,
     observedAt: leg.observedAt,
+    decidedByActorId: review?.reviewer.id ?? null,
+    decidedByKind: review?.reviewer.kind ?? null,
+    decisionReason: review?.reason.trim() ?? null,
   };
 }
 
@@ -804,20 +826,37 @@ async function appendLegs(
 ): Promise<void> {
   for (const leg of result.legs) {
     const row = legRow(businessId, leg);
-    await conn`
-      INSERT INTO kyb_verification_leg
-        (business_id, leg, provider, provider_reference, status, evidence, raw_status, checks, observed_at)
-      VALUES
-        (${businessId}::uuid,
-         ${row.leg}::kyb_leg,
-         ${row.provider},
-         ${row.providerReference},
-         ${row.status}::kyb_status,
-         ${row.evidence}::kyb_evidence,
-         ${row.rawStatus},
-         ${conn.json(checksAsJson(row.checks))},
-         ${row.observedAt}::timestamptz)`;
+    await insertLeg(businessId, row, conn);
   }
+}
+
+/**
+ * The ONE INSERT in this module.
+ *
+ * Every path that records an observation — begin, refresh, a registry recheck,
+ * an operator review — goes through here, so there is exactly one statement to
+ * read when asking what can be written to the evidence table and exactly one
+ * place a column can be forgotten. The previous draft had this SQL written out
+ * twice and the second copy had already drifted.
+ */
+async function insertLeg(businessId: string, row: KybLegRow, conn: Sql): Promise<void> {
+  await conn`
+    INSERT INTO kyb_verification_leg
+      (business_id, leg, provider, provider_reference, status, evidence, raw_status, checks,
+       observed_at, decided_by_actor_id, decided_by_kind, decision_reason)
+    VALUES
+      (${businessId}::uuid,
+       ${row.leg}::kyb_leg,
+       ${row.provider},
+       ${row.providerReference},
+       ${row.status}::kyb_status,
+       ${row.evidence}::kyb_evidence,
+       ${row.rawStatus},
+       ${conn.json(checksAsJson(row.checks))},
+       ${row.observedAt}::timestamptz,
+       ${row.decidedByActorId}::uuid,
+       ${row.decidedByKind === null ? null : row.decidedByKind}::actor_kind,
+       ${row.decisionReason})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,19 +1100,7 @@ export async function recheckRegistry(
     registryLeg,
   ]);
 
-  await conn`
-    INSERT INTO kyb_verification_leg
-      (business_id, leg, provider, provider_reference, status, evidence, raw_status, checks, observed_at)
-    VALUES
-      (${businessId}::uuid,
-       ${"business_registry"}::kyb_leg,
-       ${legRow(businessId, registryLeg).provider},
-       ${legRow(businessId, registryLeg).providerReference},
-       ${registryLeg.status}::kyb_status,
-       ${registryLeg.evidence}::kyb_evidence,
-       ${registryLeg.rawStatus},
-       ${conn.json(checksAsJson(registryLeg.checks))},
-       ${registryLeg.observedAt}::timestamptz)`;
+  await insertLeg(businessId, legRow(businessId, registryLeg), conn);
 
   log.info("kyb.registry.recheck.recorded", {
     provider: registryLeg.provider,
@@ -1206,6 +1233,98 @@ export async function probeRegistry(
   });
 }
 
+// ---------------------------------------------------------------------------
+// 4c. THE OPERATOR DECISION
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a human's decision on one leg.
+ *
+ * ===========================================================================
+ * It is an INSERT like every other observation, and that is the design. The
+ * registry's answer is not edited, not flagged, not soft-deleted — it stays
+ * exactly where it was, with its citation and its provider code, and this row
+ * becomes the latest thing anybody said about that leg. `v_business_kyb` folds
+ * it in with no special case; a reversal is a further row.
+ *
+ * THE CHECKS RUN TWICE, ON PURPOSE. `reviewRefusal()` is pure and is called by
+ * the screen to grey a control and explain why. It is called again HERE, on the
+ * server, against the state read in this transaction — because the first call
+ * is a courtesy and this one is the control. Underneath both, 0013 restates the
+ * reviewer, the reason floor and the provider name as database CHECKs.
+ * ===========================================================================
+ */
+export async function recordManualReview(
+  businessId: string,
+  args: {
+    readonly leg: KybLegKind;
+    readonly decision: ManualDecision;
+    readonly reason: string;
+    readonly reviewer: Reviewer;
+  },
+  options: { readonly conn?: Sql; readonly log?: Logger } = {},
+): Promise<Result<VerificationOutcome, ErrorShape>> {
+  const conn = options.conn ?? sql;
+  const log = (options.log ?? rootLogger).child({ businessId, leg: args.leg });
+
+  const business = await loadBusiness(businessId, conn);
+  if (business === null) {
+    return fail("BUSINESS_NOT_FOUND", "No business on this book has that id. Nothing was decided.");
+  }
+
+  const legs = (await latestLegs(conn, businessId)).get(businessId) ?? [];
+  const current = legs.find((l) => l.leg === args.leg) ?? null;
+
+  const refusal = reviewRefusal({
+    decision: args.decision,
+    reviewer: args.reviewer,
+    currentStatus: current?.status ?? null,
+    reason: args.reason,
+  });
+  if (refusal !== null) return fail(refusal.code, refusal.message);
+
+  /**
+   * WHAT IS BEING OVERRIDDEN is the latest THIRD-PARTY observation, not simply
+   * the latest one. If an operator approves, changes their mind, declines, and
+   * then approves again, all three of those are reviews — and the thing the
+   * screen must keep showing underneath is what the REGISTRY said, which is
+   * older than all of them.
+   */
+  const overridden = current !== null && isManualReview(current) ? await priorProviderLeg(conn, businessId, args.leg) : current;
+
+  const leg = manualReviewLeg({
+    leg: args.leg,
+    decision: args.decision,
+    reviewer: args.reviewer,
+    reason: args.reason,
+    businessId,
+    overriding:
+      overridden === null
+        ? null
+        : {
+            provider: overridden.provider,
+            status: overridden.status,
+            rawStatus: overridden.rawStatus,
+            providerCode: overridden.providerCode,
+          },
+  });
+
+  await insertLeg(businessId, legRow(businessId, leg, { reviewer: args.reviewer, reason: args.reason }), conn);
+
+  log.info("kyb.review.recorded", {
+    decision: args.decision,
+    reviewerId: args.reviewer.id,
+    overrodeProvider: overridden?.provider ?? null,
+    overrodeStatus: overridden?.status ?? null,
+  });
+
+  // Re-read, so the outcome returned is the DERIVED state and not this
+  // function's opinion of what it should now be.
+  const after = (await latestLegs(conn, businessId)).get(businessId) ?? [];
+  const result = CompositeKybResult.rehydrate(businessId, after.map(legResultFromView));
+  return ok(toOutcome(business, result));
+}
+
 /**
  * A stored leg row, back into the shape the composite folds.
  *
@@ -1258,6 +1377,11 @@ function toLegViewFromResult(leg: KybLegResult): LegView {
     citation: citationFromChecks(leg.checks),
     checks: leg.checks,
     observedAt: leg.observedAt,
+    // A freshly-built result carries no reviewer join; the screen reads reviews
+    // back through `latestLegs`, which does. Null here is "not looked up", and
+    // it is never rendered as "not reviewed" because this shape is only used
+    // for the action's immediate echo.
+    review: null,
   };
 }
 
@@ -1285,6 +1409,9 @@ type LegRowRead = {
   readonly raw_status: string | null;
   readonly checks: unknown;
   readonly observed_at: Date;
+  readonly decided_by_actor_id: string | null;
+  readonly decision_reason: string | null;
+  readonly decided_by_name: string | null;
 };
 
 type AccountRow = {
@@ -1308,20 +1435,95 @@ async function latestLegs(
 ): Promise<Map<string, readonly LegView[]>> {
   const rows = businessId === undefined
     ? await conn<LegRowRead[]>`
-        SELECT DISTINCT ON (business_id, leg)
-               business_id, leg::text AS leg, provider, provider_reference,
-               status::text AS status, evidence::text AS evidence,
-               raw_status, checks, observed_at
-          FROM kyb_verification_leg
-         ORDER BY business_id, leg, observed_at DESC, recorded_at DESC, seq DESC`
+        SELECT DISTINCT ON (k.business_id, k.leg)
+               k.business_id, k.leg::text AS leg, k.provider, k.provider_reference,
+               k.status::text AS status, k.evidence::text AS evidence,
+               k.raw_status, k.checks, k.observed_at,
+               k.decided_by_actor_id, k.decision_reason, a.display_name AS decided_by_name
+          FROM kyb_verification_leg k
+          LEFT JOIN actor a ON a.id = k.decided_by_actor_id
+         ORDER BY k.business_id, k.leg, k.observed_at DESC, k.recorded_at DESC, k.seq DESC`
     : await conn<LegRowRead[]>`
-        SELECT DISTINCT ON (business_id, leg)
-               business_id, leg::text AS leg, provider, provider_reference,
-               status::text AS status, evidence::text AS evidence,
-               raw_status, checks, observed_at
-          FROM kyb_verification_leg
-         WHERE business_id = ${businessId}::uuid
-         ORDER BY business_id, leg, observed_at DESC, recorded_at DESC, seq DESC`;
+        SELECT DISTINCT ON (k.business_id, k.leg)
+               k.business_id, k.leg::text AS leg, k.provider, k.provider_reference,
+               k.status::text AS status, k.evidence::text AS evidence,
+               k.raw_status, k.checks, k.observed_at,
+               k.decided_by_actor_id, k.decision_reason, a.display_name AS decided_by_name
+          FROM kyb_verification_leg k
+          LEFT JOIN actor a ON a.id = k.decided_by_actor_id
+         WHERE k.business_id = ${businessId}::uuid
+         ORDER BY k.business_id, k.leg, k.observed_at DESC, k.recorded_at DESC, k.seq DESC`;
+
+  const byBusiness = new Map<string, LegView[]>();
+  for (const row of rows) {
+    const view = toLegViewFromRow(row);
+    if (view === null) continue;
+    const list = byBusiness.get(row.business_id) ?? [];
+    list.push(view);
+    byBusiness.set(row.business_id, list);
+  }
+  return byBusiness;
+}
+
+/**
+ * THE ANSWER A REVIEW OVERRODE: the latest observation on this leg that a
+ * PROVIDER made, skipping every operator decision above it.
+ *
+ * This is what keeps the override honest on screen. "Latest wins" means a
+ * manual approval hides the registry's own answer from the fold, and a screen
+ * that only rendered the fold would show a green `approved` with no trace of
+ * the `not_in_lei_registry` underneath it — which is precisely the collapsing
+ * of two facts into one word that the review mechanism exists to avoid. So the
+ * superseded provider row is fetched alongside and rendered beneath.
+ *
+ * `evidence <> 'manual'` rather than `provider <> 'operator-review'`: the
+ * evidence label is the one 0013 constrains in both directions, so it is the
+ * one that cannot drift.
+ */
+async function priorProviderLeg(
+  conn: Sql,
+  businessId: string,
+  leg: KybLegKind,
+): Promise<LegView | null> {
+  const rows = await conn<LegRowRead[]>`
+    SELECT k.business_id, k.leg::text AS leg, k.provider, k.provider_reference,
+           k.status::text AS status, k.evidence::text AS evidence,
+           k.raw_status, k.checks, k.observed_at,
+           k.decided_by_actor_id, k.decision_reason, NULL::text AS decided_by_name
+      FROM kyb_verification_leg k
+     WHERE k.business_id = ${businessId}::uuid
+       AND k.leg = ${leg}::kyb_leg
+       AND k.evidence <> 'manual'
+     ORDER BY k.observed_at DESC, k.recorded_at DESC, k.seq DESC
+     LIMIT 1`;
+  const row = rows[0];
+  return row === undefined ? null : toLegViewFromRow(row);
+}
+
+/** The same, for every business at once. One query, not N. */
+async function priorProviderLegs(
+  conn: Sql,
+  businessId?: string,
+): Promise<Map<string, readonly LegView[]>> {
+  const rows = businessId === undefined
+    ? await conn<LegRowRead[]>`
+        SELECT DISTINCT ON (k.business_id, k.leg)
+               k.business_id, k.leg::text AS leg, k.provider, k.provider_reference,
+               k.status::text AS status, k.evidence::text AS evidence,
+               k.raw_status, k.checks, k.observed_at,
+               k.decided_by_actor_id, k.decision_reason, NULL::text AS decided_by_name
+          FROM kyb_verification_leg k
+         WHERE k.evidence <> 'manual'
+         ORDER BY k.business_id, k.leg, k.observed_at DESC, k.recorded_at DESC, k.seq DESC`
+    : await conn<LegRowRead[]>`
+        SELECT DISTINCT ON (k.business_id, k.leg)
+               k.business_id, k.leg::text AS leg, k.provider, k.provider_reference,
+               k.status::text AS status, k.evidence::text AS evidence,
+               k.raw_status, k.checks, k.observed_at,
+               k.decided_by_actor_id, k.decision_reason, NULL::text AS decided_by_name
+          FROM kyb_verification_leg k
+         WHERE k.business_id = ${businessId}::uuid AND k.evidence <> 'manual'
+         ORDER BY k.business_id, k.leg, k.observed_at DESC, k.recorded_at DESC, k.seq DESC`;
 
   const byBusiness = new Map<string, LegView[]>();
   for (const row of rows) {
@@ -1362,6 +1564,19 @@ function toLegViewFromRow(row: LegRowRead): LegView | null {
     citation: citationFromChecks(checks),
     checks,
     observedAt: row.observed_at.toISOString(),
+    // Populated ONLY from the columns, never from `checks` — the jsonb is the
+    // reviewer's prose and the columns are the record. 0013 refuses one
+    // without the other, so this is null on every provider row by construction.
+    review:
+      row.decided_by_actor_id === null || row.decision_reason === null
+        ? null
+        : {
+            decidedByActorId: row.decided_by_actor_id,
+            decidedBy: row.decided_by_name ?? "(actor no longer on the book)",
+            reason: row.decision_reason,
+            decidedAt: row.observed_at.toISOString(),
+            overrode: null,
+          },
   };
 }
 
@@ -1388,6 +1603,40 @@ function parseChecks(raw: unknown): readonly KybCheck[] {
     });
   }
   return out;
+}
+
+/**
+ * Attach, to each review row, the provider answer it superseded.
+ *
+ * Done here rather than in SQL because it is a presentation join: the two
+ * queries each answer a clean question ("latest per leg", "latest PROVIDER row
+ * per leg") and pairing them is cheap. Doing it in one query would need a
+ * lateral or a window over a table whose read pattern is already indexed for
+ * exactly these two orders.
+ */
+function withOverrides(
+  legs: readonly LegView[],
+  priors: readonly LegView[],
+): readonly LegView[] {
+  return legs.map((leg) => {
+    if (leg.review === null) return leg;
+    const prior = priors.find((p) => p.leg === leg.leg);
+    if (prior === undefined) return leg;
+    return {
+      ...leg,
+      review: {
+        ...leg.review,
+        overrode: {
+          provider: prior.provider,
+          status: prior.status,
+          rawStatus: prior.rawStatus,
+          providerCode: prior.providerCode,
+          citation: prior.citation,
+          observedAt: prior.observedAt,
+        },
+      },
+    };
+  });
 }
 
 function toBusinessView(
@@ -1438,7 +1687,7 @@ export function createLiveOnboardingSource(
     async getSnapshot(): Promise<Result<OnboardingSnapshot, ErrorShape>> {
       const asOf = new Date().toISOString();
       try {
-        const [rows, legs, accounts] = await Promise.all([
+        const [rows, legs, priorLegs, accounts] = await Promise.all([
           conn<KybViewRow[]>`
             SELECT v.business_id, v.legal_name, b.ein,
                    v.legs_on_file, v.kyb_status::text AS kyb_status,
@@ -1447,6 +1696,7 @@ export function createLiveOnboardingSource(
               JOIN business b ON b.id = v.business_id
              ORDER BY v.legal_name`,
           latestLegs(conn),
+          priorProviderLegs(conn),
           conn<AccountRow[]>`
             SELECT id, business_id, code, name
               FROM account
@@ -1468,7 +1718,10 @@ export function createLiveOnboardingSource(
           businesses: rows.map((row) =>
             toBusinessView(
               row,
-              legs.get(row.business_id) ?? [],
+              withOverrides(
+                legs.get(row.business_id) ?? [],
+                priorLegs.get(row.business_id) ?? [],
+              ),
               accountByBusiness.get(row.business_id) ?? null,
               policy,
             ),

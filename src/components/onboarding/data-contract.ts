@@ -128,6 +128,34 @@ export type LegView = {
   readonly citation: string | null;
   readonly checks: readonly KybCheck[];
   readonly observedAt: Instant;
+  /**
+   * Set when this observation is a HUMAN's decision rather than a provider's
+   * answer. Null on every provider row, in both directions — 0013 refuses a
+   * reviewer without a reason and a reason without a reviewer.
+   *
+   * `overrode` is the latest THIRD-PARTY observation this decision superseded,
+   * carried alongside so the screen can show both. That is the whole point:
+   * "latest wins" would otherwise hide the registry's own answer behind a green
+   * badge, collapsing two facts — what the registry said, and what a person
+   * decided — into the one word the review mechanism exists to keep apart.
+   */
+  readonly review: ReviewView | null;
+};
+
+/** A human's decision on one leg, and the provider answer it superseded. */
+export type ReviewView = {
+  readonly decidedBy: string;
+  readonly decidedByActorId: string;
+  readonly reason: string;
+  readonly decidedAt: Instant;
+  readonly overrode: {
+    readonly provider: string;
+    readonly status: KybStatus;
+    readonly rawStatus: string | null;
+    readonly providerCode: string | null;
+    readonly citation: string | null;
+    readonly observedAt: Instant;
+  } | null;
 };
 
 /** Where a verdict came from. See `src/components/onboarding/verdict.ts`. */

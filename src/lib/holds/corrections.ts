@@ -145,12 +145,23 @@ export function chooseCorrectionTarget(
   }
 
   const wanted = opposite(direction);
-  const candidates = events.filter(
-    (e) =>
-      e.providerEventId !== correction.providerEventId &&
-      directionOf(e) === wanted &&
-      e.amountCents > 0n,
-  );
+
+  // Deduplicated on `providerEventId`, so a caller that has not yet made its
+  // list a set gets the same answer as one that has. `card_auth_event` already
+  // guarantees it with `UNIQUE (auth_id, provider_event_id)`, and `holdState`
+  // does this too and for the same reason: the invariant is "the answer is a
+  // function of the SET", and it should hold at every layer that claims it
+  // rather than only at the layer that happens to have a unique index. Without
+  // it, a list carrying one event twice would look like two candidates and be
+  // refused as ambiguous.
+  const seen = new Set<string>([correction.providerEventId]);
+  const candidates: CardEvent[] = [];
+  for (const e of events) {
+    if (seen.has(e.providerEventId)) continue;
+    seen.add(e.providerEventId);
+    if (directionOf(e) !== wanted || e.amountCents <= 0n) continue;
+    candidates.push(e);
+  }
 
   const exact = candidates.filter((e) => e.amountCents === correction.amountCents);
   if (exact.length === 1 && exact[0] !== undefined) {

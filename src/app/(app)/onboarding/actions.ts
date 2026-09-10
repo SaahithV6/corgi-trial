@@ -42,10 +42,12 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { currentActor } from "@/lib/approvals/session";
+import { MANUAL_MIN_REASON_LENGTH } from "@/lib/kyb/manual-review";
 import {
   beginVerification,
   probeRegistry,
   recheckRegistry,
+  recordManualReview,
   refreshVerification,
   transactGateForBusiness,
 } from "@/lib/kyb/wire";
@@ -55,7 +57,7 @@ import type { LegView, RegistryProbeView } from "@/components/onboarding/data-co
 /** What the form gets back. Serialised to the client, so: no row contents. */
 export type OnboardingResult = {
   readonly status: "idle" | "ok" | "refused";
-  readonly intent: "begin" | "refresh" | "recheck" | "gate" | null;
+  readonly intent: "begin" | "refresh" | "recheck" | "gate" | "review" | null;
   /** Machine-readable: a denial code, or the intent that succeeded. */
   readonly code: string | null;
   readonly message: string;
@@ -324,5 +326,113 @@ export async function registryProbeAction(
     message:
       "This is what the registry said, and it is a statement about that identifier — not about any business on this book. Nothing was written.",
     probe: result.value,
+  };
+}
+
+
+/**
+ * ============================================================================
+ * THE OPERATOR DECISION — a separate action, because it is a separate KIND of
+ * act.
+ *
+ * Every verb in `onboardingAction` asks a PROVIDER something and records what
+ * they said. This one records what a PERSON decided, and the difference is the
+ * whole reason the evidence lattice grew a third label. Sharing an action
+ * between them would put "ask Stripe" and "approve this business yourself" one
+ * mistyped `intent` apart.
+ *
+ * THE ACTOR IS NOT TAKEN FROM THE FORM. It is resolved on the server from the
+ * session, exactly as the approvals queue does — a review whose reviewer came
+ * out of a hidden input would be an attribution anybody could type. And the
+ * database will not accept a non-human reviewer at all: 0013 constrains
+ * `decided_by_kind` to `human` through a composite foreign key to
+ * `actor(id, kind)`, so the agent surface cannot clear a KYB queue even if it
+ * reaches this function.
+ *
+ * WHAT LANDS: one INSERT. The registry's own answer is not edited, flagged or
+ * removed — it stays exactly where it was, and this becomes the latest thing
+ * said about that leg. A reversal is a further row.
+ * ============================================================================
+ */
+const reviewSchema = z.object({
+  businessId: z.uuid({ error: "that is not a business id" }),
+  leg: z.enum(["director_kyc", "business_registry"]),
+  decision: z.enum(["approve", "decline"]),
+  reason: z
+    .string()
+    .trim()
+    .min(MANUAL_MIN_REASON_LENGTH, {
+      error: `A review needs a written reason of at least ${MANUAL_MIN_REASON_LENGTH} characters — the reason IS the evidence here.`,
+    })
+    .max(2000, { error: "that reason is longer than this column is meant to hold" }),
+});
+
+export async function reviewAction(
+  _previous: OnboardingResult,
+  formData: FormData,
+): Promise<OnboardingResult> {
+  const parsed = reviewSchema.safeParse({
+    businessId: formData.get("businessId"),
+    leg: formData.get("leg"),
+    decision: formData.get("decision"),
+    reason: formData.get("reason"),
+  });
+
+  if (!parsed.success) {
+    const businessId = formData.get("businessId");
+    return refused(
+      typeof businessId === "string" ? businessId : null,
+      "review",
+      "INVALID_REVIEW",
+      parsed.error.issues[0]?.message ??
+        "That review could not be read, so nothing was recorded.",
+    );
+  }
+
+  const { businessId, leg, decision, reason } = parsed.data;
+  const log = rootLogger.child({ businessId, leg, decision });
+
+  const actor = await currentActor();
+  if (actor === null) {
+    return refused(
+      businessId,
+      "review",
+      "NO_ACTOR",
+      "No actor could be resolved for this session. A KYB decision that nobody can be named for is not one this console records — the reviewer is the evidence.",
+    );
+  }
+
+  const result = await recordManualReview(
+    businessId,
+    {
+      leg,
+      decision,
+      reason,
+      reviewer: { id: actor.id, displayName: actor.displayName, kind: actor.kind },
+    },
+    { log },
+  );
+
+  if (!result.ok) {
+    log.warn("kyb.review.refused", { actorId: actor.id, code: result.error.code });
+    return refused(businessId, "review", result.error.code, result.error.message);
+  }
+
+  const outcome = result.value;
+  revalidatePath("/onboarding");
+
+  return {
+    status: "ok",
+    intent: "review",
+    code: decision === "approve" ? "KYB_REVIEW_APPROVED" : "KYB_REVIEW_DECLINED",
+    message:
+      `${actor.displayName} ${decision === "approve" ? "approved" : "declined"} the ${
+        leg === "director_kyc" ? "director KYC" : "business registry"
+      } leg for ${outcome.legalName} on review. It is now ${outcome.status} on ${outcome.evidence} evidence. ` +
+      "The provider's own answer is untouched and still on file below this row — a review is another observation, not an edit.",
+    businessId,
+    hostedUrl: null,
+    directorReference: outcome.directorReference,
+    legs: outcome.legs,
   };
 }

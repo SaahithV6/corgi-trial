@@ -6,6 +6,7 @@ import type { KybStatus } from "@/lib/kyb";
 
 import type { BusinessKybView, TransactGateView, VerdictView } from "./data-contract";
 import { LegRow, STATUS_TONE } from "./LegRow";
+import { ReviewForm } from "./ReviewForm";
 import { VerificationForm } from "./VerificationForm";
 
 const STATUS_NOTE: Record<KybStatus, string> = {
@@ -143,6 +144,24 @@ export function EntityCard({
             approved, which is the only event that opens one.
           </p>
         )}
+      </div>
+
+      <div className="border-b border-border px-5 py-4">
+        <h4 className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+          Clear the queue — an operator decision
+        </h4>
+        <p className="mt-1 mb-3 max-w-prose text-xs leading-relaxed text-muted">
+          <span className="font-mono">needs_review</span> is a queue, not a verdict. A registry that
+          has never heard of a company has told us nothing, and somebody has to decide what to do
+          about that. Whatever is decided here is appended as another observation, under the
+          reviewer&rsquo;s name, with the provider&rsquo;s own answer left exactly where it was.
+        </p>
+        <ReviewForm
+          businessId={business.businessId}
+          legalName={business.legalName}
+          legs={business.legs}
+          live={live}
+        />
       </div>
 
       <div className="px-5 py-4">

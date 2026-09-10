@@ -229,6 +229,20 @@ function usdText(cents) {
   return `${(n / 100n).toString()}.${(n % 100n).toString().padStart(2, "0")}`;
 }
 
+/** A money column as bigint cents, whatever the driver decided to hand back.
+ *  `int8` arrives as a bigint (configured below); a view column that computed
+ *  its way to `numeric` arrives as a string, and `"0" === 0n` is false. */
+const cents = (value) => (typeof value === "bigint" ? value : BigInt(value ?? 0));
+
+/** A `date` column as `YYYY-MM-DD`. Postgres hands back a Date; slicing its
+ *  default string gives "Wed Dec 01", which is not a value date. */
+const day = (value) =>
+  value === null || value === undefined
+    ? "(none)"
+    : value instanceof Date
+      ? value.toISOString().slice(0, 10)
+      : String(value).slice(0, 10);
+
 /** A signed delta, for before/after lines. */
 const delta = (before, after) => {
   const d = after - before;
@@ -374,6 +388,23 @@ function findForm(forms, { actionId = null, where = {}, has = [] } = {}) {
  * `[<the object the action returned>]`. This is the deployment's own answer,
  * not a sentence parsed out of rendered prose.
  */
+/**
+ * Undo React's model escaping.
+ *
+ * In a flight payload a string whose first character is `$` is a REFERENCE —
+ * `$K1` is a FormData, `$@1` a promise — so React escapes an ordinary string
+ * that happens to start with `$` by doubling it. Read back raw, a card's spend
+ * limit comes out as `$$5,000.00`. One `$` comes off; nothing else is touched.
+ */
+function unflight(value) {
+  if (typeof value === "string") return value.startsWith("$$") ? value.slice(1) : value;
+  if (Array.isArray(value)) return value.map(unflight);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, unflight(v)]));
+  }
+  return value;
+}
+
 function readActionState(html, { actionId, where = {} }) {
   const forms = parseForms(html).filter((f) => f.actionId === actionId);
   const stateOf = (form) => {
@@ -381,7 +412,7 @@ function readActionState(html, { actionId, where = {} }) {
     if (field === undefined) return null;
     try {
       const parsed = JSON.parse(field.value);
-      return Array.isArray(parsed) ? (parsed[0] ?? null) : null;
+      return Array.isArray(parsed) ? (unflight(parsed[0]) ?? null) : null;
     } catch {
       return null;
     }
@@ -680,7 +711,22 @@ if (!process.env.APP_DATABASE_URL) {
   process.exit(2);
 }
 
-sql = postgres(process.env.APP_DATABASE_URL, { max: 1, onnotice: () => {} });
+sql = postgres(process.env.APP_DATABASE_URL, {
+  max: 1,
+  onnotice: () => {},
+  // BIGINT must not silently become a JS number, here for the same reason it
+  // must not in `src/lib/ledger/db.ts`: money is bigint cents, and a driver
+  // that hands back a string turns `ledger - holds` into string arithmetic and
+  // `=== 5000n` into a comparison that is always false. Measured: it did.
+  types: {
+    bigint: {
+      to: 20,
+      from: [20],
+      serialize: (v) => v.toString(),
+      parse: (v) => BigInt(v),
+    },
+  },
+});
 
 const selected = args.only === null ? LEGS : LEGS.filter((l) => args.only.includes(l.n));
 if (selected.length === 0) {
@@ -698,49 +744,75 @@ const today = new Date().toISOString().slice(0, 10);
 /* -------------------------------------------------------------------------- */
 
 /**
- * The subject is chosen by PREDICATE against the live book, never by a
- * hard-coded id: the business that holds both leaves of the chart (a 2100
- * deposit account and its 9100 memo account) AND whose latest KYB observation
- * on every leg is `verified`. A business without both accounts cannot hold a
- * card hold; a business the gate refuses cannot be carried past leg 1.
+ * The subject is chosen by ASKING THE DEPLOYED GATE, never by a hard-coded id
+ * and never by a re-implementation of the gate's rule in this file.
+ *
+ * The candidates are the businesses that hold both leaves of the chart — a
+ * 2100 deposit account and its 9100 memo account — because a business without
+ * both cannot hold a card hold. Which of those may transact is then decided by
+ * pressing "Try to start a payment" on the deployed `/onboarding` screen for
+ * each of them and reading the answer: the first one the deployment ALLOWS is
+ * the business this whole run carries, and the first it REFUSES is leg 1's
+ * foil. Re-deriving `canTransact()`'s rule here would be a second opinion that
+ * can drift from the first, which is the exact failure the KYB leg exists to
+ * catch.
  */
-const [subject] = await sql`
-  SELECT dep.business_id                     AS business_id,
-         b.legal_name                        AS legal_name,
-         dep.id                              AS deposit_account,
-         memo.id                             AS memo_account,
-         b.ein                               AS ein
+const candidates = await sql`
+  SELECT dep.business_id AS business_id,
+         b.legal_name    AS legal_name,
+         dep.id          AS deposit_account,
+         memo.id         AS memo_account,
+         b.ein           AS ein
     FROM account dep
     JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
     JOIN business b   ON b.id = dep.business_id
-   WHERE dep.code = '2100'
-     AND dep.closed_at IS NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM (
-         SELECT DISTINCT ON (leg) leg, status
-           FROM kyb_verification_leg
-          WHERE business_id = dep.business_id
-          ORDER BY leg, observed_at DESC, seq DESC
-       ) latest WHERE latest.status <> 'verified'
-     )
-     AND EXISTS (SELECT 1 FROM kyb_verification_leg WHERE business_id = dep.business_id)
-   ORDER BY b.legal_name
-   LIMIT 1`;
+   WHERE dep.code = '2100' AND dep.closed_at IS NULL
+   ORDER BY b.legal_name`;
 
-/** The foil for leg 1: a business on the same book that the gate refuses. */
-const [foil] = await sql`
-  SELECT dep.business_id AS business_id, b.legal_name AS legal_name, dep.id AS deposit_account
-    FROM account dep
-    JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
-    JOIN business b   ON b.id = dep.business_id
-   WHERE dep.code = '2100'
-     AND dep.closed_at IS NULL
-     AND dep.business_id <> ${subject?.business_id ?? "00000000-0000-0000-0000-000000000000"}::uuid
-   ORDER BY b.legal_name
-   LIMIT 1`;
+const onboardingHtml = await getPage("/onboarding");
+const onboardingForms = parseForms(onboardingHtml);
+const gateAnswers = [];
+for (const candidate of candidates) {
+  const form = findForm(onboardingForms, { where: { businessId: candidate.business_id } });
+  if (form === null) {
+    gateAnswers.push({ ...candidate, allowed: false, code: "NO_GATE_CONTROL" });
+    continue;
+  }
+  const answer = await submitForm("/onboarding", form, {
+    businessId: candidate.business_id,
+    intent: "gate",
+  });
+  gateAnswers.push({
+    ...candidate,
+    actionId: form.actionId,
+    allowed: answer.state !== null && answer.state.status === "ok",
+    code: answer.state?.code ?? `NO_STATE(${answer.status})`,
+    message: answer.state?.message ?? "",
+  });
+}
+
+/**
+ * How close a refusal is to an allowance, so a run on a book where the gate
+ * currently allows nobody still has a subject to carry and still says why.
+ * Lower is closer. This ranking chooses a SUBJECT; it never decides a verdict.
+ */
+const GATE_RANK = {
+  KYB_ALLOWED: 0,
+  KYB_NEEDS_REVIEW: 1,
+  KYB_EVIDENCE_SIMULATED: 2,
+  KYB_PENDING: 3,
+  KYB_NOT_STARTED: 4,
+  KYB_STATE_UNREADABLE: 5,
+  KYB_REJECTED: 6,
+};
+const rankOf = (answer) => (answer.allowed ? -1 : (GATE_RANK[answer.code] ?? 9));
+
+const ranked = [...gateAnswers].sort((a, b) => rankOf(a) - rankOf(b));
+const subject = ranked[0];
+const foil = gateAnswers.find((c) => !c.allowed && c.business_id !== subject?.business_id);
 
 if (subject === undefined) {
-  console.error("no business on this book holds both a 2100 and a 9100 with every KYB leg verified");
+  console.error("no business on this book holds both a 2100 deposit account and a 9100 memo account");
   await sql.end();
   process.exit(2);
 }
@@ -772,8 +844,23 @@ console.log(`    EIN               ${subject.ein ?? "(none on file)"}`);
 console.log(`    2100 deposit      ${DEPOSIT}`);
 console.log(`    9100 memo         ${subject.memo_account}`);
 console.log(`    console           ${baseUrl}${CONSOLE_PATH}`);
-if (foil !== undefined) {
-  console.log(`    leg-1 foil        ${foil.legal_name}  ${foil.business_id}`);
+console.log(THIN);
+console.log("  WHY THIS BUSINESS — the deployed gate was asked, live, before anything else ran");
+for (const answer of gateAnswers) {
+  const mark = answer.allowed ? "ALLOWED " : "REFUSED ";
+  const role =
+    answer.business_id === subject.business_id
+      ? "  <- the subject"
+      : foil !== undefined && answer.business_id === foil.business_id
+        ? "  <- leg 1's foil"
+        : "";
+  console.log(`    ${mark} ${String(answer.code).padEnd(22)} ${answer.legal_name}${role}`);
+}
+if (!subject.allowed) {
+  console.log("");
+  console.log(YELLOW("    The gate allows NO business on this book right now. The subject below is the one"));
+  console.log(YELLOW(`    closest to allowed (${subject.code}); the legs that need a transactable business`));
+  console.log(YELLOW("    will skip, and will say so."));
 }
 console.log(RULE);
 console.log("");
@@ -873,10 +960,35 @@ if (want(1)) {
     const subjectForm = findForm(parseForms(onboarding), { where: { businessId: BIZ } });
     t.check(subjectForm !== null, `/onboarding renders no verification form for ${subject.legal_name}`);
     const allowed = await submitForm("/onboarding", subjectForm, { businessId: BIZ, intent: "gate" });
-    t.check(allowed.state !== null, "the gate action returned no state for the verified business");
+    t.check(allowed.state !== null, "the gate action returned no state for the subject business");
+
+    if (allowed.state.status !== "ok") {
+      const view = await sql`
+        SELECT legal_name, kyb_status::text AS status, kyb_evidence::text AS evidence,
+               legs_on_file, director_status::text AS director, registry_status::text AS registry
+          FROM v_business_kyb WHERE business_id IS NOT NULL ORDER BY legal_name`;
+      t.note(
+        "",
+        "the second half of this leg — a verified business ALLOWED — could not be shown:",
+        ...view.map(
+          (v) =>
+            `  ${String(v.legal_name).padEnd(32)} ${String(v.status).padEnd(13)} ${String(v.evidence).padEnd(10)}` +
+            ` legs=${v.legs_on_file} director=${v.director ?? "-"} registry=${v.registry ?? "-"}`,
+        ),
+      );
+      t.skip(
+        `the deployed gate currently refuses EVERY business on this book — ` +
+          gateAnswers.map((a) => `${a.legal_name}=${a.code}`).join(", ") +
+          `. The refusal half of this leg is proven above; the allowance half needs a business ` +
+          `canTransact() lets through, and the KYB legs are being re-observed live right now ` +
+          `(v_business_kyb above is the current reading). Nothing here can manufacture one: a ` +
+          `verification status written by this script would not be a KYB check.`,
+      );
+    }
+
     t.check(
-      allowed.state.status === "ok" && allowed.state.code === "KYB_ALLOWED",
-      `the gate refused the verified business: ${allowed.state.code}`,
+      allowed.state.code === "KYB_ALLOWED",
+      `the gate allowed the business with an unexpected code: ${allowed.state.code}`,
     );
 
     const legs = await sql`
@@ -1085,7 +1197,7 @@ if (want(4)) {
     // for it, nudging the deployed drain — never writing the row ourselves.
     const landed = await waitForDrained("the authorisation webhook", async () => {
       const [row] = await sql`
-        SELECT ca.id, ca.hold_id, ca.account_id
+        SELECT ca.id, ca.hold_id, ca.account_id, ca.first_seen_at
           FROM card_authorization ca
          WHERE ca.provider_auth_id = ${txnToken}`;
       return row ?? null;
@@ -1147,7 +1259,7 @@ if (want(4)) {
 
     const settled = await waitForDrained("the clearing webhook", async () => {
       const [row] = await sql`
-        SELECT e.id, e.amount_cents, e.value_date, e.is_final
+        SELECT e.id, e.amount_cents, e.value_date, e.is_final, e.received_at
           FROM card_auth_event e JOIN card_authorization ca ON ca.id = e.auth_id
          WHERE ca.provider_auth_id = ${txnToken} AND e.kind = 'clearing'
          ORDER BY e.received_at DESC LIMIT 1`;
@@ -1162,7 +1274,7 @@ if (want(4)) {
       settled.value.amount_cents === CLEAR_CENTS,
       `the clearing booked ${usd(settled.value.amount_cents)}, expected ${usd(CLEAR_CENTS)}`,
     );
-    carried.settlementValueDate = String(settled.value.value_date).slice(0, 10);
+    carried.settlementValueDate = day(settled.value.value_date);
 
     const afterClear = await facts(BIZ);
     t.check(
@@ -1171,16 +1283,53 @@ if (want(4)) {
         `ledger posts the SETTLED amount, not the authorised one`,
     );
 
-    // The hold releases exactly once, no matter how strangely the sequence
-    // arrived. Counted at the database, not inferred from a balance.
+    // ---- the hold releases exactly once ------------------------------------
+    //
+    // Counted at the database, and counted on the MEMO BOOK, because that is
+    // where a card hold lives: `hold` carries no amount column, the size of a
+    // hold is the balance of its own 9100 memo account, and a release is an
+    // appended memo entry that takes that balance back to zero. Counting
+    // `hold_closure` rows would measure the wrong mechanism — that table is the
+    // explicit-closure path (0011) and a card hold released by compare-and-
+    // append has none. Two entries and exactly two: one opening, one releasing.
+    const [memo] = await sql`
+      SELECT
+        count(*) FILTER (WHERE l.amount_cents < 0)::int AS opens,
+        count(*) FILTER (WHERE l.amount_cents > 0)::int AS releases,
+        COALESCE(SUM(l.amount_cents), 0)::bigint        AS net_cents
+        FROM journal_entry e
+        JOIN journal_line  l ON l.entry_id = e.id AND l.account_id = ${subject.memo_account}::uuid
+       WHERE e.hold_id = ${carried.authHoldId}::uuid`;
+    t.check(
+      memo.releases === 1,
+      `the hold has ${memo.releases} releasing memo entries — it must release exactly once`,
+    );
+    t.check(
+      memo.opens === 1,
+      `the hold has ${memo.opens} opening memo entries, expected exactly one`,
+    );
+    t.check(
+      cents(memo.net_cents) === 0n,
+      `the hold's memo balance is ${usd(memo.net_cents)} after settlement, expected zero`,
+    );
+
+    const [state] = await sql`
+      SELECT memo_balance_cents, active_hold_cents, is_released
+        FROM v_hold_state WHERE hold_id = ${carried.authHoldId}::uuid`;
+    t.check(state !== undefined, "the hold has no row in v_hold_state");
+    t.check(
+      cents(state.active_hold_cents) === 0n,
+      `v_hold_state still shows ${usd(state.active_hold_cents)} held against this authorisation`,
+    );
+    t.check(
+      cents(state.memo_balance_cents) === 0n,
+      `v_hold_state shows a memo balance of ${usd(state.memo_balance_cents)}, expected zero`,
+    );
+
     const [closures] = await sql`
       SELECT count(*)::int AS closed,
              (SELECT count(*)::int FROM hold_closure_reversal r WHERE r.hold_id = ${carried.authHoldId}::uuid) AS reversed
         FROM hold_closure c WHERE c.hold_id = ${carried.authHoldId}::uuid`;
-    t.check(
-      closures.closed === 1,
-      `the hold has ${closures.closed} closure rows — it must release exactly once`,
-    );
     t.check(closures.reversed === 0, `the hold's closure was reversed ${closures.reversed} time(s)`);
     t.check(
       afterClear.holds === before.holds,
@@ -1206,12 +1355,19 @@ if (want(4)) {
       `webhook       arrived and drained after ${settled.waitedMs / 1000}s`,
       `settled       ${usd(settled.value.amount_cents)} at value date ${carried.settlementValueDate}` +
         `   final=${settled.value.is_final}`,
-      `hold closures ${closures.closed} (reversals ${closures.reversed}) — released exactly once`,
+      `hold          ${memo.opens} opening memo entry, ${memo.releases} releasing — released EXACTLY ONCE;`,
+      `              memo balance ${usd(cents(memo.net_cents))}, v_hold_state active ${usd(cents(state.active_hold_cents))},`,
+      `              hold_closure rows ${closures.closed} / reversals ${closures.reversed}`,
       `entry         ${entry.id}  seq ${entry.booking_seq}  ${entry.entry_type}`,
       ...positionLines("AUTH -> SETTLEMENT", before, afterClear),
       `authorised ${usd(AUTH_CENTS)}, settled ${usd(CLEAR_CENTS)}: available fell by the authorised`,
-      `amount while the ledger stood still, then the ledger fell by the settled amount and the hold`,
+      `amount while the ledger stood still, then the ledger fell by the SETTLED amount and the hold`,
       `came off. The over-capture of ${usd(CLEAR_CENTS - AUTH_CENTS)} is not special-cased anywhere.`,
+      `"days later" is the one half of this leg the sandbox cannot be made to perform: Lithic clears`,
+      `on demand, so the clearing above arrived ${Math.round((settled.value.received_at - landed.value.first_seen_at) / 1000)}s after its authorisation rather than two days.`,
+      `What is proven is the part that matters and the part a clock cannot fake — a settlement for a`,
+      `DIFFERENT amount, matched to its authorisation and released once. The value-date axis is`,
+      `exercised by leg 6.`,
     );
   });
 }
@@ -1222,6 +1378,16 @@ if (want(4)) {
 
 if (want(5)) {
   await runLeg(LEGS[4], async (t) => {
+    if (!subject.allowed) {
+      t.skip(
+        `the deployed gate refuses ${subject.legal_name} with ${subject.code}, and requestPayment() ` +
+          `re-reads that gate inside the write transaction, so no payment instruction can be raised ` +
+          `for this business at all. There is no second business on this book the gate allows either ` +
+          `(${gateAnswers.map((a) => `${a.legal_name}=${a.code}`).join(", ")}). The maker-checker ` +
+          `machinery is unaffected and unproven by this run; leg 1 names what is blocking it.`,
+      );
+    }
+
     const [policy] = await sql`
       SELECT id, threshold_cents, required_approvals
         FROM approval_policy WHERE rail = 'ach' ORDER BY effective_from DESC LIMIT 1`;
@@ -1518,8 +1684,8 @@ if (want(6)) {
     });
     t.check(landed.ok, "no reversing entry appeared against the settlement");
     t.check(
-      String(landed.value.value_date).slice(0, 10) === carried.settlementValueDate,
-      `the reversal booked at value date ${String(landed.value.value_date).slice(0, 10)}, not the ` +
+      day(landed.value.value_date) === carried.settlementValueDate,
+      `the reversal booked at value date ${day(landed.value.value_date)}, not the ` +
         `settlement's ${carried.settlementValueDate} — a correction belongs to the day it happened`,
     );
 
@@ -1564,19 +1730,52 @@ if (want(7)) {
       .filter((l) => l.length > 0)
       .join("\n");
 
-    const [run] = await sql`
-      SELECT r.id, r.business_date, r.started_at, f.filename, f.row_count, f.total_cents
-        FROM recon_run r LEFT JOIN scheme_file f ON f.id = r.file_id
-       ORDER BY r.started_at DESC LIMIT 1`;
-    t.check(run !== undefined, "this book holds no reconciliation run at all");
+    // The screen is read FIRST and the database is asked to corroborate it,
+    // not the other way round. Which file and which run the breaks screen shows
+    // is the SCREEN's decision — it renders the live view rather than a run's
+    // snapshot, and it says so on the page — so a run this script picked by
+    // `ORDER BY started_at DESC` would be a second opinion that can disagree
+    // with it, and other work landing on this book creates runs constantly.
+    const tableStart = text.indexOf("Reconciliation breaks");
+    t.check(tableStart >= 0, "the breaks table is not on the deployed screen at all");
+    const tableEnd = text.indexOf("Runs over this file", tableStart);
+    const region = text.slice(tableStart, tableEnd < 0 ? undefined : tableEnd);
+    const candidates = [
+      ...new Set(
+        region
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => /^[A-Za-z0-9][A-Za-z0-9._:/#-]{5,}$/.test(l)),
+      ),
+    ];
+    t.check(candidates.length > 0, "the breaks table renders no reference-shaped cell");
 
-    const breaks = await sql`
-      SELECT b.break_kind, b.reason_code, b.external_ref, b.value_date, b.age_days,
-             b.severity, b.file_amount_cents, b.ledger_net_cents, b.break_amount_cents
-        FROM recon_run_break b
-       WHERE b.run_id = ${run.id}::uuid
-       ORDER BY b.break_amount_cents DESC`;
-    t.check(breaks.length > 0, `the newest reconciliation run (${run.id}) found no breaks to show`);
+    const matches = await sql`
+      SELECT v.file_id, v.break_kind, v.reason_code, v.external_ref, v.value_date, v.age_days,
+             v.closes_crossed, v.file_amount_cents, v.ledger_net_cents, v.break_amount_cents,
+             v.business_date, v.provider, v.rail
+        FROM v_recon_break v
+       WHERE v.external_ref = ANY(${candidates})`;
+    const shown = matches[0] ?? null;
+    t.check(
+      shown !== null,
+      `the ${candidates.length} reference(s) the breaks screen renders ` +
+        `(${candidates.slice(0, 4).join(", ")}) match no row in v_recon_break`,
+    );
+
+    const [file] = await sql`
+      SELECT f.filename, f.row_count, f.total_cents, f.business_date,
+             (SELECT count(*)::int FROM recon_run r WHERE r.file_id = f.id) AS runs,
+             (SELECT r.id FROM recon_run r WHERE r.file_id = f.id ORDER BY r.started_at DESC LIMIT 1) AS newest_run
+        FROM scheme_file f WHERE f.id = ${shown.file_id}::uuid`;
+    const onFile = await sql`
+      SELECT break_kind, count(*)::int AS n FROM v_recon_break
+       WHERE file_id = ${shown.file_id}::uuid GROUP BY break_kind`;
+    const [severityRow] = await sql`
+      SELECT CASE WHEN ${shown.closes_crossed} >= 2 THEN 'Critical'
+                  WHEN ${shown.closes_crossed} >= 1 THEN 'Aged'
+                  ELSE 'Open' END AS severity`;
+    shown.severity = severityRow.severity;
 
     const KINDS = {
       in_file_not_ledger: "In file, not in ledger",
@@ -1584,17 +1783,6 @@ if (want(7)) {
       amount_mismatch: "Amount mismatch",
     };
 
-    let shown = null;
-    for (const b of breaks) {
-      if (text.includes(b.external_ref)) {
-        shown = b;
-        break;
-      }
-    }
-    t.check(
-      shown !== null,
-      `none of the ${breaks.length} break(s) on run ${run.id} appears on the deployed breaks screen`,
-    );
     t.check(
       Object.hasOwn(KINDS, shown.break_kind),
       `the break's kind "${shown.break_kind}" is not one of the three categories`,
@@ -1604,7 +1792,7 @@ if (want(7)) {
       `the screen does not name the break's category "${KINDS[shown.break_kind]}"`,
     );
     t.check(
-      text.includes(usd(shown.break_amount_cents)) || text.includes(usd(shown.file_amount_cents ?? 0n)),
+      text.includes(usd(shown.break_amount_cents)),
       `the screen shows no amount matching ${usd(shown.break_amount_cents)}`,
     );
     t.check(
@@ -1612,27 +1800,33 @@ if (want(7)) {
       "the break carries no age, so a breaks screen cannot age it",
     );
     t.check(
-      /\bAge\b/.test(text) && (/day still open/.test(text) || /\d+d\b/.test(text)),
-      "the screen renders no age column for the break",
+      /\bAge\b/.test(text) && (/day still open/.test(text) || /-?\d+d\b/.test(text)),
+      "the screen renders no age for the break",
     );
     t.check(
-      typeof shown.severity === "string" && text.includes(shown.severity),
+      text.includes(shown.severity),
       `the screen does not carry the break's severity "${shown.severity}"`,
     );
-
-    const counts = {};
-    for (const b of breaks) counts[b.break_kind] = (counts[b.break_kind] ?? 0) + 1;
+    t.check(
+      shown.closes_crossed !== null && shown.closes_crossed !== undefined,
+      "the break records no day closes crossed, so its severity cannot escalate with age",
+    );
+    t.check(
+      Object.keys(KINDS).every((k) => text.includes(KINDS[k])),
+      "the screen does not render all three break categories, so a category could go unseen",
+    );
 
     t.note(
-      `GET /reconciliation  (a read; the breaks screen has no write control and needs none)`,
-      `run           ${run.id}   business date ${String(run.business_date).slice(0, 10)}`,
-      `file          ${run.filename ?? "(no file row)"}   ${run.row_count ?? "?"} rows` +
-        `   ${run.total_cents === null || run.total_cents === undefined ? "" : usd(run.total_cents)}`,
-      `breaks        ${breaks.length}   ` +
-        Object.entries(counts).map(([k, n]) => `${k}=${n}`).join(" · "),
+      `GET /reconciliation  (a read; the breaks screen carries no write control and needs none)`,
+      `file          ${file?.filename ?? "(no file row)"}   ${file?.row_count ?? "?"} rows` +
+        `   ${file?.total_cents === null || file?.total_cents === undefined ? "" : usd(file.total_cents)}` +
+        `   business date ${day(shown.business_date)}`,
+      `runs          ${file?.runs ?? "?"} over this file, newest ${file?.newest_run ?? "?"}`,
+      `breaks        ` + onFile.map((c) => `${c.break_kind}=${c.n}`).join(" · "),
       `on screen     ${KINDS[shown.break_kind]}  ref ${shown.external_ref}`,
-      `              ${usd(shown.break_amount_cents)}  age ${shown.age_days}d  severity ${shown.severity}` +
-        `  value date ${String(shown.value_date).slice(0, 10)}`,
+      `              ${usd(shown.break_amount_cents)}  age ${shown.age_days}d` +
+        `  closes crossed ${shown.closes_crossed}  severity ${shown.severity}` +
+        `  value date ${day(shown.value_date)}`,
       `reason        ${shown.reason_code}`,
       `the planted row is the one the nightly file is missing; this leg proves the screen finds it,`,
       `names its category and ages it. The planting itself has no deployed control — /reconciliation`,

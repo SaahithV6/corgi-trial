@@ -164,74 +164,52 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
   },
 
   business_registry: async () => {
-    const key = env.STRIPE_SECRET_KEY;
-    if (!key) return { liveness: "not_configured", detail: "STRIPE_SECRET_KEY absent", ms: 0 };
-
-    // Third attempt at this probe, and the first two were both wrong in the
-    // same direction — they reported LIVE for a slot that cannot function.
+    // This slot is GLEIF now, not Stripe Connect.
     //
-    //   GET /v1/balance   -> 200 with Connect disabled. Proves the credential.
-    //   GET /v1/accounts  -> 200 with Connect disabled, returning an empty
-    //                        list. READING connected accounts is allowed even
-    //                        when you have none and cannot make any.
-    //   POST /v1/accounts -> 400 "You can only create new accounts if you've
-    //                        signed up for Connect". This is the only call
-    //                        that tells the truth.
+    // It probed Connect because Connect was the plan, and it kept probing
+    // Connect after the registry leg moved — which is how /api/health came to
+    // report `simulated` for a leg that was answering live, the same drift as
+    // reporting `live` for one that was not, pointed the other way. The probe
+    // must ask the provider the APPLICATION uses.
     //
-    // A parameterless POST is safe to use as a health check: Stripe evaluates
-    // the Connect entitlement BEFORE it validates parameters, so with Connect
-    // disabled you get the Connect message and with Connect enabled you get a
-    // parameter-validation error. Measured both directions. Nothing is created
-    // in either case, which is what makes it usable from /api/health.
+    // GLEIF needs no credential at all, which is the whole reason it is here:
+    // every KYB option the brief lists (Middesk, Persona KYB, Sumsub KYB) is
+    // gated behind sales or a business email, and Stripe Connect — now
+    // enabled — retired Accounts v1 for new integrations. See DECISIONS 034.
+    //
+    // A known-good LEI is used rather than a name search: name matching on
+    // GLEIF is a fuzzy token match that returns tens of thousands of loose
+    // hits, so a lookup by identifier is the only call whose success means
+    // what it looks like. Apple's LEI is public reference data, not ours.
     const { res, ms, err } = await timed((signal) =>
-      fetch("https://api.stripe.com/v1/accounts", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}` },
+      fetch("https://api.gleif.org/api/v1/lei-records/HWUPKR0MPOU8FGXBT394", {
+        headers: { accept: "application/vnd.api+json" },
         signal,
       }),
     );
     if (!res) return { liveness: "unreachable", detail: err ?? "no response", ms };
-    if (res.status === 401 || res.status === 403) {
-      return { liveness: "unauthorised", detail: `credentials rejected (${res.status})`, ms };
+    if (!res.ok) {
+      return {
+        liveness: "unreachable",
+        detail: `GET /v1/lei-records/HWUPKR0MPOU8FGXBT394 -> ${res.status}`,
+        ms,
+      };
     }
     const body = (await res.json().catch(() => null)) as
-      | { error?: { message?: string } }
+      | { data?: { attributes?: { entity?: { legalName?: { name?: string } } } } }
       | null;
-    const msg = body?.error?.message ?? "";
-    if (msg.includes("signed up for Connect")) {
-      return {
-        liveness: "unauthorised",
-        detail:
-          "Connect not enabled. Every KYB option the brief lists (Middesk, Persona KYB, Sumsub KYB) is gated behind sales or business verification; registry runs simulated and is labelled so.",
-        ms,
-      };
+    const name = body?.data?.attributes?.entity?.legalName?.name ?? "";
+    if (name === "") {
+      return { liveness: "unreachable", detail: "200 with no legalName in the record", ms };
     }
-    // Entitled, but through an API this system does not speak.
-    //
-    // FOURTH bug in this probe, and the first one I caused myself. Enabling
-    // Connect in the dashboard changed Stripe's 400 from an entitlement
-    // refusal to a DEPRECATION notice: v1 account creation is gone and the
-    // replacement is POST /v2/core/accounts, which nothing here calls. The
-    // fallthrough below read "not the entitlement message" as "parameter
-    // validation, therefore live", and /api/health went to 7 of 7 with
-    // business_registry LIVE while the registry leg was still the simulator.
-    //
-    // That is the automatic fail of this trial, produced by a click. The
-    // lesson is the one the other three taught: an else-branch that means
-    // "success" is a claim, and a claim needs a reason. Entitlement is
-    // necessary and not sufficient — the question is whether THIS system can
-    // create a connected account, not whether the account is allowed to.
-    if (msg.includes("Accounts v1") || msg.includes("v2/core/accounts")) {
-      return {
-        liveness: "unauthorised",
-        detail:
-          "Connect is enabled, but Stripe has retired Accounts v1 for new integrations and POST /v2/core/accounts is not wired here, so no connected account can be created; the registry leg runs simulated and is labelled so.",
-        ms,
-      };
-    }
-    // A genuine parameter-validation error means the entitlement check passed
-    // AND the endpoint is one we can call. Only then is the capability real.
-    return { liveness: "live", detail: `Connect enabled, account creation entitled (POST /v1/accounts -> ${res.status} parameter validation)`, ms };
+    // LIVE, and the evidence says whose registry it is, because GLEIF is a
+    // SUBSTITUTION for the three providers the brief names and a reader must
+    // not mistake it for one of them.
+    return {
+      liveness: "live",
+      detail: `GET api.gleif.org /v1/lei-records/{lei} -> 200 (${name}); GLEIF is a substitution for Middesk / Persona KYB / Sumsub KYB, all gated`,
+      ms,
+    };
   },
 
   director_kyc: async () => {

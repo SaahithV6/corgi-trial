@@ -79,12 +79,18 @@ describe('degradeEvidence', () => {
     expect(degradeEvidence(['simulated'])).toBe('simulated');
   });
 
-  it('treats no legs at all as vacuously live, which is why callers check the count', () => {
-    // Documented rather than defended here: the "both legs required" rule lives
-    // in v_business_kyb (legs_on_file < 2 => pending) and in the factory, which
-    // always constructs two. This assertion pins the primitive's behaviour so
-    // nobody relies on it to enforce something it does not.
-    expect(degradeEvidence([])).toBe('live');
+  it('treats no legs at all as SIMULATED, because nobody vouched for it', () => {
+    // This assertion used to expect 'live', on the reasoning that an empty
+    // conjunction is vacuously true and that the "both legs required" rule
+    // lives elsewhere (v_business_kyb: legs_on_file < 2 => pending).
+    //
+    // Vacuously true is the wrong default for a claim about who verified
+    // something. A verification made of no legs rests on nobody's word, and the
+    // safe answer to "how good is this evidence" when there is no evidence is
+    // the weakest label, not the strongest. The old spelling meant a bug that
+    // dropped both legs would report the strongest possible evidence, which is
+    // the failure mode this whole module exists to prevent.
+    expect(degradeEvidence([])).toBe('simulated');
   });
 
   it('narrows untrusted evidence strings', () => {

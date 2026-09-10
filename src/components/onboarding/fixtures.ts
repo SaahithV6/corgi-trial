@@ -110,6 +110,7 @@ const EDGE_DIRECTOR_LEG: LegView = {
     { name: "provider_outcome", status: "passed", reasons: ["stripe_identity_verified"] },
   ],
   observedAt: "2026-09-10T18:05:00.000Z",
+  review: null,
 };
 
 /** The other half, which nobody outside this system performed. */
@@ -139,6 +140,7 @@ const EDGE_REGISTRY_LEG: LegView = {
     },
   ],
   observedAt: "2026-09-10T18:05:00.000Z",
+  review: null,
 };
 
 /** Build a row the same way the live source does: state in, predicate out. */
