@@ -114,6 +114,7 @@ function toLatePosting(p: LatePosting): LatePostingView {
     externalRef: p.externalRef,
     reversesEntryId: p.reversesEntryId,
     amountCents: toCents(p.signedCents),
+    affectsOpening: p.affectsOpening,
   };
 }
 

@@ -16,9 +16,10 @@ const LIVE = [
   { href: "/accounts", label: "Accounts" },
   { href: "/approvals", label: "Approvals" },
   { href: "/reconciliation", label: "Reconciliation" },
+  { href: "/statements", label: "Statements" },
 ] as const;
 
-const PLANNED = ["Payments", "Statements"] as const;
+const PLANNED = ["Payments"] as const;
 
 export function NavLinks() {
   const pathname = usePathname();

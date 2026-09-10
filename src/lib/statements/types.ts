@@ -163,15 +163,24 @@ export interface PublishResult {
 }
 
 /**
- * An entry that landed inside a closed period AFTER the statement was issued.
+ * An entry booked AFTER the statement was issued that changes what that day
+ * was worth.
  *
  * These are the rows that make "as corrected" differ from "as published", and
- * they are the answer to "why". `queries.draft.sql` §4e is this query.
+ * they are the answer to "why". `queries.draft.sql` §4e is the same idea,
+ * scoped to entries *inside* the period — which is not quite enough, and the
+ * integration suite proved it. A closing balance is `opening + Σ lines`, so an
+ * entry backdated to before the period and booked after the close moves the
+ * closing figure without ever appearing as a line. Listing only in-period
+ * entries left part of the difference unattributed, and the screen would have
+ * reported a gap it could not itemise. The predicate is therefore "value date
+ * at or before the period end", and `affectsOpening` says which side a row
+ * landed on.
  *
- * Closing a day does not forbid them. Late and corrected entries with a value
- * date inside a closed period are legal and expected (DESIGN §13); they land
- * above the watermark and show up in the next version. Forbidding them is how
- * ledgers end up with a "corrections" suspense account nobody can explain.
+ * Closing a day does not forbid any of them. Late and corrected entries with a
+ * value date inside a closed period are legal and expected (DESIGN §13); they
+ * land above the watermark and show up in the next version. Forbidding them is
+ * how ledgers end up with a "corrections" suspense account nobody can explain.
  */
 export interface LatePosting {
   readonly entryId: string;
@@ -186,6 +195,14 @@ export interface LatePosting {
   readonly correctionGroupId: string | null;
   /** This entry's effect on the account, positive = money in for the holder. */
   readonly signedCents: bigint;
+  /**
+   * Its value date is BEFORE the period, so it moved the opening balance.
+   *
+   * Same effect on the closing figure as an in-period line, and a completely
+   * different thing to read: "the day before was restated" rather than "this
+   * day was corrected".
+   */
+  readonly affectsOpening: boolean;
 }
 
 /**

@@ -27,6 +27,7 @@ function posting(over: Partial<LatePosting> = {}): LatePosting {
     reversesEntryId: null,
     correctionGroupId: null,
     signedCents: -1_000n,
+    affectsOpening: false,
     ...over,
   };
 }

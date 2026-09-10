@@ -256,6 +256,46 @@ export async function currentWatermark(conn: Sql): Promise<bigint> {
   return rows[0]?.watermark ?? 0n;
 }
 
+/**
+ * The LOWEST watermark that still produces the document's current content.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY A CORRECTED VERSION IS NOT PINNED TO `MAX(booking_seq)`
+ * ---------------------------------------------------------------------------
+ *
+ * The watermark is part of the content hash, so pinning a reissue to "the book
+ * right now" makes its hash a function of unrelated activity: a card clearing
+ * for a different customer moves the maximum, the hash changes, the "nothing
+ * has changed" check fails, and a new version is issued for a document that
+ * says exactly what the last one said. The version history then fills with
+ * noise, which is the failure the reissue path exists to avoid. This was found
+ * by the integration suite, not by reading the code: the demo day reached v3
+ * across two runs with no correction between them.
+ *
+ * The fix is to pin a version to the highest booking position that could
+ * AFFECT it — every line on this account with a value date at or before the
+ * period end, because those are exactly the rows the opening balance and the
+ * body are folded from. Nothing above that number can change the rendering, so
+ * rendering at it and rendering at `MAX(booking_seq)` produce identical
+ * documents, and this is the smaller of the two.
+ *
+ * Note the predicate is `<=` the period END, not "inside the period". An entry
+ * backdated to BEFORE the period and booked after the close changes the
+ * opening balance, and therefore the closing balance, without ever appearing
+ * as a line. Missing that was the second bug the suite caught.
+ */
+export async function contentWatermark(
+  args: { readonly accountId: string; readonly periodEnd: BusinessDate },
+  conn: Sql,
+): Promise<bigint> {
+  const rows = await conn<{ watermark: bigint }[]>`
+    SELECT COALESCE(MAX(l.booking_seq), 0)::bigint AS watermark
+      FROM journal_line l
+     WHERE l.account_id = ${args.accountId}::uuid
+       AND l.value_date <= ${args.periodEnd}::date`;
+  return rows[0]?.watermark ?? 0n;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Rendering                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -434,7 +474,7 @@ export async function listLatePostings(
       JOIN journal_entry e ON e.id = l.entry_id
       JOIN account       a ON a.id = l.account_id
      WHERE l.account_id  = ${args.accountId}::uuid
-       AND l.value_date BETWEEN ${args.periodStart}::date AND ${args.periodEnd}::date
+       AND l.value_date <= ${args.periodEnd}::date
        AND l.booking_seq > ${args.sinceWatermark}
        AND e.book = 'financial'
      GROUP BY e.id, e.value_date, e.booking_seq, e.booking_time, e.entry_type,
@@ -452,6 +492,10 @@ export async function listLatePostings(
     reversesEntryId: row.reverses_entry_id,
     correctionGroupId: row.correction_group_id,
     signedCents: row.signed_cents,
+    // Before the period, so it moved the OPENING balance rather than adding a
+    // line. Same effect on the closing figure; a completely different thing to
+    // read on a screen.
+    affectsOpening: row.value_date < args.periodStart,
   }));
 }
 

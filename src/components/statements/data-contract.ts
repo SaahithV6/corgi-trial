@@ -119,6 +119,13 @@ export type LatePostingView = {
   readonly externalRef: string | null;
   readonly reversesEntryId: string | null;
   readonly amountCents: Cents;
+  /**
+   * Its value date is before the period, so it moved the OPENING balance.
+   *
+   * Same effect on the closing figure, and a different sentence: "the day
+   * before was restated" rather than "this day was corrected".
+   */
+  readonly affectsOpening: boolean;
 };
 
 /**

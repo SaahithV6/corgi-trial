@@ -2,7 +2,7 @@ import type { Sql } from "@/lib/ledger/queries";
 
 import {
   UnknownAccountError,
-  currentWatermark,
+  contentWatermark,
   listStatementVersions,
   readBookDay,
   readStatementAccount,
@@ -292,12 +292,32 @@ export async function reissueStatement(
       throw new DayNotClosedError(account.entityId, input.businessDate);
     }
 
+    // The same lock `closeDay` and `ledger_append()` hold, and for the same
+    // reason: the watermark below is about to be FROZEN into a document, and a
+    // maximum read without this lock is not a high-water mark. A lower
+    // `booking_seq` could still be in flight and commit beneath a version that
+    // has already been published, and that version would stop reproducing.
+    await tx`SELECT pg_advisory_xact_lock(hashtext('ledger_append:' || ${account.entityId}::text))`;
+
+    // Pinned to the lowest watermark that yields this content, never to
+    // `MAX(booking_seq)`. See `contentWatermark` for why — in short, the
+    // watermark is in the hash, so pinning to the book's global maximum makes
+    // a customer's version history a function of other customers' activity.
+    // Floored at the close watermark so a corrected version is never pinned
+    // BELOW the document it corrects.
+    const minimal = await contentWatermark(
+      { accountId: input.accountId, periodEnd: input.businessDate },
+      scoped,
+    );
+    const watermark =
+      minimal > bookDay.bookingWatermark ? minimal : bookDay.bookingWatermark;
+
     return writeVersion(
       {
         accountId: input.accountId,
         periodStart: input.businessDate,
         periodEnd: input.businessDate,
-        bookingWatermark: await currentWatermark(scoped),
+        bookingWatermark: watermark,
         actorId: input.actorId,
         requireExisting: true,
       },
@@ -373,12 +393,13 @@ async function writeVersion(
     return { statement: atSameWatermark, created: false, document };
   }
 
-  // Issued at a different watermark but saying exactly the same thing: a new
-  // version would carry no information.
-  const identical = versions.find((v) => v.contentHash === hash);
-  if (identical !== undefined) {
-    return { statement: identical, created: false, document };
-  }
+  // There is deliberately no "same hash at a different watermark" fallback
+  // here, because there cannot be one: the watermark is part of the preimage,
+  // so two documents at different watermarks never share a hash. "Nothing has
+  // changed" is decided by the watermark not having moved, which is why
+  // `reissueStatement` computes the MINIMAL watermark for the content rather
+  // than the book's global maximum. That is the whole mechanism, and putting a
+  // hash comparison here as well would be a fallback that can never fire.
 
   const version = versions.reduce((max, v) => (v.version > max ? v.version : max), 0) + 1;
 
