@@ -739,3 +739,56 @@ the KYB research left open.
 Connect for a slot the brief never asked Stripe to fill, while the Stripe
 product the brief *does* list sat untested in the same account. Reading the
 spec again beat debugging the thing I had already built.
+
+---
+
+## 019 — 2026-09-10T17:45Z — "Returns are the interesting part", done for real
+
+Prompted to read the provider menu's *notes* rather than treating it as a list
+of slots to fill. The notes are instructions, and one of them was unactioned:
+Increase's row says "All simulate returns and delayed settlement. **Returns are
+the interesting part.**" We had a working key and had not done it.
+
+Full lifecycle against the live sandbox:
+
+    create   $742.19 outbound ACH credit   status=pending_submission
+    submit                                 status=submitted
+    settle                                 status=submitted  settled_at=16:13:05
+    return   R01 insufficient_fund         status=returned   settled_at=16:13:05
+                                                             return_at=16:13:21
+
+**Two findings, both confirmed rather than predicted.**
+
+1. **Increase has no `settled` status.** A settled transfer stays `submitted`
+   and merely grows `settlement.settled_at`. A consumer keying hold release off
+   `status` alone never releases one. The ACH research predicted this from the
+   docs; it is now measured, and the adapter's explicit promotion of
+   submitted+settled_at -> settled is justified by observation.
+
+2. **The return does not erase the settlement.** After the return,
+   `settlement.settled_at` is still populated and the original transfer id is
+   unchanged. The provider models a return as a second money movement, not as
+   an edit of the first.
+
+That second point is the whole reason `rail_event_semantics` distinguishes
+`new_event` from `correction` per provider event type. An ACH return is a
+**new event at a new value date**: the money really did leave on the settle
+date, and it really did come back on the return date, and a statement for the
+settle date should still show the payment. A card clearing reversal is the
+opposite — a correction at the *original* value date, because the clearing
+should never have posted at that amount.
+
+Getting that mapping backwards is the failure mode the ledger design named as
+its single biggest risk: one wrong row silently corrupts every past statement
+it touches while all five invariants keep passing, the hash chain verifies, and
+reconciliation stays clean. The provider's own behaviour now confirms which way
+the ACH row goes.
+
+**Still outstanding from the menu's notes, recorded so it is not lost:**
+- "Test cards, test clocks, **webhook replay from the dashboard**: use all of
+  it." The graders' published attack is "replay the payment webhook from the
+  provider dashboard. Twice is one." Our inbox dedupes at the database on
+  (provider, provider_event_id), but it has not yet been exercised by a real
+  dashboard replay — only by tests. That needs the webhook URLs registered.
+- "A stablecoin payout that actually confirms on a testnet is worth far more
+  than a slide about one." Blocked on gas, not on code.
