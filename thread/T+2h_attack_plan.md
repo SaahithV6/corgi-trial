@@ -1,4 +1,25 @@
-Subject: Work trial: Saahith Veeramaneni, Track 3
+Subject: Work trial: 4. Lithic cannot originate a force post, and I would rather say so now than
+   have it come up in the debrief. I enumerated every simulate path in their
+   OpenAPI spec: there is no force-post endpoint, and /simulate/clearing
+   requires a parent authorisation token, so it cannot produce an unmatched
+   clearing. What I am building instead: the matcher does not require an
+   authorisation to exist, so an unmatched clearing posts and opens a
+   reconciliation break; FINANCIAL_AUTHORIZATION exercises the same
+   no-hold-to-release path; and the scheme file simulator ships genuine
+   unmatched clearings. If you know a way to originate a real one in their
+   sandbox, I would rather hear it than ship the substitute.
+
+One thing already measured rather than assumed, since it shaped the schema.
+Lithic's transaction status flips to SETTLED while a partial hold is still
+outstanding — a 1000 authorisation cleared for 600 reports SETTLED with 400
+still held — and amounts.hold.amount is signed negative. Releasing a hold on
+status == SETTLED, which is the obvious implementation, frees money that is
+still authorised. So the hold is computed as a pure function of the event set,
+max(authorised - cleared, 0), which reproduces their arithmetic in every case I
+measured including over-capture, and agrees with the network precisely where
+their status field does not.
+
+Saahith Veeramaneni, Track 3
 
 Track 3, neobank. T0 17:13 PDT 9 Sep, freeze 17:13 PDT 11 Sep.
 
@@ -31,7 +52,8 @@ THE THREE USE CASES I OWN END TO END
 PROVIDER PICKS
 
   Card issuing        Lithic sandbox              LIVE
-  KYB / KYC           Persona sandbox             LIVE  (see question 1)
+  Director KYC        Persona sandbox             LIVE
+  Business registry   Stripe Connect test mode    LIVE  (see question 1)
   Open banking        Plaid sandbox               LIVE
   ACH rail            Increase sandbox            LIVE if self-serve, else a
                                                   labelled simulator behind the
@@ -39,7 +61,7 @@ PROVIDER PICKS
   Stablecoin          USDC on Base Sepolia,       LIVE
                       direct via viem
 
-That is three live slots against a minimum of two, plus a testnet USDC payout
+That is four live slots against a minimum of two, plus a testnet USDC payout
 that confirms on chain. Every rail — ACH, card, USDC — sits behind one adapter
 interface, because a rail is an adapter and not a schema. Everything is
 labelled live or simulated in the README and I will not blur that line.
@@ -65,14 +87,22 @@ than adding polish.
 
 QUESTIONS
 
-1. KYB self-serve. Persona's sandbox is the plan for business plus director
-   verification. If their KYB templates turn out to be gated behind a sales
-   conversation, my fallback is director KYC live through Persona or Stripe
-   Identity, with the business-registry check behind the same interface as a
-   clearly labelled simulator. Does that still satisfy the must-be-live
-   requirement on that slot, or would you rather I move the live slot
-   somewhere else and label KYB simulated in full? Proceeding on the fallback
-   until I hear otherwise.
+1. KYB, and what I found rather than what I assumed. Persona's business
+   verification is gated: their KYB-via-API guide's first step is to contact
+   their team for a transaction_type_id, and Business Verification is listed
+   Not Available on every self-serve tier. Rather than label the slot
+   simulated, I am splitting it. Persona sandbox does director KYC live, and
+   its perform-simulate-actions endpoint drives an inquiry to pending,
+   declined and needs_review while firing the real webhooks for each — so the
+   non-happy-path states you asked for are genuinely third-party rather than
+   rows I flipped. Stripe Connect test mode does the business-registry leg
+   live, with published magic EINs that force company-not-found and
+   pending-response-from-registry. A composite provider takes the stricter of
+   the two statuses and degrades its own evidence label to "simulated" if
+   either leg was, so the system cannot structurally claim third-party
+   verification over manufactured evidence. Does splitting the slot across two
+   live providers read as one satisfied integration to you, or two? I am
+   proceeding either way; it changes the README labelling, not the build.
 
 2. Uncleared credits and available balance. The brief says available equals
    ledger minus active holds "plus rules you must decide about uncleared
@@ -92,5 +122,26 @@ QUESTIONS
    this ledger, and if so, is the ledger meant to be the shared spine across
    both — which is the reading that would change how I model the account
    hierarchy this weekend?
+
+4. Lithic cannot originate a force post, and I would rather say so now than
+   have it come up in the debrief. I enumerated every simulate path in their
+   OpenAPI spec: there is no force-post endpoint, and /simulate/clearing
+   requires a parent authorisation token, so it cannot produce an unmatched
+   clearing. What I am building instead: the matcher does not require an
+   authorisation to exist, so an unmatched clearing posts and opens a
+   reconciliation break; FINANCIAL_AUTHORIZATION exercises the same
+   no-hold-to-release path; and the scheme file simulator ships genuine
+   unmatched clearings. If you know a way to originate a real one in their
+   sandbox, I would rather hear it than ship the substitute.
+
+One thing already measured rather than assumed, since it shaped the schema.
+Lithic's transaction status flips to SETTLED while a partial hold is still
+outstanding — a 1000 authorisation cleared for 600 reports SETTLED with 400
+still held — and amounts.hold.amount is signed negative. Releasing a hold on
+status == SETTLED, which is the obvious implementation, frees money that is
+still authorised. So the hold is computed as a pure function of the event set,
+max(authorised - cleared, 0), which reproduces their arithmetic in every case I
+measured including over-capture, and agrees with the network precisely where
+their status field does not.
 
 Saahith Veeramaneni
