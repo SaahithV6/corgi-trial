@@ -420,7 +420,7 @@ X01 X02 X03 X04 X05
 """.split()
 
 DOING = """
-LF10 LF11 Z16
+LF10 LF11
 """.split()
 
 # Landed since the last graph update.
@@ -433,7 +433,7 @@ O02 O03 O04 O08 O09 T01 T02 T03 T04 T05 T07
 W10 W14 E04 E06 E07 E09 E10 E11 E12 E13 K04
 X06 X07 X08 X09 X10 X11
 Y01 Y02 Y03 Y04 Y06 Y07 Y08
-LF07 Z01 Z02 Z03 Z04 Z05 Z06 Z07 Z11 Z12 Z13 Z14 Z15
+LF07 Z01 Z02 Z03 Z04 Z05 Z06 Z07 Z11 Z12 Z13 Z14 Z15 Z16 Z17 Z18 Z19 Z20 Z21
 """.split()
 
 # Discovered after the deploy went live.
@@ -527,6 +527,25 @@ def _iter6():
       "finish", 70, ["Z13","Z14"], "agent", ["docs/debrief"], "doing",
       risk="'code you cannot explain line by line' is an automatic fail")
 _iter6()
+
+# --- iteration 7: the console becomes usable ---
+def _iter7():
+    N("Z17", "/payments: requestPayment() reachable from the UI at last",
+      "finish", 120, [], "agent", ["app/ui/payments"], "done",
+      risk="a grader could approve seeded payments but not originate one; the loop never closed")
+    N("Z18", "/ rebuilt as a working console, 0/0/0 controls -> 3/6/8",
+      "finish", 110, [], "agent", ["app/ui/home"], "done",
+      risk="the front door was a brochure for a system whose claim is that it works")
+    N("Z19", "/accounts operable: issue a real card, drive the hold arithmetic live",
+      "finish", 140, [], "agent", ["app/ui/accounts"], "done",
+      risk="the most persuasive claim in the build could only be seen by running a test suite")
+    N("Z20", "MCP token in docs did not match production; grader could not use it",
+      "discovered", 30, [], "human", ["env"], "done",
+      risk="worse than unconfigured - non-negotiable 8 LOOKED like it worked")
+    N("Z21", "hold_closure_reversal missed by three readers, incl. the MCP gateway",
+      "discovered", 45, [], "claude", ["lib/ledger"], "done",
+      risk="an autonomous agent read a balance $60 higher than the customer's")
+_iter7()
 
 def apply_status():
     idx = {n["id"]: n for n in NODES}

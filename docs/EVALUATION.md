@@ -1219,3 +1219,76 @@ stays.
     Z08  five-minute video             HUMAN, largest unstarted
     Z09  evidence pack screenshots     HUMAN
     T+24h email                        HUMAN, updated with the payout hash
+
+---
+
+# ITERATION 7 — 2026-09-10T21:25Z
+
+Run against a direct challenge: the deployed page was a narrative, not a
+product. It was a fair hit and the measurement was worse than the accusation.
+
+## What a grader could actually DO, before and after
+
+    screen            before                    after
+    /                 0 forms  0 btn  0 inp     3 forms   6 btn    8 inp
+    /accounts         1 form   2 btn  1 inp     53 forms  54 btn   364 inp
+    /payments         did not exist             2 forms   3 btn    11 inp
+    /onboarding       5 / 14 / 21               unchanged
+    /approvals        51 / 152 / 301            unchanged
+
+The root page had **zero controls**, and `requestPayment()` was reachable from
+**no route at all** — a grader could approve payments the seed script wrote but
+could not originate one, so the loop never closed inside the product. The
+approvals queue was impressive and unreachable from anything a person did.
+
+Three agents in parallel with disjoint file ownership, no collisions.
+
+## The MCP surface was worse than unconfigured
+
+`docs/MCP.md` publishes a demo bearer token. Production refused it — the
+deployed grant hashed a *different* token that appeared nowhere a grader could
+find. Non-negotiable 8 therefore **looked** like it worked and did not, which
+is worse than an honest absence, and no test could catch it because the
+mismatch lived between a document and an environment variable.
+
+Now, against production:
+
+    Bearer corgi_mcp_demo_7f3a91c4e05b2d68a4c1
+    -> get_balance, list_transactions, list_recon_breaks, initiate_payment
+
+## The fifth duplicated predicate, found by a screen refusing to average
+
+Migration 0011 added `hold_closure_reversal`. In that same commit I wrote that
+the release predicate was duplicated across call sites and would have to learn
+the same thing — then taught two readers and missed **three**.
+
+The new `/accounts` console found it by rendering both figures side by side
+instead of picking one: `availableBalance()` said $310.00 of card holds,
+`listHoldRows()` said $250.00, for the same account, in the same library.
+Measured before and after: **25000 -> 31000, now equal.**
+
+    ledger/queries.ts   the console and the hold drill-down
+    mcp/gateway.ts      what an AUTONOMOUS AGENT is told the balance is — an
+                        agent read $60.00 more than the customer had, on holds
+                        that were still authorised
+    holds/store.ts      the expiry sweeper, which would otherwise leave a hold
+                        whose wrong closure was corrected with nothing that
+                        will ever close it
+
+**A predicate duplicated across N call sites is a bug with N-1 places to hide.**
+`v_hold_state` is already the single definition; the three should read it rather
+than restate it. Recorded rather than done — rewriting three hot queries hours
+before a freeze is how you break the thing you are trying to make honest.
+
+## Standing pattern, sixth instance
+
+Every guard failure in this project has had the same shape, and this one is the
+first found by a *product* surface rather than by a test: the screen was built
+to show the arithmetic rather than the answer, so a disagreement between two
+functions had nowhere to hide.
+
+## Ready now
+
+    Z08  five-minute video          HUMAN, still 0% started, largest remaining risk
+    Z09  evidence pack screenshots  HUMAN
+    T+24h email                     HUMAN, send-ready, deadline 17:13 today
