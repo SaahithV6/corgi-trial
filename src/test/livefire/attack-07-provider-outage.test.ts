@@ -794,7 +794,17 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // And it does NOT blank the console. Every figure below the banner is a
     // fold over rows that are already durable, and they stay true while a feed
     // is silent; hiding them would be the stronger, false claim.
-    expect(html).toContain("Deposit accounts");
+    //
+    // Asserted on STRUCTURE, not on copy. This line read
+    // `toContain("Deposit accounts")` and failed the whole attack the moment
+    // /accounts was rewritten and that heading was renamed — while the claim
+    // it exists to prove was still perfectly true. A live-fire assertion
+    // pinned to a sentence tests the sentence.
+    //
+    // `id="balances"` is the panel that renders ledger, holds and available;
+    // the money figures are the point, so the currency marker is checked too.
+    expect(html).toContain('id="balances"');
+    expect(html).toMatch(/\$[0-9][0-9,]*\.[0-9]{2}/);
 
     record(
       "evidence",
