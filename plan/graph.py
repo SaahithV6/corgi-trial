@@ -425,6 +425,23 @@ D03 D05 D13 D14 U04 U09 L15 L16 LF01 LF02 LF10
 
 # Discovered after the deploy went live.
 def _late():
+    # --- the remaining work, T+18h, ranked by what a grader sees first ---
+    N("Y01", "Root page still says 'ledger not yet wired' — FIRST thing a grader sees",
+      "finish", 45, [], "agent", ["app/ui/home"],
+      risk="the landing page contradicts a system with 467 journal entries")
+    N("Y02", "Health: webhook delivery freshness per provider", "finish", 50, [], "agent", ["app/api/health"],
+      risk="closes live-fire attack 7; data already in webhook_inbox.received_at")
+    N("Y03", "Provider-down banner on the account screen", "finish", 45, ["Y02"], "agent", ["app/ui/shell"],
+      risk="other half of attack 7")
+    N("Y04", "Statements: reproducible closed day, byte-identical on re-run", "finish", 70, [], "agent", ["lib/statements"],
+      risk="non-negotiable 5 and gauntlet 7; nothing writes to the statement table yet")
+    N("Y05", "Two demo role logins verified on prod", "finish", 30, [], "agent", ["ops/demo"],
+      risk="submission requirement: demo credentials for two roles")
+    N("Y06", "README: honest live-vs-simulated table, final", "finish", 40, [], "agent", ["docs/readme"],
+      risk="presenting simulated as live is the automatic fail")
+    N("Y07", "MCP_AGENT_TOKENS set in Vercel so the surface is reachable", "finish", 15, [], "human", ["env"],
+      risk="the whole MCP non-negotiable returns 401 to a grader today")
+    N("Y08", "Cut list, final, with week-two ordering", "finish", 30, [], "agent", ["docs/cutlist"])
     N("X06", "Probe by capability, not credential (3 iterations)", "discovered", 90, [], "claude", ["lib/probe"], "done",
       risk="four probes reported LIVE for capabilities that did not exist")
     N("X07", "jsonb double-encoding + parameter casts in the inbox", "discovered", 60, [], "claude", ["lib/verify/lithic"], "done",

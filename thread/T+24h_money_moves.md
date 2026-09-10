@@ -8,11 +8,27 @@ https://corgi-trial-psi.vercel.app
 No credentials. There is nothing to sign into: the ops console is open, and the
 screens are /accounts, /approvals, /reconciliation and /api/health.
 
-Start with the health page. Every label on it was earned by a live
-authenticated call, and the evidence string beside each slot names the call. If
-anything below disagrees with that page, believe the page.
+Money moves end to end on that URL. A real Lithic sandbox authorisation for
+$50.00, fired at the provider, delivered to production, signature verified,
+drained into the journal:
 
-It reports 5 live of 7 right now.
+  before   ledger 1,153,733   holds 15,000   available 1,138,733
+  after    ledger 1,153,733   holds 20,000   available 1,133,733
+
+The ledger balance does not move. Available drops by exactly 5,000 cents. That
+is your first published attack, passing on the deployed system rather than in a
+test file.
+
+Live state behind it, read a few minutes before sending: 53 webhook deliveries
+processed to done, 467 journal entries, 84 card authorisations, 84 live holds,
+trial balance 0, all five invariant views returning zero rows, and pnpm db:check
+at 14 of 14.
+
+INTEGRATIONS
+
+Start with /api/health. Every label on it was earned by a live authenticated
+call, and the evidence string beside each slot names the call. If anything below
+disagrees with that page, believe the page. It reports 5 live of 7.
 
   LIVE       card_issuing       Lithic sandbox      GET /v1/cards -> 200
   LIVE       card_webhooks      Lithic              verified deliveries on Neon
@@ -32,45 +48,61 @@ can read the chain and cannot move a cent. Its probe used to report LIVE off a
 balanceOf call, which is the same lie in a friendlier shape, and I count that as
 one of the worse bugs I have written this weekend.
 
-WHAT MOVED MONEY
+HOW THE MONEY ACTUALLY GETS THERE
 
-Increase, live sandbox, whole lifecycle: a $742.19 outbound ACH credit created,
-submitted, settled at 16:13:05, then returned R01 insufficient_fund at 16:13:21.
+The webhook route verifies the signature, writes the delivery to an inbox, and
+answers. It does not run a consumer inline, because Plaid fails a delivery that
+is not answered in ten seconds and then retries for twenty-four hours. So the
+drain is separate, and it has three triggers that fail in different ways.
+after() in the route is the fast path, and it is a nudge rather than the
+mechanism: an instance can be recycled and drop it, and something that usually
+runs is the worst kind of delivery. A Vercel cron is the guarantee. An
+authenticated POST to /api/drain is for the demo, so I can say "watch, I will
+drain it now" instead of waiting for a timer.
 
-Lithic, live sandbox: authorisations and clearings driven through the partial,
-repeat and over-capture cases, and a real card_transaction.updated delivery
-arrived at production, signature verified, stored on Neon. That delivery is also
-the best thing that happened today. The first attempt failed at 16:18:43 on a
-jsonb cast bug, the route returned 500, Lithic retried, and the event landed at
-16:23:23 once I had fixed it. Nothing was lost, which is the entire reason an
-inbox failure returns 500 instead of swallowing the delivery.
+One honest limit on that. This is a Hobby account and Hobby caps crons at once
+per day, so the backstop ticks daily rather than hourly; the deploy rejected my
+hourly schedule outright. What that costs is latency, not money. The inbox row
+is durable before any trigger runs, the dispatcher re-claims rows whose lease
+expired, and a row stays pending until a consumer succeeds. Worst case on this
+plan is a delivery waiting up to a day. The fix is one line of vercel.json and a
+paid plan, and it is on the cut list rather than smuggled into the README as
+though the guarantee were tighter than it is.
 
-WHERE I AM SHORT
+Eleven deliveries are currently PARKED, and I would rather you saw that than a
+clean zero. They are authorisations on Lithic cards that were created directly
+in the sandbox and never registered to a customer here. The consumer will not
+guess whose money to move, so it parks the event with the card token in the
+reason and stops. They are still in the inbox, still verified, and they post the
+moment a card is claimed.
 
-The gate asks for money moving end to end through a live rail on the deployed
-URL. I am one hop short of it. On production the webhook route verifies the
-signature and writes the event to the inbox, then stops. The drain that turns an
-inbox row into journal lines runs out of band and is not switched on yet, so no
-live provider event has become a journal line in production. The account screen
-still reads fixtures and the home page still says so.
+Deploys now build from the repo on git push. What is deployed is what is in the
+tree the graders can read.
 
-Both halves either side of that hop are real. Provider events reach the deployed
-system and are stored with signatures checked. Ledger posting, derived balances
-and the backdated correction all run against the same live Neon database in the
-integration suite, including reverse-and-rebook of $73.40 at Tuesday's value
-date with Tuesday-as-believed-on-Wednesday still answerable. 700 tests pass.
+LIVE FIRE
 
-Why it went this way, since the honest version is more useful than an excuse. I
-spent most of the first day making the live/simulated labels impossible to fake,
-and it cost more than I planned: four probes shipped green while the capability
-behind them was absent, and I only found each by measuring. A valid Stripe key
-answers 200 on /v1/balance with Connect switched off. It also answers 200 on GET
-/v1/accounts with Connect switched off, which is the fix I wrote for the first
-bug and congratulated myself for. Only a parameterless POST /v1/accounts fails
-when the entitlement is missing. Three attempts at one probe. I would make that
-trade again, because the alternative was a README claiming five live slots that
-nobody had watched fail, but it is where the hours went and the drain is what
-paid for it.
+Your eight published attacks, run against production: 6 PASS, 0 FAIL, 2 SKIP. A
+skip is not a pass, so here is what each one could not prove.
+
+Attack 2, over-capture. The money is right and the row is missing. On the fuel
+pump over-capture the hold is released, two memo entries net to zero, the ledger
+posts exactly 7340 in one financial entry, and available equals ledger minus
+holds minus uncleared with no clamp anywhere. What does not appear is a
+hold_closure row, so the attack's wording read strictly as "one closure row"
+cannot be demonstrated. The cause is a disagreement between two of my own
+artefacts: model.ts computes closed as is_final OR close/expiry OR A <= 0, and
+with A=5000 against C=7340 that is false, while DESIGN 8.3 says the same case
+closes. I wrote the one-line fix, watched three model tests fail, and reverted
+it. v_hold_drift holds the TypeScript model and the SQL view equal by invariant.
+Changing one side alone converts a prose mismatch into a live drift alarm, and
+an invariant reporting drift is indistinguishable from a ledger that has
+actually drifted. Week two is one migration moving both sides together with
+v_hold_drift proving they still agree.
+
+Attack 7, provider outage. /api/health reports credential and capability
+liveness and says nothing about webhook delivery freshness, so an outage is
+invisible to it. The data already exists in webhook_inbox.received_at. It is the
+highest-value thing left on the list.
 
 THREE THINGS I MEASURED THAT CHANGED THE BUILD
 
@@ -85,21 +117,23 @@ THREE THINGS I MEASURED THAT CHANGED THE BUILD
 
 2. Increase has no settled status at all. A settled transfer stays submitted and
    grows settlement.settled_at. Key a release off status and you release
-   nothing, ever. The more useful half came from the return: after R01, the
-   original transfer id is unchanged and settled_at is still populated. The
-   provider models a return as a second movement rather than an edit of the
-   first. That decides a row I could otherwise have got backwards for the whole
-   trial. An ACH return is a new event at a new value date, because the money
-   really did leave on the settle date and really did come back on the return
-   date, and a statement for the settle date must still show the payment. A card
-   clearing reversal is the opposite: a correction at the original value date,
-   because the clearing should never have posted at that amount. One wrong entry
-   there corrupts every past statement it touches while the invariants keep
-   passing and reconciliation stays clean.
+   nothing, ever. The more useful half came from the return. I ran a $742.19
+   outbound credit through create, submit, settle at 16:13:05 and R01
+   insufficient_fund at 16:13:21, and after the return the original transfer id
+   is unchanged and settled_at is still populated. The provider models a return
+   as a second movement rather than an edit of the first. That decides a row I
+   could otherwise have got backwards for the whole trial. An ACH return is a
+   new event at a new value date, because the money really did leave on the
+   settle date and really did come back on the return date, and a statement for
+   the settle date must still show the payment. A card clearing reversal is the
+   opposite: a correction at the original value date, because the clearing
+   should never have posted at that amount. One wrong entry there corrupts every
+   past statement it touches while the invariants keep passing and
+   reconciliation stays clean.
 
 3. The application connects as a restricted role that cannot express UPDATE on a
    money table. Not "does not", cannot. pnpm db:check attempts the forbidden
-   thing and asserts the refusal, and it ran a few minutes ago at 14 of 14:
+   thing and asserts the refusal:
 
      PASS  UPDATE journal_entry is refused - permission denied for table journal_entry
      PASS  DELETE FROM journal_entry is refused - permission denied for table journal_entry
@@ -112,8 +146,6 @@ THREE THINGS I MEASURED THAT CHANGED THE BUILD
 
 NOT DONE
 
-- No live provider event becomes a journal line on the deployed URL. Above.
-- Account, approvals and reconciliation screens read fixtures in production.
 - The USDC payout is blocked on testnet gas, not on code.
 - Persona is not signed up. Director KYC is live via Stripe Identity instead,
   which cannot script a declined or needs_review outcome, so the non-happy-path
@@ -122,52 +154,46 @@ NOT DONE
   it by replaying stored bytes, saw the row count hold at 1, and nearly wrote it
   up as evidence. It was not. Both replays returned 401 on corrupted stored
   headers, so the count held because the requests never reached the inbox.
+- The two live-fire skips above.
 
 REMAINING HOURS, IN ORDER
 
-1. Drain the inbox into the journal, so a real Lithic authorisation moves the
-   available balance on the deployed URL. This is the miss above and it is
-   first.
-2. Account screen off fixtures. state=default becomes the live query; the other
-   four states keep working, because they answer the same interface.
-3. Hold state machine end to end: partial capture, over-capture, a settlement
-   that arrives before its own authorisation, exactly-once release.
-4. Approvals and reconciliation on live data, with the initiator-cannot-approve
+1. Delivery freshness on /api/health and a stale-feed state on the account
+   screen. Attack 7, and the only one of the eight with no coverage at all.
+2. Reconciliation and approvals on live data, with the initiator-cannot-approve
    rule enforced in the database rather than in a handler.
-5. The seven published live-fire attacks as automated tests, run against
-   production before you run them.
-6. Gas, then a USDC payout that confirms on chain.
+3. Statements reproducible for a closed day, byte-identical on re-run.
+4. Gas, then a USDC payout that confirms on chain.
 
-Every number here came from /api/health or from a run I can replay in front of
-you.
+Every number here came from /api/health, from the deployed database, or from a
+run I can replay in front of you.
 
 Saahith
 ```
 
 ## What I left out and why
 
-- The T+2h email promised six live slots including USDC and Stripe Connect for
+- The T+2h email promised six live slots, including USDC and Stripe Connect for
   the registry leg. Rather than re-litigating that plan line by line, the email
   states today's labels and lets /api/health be the diff. The two slots that
   moved are named as simulated in the same table as the live ones.
-- Test-count trivia, table counts, commit counts and the decision-log length are
-  all out. They measure typing, not whether money moved, and this checkpoint is
-  graded on the latter. The one count kept is 700 passing tests, because it sits
-  under the claim about the ledger running against a live database.
-- **Fix /api/health before sending; it currently contradicts itself.** The
-  authoritative `integrations.slots[]` array says `business_registry:
-  simulated`, and the count is 5 of 7. But `integrations.webhooks[]` carries a
-  nested copy of the slot list, and in it the Stripe entry reports
-  `business_registry: live`, because that nested status is derived from whether
-  the webhook credentials are present rather than from the slot probe. Anyone
-  parsing the JSON finds a simulated slot labelled live inside the page this
-  email tells them to trust. That is the automatic-fail shape, in the one
-  endpoint whose job is to be believed. Fix it before the email goes, or the
-  labelling in the email does not match the page.
-- **Re-check before sending.** The "one hop short" section is true as measured
-  at T+16h. If the inbox drain lands before Thu 17:13 PDT, that section and item
-  1 of the plan both have to be rewritten, and /api/health has to be re-read for
-  the live count, which may become 6 of 7 if the testnet wallet gets gas.
+- The committed-credentials incident (DECISIONS 023) is out. Both values are
+  dead, rotated or expired, and the tree is scrubbed. The history purge needs a
+  force push that has not happened yet, and a checkpoint email is the wrong
+  place to raise it: it belongs in a direct note to the graders once the history
+  is actually clean, not buried in a status update.
+- Counts move. 53 done, 467 entries and 84 holds were read from the deployed
+  database at 17:40Z. Re-read them before sending, along with /api/health, and
+  update the two lines that quote them. The parked count of 11 will also change
+  if any of those cards get claimed.
+- Test-count trivia, table counts and commit counts are all out. They measure
+  typing, not whether money moved.
+- `/api/health` no longer contradicts itself. The nested
+  `integrations.webhooks[].slots[]` copy used to report `business_registry:
+  live` off credential presence while the authoritative table said `simulated`;
+  it now agrees, and `consistency.test.ts` asserts that no nested slot may
+  disagree with the probe verdict. Verified against production before this
+  draft, so the labelling in the email matches the page exactly.
 
 ## Style checklist used
 
@@ -175,7 +201,8 @@ Applied to the draft above, in order of how much each one cut.
 
 1. **Vary sentence length hard.** AI prose runs a metronome at roughly 20-25
    words per sentence where human writing sits at 14-18. Human technical writing
-   drops to four words and back. ("Three attempts at one probe." "Above.")
+   drops to four words and back. ("No credentials." "Counts move." "Not 'does
+   not', cannot.")
 2. **No triads.** The three-parallel-item rhythm is the single loudest tell.
    Where a list wanted three parallel clauses, it got two or four, or became a
    numbered list of unequal length.
@@ -187,25 +214,26 @@ Applied to the draft above, in order of how much each one cut.
    it was announcing itself.
 5. **No summary paragraph.** Nothing restates the paragraph before it, and there
    is no "in conclusion", "ultimately" or "at the end of the day".
-6. **No upbeat forward-looking closer.** The email ends on where the numbers
-   came from, not on enthusiasm. No "excited to", no "happy to answer questions".
+6. **No upbeat closer, and no victory lap.** The email ends on where the numbers
+   came from. The two skips and the two simulated slots sit in the body rather
+   than in a footnote, and the section that reports 6 PASS says "a skip is not a
+   pass" before it explains either one.
 7. **Ban the vocabulary.** leverage, utilise, robust, seamless, comprehensive,
    delve, navigate, landscape, realm, pivotal, unlock, empower, foster, myriad.
    None appear.
 8. **Cut empty intensifiers.** incredibly, truly, extremely, really, simply,
-   just, genuinely, "it is crucial that". Replaced by a number or deleted.
+   just, genuinely, "it is crucial that". Deleted, or replaced by a number.
 9. **Strip hedges.** No stacked can/may/might/could. Claims are stated flat and
-   attributed to a measurement, or they are labelled as unproven and named as
-   such.
+   attributed to a measurement, or they are labelled unproven and named as such.
 10. **Avoid the named constructions.** "It's not just X, it's Y", "X, not Y" as
     a rhetorical reframe, "That's where...", "Whether you're X or Y", "From X to
     Y". One deliberate exception survives: "Not 'does not', cannot" — it is a
-    precise distinction about database privileges, not a rhetorical flourish.
+    precise distinction about database privileges, not a flourish.
 11. **Concrete nouns and real numbers over adjectives.** Every claim carries a
-    figure, an endpoint or a timestamp: 5 of 7, $742.19, 16:13:21, hold -400,
-    390000000000 wei, 14 of 14.
-12. **One specific thing only the author could write.** The 16:18:43 failure and
-    the 16:23:23 recovery, and the probe I congratulated myself for.
+    figure, an endpoint or a timestamp: 5 of 7, available 1,133,733, 84 holds,
+    hold -400, 16:13:21, 390000000000 wei, 14 of 14.
+12. **One specific thing only the author could write.** The one-line fix that
+    was written and reverted, and the eleven parked cards.
 
 ### Sources read
 
