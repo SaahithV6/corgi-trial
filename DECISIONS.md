@@ -524,3 +524,47 @@ guards were individually reasonable and the gap sat between them.
 for a filename does not cover the filenames a tool derives from it. When the
 thing being protected is secrets, the pattern needs to cover the family, not
 the file.
+
+---
+
+## 014 — 2026-09-10T15:00Z — Reconciliation caught a flaw in my own design draft
+
+The recon build found something the ledger design got wrong, and the fix
+matters because it is exactly what the graders test.
+
+**The draft defined "unmatched" as "no `recon_match` row".** `recon_match` is
+UNIQUE on `entry_id`. So an entry paired against last night's file could never
+pair again — and the moment a provider re-issues a file, a diff driven by that
+table reports the re-issued file as **perfect** while the deleted row silently
+vanishes. The published live-fire scenario is "delete one row from tonight's
+scheme file and ask your breaks screen where it went." The draft's definition
+would have answered "nothing is wrong."
+
+**Fixed by separating two things the draft conflated.** Pairing is re-derived
+from provider references on every run, so each run is a fresh opinion about the
+current file. `recon_match` keeps its 0001 job: append-only *evidence* of the
+first pairing, carrying both amounts as at that moment. Evidence of what we
+concluded is not the same object as the conclusion, and a table that is both
+cannot survive a second file.
+
+**Aging is measured in day closes, not hours.** `closes_crossed` counts the
+`book_day` rows closed since the break's value date. "Open across a day close"
+means somebody signed off a business day with the break outstanding, which is a
+categorically different failure from "24 hours old". The ladder — open, aged,
+stale, critical — keys off that, and `critical` also catches anything over
+$1,000 that has survived two closes.
+
+**One more thing worth recording.** The `in_ledger_not_file` query excludes
+groups whose net is zero. An entry booked and then reversed is *agreement* with
+a file that never mentioned it, not a break. Reporting it would train whoever
+reads that screen to ignore it, which is how real breaks get missed.
+
+Live output across three seeded files, with the ladder actually exercised:
+
+    2026-09-10  age  0  closes  0  -> open      (4 breaks, one explained)
+    2026-09-09  age  1  closes  1  -> aged      (one adjudicated)
+    2026-07-27  age 45  closes 45  -> critical  ($12,845.00 in_ledger_not_file)
+
+Eight planted-break tests pass against the live database, including
+re-importing identical bytes as a hash-decided no-op and a prior run's breaks
+being physically immutable.

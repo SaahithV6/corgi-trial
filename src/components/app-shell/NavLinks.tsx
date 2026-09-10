@@ -12,9 +12,13 @@ import { FOCUS_RING } from "../ui/primitives";
  * rendered as plainly disabled text — a nav item that 404s is worse than an
  * honest gap, and typed routes would not let it compile anyway.
  */
-const LIVE = [{ href: "/accounts", label: "Accounts" }] as const;
+const LIVE = [
+  { href: "/accounts", label: "Accounts" },
+  { href: "/approvals", label: "Approvals" },
+  { href: "/reconciliation", label: "Reconciliation" },
+] as const;
 
-const PLANNED = ["Payments", "Approvals", "Reconciliation", "Statements"] as const;
+const PLANNED = ["Payments", "Statements"] as const;
 
 export function NavLinks() {
   const pathname = usePathname();

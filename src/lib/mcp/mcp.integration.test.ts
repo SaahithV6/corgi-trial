@@ -1,0 +1,419 @@
+/**
+ * The MCP surface against the REAL Neon database.
+ *
+ * Gated on RUN_DB_TESTS=1 so CI, which holds no credentials on purpose, skips
+ * rather than fails. Run locally with:
+ *   set -a; . ./.env; set +a; RUN_DB_TESTS=1 pnpm test
+ *
+ * What is being proved here is not that the code compiles — `server.test.ts`
+ * covers the protocol against an in-memory gateway. It is:
+ *
+ *   1. that the SQL in `gateway.ts` runs, against this schema, with these
+ *      column names;
+ *   2. that the tenant predicate holds against real rows;
+ *   3. and the one that matters most: that a payment queued by the agent
+ *      CANNOT BE APPROVED BY THAT AGENT, because the database refuses. The
+ *      test attempts the approval for real and asserts SQLSTATE 42501. A
+ *      claim of maker-checker that has never been attempted is a claim.
+ *
+ * These tests write real rows. `payment_instruction` is append-only and
+ * `corgi_app` holds no DELETE on it, so the rows stay — which is correct: they
+ * are the evidence. Idempotency keys carry a run stamp so a re-run raises new
+ * instructions instead of colliding.
+ */
+
+import { beforeAll, describe, expect, it } from "vitest";
+
+import { MemoryAuditSink } from "./audit";
+import { parseTokenConfig } from "./auth";
+import { createMcpServer, type McpServer } from "./server";
+// Type-only, so this does NOT pull the Postgres handle in at module load; the
+// value is imported dynamically inside beforeAll.
+import type { sql as SqlHandle } from "@/lib/ledger/db";
+import type { Gateway } from "./types";
+
+const RUN = process.env["RUN_DB_TESTS"] === "1";
+const d = RUN ? describe : describe.skip;
+
+const TOKEN_A = "corgi_mcp_integration_ridgeline_0001";
+const TOKEN_B = "corgi_mcp_integration_kettle_000002";
+const URL = "http://localhost:3000/api/mcp";
+
+d("the MCP surface, against the live database", () => {
+  let sql: typeof SqlHandle;
+  let gateway: Gateway;
+  let server: McpServer;
+  let audit: MemoryAuditSink;
+
+  let businessA: string;
+  let businessB: string;
+  let agentActorId: string;
+  let humanApproverId: string;
+  let run: number;
+
+  async function post(body: unknown, token: string | null = TOKEN_A): Promise<Response> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (token !== null) headers["authorization"] = `Bearer ${token}`;
+    return server.handlePost(
+      new Request(URL, { method: "POST", headers, body: JSON.stringify(body) }),
+    );
+  }
+
+  let nextId = 0;
+  async function call(
+    tool: string,
+    args: Record<string, unknown>,
+    token: string = TOKEN_A,
+  ): Promise<Record<string, unknown>> {
+    nextId += 1;
+    const response = await post(
+      { jsonrpc: "2.0", id: nextId, method: "tools/call", params: { name: tool, arguments: args } },
+      token,
+    );
+    return (await response.json()) as Record<string, unknown>;
+  }
+
+  function structured(body: Record<string, unknown>): Record<string, unknown> {
+    const result = body["result"] as Record<string, unknown> | undefined;
+    if (result === undefined) {
+      throw new Error(`expected a result, got ${JSON.stringify(body["error"])}`);
+    }
+    return result["structuredContent"] as Record<string, unknown>;
+  }
+
+  beforeAll(async () => {
+    // Imported dynamically so a missing APP_DATABASE_URL does not blow up at
+    // module load when these tests are skipped.
+    ({ sql } = await import("@/lib/ledger/db"));
+    const { liveGateway } = await import("./gateway");
+
+    // A is a business with a real deposit leaf; B is any OTHER business. B is
+    // deliberately allowed to be one with no accounts yet — that is the
+    // sharper scoping test, because a token scoped to B must then find that
+    // A's account does not exist rather than finding it and being refused.
+    const [withAccounts] = await sql<{ id: string }[]>`
+      SELECT b.id
+        FROM business b
+        JOIN account a ON a.business_id = b.id AND a.code = '2100'
+       ORDER BY b.legal_name
+       LIMIT 1`;
+    if (withAccounts === undefined) {
+      throw new Error("seed first: node scripts/seed.mjs (need a business with a 2100 leaf)");
+    }
+    businessA = withAccounts.id;
+
+    const [other] = await sql<{ id: string }[]>`
+      SELECT id FROM business WHERE id <> ${businessA}::uuid ORDER BY legal_name LIMIT 1`;
+    if (other === undefined) throw new Error("seed first: need a second business");
+    businessB = other.id;
+
+    const [agent] = await sql<{ id: string }[]>`
+      SELECT id FROM actor WHERE kind = 'agent' ORDER BY display_name LIMIT 1`;
+    const [human] = await sql<{ id: string }[]>`
+      SELECT id FROM actor WHERE kind = 'human' AND can_approve = true ORDER BY display_name LIMIT 1`;
+    if (agent === undefined || human === undefined) throw new Error("seed first");
+    agentActorId = agent.id;
+    humanApproverId = human.id;
+
+    gateway = liveGateway();
+    audit = new MemoryAuditSink();
+    server = createMcpServer({
+      gateway,
+      config: parseTokenConfig(
+        JSON.stringify([
+          { label: "it-a", token: TOKEN_A, actorId: agentActorId, businessId: businessA },
+          { label: "it-b", token: TOKEN_B, actorId: agentActorId, businessId: businessB },
+        ]),
+      ),
+      audit,
+    });
+
+    run = Date.now();
+  });
+
+  // -------------------------------------------------------------------
+  // Reads
+  // -------------------------------------------------------------------
+
+  it("resolves the seeded agent actor and refuses to speak as a human", async () => {
+    const actor = await gateway.resolveActor(agentActorId, businessA);
+    expect(actor?.kind).toBe("agent");
+    expect(actor?.canApprove).toBe(false);
+
+    const impostor = createMcpServer({
+      gateway,
+      config: parseTokenConfig(
+        JSON.stringify([
+          { label: "impostor", token: TOKEN_A, actorId: humanApproverId, businessId: businessA },
+        ]),
+      ),
+      audit: new MemoryAuditSink(),
+    });
+    const response = await impostor.handlePost(
+      new Request(URL, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN_A}` },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+      }),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("runs get_balance against the real ledger", async () => {
+    const body = await call("get_balance", {});
+    const data = structured(body);
+
+    expect((data["business"] as Record<string, unknown>)["id"]).toBe(businessA);
+    expect((data["account"] as Record<string, unknown>)["code"]).toBe("2100");
+
+    const ledger = BigInt(String((data["ledger_balance"] as Record<string, unknown>)["cents"]));
+    const available = BigInt(String((data["available_balance"] as Record<string, unknown>)["cents"]));
+    const items = (data["difference"] as { items: { amount: { cents: string } }[] }).items;
+    const encumbered = items.reduce((acc, i) => acc + BigInt(i.amount.cents), 0n);
+
+    // available = ledger - holds - uncleared, exactly, with no rounding.
+    expect(available).toBe(ledger + encumbered);
+  });
+
+  it("answers the bitemporal question on both axes", async () => {
+    // "Everything we know now" and "what we believed at the epoch" are
+    // different questions; the second must include nothing.
+    const now = await call("get_balance", {});
+    const believedAtDawnOfTime = await call("get_balance", {
+      as_of_value_date: "2026-12-31",
+      as_of_booking_time: "2000-01-01T00:00:00Z",
+    });
+
+    expect((structured(now)["as_of"] as Record<string, unknown>)["basis"]).toBe("current");
+    const past = structured(believedAtDawnOfTime);
+    expect((past["as_of"] as Record<string, unknown>)["basis"]).toBe("as_believed");
+    expect((past["as_of"] as Record<string, unknown>)["booking_watermark"]).toBe("0");
+    expect((past["ledger_balance"] as Record<string, unknown>)["cents"]).toBe("0");
+  });
+
+  it("runs list_transactions and keeps the two date columns apart", async () => {
+    const body = await call("list_transactions", { limit: 25 });
+    const data = structured(body);
+    const rows = data["transactions"] as Record<string, unknown>[];
+
+    for (const row of rows) {
+      expect(typeof row["value_date"]).toBe("string");
+      expect(typeof row["booking_date"]).toBe("string");
+      expect(typeof row["booking_seq"]).toBe("string");
+      // Nothing can be learned before it happened.
+      expect(String(row["booking_date"]) >= String(row["value_date"])).toBe(true);
+    }
+  });
+
+  // 20s: `v_recon_break` recomputes the whole diff, and this branch is
+  // cross-region from here. Measured at ~0.2-0.7s warm; the margin is for a
+  // Neon compute that has scaled to zero.
+  it("runs list_recon_breaks against the reconciliation engine's own view", { timeout: 20_000 }, async () => {
+    const body = await call("list_recon_breaks", { limit: 25 });
+    const data = structured(body);
+    expect(Array.isArray(data["open_breaks"])).toBe(true);
+    expect(typeof data["unattributable_open_breaks"]).toBe("number");
+    for (const row of data["open_breaks"] as Record<string, unknown>[]) {
+      expect(["in_file_not_ledger", "in_ledger_not_file", "amount_mismatch"]).toContain(
+        row["category"],
+      );
+      expect(typeof row["age_days"]).toBe("number");
+    }
+  });
+
+  it("keeps two tenants apart on real rows", async () => {
+    const a = structured(await call("get_balance", {}, TOKEN_A));
+    expect((a["business"] as Record<string, unknown>)["id"]).toBe(businessA);
+    const accountName = String((a["account"] as Record<string, unknown>)["name"]);
+
+    // The same call, same arguments, a different token. There is no argument
+    // that could carry business A's account across; the resolution happens
+    // inside the grant's business, so from B the account is simply absent.
+    const b = await call("get_balance", {}, TOKEN_B);
+    const result = b["result"] as Record<string, unknown>;
+    const bData = result["structuredContent"] as Record<string, unknown>;
+
+    if (result["isError"] === true) {
+      expect(String(bData["message"])).toMatch(/no open account with code 2100/);
+    } else {
+      expect((bData["business"] as Record<string, unknown>)["id"]).toBe(businessB);
+      expect((bData["account"] as Record<string, unknown>)["name"]).not.toBe(accountName);
+    }
+
+    // Whichever branch ran, business A's figures were never in B's answer.
+    expect(JSON.stringify(bData)).not.toContain(accountName);
+  });
+
+  it("cannot address a house account from a tenant token", async () => {
+    // 1110 is the FBO settlement account: every customer's money, pooled.
+    const body = await call("get_balance", { account_code: "1110" });
+    const result = body["result"] as Record<string, unknown>;
+    expect(result["isError"]).toBe(true);
+  });
+
+  // -------------------------------------------------------------------
+  // The write, and the refusal that makes it safe
+  // -------------------------------------------------------------------
+
+  it("queues a real payment instruction that no money depends on", async () => {
+    const key = `it-queue-${run}`;
+    const body = await call("initiate_payment", {
+      rail: "ach",
+      amount_cents: "1500",
+      destination: {
+        type: "ach",
+        holder_name: "Northwind Components LLC",
+        routing_number: "021000021",
+        account_number_last4: "6789",
+        account_type: "checking",
+      },
+      reason: `Integration test ${run}: proving the queue path end to end`,
+      idempotency_key: key,
+    });
+
+    const data = structured(body);
+    expect(data["status"]).toBe("queued_for_human_approval");
+    expect(data["money_moved"]).toBe(false);
+    expect(data["state"]).toBe("requested");
+
+    const instructionId = String(data["instruction_id"]);
+
+    // The row exists, is attributed to the AGENT, and cites a policy.
+    const [row] = await sql<
+      { requested_by: string; kind: string; can_approve: boolean; policy_id: string }[]
+    >`
+      SELECT pi.requested_by, a.kind::text AS kind, a.can_approve, pi.policy_id
+        FROM payment_instruction pi
+        JOIN actor a ON a.id = pi.requested_by
+       WHERE pi.id = ${instructionId}::uuid`;
+    expect(row?.requested_by).toBe(agentActorId);
+    expect(row?.kind).toBe("agent");
+    expect(row?.can_approve).toBe(false);
+    expect(row?.policy_id).toBeTruthy();
+
+    // A `requested` event exists and nothing else does.
+    const events = await sql<{ kind: string }[]>`
+      SELECT kind::text AS kind FROM payment_instruction_event
+       WHERE instruction_id = ${instructionId}::uuid`;
+    expect(events.map((e) => e.kind)).toEqual(["requested"]);
+
+    // AND NO MONEY MOVED. No journal entry references this instruction by any
+    // route: not through an event, not through the external ref.
+    const [posted] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count
+        FROM payment_instruction_event
+       WHERE instruction_id = ${instructionId}::uuid
+         AND entry_id IS NOT NULL`;
+    expect(posted?.count).toBe(0);
+  });
+
+  it("REFUSES to let the agent approve what the agent queued", async () => {
+    const key = `it-selfapprove-${run}`;
+    const body = await call("initiate_payment", {
+      rail: "ach",
+      amount_cents: "1500",
+      destination: {
+        type: "ach",
+        holder_name: "Northwind Components LLC",
+        routing_number: "021000021",
+        account_number_last4: "6789",
+        account_type: "checking",
+      },
+      reason: `Integration test ${run}: attempting self-approval, which must fail`,
+      idempotency_key: key,
+    });
+    const data = structured(body);
+    const instructionId = String(data["instruction_id"]);
+    const contentHash = String(data["content_hash"]);
+
+    // Go around the application entirely and try to write the approval
+    // directly, as the agent, citing the correct hash. This is the strongest
+    // form of the attack: no TypeScript is in the way.
+    let raised: unknown = null;
+    try {
+      await sql`
+        INSERT INTO payment_instruction_event
+          (instruction_id, kind, actor_id, approved_content_hash, value_date)
+        VALUES
+          (${instructionId}::uuid, 'approved', ${agentActorId}::uuid,
+           decode(${contentHash}, 'hex'), CURRENT_DATE)`;
+    } catch (error) {
+      raised = error;
+    }
+
+    expect(raised, "the database MUST refuse an approval by an agent").not.toBeNull();
+    const code = (raised as { code?: string }).code;
+    // 42501 insufficient_privilege, raised by assert_maker_checker().
+    expect(code).toBe("42501");
+    expect(String((raised as Error).message)).toMatch(/not an approver|maker-checker/i);
+
+    // And the row really is not there.
+    const approvals = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM payment_instruction_event
+       WHERE instruction_id = ${instructionId}::uuid AND kind = 'approved'`;
+    expect(approvals[0]?.count).toBe(0);
+  });
+
+  it("REFUSES an approving agent as a row at all", async () => {
+    // The constraint underneath everything: `actor_only_humans_approve`.
+    // Nothing above this line would matter if this row were storable.
+    let raised: unknown = null;
+    try {
+      await sql.begin(async (tx) => {
+        await tx`
+          INSERT INTO actor (kind, display_name, can_approve)
+          VALUES ('agent', 'impossible approver', true)`;
+      });
+    } catch (error) {
+      raised = error;
+    }
+    expect(raised).not.toBeNull();
+    expect(String((raised as Error).message)).toMatch(
+      /actor_only_humans_approve|violates check constraint|permission denied/i,
+    );
+  });
+
+  it("replays an idempotency key to the same instruction", async () => {
+    const key = `it-replay-${run}`;
+    const args = {
+      rail: "ach",
+      amount_cents: "1200",
+      destination: {
+        type: "ach",
+        holder_name: "Northwind Components LLC",
+        routing_number: "021000021",
+        account_number_last4: "6789",
+        account_type: "checking",
+      },
+      reason: `Integration test ${run}: a retry must not queue a second payment`,
+      idempotency_key: key,
+    };
+
+    const first = structured(await call("initiate_payment", args));
+    const second = structured(await call("initiate_payment", args));
+
+    expect(second["instruction_id"]).toBe(first["instruction_id"]);
+    expect(second["replayed"]).toBe(true);
+    expect(first["content_hash"]).toBe(second["content_hash"]);
+
+    const [count] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM payment_instruction
+       WHERE idempotency_key LIKE ${`%${key}`}`;
+    expect(count?.count).toBe(1);
+  });
+
+  it("audits every call it just made, with actor and outcome", async () => {
+    const writes = audit.records.filter(
+      (r) => r.tool === "initiate_payment" && r.outcome === "ok",
+    );
+    expect(writes.length).toBeGreaterThan(0);
+    for (const record of writes) {
+      expect(record.actorId).toBe(agentActorId);
+      expect([businessA, businessB]).toContain(record.businessId);
+      expect(record.argumentsRedacted).not.toBeNull();
+    }
+    const refusals = audit.records.filter((r) => r.outcome !== "ok");
+    // The house-account call above was refused and must appear.
+    expect(refusals.some((r) => r.errorCode === "ACCOUNT_NOT_FOUND")).toBe(true);
+  });
+});
