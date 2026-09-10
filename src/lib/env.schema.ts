@@ -1,101 +1,165 @@
-/**
- * Environment schema and parser.
- *
- * This module is deliberately free of `server-only` so it can be unit tested
- * and so the parser can be exercised without a live process environment. It
- * holds no values. `src/lib/env.ts` is the only module that reads
- * `process.env`, and that one is server-only.
- */
 import { z } from "zod";
 
-const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-const EVM_PRIVATE_KEY = /^0x[0-9a-fA-F]{64}$/;
+/**
+ * Environment contract.
+ *
+ * The rule that shapes this file: a MISSING PROVIDER KEY IS NOT AN ERROR. It
+ * selects that slot's simulator, and the selection is reported honestly by
+ * /api/health and in the README's live-vs-simulated table.
+ *
+ * The first version of this module required all fifteen keys and threw at
+ * import. That is correct for a system whose integrations are all mandatory,
+ * and wrong for this one: it meant the deployed app could not boot until every
+ * provider had been signed up for, which inverts the build order the brief
+ * actually asks for ("wire the live rail before lunch on day one"). It also
+ * made the honest-labelling requirement unimplementable, because a slot can
+ * only be labelled `simulated` if the system is allowed to run without its key.
+ *
+ * So: exactly one variable is required to boot. Everything else degrades, and
+ * the degradation is visible rather than silent.
+ */
 
-/** A non-empty, whitespace-trimmed secret. */
-const secret = (label: string) =>
+const EVM_PRIVATE_KEY = /^0x[0-9a-fA-F]{64}$/;
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+const pg = (label: string) =>
   z
     .string({ error: `${label} is required` })
-    .trim()
-    .min(1, { error: `${label} must not be empty` });
+    .min(1, { error: `${label} must not be empty` })
+    .refine((v) => v.startsWith("postgres://") || v.startsWith("postgresql://"), {
+      error: `${label} must be a postgres:// or postgresql:// URI`,
+    });
 
-const url = (label: string) =>
-  secret(label).refine((value) => URL.canParse(value), {
-    error: `${label} must be a valid URL`,
-  });
-
-/**
- * Every key, with a one-line note used verbatim in the failure message so an
- * operator reading a crashed boot log knows what the key is and where it comes
- * from without opening another file.
- */
 export const ENV_HELP: Record<string, string> = {
-  DATABASE_URL:
-    "Postgres connection string (Neon dashboard -> Connection Details, pooled).",
-  LITHIC_API_KEY: "Lithic sandbox API key (Lithic dashboard -> Developers -> API Keys).",
-  LITHIC_WEBHOOK_SECRET:
-    "Lithic webhook signing secret (Lithic dashboard -> Developers -> Webhooks).",
-  PERSONA_API_KEY: "Persona sandbox API key (Persona dashboard -> API Keys).",
-  PERSONA_WEBHOOK_SECRET:
-    "Persona webhook shared secret (Persona dashboard -> Webhooks -> the webhook's secret).",
-  PLAID_CLIENT_ID: "Plaid client id (Plaid dashboard -> Team Settings -> Keys).",
-  PLAID_SECRET: "Plaid sandbox secret (Plaid dashboard -> Team Settings -> Keys).",
-  INCREASE_API_KEY: "Increase sandbox API key (Increase dashboard -> Developers -> API Keys).",
-  INCREASE_WEBHOOK_SECRET:
-    "Increase webhook secret (Increase dashboard -> Developers -> Event Subscriptions).",
-  STRIPE_SECRET_KEY: "Stripe test-mode secret key, sk_test_... (Stripe dashboard -> Developers -> API Keys).",
-  STRIPE_WEBHOOK_SECRET:
-    "Stripe webhook signing secret, whsec_... (Stripe dashboard -> Developers -> Webhooks, or `stripe listen`).",
-  USDC_SENDER_PRIVATE_KEY:
-    "0x-prefixed 32-byte private key of the Base Sepolia payout wallet. Testnet funds only.",
-  USDC_SENDER_ADDRESS:
-    "0x-prefixed address derived from USDC_SENDER_PRIVATE_KEY; kept explicit so a mismatch is caught at boot.",
-  BASE_SEPOLIA_RPC_URL:
-    "Base Sepolia JSON-RPC endpoint (Alchemy/Infura, or https://sepolia.base.org).",
-  USDC_CONTRACT_ADDRESS:
-    "USDC token contract on Base Sepolia (0x036CbD53842c5426634e7929541eC2318f3dCF7e).",
+  APP_DATABASE_URL:
+    "Neon pooled URI for the corgi_app role. NOT the owner - the app must hold no UPDATE/DELETE on money tables. Console > Connect > Connection string.",
+  DIRECT_URL:
+    "Neon UNPOOLED owner URI. Used only by scripts/migrate.mjs and scripts/seed.mjs; never by the app. Session advisory locks do not survive PgBouncer.",
+  LITHIC_API_KEY: "Lithic sandbox key (raw UUID). app.lithic.com > Settings.",
+  LITHIC_WEBHOOK_SECRET: "Lithic webhook signing secret (whsec_...), created when you register the webhook URL.",
+  PERSONA_API_KEY: "Persona sandbox API key. app.withpersona.com > API keys. Director KYC only - business verification is gated.",
+  PERSONA_WEBHOOK_SECRET: "Persona webhook shared secret.",
+  PLAID_CLIENT_ID: "Plaid client_id. dashboard.plaid.com > Developers > Keys.",
+  PLAID_SECRET: "Plaid SANDBOX secret. Never the production one.",
+  INCREASE_API_KEY: "Increase sandbox API key. dashboard.increase.com. Absent means the ACH simulator is used.",
+  INCREASE_WEBHOOK_SECRET: "Increase webhook secret (Standard Webhooks).",
+  STRIPE_SECRET_KEY: "Stripe TEST secret key (sk_test_...). Used for the Connect business-registry leg. A live key ends the trial.",
+  STRIPE_WEBHOOK_SECRET: "Stripe webhook signing secret (whsec_...).",
+  USDC_SENDER_PRIVATE_KEY: "Throwaway Base Sepolia private key. TESTNET ONLY - must never have touched real funds.",
+  USDC_SENDER_ADDRESS: "Address derived from the above.",
+  BASE_SEPOLIA_RPC_URL: "https://sepolia.base.org - no API key needed.",
+  USDC_CONTRACT_ADDRESS: "0x036CbD53842c5426634e7929541eC2318f3dCF7e - Circle's USDC on Base Sepolia, 6 decimals.",
+  SIM_CONTROL_ENABLED: "Set to 'true' to expose /api/sim control routes. Must be absent or false in any shared environment.",
 };
 
 export const envSchema = z.object({
-  // Storage
-  DATABASE_URL: url("DATABASE_URL"),
+  // ---- the only thing required to boot -------------------------------
+  APP_DATABASE_URL: pg("APP_DATABASE_URL"),
 
-  // Card issuing — Lithic
-  LITHIC_API_KEY: secret("LITHIC_API_KEY"),
-  LITHIC_WEBHOOK_SECRET: secret("LITHIC_WEBHOOK_SECRET"),
+  // ---- owner connection: scripts only, never the running app ---------
+  DIRECT_URL: pg("DIRECT_URL").optional(),
 
-  // KYB / KYC — Persona
-  PERSONA_API_KEY: secret("PERSONA_API_KEY"),
-  PERSONA_WEBHOOK_SECRET: secret("PERSONA_WEBHOOK_SECRET"),
+  // ---- integration slots: absent key => that slot runs simulated -----
+  LITHIC_API_KEY: z.string().min(1).optional(),
+  LITHIC_WEBHOOK_SECRET: z.string().min(1).optional(),
 
-  // Open banking — Plaid
-  PLAID_CLIENT_ID: secret("PLAID_CLIENT_ID"),
-  PLAID_SECRET: secret("PLAID_SECRET"),
+  PERSONA_API_KEY: z.string().min(1).optional(),
+  PERSONA_WEBHOOK_SECRET: z.string().min(1).optional(),
 
-  // ACH rail — Increase
-  INCREASE_API_KEY: secret("INCREASE_API_KEY"),
-  INCREASE_WEBHOOK_SECRET: secret("INCREASE_WEBHOOK_SECRET"),
+  PLAID_CLIENT_ID: z.string().min(1).optional(),
+  PLAID_SECRET: z.string().min(1).optional(),
 
-  // Cards-on-file / collections — Stripe
-  STRIPE_SECRET_KEY: secret("STRIPE_SECRET_KEY"),
-  STRIPE_WEBHOOK_SECRET: secret("STRIPE_WEBHOOK_SECRET"),
+  INCREASE_API_KEY: z.string().min(1).optional(),
+  INCREASE_WEBHOOK_SECRET: z.string().min(1).optional(),
 
-  // Stablecoin payout — USDC on Base Sepolia
-  USDC_SENDER_PRIVATE_KEY: secret("USDC_SENDER_PRIVATE_KEY").regex(EVM_PRIVATE_KEY, {
+  STRIPE_SECRET_KEY: z
+    .string()
+    .min(1)
+    .refine((v) => !v.startsWith("sk_live"), {
+      // Live keys are an automatic fail for the whole trial. Refuse at boot
+      // rather than discovering it when money moves.
+      error: "STRIPE_SECRET_KEY is a LIVE key. This system must never hold one.",
+    })
+    .optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
+
+  USDC_SENDER_PRIVATE_KEY: z.string().regex(EVM_PRIVATE_KEY, {
     error: "USDC_SENDER_PRIVATE_KEY must be a 0x-prefixed 32-byte hex string",
-  }),
-  USDC_SENDER_ADDRESS: secret("USDC_SENDER_ADDRESS").regex(EVM_ADDRESS, {
+  }).optional(),
+  USDC_SENDER_ADDRESS: z.string().regex(EVM_ADDRESS, {
     error: "USDC_SENDER_ADDRESS must be a 0x-prefixed 20-byte hex address",
-  }),
-  BASE_SEPOLIA_RPC_URL: url("BASE_SEPOLIA_RPC_URL"),
-  USDC_CONTRACT_ADDRESS: secret("USDC_CONTRACT_ADDRESS").regex(EVM_ADDRESS, {
+  }).optional(),
+  BASE_SEPOLIA_RPC_URL: z.string().url().optional(),
+  USDC_CONTRACT_ADDRESS: z.string().regex(EVM_ADDRESS, {
     error: "USDC_CONTRACT_ADDRESS must be a 0x-prefixed 20-byte hex address",
-  }),
+  }).optional(),
+
+  SIM_CONTROL_ENABLED: z.enum(["true", "false"]).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
 
-/** Every key the app requires, in declaration order. */
 export const ENV_KEYS = Object.keys(envSchema.shape) as ReadonlyArray<keyof Env>;
+
+/**
+ * Integration slots and the keys each needs to run LIVE.
+ *
+ * `mustBeLive` marks the slots the trial brief requires to be genuinely live.
+ * They are still allowed to degrade — a system that refuses to boot proves
+ * nothing — but /api/health reports a degraded must-be-live slot as a WARNING
+ * rather than as normal, so it cannot be quietly forgotten before submission.
+ */
+export const INTEGRATION_SLOTS = {
+  card_issuing: { keys: ["LITHIC_API_KEY"], mustBeLive: true, provider: "Lithic sandbox" },
+  card_webhooks: { keys: ["LITHIC_WEBHOOK_SECRET"], mustBeLive: false, provider: "Lithic" },
+  director_kyc: { keys: ["PERSONA_API_KEY"], mustBeLive: true, provider: "Persona sandbox" },
+  business_registry: { keys: ["STRIPE_SECRET_KEY"], mustBeLive: false, provider: "Stripe Connect test mode" },
+  open_banking: { keys: ["PLAID_CLIENT_ID", "PLAID_SECRET"], mustBeLive: false, provider: "Plaid sandbox" },
+  ach_rail: { keys: ["INCREASE_API_KEY"], mustBeLive: false, provider: "Increase sandbox" },
+  stablecoin: {
+    keys: ["USDC_SENDER_PRIVATE_KEY", "USDC_SENDER_ADDRESS", "BASE_SEPOLIA_RPC_URL", "USDC_CONTRACT_ADDRESS"],
+    mustBeLive: false,
+    provider: "USDC on Base Sepolia",
+  },
+} as const satisfies Record<string, { keys: readonly (keyof Env)[]; mustBeLive: boolean; provider: string }>;
+
+export type IntegrationSlot = keyof typeof INTEGRATION_SLOTS;
+export type SlotStatus = "live" | "simulated";
+
+export interface SlotReport {
+  readonly slot: IntegrationSlot;
+  readonly provider: string;
+  readonly status: SlotStatus;
+  readonly mustBeLive: boolean;
+  readonly missing: readonly string[];
+}
+
+/**
+ * Derive live-vs-simulated per slot from the parsed environment.
+ *
+ * This is the ONLY place that decision is made. Every other part of the system
+ * — the rail factory, the KYB factory, /api/health, the README table and the
+ * in-product banner — reads it from here, so they cannot disagree. A system
+ * with two opinions about whether an integration is live will eventually
+ * present the wrong one, and presenting a simulated integration as live fails
+ * the entire trial.
+ */
+export function reportIntegrations(e: Env): readonly SlotReport[] {
+  return (Object.keys(INTEGRATION_SLOTS) as IntegrationSlot[]).map((slot) => {
+    const spec = INTEGRATION_SLOTS[slot];
+    const missing = spec.keys.filter((k) => {
+      const v = e[k as keyof Env];
+      return v === undefined || v === "";
+    });
+    return {
+      slot,
+      provider: spec.provider,
+      status: missing.length === 0 ? ("live" as const) : ("simulated" as const),
+      mustBeLive: spec.mustBeLive,
+      missing,
+    };
+  });
+}
 
 export class EnvironmentError extends Error {
   override readonly name = "EnvironmentError";
@@ -107,37 +171,31 @@ export class EnvironmentError extends Error {
   }
 }
 
-/**
- * Parse a raw environment bag.
- *
- * Throws `EnvironmentError` naming every offending key — not just the first —
- * because fixing one missing secret only to crash on the next is a bad loop to
- * put someone in at 3am. Values are never echoed back in the message.
- */
-export function parseEnv(raw: Record<string, string | undefined>): Env {
-  const result = envSchema.safeParse(raw);
-  if (result.success) return result.data;
-
-  const problems = new Map<string, string>();
-  for (const issue of result.error.issues) {
-    const key = String(issue.path[0] ?? "(unknown)");
-    if (problems.has(key)) continue;
-    const present = typeof raw[key] === "string" && raw[key].trim() !== "";
-    problems.set(key, present ? issue.message : `${key} is missing`);
+/** Parse and validate. Throws EnvironmentError naming every offending key. */
+export function parseEnv(source: Record<string, string | undefined>): Env {
+  // An environment variable set to the empty string is NOT configured. This
+  // matters in practice: a hosting dashboard where someone adds the key and
+  // leaves the value blank produces "" and not undefined, and treating that as
+  // present would mark a slot LIVE with no credential behind it. Strip empties
+  // before validation so "declared but blank" and "absent" mean the same
+  // thing, which is what an operator staring at the dashboard believes.
+  const cleaned: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(source)) {
+    if (typeof v === "string" && v.trim() === "") continue;
+    cleaned[k] = v;
   }
+  const parsed = envSchema.safeParse(cleaned);
+  if (parsed.success) return parsed.data;
 
-  const keys = [...problems.keys()];
-  const lines = keys.map((key) => {
+  const issues = parsed.error.issues;
+  const keys = [...new Set(issues.map((i) => String(i.path[0])))];
+  const lines = issues.map((i) => {
+    const key = String(i.path[0]);
     const help = ENV_HELP[key];
-    return `  - ${problems.get(key) ?? key}${help ? `\n      ${help}` : ""}`;
+    return `  ${key}: ${i.message}${help ? `\n      ${help}` : ""}`;
   });
-
-  const message = [
-    `Environment is not usable: ${keys.length} problem${keys.length === 1 ? "" : "s"}.`,
-    ...lines,
-    "",
-    "Copy .env.example to .env and fill these in. Never commit .env.",
-  ].join("\n");
-
-  throw new EnvironmentError(message, keys);
+  throw new EnvironmentError(
+    `Environment is invalid. ${keys.length} problem(s):\n${lines.join("\n")}`,
+    keys,
+  );
 }

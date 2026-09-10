@@ -1,24 +1,34 @@
-/**
- * Validated server environment.
- *
- * `server-only` makes importing this from a Client Component a build error
- * rather than a leaked secret. Nothing in here is ever prefixed
- * `NEXT_PUBLIC_`, and nothing in here may be re-exported from a module a
- * client component imports.
- *
- *   import { env } from "@/lib/env";
- *   const db = connect(env.DATABASE_URL);
- */
 import "server-only";
 
-import { parseEnv, type Env } from "./env.schema";
+import {
+  parseEnv,
+  reportIntegrations,
+  type Env,
+  type SlotReport,
+} from "./env.schema";
 
-export { EnvironmentError, ENV_KEYS, ENV_HELP, envSchema } from "./env.schema";
-export type { Env } from "./env.schema";
+export {
+  EnvironmentError,
+  ENV_KEYS,
+  ENV_HELP,
+  INTEGRATION_SLOTS,
+  envSchema,
+  reportIntegrations,
+} from "./env.schema";
+export type { Env, IntegrationSlot, SlotStatus, SlotReport } from "./env.schema";
 
 /**
- * Parsed once at module load, so a bad environment fails the process at
- * startup with a message naming every missing key, rather than at the first
- * request that happens to touch a rail.
+ * The parsed environment. The single place process.env is read.
+ *
+ * Parsed eagerly at import: a malformed APP_DATABASE_URL should kill the
+ * process at boot, not at the first request that happens to need money.
  */
 export const env: Env = parseEnv(process.env);
+
+/** Live-vs-simulated for every integration slot. Derived, never stored. */
+export const integrations: readonly SlotReport[] = reportIntegrations(env);
+
+/** Slots the brief requires to be live that currently are not. */
+export const degradedMustBeLive: readonly SlotReport[] = integrations.filter(
+  (s) => s.mustBeLive && s.status === "simulated",
+);

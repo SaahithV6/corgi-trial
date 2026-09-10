@@ -55,7 +55,7 @@ N("H09", "Circle faucet: testnet USDC to that wallet", "human-gate", 10, ["H08"]
 N("H10", "Send T+2h attack plan email", "human-gate", 10, ["C01"], "human", ["thread"])
 N("H11", "Loom/YouTube account ready for the 5-min video", "human-gate", 5, [], "human", ["video"])
 N("H12", "Register webhook URLs in all four provider dashboards", "human-gate", 25,
-  ["O06","W04","W05","W06","W07"], "human", ["providers"],
+  ["H18","W04","W05","W06","W07"], "human", ["providers"],
   risk="cannot be done until a stable prod URL exists. sequencing trap")
 N("H13", "Capture evidence pack: dashboard screenshots + webhook delivery logs", "human-gate", 40,
   ["LF01","LF02","LF03"], "human", ["evidence"])
@@ -323,7 +323,7 @@ N("O03", "README: integration honesty table finalised, live vs simulated", "ops"
 N("O04", "Cut list: what we did not build and what week two looks like", "ops", 35, [], "claude", ["docs/cutlist"])
 N("O05", "Secret scan: assert no keys anywhere in git history", "ops", 25, ["S07"], "agent", ["ci"],
   risk="automatic fail. verify, do not assume")
-N("O06", "Production deploy with all env vars set", "ops", 40, ["S06","U03","D14"], "claude", ["vercel"])
+N("O06", "Production deploy with all env vars set", "ops", 40, ["S06","U03","D14","H17","H18"], "claude", ["vercel"])
 N("O07", "Prod smoke test green", "ops", 30, ["O06","T08"], "claude", ["test/smoke"])
 N("O08", "Two demo role logins created and verified on prod", "ops", 30, ["O07","E03"], "claude", ["ops/demo"])
 N("O09", "Architecture diagram: money path end to end", "ops", 45, ["A01","L09"], "agent", ["docs/arch"])
@@ -333,6 +333,23 @@ N("O11", "Debrief prep: be able to explain every line we will be pointed at", "o
 N("O12", "Decision log maintenance", "ops", 60, [], "claude", ["DECISIONS.md"])
 N("O13", "Stretch: card controls enforced in the real-time auth webhook", "ops", 90, ["A03","LF11"], "agent", ["lib/rails/lithic"])
 N("O14", "Stretch: sub-accounts as pure ledger moves", "ops", 60, ["L09","LF11"], "agent", ["lib/ledger"])
+
+# ---------------------------------------------------------------------------
+# X — discovered during the build. Recorded so the graph stays an honest model
+# of the work rather than a plan I stopped updating.
+# ---------------------------------------------------------------------------
+N("X01", "Env contract: missing provider key selects the simulator", "discovered", 60, [], "claude", ["app/env"], "done",
+  risk="the deployed app could not boot with all 15 keys required")
+N("X02", "Pin search_path on the SECURITY DEFINER write path", "discovered", 45, [], "claude", ["db/constraints"], "done",
+  risk="latent privilege escalation into the function that writes the journal")
+N("X03", "Commit gate + staged-secret scan", "discovered", 45, [], "claude", ["ci"], "done")
+N("X04", "db:reset, and hash migrations in node not pgcrypto", "discovered", 40, [], "claude", ["scripts/seed"], "done")
+N("X05", "Reconcile duplicate Standard Webhooks verifiers", "discovered", 25, [], "claude", ["lib/verify/lithic"], "done")
+N("H17", "Set the 6 env vars in the Vercel dashboard", "human-gate", 15, ["X01"], "human", ["vercel"],
+  risk="app is DOWN until APP_DATABASE_URL is set. blocks every deployed check")
+N("H18", "Send me the deployment URL", "human-gate", 2, ["H17"], "human", ["vercel"],
+  risk="blocks webhook registration, health checks and the T+24h email")
+N("H19", "Paste LITHIC_WEBHOOK_SECRET after registering the URL", "human-gate", 10, ["H12"], "human", ["providers"])
 
 # ---------------------------------------------------------------------------
 # C — the three checkpoint gates. Hard deadlines, not tasks.
@@ -380,11 +397,40 @@ DELEGATE = [
     "E03","E11","O09",        # session auth, funding flow, arch diagram
 ]
 
+# ---------------------------------------------------------------------------
+# LIVE STATUS
+#
+# Applied as data rather than edited into each N(...) call, so the node
+# definitions stay stable and a diff of this block alone shows exactly what
+# moved since the last update. Updated as work lands.
+# ---------------------------------------------------------------------------
+DONE = """
+H01 H05 H06 H08 H09 H10 H11 C01
+R01 R02 R03 R04 R05 R06 R08 R12
+S01 S02 S03 S04 S05 S06 S07 S08 S09 S10
+L01 L02 L03 L04 L05 L06 L07 L19
+W01 W02 W03 W08 W11
+A02 A03 D18 D19 O05 E02
+X01 X02 X03 X04 X05
+""".split()
+
+DOING = """
+L08 O01 A04 A06 A07 W04 W05 W06 W07 U01 U02 U03 U11 M01
+""".split()
+
+def apply_status():
+    idx = {n["id"]: n for n in NODES}
+    for i in DONE:
+        if i in idx: idx[i]["status"] = "done"
+    for i in DOING:
+        if i in idx: idx[i]["status"] = "doing"
+
 def apply_delegation():
     """Move drafting to agents, add the review cost back onto claude.
 
     Called by schedule.py. Kept as a function rather than baked in so the
     policy can be turned off and the counterfactual re-measured."""
+    apply_status()
     idx = {n["id"]: n for n in NODES}
     added = []
     for i in DELEGATE:

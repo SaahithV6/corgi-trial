@@ -28,19 +28,19 @@ describe("result", () => {
 });
 
 describe("env", () => {
-  it("names every missing key, not just the first", () => {
-    let thrown: unknown;
+  it("names every INVALID key at once, not just the first", () => {
+    // Contract changed deliberately: provider keys are optional now, because a
+    // missing key selects that slot's simulator rather than killing the app.
+    // See src/lib/env.schema.ts. What must still hold is that when keys ARE
+    // invalid, the error names all of them in one pass.
     try {
-      parseEnv({});
-    } catch (caught) {
-      thrown = caught;
+      parseEnv({ APP_DATABASE_URL: "not-a-uri", USDC_SENDER_ADDRESS: "nope" });
+      expect.unreachable("should have thrown");
+    } catch (e) {
+      const err = e as EnvironmentError;
+      expect(err.keys).toContain("APP_DATABASE_URL");
+      expect(err.keys).toContain("USDC_SENDER_ADDRESS");
     }
-
-    expect(thrown).toBeInstanceOf(EnvironmentError);
-    const error = thrown as EnvironmentError;
-    expect(error.keys).toEqual([...ENV_KEYS]);
-    expect(error.message).toContain("DATABASE_URL is missing");
-    expect(error.message).toContain("STRIPE_WEBHOOK_SECRET is missing");
   });
 });
 
