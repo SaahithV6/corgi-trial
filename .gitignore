@@ -46,3 +46,4 @@ coverage/
 *.tsbuildinfo
 .vercel
 .env*
+.scratch/

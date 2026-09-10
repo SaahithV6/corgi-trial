@@ -542,6 +542,107 @@ export async function listTransactions(
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
+ * Event subscriptions — the webhook registration, read back from Lithic
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A registered webhook endpoint, as Lithic holds it.
+ *
+ * [MEASURED] `GET /v1/event_subscriptions -> 200`:
+ *
+ *   {"data":[{"description":"Corgi work trial - card auth and clearing",
+ *             "token":"ep_3J8yb9…","event_types":null,"disabled":false,
+ *             "url":"https://corgi-trial-psi.vercel.app/api/webhooks/lithic",
+ *             "version":null}],"has_more":false}
+ *
+ * `event_types: null` means "every event type", not "none".
+ */
+export interface EventSubscription {
+  token: string;
+  url: string;
+  /** Lithic sends `disabled`, not `enabled`. A disabled subscription delivers nothing. */
+  disabled: boolean;
+  description?: string | null;
+  event_types?: string[] | null;
+  version?: number | null;
+}
+
+/**
+ * [MEASURED] The four values seen on the `status` field, and the two that are
+ * NOT terminal. `PENDING` and `SENDING` are a delivery still in flight; only
+ * `SUCCESS` and `FAILED` are outcomes.
+ */
+export type EventSubscriptionAttemptStatus = 'FAILED' | 'PENDING' | 'SENDING' | 'SUCCESS';
+
+/**
+ * One delivery attempt Lithic made to a subscription's URL, with the HTTP
+ * status our endpoint answered. This is the provider's own record of the
+ * inbound leg — the half of the webhook loop nothing on our side of the wire
+ * can otherwise see.
+ *
+ * [MEASURED] a success and a failure from our own history:
+ *
+ *   {"created":"2026-09-10T18:40:36.424Z","status":"SUCCESS",
+ *    "response_status_code":202,"response":"{\"status\":\"accepted\",…}",
+ *    "url":"https://corgi-trial-psi.vercel.app/api/webhooks/lithic", …}
+ *
+ *   {"created":"2026-09-10T16:18:47.680Z","status":"FAILED",
+ *    "response_status_code":500,
+ *    "response":"{\"error\":{\"code\":\"WEBHOOK_INBOX_UNAVAILABLE\",…}}", …}
+ *
+ * That 500 pair is the inbox bug of DECISIONS 020, recorded by Lithic and
+ * recovered by its retry. It is the exact shape a probe has to be able to see.
+ */
+export interface EventSubscriptionAttempt {
+  token: string;
+  event_subscription_token: string;
+  event_token: string;
+  url: string;
+  status: EventSubscriptionAttemptStatus;
+  /** Null when the attempt never got an HTTP response at all. */
+  response_status_code: number | null;
+  /** Our endpoint's response body, verbatim, as a string. */
+  response?: string;
+  created: string;
+}
+
+/** `GET /v1/event_subscriptions` — every webhook endpoint registered on the account. */
+export async function listEventSubscriptions(
+  query: { page_size?: number } = {},
+  options: LithicRequestOptions = {},
+): Promise<LithicPage<EventSubscription>> {
+  return lithicRequest<LithicPage<EventSubscription>>(
+    { method: 'GET', path: '/event_subscriptions', query: { ...query }, limiter: readLimiter },
+    options,
+  );
+}
+
+/**
+ * `GET /v1/event_subscriptions/{token}/attempts` — delivery history, NEWEST
+ * FIRST. [MEASURED] ordering, and `?status=` filtering by attempt status.
+ *
+ * [MEASURED] An unknown subscription token answers `404 {"message":"endpoint
+ * not found"}`, which is a different message from the account-level 404 and is
+ * about the subscription, not the route.
+ */
+export async function listEventSubscriptionAttempts(
+  subscriptionToken: string,
+  query: { page_size?: number; status?: EventSubscriptionAttemptStatus } = {},
+  options: LithicRequestOptions = {},
+): Promise<LithicPage<EventSubscriptionAttempt>> {
+  return lithicRequest<LithicPage<EventSubscriptionAttempt>>(
+    {
+      method: 'GET',
+      path: `/event_subscriptions/${encodeURIComponent(subscriptionToken)}/attempts`,
+      query: { ...query },
+      limiter: readLimiter,
+    },
+    options,
+  );
+}
+
+
+/* ────────────────────────────────────────────────────────────────────────────
  * Normalisation — the whole point of this adapter
  * ──────────────────────────────────────────────────────────────────────────── */
 

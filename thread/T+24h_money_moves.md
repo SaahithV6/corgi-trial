@@ -19,10 +19,10 @@ The ledger balance does not move. Available drops by exactly 5,000 cents. That
 is your first published attack, passing on the deployed system rather than in a
 test file.
 
-Live state behind it, read a few minutes before sending: 53 webhook deliveries
-processed to done, 467 journal entries, 84 card authorisations, 84 live holds,
-trial balance 0, all five invariant views returning zero rows, and pnpm db:check
-at 14 of 14.
+Live state behind it, read a few minutes before sending: 70 webhook deliveries
+processed to done, 734 journal entries, 104 card authorisations, 45 live holds,
+trial balance 0, every invariant view returning zero rows including the one I
+added today, and pnpm db:check at 14 of 14.
 
 INTEGRATIONS
 
@@ -89,8 +89,8 @@ tree the graders can read.
 
 LIVE FIRE
 
-Your eight published attacks, run against production: 6 PASS, 0 FAIL, 2 SKIP. A
-skip is not a pass, so here is what each one could not prove.
+Your eight published attacks, run against production: 7 PASS, 0 FAIL, 1 SKIP. A
+skip is not a pass, so here is what the one skip could not prove.
 
 Attack 2, over-capture. The money is right and the row is missing. On the fuel
 pump over-capture the hold is released, two memo entries net to zero, the ledger
@@ -101,16 +101,40 @@ cannot be demonstrated. The cause is a disagreement between two of my own
 artefacts: model.ts computes closed as is_final OR close/expiry OR A <= 0, and
 with A=5000 against C=7340 that is false, while DESIGN 8.3 says the same case
 closes. I wrote the one-line fix, watched three model tests fail, and reverted
-it. v_hold_drift holds the TypeScript model and the SQL view equal by invariant.
-Changing one side alone converts a prose mismatch into a live drift alarm, and
-an invariant reporting drift is indistinguishable from a ledger that has
-actually drifted. Week two is one migration moving both sides together with
-v_hold_drift proving they still agree.
+it. Then I worked out why the model is right and my own design note is wrong.
 
-Attack 7, provider outage. /api/health reports credential and capability
-liveness and says nothing about webhook delivery freshness, so an outage is
-invisible to it. The data already exists in webhook_inbox.received_at. It is the
-highest-value thing left on the list.
+The arm is arithmetically a no-op. max(A - C, 0) is already 0 once C reaches A,
+so adding it changes no balance anywhere. Its only effect is to write a
+hold_closure row, and that row is permanent. An incremental authorisation
+arriving afterwards would reopen the hold with the closure already written, and
+the customer would spend money that is still authorised.
+
+That is not hypothetical. Three holds in this database carry a closure row
+reading "authorisation fully reversed" whose authorisation was never reversed.
+They are residue of the same mistake made once already, on the arrival order
+where a settlement beats its authorisation, and they were still freeing $60 as
+of this morning. The part I would want a reviewer to look at is why nothing
+caught them: v_hold_drift is defined WHERE NOT is_released, so a wrong closure
+row removes a hold from the invariant whose job is to catch wrong closure rows.
+It has been returning zero this whole time and it was telling the truth about a
+set that did not contain the bug.
+
+So the fix was the other half of the check, plus a compensating append that
+corrects a closure without deleting it, because hold_closure is append-only and
+fixing the writer does not unwrite what it wrote. Three reversals are appended,
+the $60 is withheld again, and both halves of the check now return zero. The
+closure rows are still there, still readable, still saying what they said.
+
+Attack 2 stays a skip on
+purpose. The money is right, the row is absent, and writing it would cost more
+than it proves.
+
+Attack 7, provider outage, was a skip when I last wrote and it passes now.
+/api/health reported credential and capability liveness and said nothing about
+webhook delivery freshness, so an outage was invisible to it. The data was
+already sitting in webhook_inbox.received_at. Delivery freshness now feeds the
+same verdict, with a banner on every screen, and it was earned by inducing an
+outage rather than waiting for one.
 
 THREE THINGS I MEASURED THAT CHANGED THE BUILD
 
@@ -190,10 +214,10 @@ Saahith
   force push that has not happened yet, and a checkpoint email is the wrong
   place to raise it: it belongs in a direct note to the graders once the history
   is actually clean, not buried in a status update.
-- Counts move. 53 done, 467 entries and 84 holds were read from the deployed
-  database at 17:40Z. Re-read them before sending, along with /api/health, and
-  update the two lines that quote them. The parked count of 11 will also change
-  if any of those cards get claimed.
+- Counts move. 70 done, 734 entries, 104 authorisations and 45 live holds were
+  read from the deployed database at 19:05Z. Re-read them before sending, along
+  with /api/health, and update the line that quotes them. The parked count of 12
+  will also change if any of those cards get claimed.
 - Test-count trivia, table counts and commit counts are all out. They measure
   typing, not whether money moved.
 - `/api/health` no longer contradicts itself. The nested
@@ -223,9 +247,9 @@ Applied to the draft above, in order of how much each one cut.
 5. **No summary paragraph.** Nothing restates the paragraph before it, and there
    is no "in conclusion", "ultimately" or "at the end of the day".
 6. **No upbeat closer, and no victory lap.** The email ends on where the numbers
-   came from. The two skips and the two simulated slots sit in the body rather
-   than in a footnote, and the section that reports 6 PASS says "a skip is not a
-   pass" before it explains either one.
+   came from. The skip and the three simulated slots sit in the body rather
+   than in a footnote, and the section that reports 7 PASS says "a skip is not a
+   pass" before it explains it.
 7. **Ban the vocabulary.** leverage, utilise, robust, seamless, comprehensive,
    delve, navigate, landscape, realm, pivotal, unlock, empower, foster, myriad.
    None appear.

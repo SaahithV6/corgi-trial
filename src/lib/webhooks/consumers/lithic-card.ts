@@ -38,6 +38,7 @@ import "server-only";
 
 import { applyCardTransaction, LITHIC_PROVIDER } from "@/lib/holds";
 import type { Transaction } from "@/lib/rails/lithic/types";
+import { describeResolutions, resolveEventSemanticsBatch } from "@/lib/rails/semantics";
 
 import {
   consumers,
@@ -108,6 +109,26 @@ export function asCardTransaction(payload: Record<string, unknown>): Transaction
   return payload as unknown as Transaction;
 }
 
+/**
+ * The lifecycle steps this payload asserts, in payload order.
+ *
+ * Lithic fires ONE webhook type for every step and puts the step in
+ * `events[].type`, so the step — not the webhook type — is what
+ * `rail_event_semantics` is keyed on. An event with no usable `type` is
+ * returned as `null`, which composes to the bare webhook key and therefore
+ * fails to classify: an unreadable step is exactly the case that must not be
+ * waved through.
+ */
+export function cardTransactionStepTypes(payload: Record<string, unknown>): (string | null)[] {
+  const events = payload["events"];
+  if (!Array.isArray(events)) return [];
+  return events.map((raw) => {
+    if (typeof raw !== "object" || raw === null) return null;
+    const type = (raw as Record<string, unknown>)["type"];
+    return typeof type === "string" && type.length > 0 ? type : null;
+  });
+}
+
 export const lithicCardConsumer: WebhookConsumer = {
   provider: LITHIC_PROVIDER,
 
@@ -132,6 +153,38 @@ export const lithicCardConsumer: WebhookConsumer = {
       // it and it was not a transaction.
       return ignored("payload has no usable token / card_token / created");
     }
+
+    // Ask the table, do not assume. `rail_event_semantics` carries one reviewed
+    // row per lifecycle step saying whether that step is a CORRECTION at the
+    // original value date or a NEW EVENT at its own — the distinction from
+    // DESIGN.md §6.1 that is invisible in the API and opposite in the ledger.
+    //
+    // A step with no row is not defaulted to either answer. It PARKS: nobody
+    // has decided, and a consumer that decided for them would post money at a
+    // value date no human ever reviewed, which is the one failure this system
+    // has no alarm for. A park is visible, bounded (twelve re-checks, then a
+    // dead letter in front of a human) and self-draining — add the row and the
+    // event processes on its next re-check, with no deploy and no data loss.
+    const semantics = await resolveEventSemanticsBatch({
+      provider: LITHIC_PROVIDER,
+      eventType: LIFECYCLE_EVENT,
+      nestedSteps: cardTransactionStepTypes(payload),
+    });
+
+    if (semantics.status === "unclassified") {
+      return parked(
+        "rail_event_semantics",
+        semantics.key,
+        `no rail_event_semantics row for '${semantics.key}'; nobody has classified this step as a correction or a new event`,
+      );
+    }
+
+    ctx.logger.info("lithic.card_transaction.semantics", {
+      inboxId: event.id,
+      // The table's answer, in the log, because "why is that dated Tuesday" is
+      // the question this system will be asked and this is the answer.
+      steps: describeResolutions(semantics.resolved),
+    });
 
     const result = await applyCardTransaction(txn, {
       provider: LITHIC_PROVIDER,

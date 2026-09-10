@@ -104,6 +104,13 @@ export interface AvailableBalance {
  * primary-key existence check, which is what makes release exactly-once by
  * construction rather than by a flag someone could set twice.
  *
+ * ...and one row in hold_closure_reversal un-does it, because a primary-key
+ * existence check in an append-only table has no other way back. Three holds
+ * in this database carried a closure row reading "authorisation fully
+ * reversed" whose authorisation was never reversed — residue of a bug fixed
+ * long before, still freeing $60.00 of authorised money, because fixing the
+ * writer does not unwrite what it wrote. See migration 0011.
+ *
  * Note what is NOT here: any reference to a provider's transaction status.
  * Lithic reports SETTLED while a partial hold is still outstanding (measured;
  * DECISIONS 006). A system that released holds on that field would free money
@@ -148,7 +155,19 @@ export async function availableBalance(
         LEFT JOIN journal_line  l ON l.entry_id = e.id
                                  AND l.account_id = h.memo_account_id
        WHERE a.business_id = ${businessId}::uuid
-         AND NOT EXISTS (SELECT 1 FROM hold_closure c WHERE c.hold_id = h.id)
+         -- Released, and not un-released. A closure row that should never have
+         -- been written is corrected by an append to hold_closure_reversal,
+         -- never by a DELETE (migration 0011). This predicate is a duplicate of
+         -- v_hold_state.is_released, so it has to learn the same thing or
+         -- availability and the invariant views disagree about the same hold —
+         -- which is exactly the state three holds were in before 0011.
+         AND NOT EXISTS (
+           SELECT 1 FROM hold_closure c
+            WHERE c.hold_id = h.id
+              AND NOT EXISTS (
+                SELECT 1 FROM hold_closure_reversal r WHERE r.hold_id = c.hold_id
+              )
+         )
        GROUP BY h.id, h.kind
     )
     SELECT (SELECT COALESCE(cents, 0) FROM booked)                          AS ledger_cents,

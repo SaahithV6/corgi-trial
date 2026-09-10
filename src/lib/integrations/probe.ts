@@ -1,5 +1,6 @@
 import "server-only";
 import { env, integrations, type IntegrationSlot, type SlotReport } from "@/lib/env";
+import { probeLithicWebhooks } from "./probes/lithic-webhooks";
 
 /**
  * Liveness by PROOF, not by presence.
@@ -96,6 +97,19 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
     if (!res) return { liveness: "unreachable", detail: err ?? "no response", ms };
     return { liveness: fromStatus(res.status), detail: `GET /v1/cards -> ${res.status}`, ms };
   },
+
+  // The slot DECISIONS 026 left `unprobed`, now earned. Two authenticated reads
+  // — the subscription list and that subscription's delivery attempts — prove
+  // Lithic is registered against THIS deployment's URL, is not disabled, and is
+  // having its deliveries accepted. Lives in ./probes/ because it is the one
+  // probe with a real ladder of degraded truths; see that file for why a
+  // successful attempt is end-to-end proof and why this has no opinion about
+  // freshness (delivery-health.ts owns that question, and only that module).
+  card_webhooks: () =>
+    probeLithicWebhooks({
+      apiKey: env.LITHIC_API_KEY,
+      webhookSecret: env.LITHIC_WEBHOOK_SECRET,
+    }),
 
   open_banking: async () => {
     const id = env.PLAID_CLIENT_ID;
@@ -211,6 +225,16 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
     // URL). What it cannot do is force an outcome; there is no scriptable way
     // to drive it to a decision, which is why it is second and not first.
     const persona = env.PERSONA_API_KEY;
+    // Why this is a variable and not a constant string. The Stripe success
+    // path used to hardcode "(Persona not configured)", and the Persona branch
+    // below FALLS THROUGH to Stripe on a 401/403 — so a Persona key that was
+    // present and REJECTED rendered as a Persona key that was absent, on the
+    // endpoint this trial treats as authoritative. That is the difference
+    // between "we did not wire it" and "we wired it wrong", and the second was
+    // displaying as the first. It was true only by luck: PERSONA_API_KEY
+    // exists in .env and on Vercel but is zero-length, so the branch never
+    // ran. The moment that key is filled in, the luck runs out.
+    let personaNote = "Persona not configured";
     if (persona) {
       const { res, ms, err } = await timed((signal) =>
         fetch("https://api.withpersona.com/api/v1/inquiries?page%5Bsize%5D=1", {
@@ -225,6 +249,9 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
       }
       // Persona key present but rejected: fall through and try Stripe Identity
       // rather than reporting simulated while a working alternative exists.
+      // Carry the rejection into the evidence string so the fallthrough is
+      // visible rather than silent.
+      personaNote = `Persona key present but rejected: ${res.status}`;
     }
 
     const stripe = env.STRIPE_SECRET_KEY;
@@ -246,7 +273,7 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
     );
     if (!res) return { liveness: "unreachable", detail: err ?? "no response", ms };
     if (res.ok) {
-      return { liveness: "live", detail: "Stripe Identity enabled (Persona not configured)", ms };
+      return { liveness: "live", detail: `Stripe Identity enabled (${personaNote})`, ms };
     }
     return { liveness: "unauthorised", detail: `Stripe Identity unavailable (${res.status})`, ms };
   },
