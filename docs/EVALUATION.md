@@ -1,8 +1,15 @@
 # Independent evaluation — Corgi work trial, Track 3 (Neobank)
 
 Evaluator: independent, adversarial. Not a cheerleader.
-Evaluated at 2026-09-10 ~16:45Z, against commit `f39606a` as deployed.
+Evaluated at 2026-09-10 ~16:45Z, against commit **`f39606a`** as deployed.
 Repo: `/home/lain_iwakura/Documents/corgi-trial` · Live: https://corgi-trial-psi.vercel.app
+
+> ⚠️ **This report was overtaken by events. Read §8 before acting on §6.**
+> Between measurement and write-up the candidate landed `src/lib/holds/`, a Lithic card
+> consumer, `src/lib/webhooks/drain.ts`, a cron, and an 8-file live-fire suite — i.e. most
+> of fix #5 — and the deployed commit moved to `ef62512`. §1–§7 are a rigorous, evidence-
+> backed snapshot of `f39606a`. §8 records what changed, what now passes, and what the
+> revised priorities are.
 
 **Snapshot caveat.** T0 was 2026-09-09 17:13 PDT, freeze 2026-09-11 17:13 PDT. The
 last decision-log entry is `020 — 2026-09-10T18:10Z`, i.e. roughly T+18h of 48. This is a
@@ -274,7 +281,7 @@ much better position to be in at T+18h than the reverse, and §6 is sized accord
 | 2 | A simulated integration presented as live | **PASS** | Checked hardest here. `/api/health` labels every slot `live` or `simulated` **with per-slot evidence**, and both simulated slots state *why* (Connect gated; 0 wei gas). The ACH simulator emits `label: "SIMULATED"` on every log line and response body (`achsim/control.ts`, `api/sim/route.ts:16-21`) and is unreachable in production. The account screen's fixtures sit under a dashed "Demo state" bar explicitly styled not to look like a feature (`DemoStateBar.tsx:14-21`). The reconciliation screen's file is rendered from the ACH simulator, and while the screen carries no "SIMULATED" badge, the filename shown in production is literally **`achsim-settlement-2026-09-10.csv`** and the header carries a `Sandbox` badge. Honest — though see §6.5 for the cheap way to remove all doubt. |
 | 3 | UPDATE or DELETE on money rows anywhere ever | **PASS**, and unusually well proven | Three independent layers. Privileges: `REVOKE ALL … FROM PUBLIC` then `GRANT SELECT, INSERT` only, with a deliberately redundant explicit `REVOKE UPDATE, DELETE, TRUNCATE … FROM corgi_app, PUBLIC` ("the line a reviewer greps for", `0001_ledger.sql:816-832`). Triggers: `%I_no_update_delete` + `%I_no_truncate` installed over 15 tables (`0001_ledger.sql:748-775`, repeated for recon tables at `0006_recon.sql:176-185`). Runtime proof: `dbcheck.mjs` **14/14 PASS**, each forbidden statement actually attempted and refused with `permission denied`. Source scan: zero `UPDATE … SET` / `DELETE FROM` / `TRUNCATE` statements in `src/` outside comments; the one `ON CONFLICT` on a money-adjacent table is `DO NOTHING`, not `DO UPDATE` (`instructions.ts:265`). The single sanctioned mutation is `webhook_inbox.processed_at/processing_error/attempts`, column-scoped via `GRANT UPDATE (…)` and guarded by `webhook_inbox_guard()` (`0001_ledger.sql:779-800`) — not a money row. |
 | 4 | Live-mode API keys, real money, or real personal data | **PASS** | Every key in `.env` is sandbox/testnet: Lithic sandbox, Plaid sandbox, Increase sandbox, `sk_test_…` for Stripe, Base **Sepolia** testnet USDC. `src/lib/env.schema.ts:78` and `:183` actively **refuse** any value starting `sk_live`. Seeded businesses are fictional ("Blue Ridge Coffee Roasters LLC", "Ridgeline"). No real PII found. |
-| 5 | Secrets committed to the repo | **FAIL — remediable in 30 minutes** | Two live-shaped credentials sit in tracked files, and `research/` is **not** in `.gitignore`: `research/plaid/NOTES.md:253` pastes a real Plaid **`access-sandbox-8ab976e6-…`** token — and the note two lines below says it is *"long-lived — persist it (encrypted at rest)"*; `research/lithic/NOTES.md:521` pastes **`whsec_REDACTED-ROTATED`** captured from a real `GET /v1/event_subscriptions/{tok}/secret` response (it does **not** match the current `.env` value, so it is probably rotated — but the shape and provenance are genuine, not a doc placeholder). Line 614 of the same file is fine: `whsec_MfKQ9r8…` is the public Standard Webhooks test vector. Mitigating: both are sandbox-scope, no live keys, no money at risk, and `.gitignore` is otherwise unusually careful (`*.local.md` listed *before the file was created*, plus `.*.local.md*` added after the incident in decision 013). Aggravating: **decision 013 self-reports that an editor swap file of the secrets scratchpad was already committed once.** As written, the rule is flat: a credential in a tracked file is a committed secret. **Not fully verified** — I was instructed not to run git commands, so history was not scanned; the working-tree finding alone is sufficient. |
+| 5 | Secrets committed to the repo | **FAIL — remediable in 30 minutes** | Two live-shaped credentials sit in tracked files, and `research/` is **not** in `.gitignore`: `research/plaid/NOTES.md:253` pastes a real Plaid **`access-sandbox-<REDACTED, ROTATED>…`** token — and the note two lines below says it is *"long-lived — persist it (encrypted at rest)"*; `research/lithic/NOTES.md:521` pastes **`whsec_REDACTED-ROTATED`** captured from a real `GET /v1/event_subscriptions/{tok}/secret` response (it does **not** match the current `.env` value, so it is probably rotated — but the shape and provenance are genuine, not a doc placeholder). Line 614 of the same file is fine: `whsec_MfKQ9r8…` is the public Standard Webhooks test vector. Mitigating: both are sandbox-scope, no live keys, no money at risk, and `.gitignore` is otherwise unusually careful (`*.local.md` listed *before the file was created*, plus `.*.local.md*` added after the incident in decision 013). Aggravating: **decision 013 self-reports that an editor swap file of the secrets scratchpad was already committed once.** As written, the rule is flat: a credential in a tracked file is a committed secret. **Not fully verified** — I was instructed not to run git commands, so history was not scanned; the working-tree finding alone is sufficient. |
 | 6 | Code the candidate cannot explain line by line | **NOT ASSESSABLE** (no red flags) | Cannot be judged without the debrief. Nothing suggests it: comment density is extreme and *reason-giving* rather than restating, decisions record measurements that contradict the author's assumptions, and several comments name the specific bug that motivated the line (e.g. `post.ts:88` "`ledger_append` fails with 'cannot extract elements from a scalar'. Found by…"). One caveat worth naming: `AGENTS.md` and the decision log (entry 007, "I turned CI red by committing another worker's half-written files") indicate multiple agents wrote this tree. The candidate should expect to be asked about a module they did not personally type — `src/lib/mcp/*` and `src/lib/recon/*` are the largest such surfaces. |
 
 **One automatic fail is live (#5).** It is the cheapest thing on the entire list to fix
@@ -598,3 +605,101 @@ exercisable — call it 62 → 68. The full list, if #5 lands, is a genuinely di
 the hold model gets a caller, the live-fire script becomes runnable end to end, and the
 score goes to the mid-to-high 70s. That is the number entry 003 predicted for this track,
 which suggests the estimate was honest.
+
+---
+
+## 8. ADDENDUM — the tree moved during this evaluation
+
+Written 2026-09-10 ~16:50Z. Disclosed rather than quietly folded in, because the
+measurements in §0–§7 were taken against `f39606a` and remain accurate for it.
+
+**What happened.** While §1–§7 were being written, the candidate landed roughly 3,800 lines
+across nine new files, and the deployed commit moved **`f39606a` → `ef62512`**. The new
+work is precisely fix #5, plus most of #4:
+
+| New | Lines | What it is |
+| --- | --- | --- |
+| `src/lib/holds/{model,apply,expiry,store,lithic-events,index}.ts` | 1,596 | The missing holds module. **`store.ts` now contains the writes whose absence was my central finding**: `INSERT INTO hold` (`:191`), `card_authorization` (`:197`), `card_auth_event` (`:283`), `hold_closure` (`:364`). |
+| `src/lib/webhooks/consumers/lithic-card.ts` | 211 | The missing card consumer. |
+| `src/lib/webhooks/drain.ts` | 137 | The missing drain — calls `consumers.register` (`:85`) and `dispatchUntilIdle` (`:118`). |
+| `src/app/api/drain/route.ts` + `crons` in `vercel.json:14` | — | The missing scheduler. The drain is now **also** called inline from the webhook route (`api/webhooks/[provider]/route.ts:12`). |
+| `src/test/livefire/attack-0{1..8}-*.test.ts` | 1,483 | A test per published attack, named after it. |
+| `src/lib/holds/model.test.ts` | 365 | **42 unit tests, all passing**, folding event sets — exactly the "unwritten test" idea §7.1 asked for. |
+
+**This retires the single largest deduction in §1 and §4**, and it was done in the right
+order: the algebra first, then the writer, then the consumer, then the drain, then a test
+per attack. Nothing about it looks like scaffolding.
+
+**But it is not green yet.** Measured directly:
+
+- `pnpm test` (no DB): **9 failed / 714 passed / 72 skipped**, all 9 in
+  `src/components/account/derive.test.ts` — the account fixtures no longer satisfy their own
+  invariants mid-refactor.
+- `LIVEFIRE=1 RUN_DB_TESTS=1 pnpm vitest run src/test/livefire/`: **9 failed / 8 passed / 2 skipped**.
+  - ✅ Attack 3 (bitemporal correction), Attack 5 (maker-checker), Attack 6 (planted break, 2 of 3).
+  - ❌ **Attacks 1, 2 and 4 fail with `Test timed out in 5000ms` — nothing else.** They are
+    not wrong; they are starved. `vitest.config.ts` sets **no `testTimeout`**, so the 5s
+    default applies, and each of these does several Neon round trips that measure
+    300–1,800ms apiece elsewhere in the suite.
+  - ❌ Attack 6's third case: `expected [] to have a length of 1` — a real assertion failure.
+  - ❌ Attack 7: deep-equal mismatch — a real assertion failure.
+  - ❌ Attack 8: `LithicApiError: Rate limit exceeded`, then three cascading
+    `no delivery captured`. Partly my fault — see the disclosure below.
+
+**Revised priorities.** §6 items 1, 2 and 3 are unchanged and still rank first; item 5 is
+substantially done; item 4 is in progress and currently red. Insert these two at the top:
+
+- **0a. Add `testTimeout: 30_000` to `vitest.config.ts` — one line, ~30 seconds, recovers
+  three of the seven graded live-fire attacks.** Attacks 1, 2 and 4 are failing purely on
+  the 5s default. This is the highest points-per-minute item in the entire evaluation.
+- **0b. Finish the `derive.test.ts` refactor or revert it.** Nine failing tests on the
+  default `pnpm test` is the first thing a grader sees, and it is the one command CI runs.
+  A half-landed refactor is worse than either end state.
+
+Then: Attack 8 needs a retry/backoff around the Lithic call (the rate limiter at
+`src/lib/rails/lithic/ratelimit.ts` exists but this path evidently does not use it), and
+Attacks 6.3 and 7 need their assertions debugged — those two are real failures, not
+plumbing.
+
+**Disclosure about my own effect on the system.** This matters because §6.3 is about
+exactly this hazard, and I walked into it:
+
+- `.env` points `APP_DATABASE_URL` at the **production** Neon database, so every DB test I
+  ran wrote permanent, append-only rows into the live demo. Across my runs and the two
+  sub-audits, `payment_instruction` went to 109, `payment_instruction_event` to 157 and
+  `journal_entry` to 233. Much of the ~50-row `/approvals` queue now visible in production
+  is evaluation residue. It cannot be cleaned without `dbreset` because the tables are
+  append-only by design — which is correct behaviour and exactly why the tests need their
+  own Neon branch.
+- Running Attack 8 consumed Lithic sandbox rate-limit budget and probably caused, or
+  contributed to, the `Rate limit exceeded` above. Re-run it in isolation before believing
+  that failure.
+
+**Method correction.** Subagent review caught a flaw in my own scanning:
+`src/lib/webhooks/inbox.ts` contains a **literal NUL byte at line 907** (`` `${p}\x00${e}` ``
+written as a raw `0x00` rather than the escape). `file(1)` classifies it as `data` and
+plain `grep`/`grep -r` **silently skips it as binary** — so my first secrets, float-money
+and `UPDATE`/`DELETE` sweeps never read the largest file in the webhooks module (1,206
+lines). I re-scanned it with `grep -a`: **clean on all three** — no credentials, no float
+money (the `Number()` calls are attempt counters and timestamps), and its seven `UPDATE`s
+all target `webhook_inbox`, the sanctioned column-scoped exception. **The §2 verdicts
+stand.** Worth fixing anyway, and worth flagging to the candidate for a reason bigger than
+tidiness: any secret scanner, linter or `grep`-based CI check run across this repo silently
+skips that file. Replace the raw byte with `\x00` and add a `grep -aI` guard to
+`scripts/precommit.sh`.
+
+**Does the score change?** Not as published — §1–§7 are pinned to `f39606a`, which is what
+I measured end to end. Provisionally, if the new work goes green (which on current
+evidence is a `testTimeout` line plus two assertion fixes away), gauntlet items 2, 3 and 4
+move PARTIAL → IMPLEMENTED and live-fire 1, 2, 4 and 7 become defensible, which is worth
+roughly **+10 to +12**, i.e. low-to-mid 70s — matching decision 003's own forecast for this
+track. That estimate is contingent on a green run I have not yet seen, and I am not
+awarding it on the strength of files existing.
+
+**One observation for the debrief, offered as judgment rather than as a score.** The gap
+between "the schema is right" and "the schema has a caller" was closed in about ninety
+minutes, which is strong evidence the candidate genuinely understands the code rather than
+having assembled it. But it also means the freeze will arrive with this work at whatever
+state it happens to be in. Landing `testTimeout` and stabilising `derive.test.ts` is worth
+more than starting anything else, because **a red default `pnpm test` at freeze would cost
+more points than the entire holds module gains.**

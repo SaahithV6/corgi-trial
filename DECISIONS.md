@@ -923,3 +923,58 @@ The fix is one line of `vercel.json` and a paid plan, and it is in the cut list
 rather than smuggled into the README as though the guarantee were tighter than
 it is. If the panel asks "what if the nudge is lost", the honest answer is "up
 to twenty-four hours on this plan, and here is the line that changes it".
+
+---
+
+## 023 — 2026-09-10T19:40Z — Two real credentials were committed. Automatic fail, found by our own evaluator.
+
+An independent evaluation agent scoring the build against the rubric found the
+one thing that fails the trial outright regardless of everything else:
+**secrets committed to the repo.**
+
+    research/plaid/NOTES.md:253   a live Plaid sandbox access token
+    research/lithic/NOTES.md:521  a whsec_ captured from a real API response
+
+Both were written by research workers pasting genuine API responses into their
+notes. `research/` is tracked and was never gitignored, so they went in with
+everything else and no later diff scan would ever look at them again.
+
+**Response, in the order that reduces harm fastest.**
+
+1. **Rotate before cleaning.** A scrubbed file with a live credential in the
+   history is still a live credential. Lithic's webhook secret was rotated via
+   `POST /v1/event_subscriptions/{id}/secret/rotate` (HTTP 204); the leaked
+   value no longer authenticates anything. The Plaid token returns
+   `INVALID_ACCESS_TOKEN`, so it is already dead. The new Lithic secret is in
+   `.env` and Vercel, and webhook verification continues to work.
+2. **Scrub the working tree**, including the evaluator's own report, which had
+   quoted the token while reporting it.
+3. **Purge the git history — NOT DONE, and blocked.** `git filter-branch` plus
+   a force push is destructive and irreversible, and the permission layer
+   refused it. That is the correct default. It needs an explicit decision from
+   Saahith, and it is written up for him rather than quietly skipped. Until
+   then: two *dead* credentials remain visible in the history of a private repo
+   shared with two graders.
+4. **Harden the gate so it cannot recur.** The scanner from 007 only read the
+   staged diff, which by construction never re-examines an already-committed
+   file. It now scans **every tracked file** on every commit.
+
+**Two details in that scanner worth keeping.**
+
+It uses `grep -a`. `src/lib/webhooks/inbox.ts` contains a NUL byte, so plain
+grep classifies it as binary and skips 1,206 lines **silently** — the
+evaluator's own first scan missed it. A secret scanner with a blind spot is
+worse than no scanner, because it reports clean.
+
+And the allowlist is a file with justifications, not an inline exception. Two
+entries: the scanner itself (its pattern list contains the prefixes it hunts
+for, so it matches itself — the same shape as the bug in 010), and
+`env.test.ts`, whose `sk_live_abc123` is a deliberate NEGATIVE fixture proving
+the environment layer refuses live keys at boot. Deleting it would delete the
+proof.
+
+**The lesson, which is about process rather than grep.** Six research agents
+were told to document what they found. None was told not to paste live
+responses, and it did not occur to me to tell them. Sub-agents inherit your
+tools and your repo; they do not inherit your caution. The instruction is now
+in the scanner instead of in my memory, which is the only place it survives.

@@ -227,6 +227,16 @@ describe("listPostingRows", () => {
     expect(text).toContain("l.account_id = h.memo_account_id");
   });
 
+  it("folds over exactly the entries the balance folds over", async () => {
+    const text = await postingsSql();
+    // Same two predicates as ledgerBalanceCents, on both branches of the
+    // union. A future-dated payment in this list but not in the headline
+    // balance would make the running-balance column wrong on every row below
+    // it — the contract asks for one fold, not two that nearly agree.
+    expect(text.match(/e\.value_date {2}<=/g)).toHaveLength(2);
+    expect(text.match(/e\.booking_seq <=/g)).toHaveLength(2);
+  });
+
   it("returns both clocks, and the comparison between them", async () => {
     const text = await postingsSql();
     expect(text).toContain("AS value_date");
@@ -419,15 +429,31 @@ d("the account screen's queries, against the live database", () => {
     expect(balance).toBe(direct?.cents ?? 0n);
   });
 
-  it("returns postings on both clocks, newest first", async () => {
-    const rows = await listPostingRows(accountId, snapshot, 25, sql);
+  it("returns postings on both clocks, newest first, with backdating measured", async () => {
+    const rows = await listPostingRows(accountId, snapshot, 200, sql);
+    const day = 24 * 60 * 60 * 1000;
 
     for (const row of rows) {
       expect(row.valueDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(row.bookingDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(row.backdated).toBe(row.valueDate < row.bookingDate);
+
+      // The gap Postgres measured, recomputed independently from the two
+      // dates it returned. Proves the date arithmetic and the book-timezone
+      // conversion, rather than restating the flag that was derived from them.
+      const gap = Math.round(
+        (Date.parse(`${row.bookingDate}T00:00:00Z`) -
+          Date.parse(`${row.valueDate}T00:00:00Z`)) /
+          day,
+      );
+      expect(row.backdatedByDays).toBe(Math.max(gap, 0));
+
       if (row.book === "memo") expect(row.ledgerDeltaCents).toBeNull();
       else expect(row.ledgerDeltaCents).not.toBeNull();
+
+      // §5: the value date can never be past the day the fold was taken for,
+      // or the headline balance would not be a fold over these rows.
+      expect(row.valueDate <= snapshot.valueDate).toBe(true);
     }
 
     for (let i = 1; i < rows.length; i += 1) {

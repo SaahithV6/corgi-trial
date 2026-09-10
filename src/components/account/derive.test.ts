@@ -4,7 +4,7 @@ import { isErr, isOk, unwrap } from "@/lib/result";
 import type { ErrorShape, Result } from "@/lib/result";
 
 import type { Hold, Posting } from "./data-contract";
-import { DEMO_ACCOUNTS, getAccountDataSource } from "./fixtures";
+import { DEMO_ACCOUNTS, createFixtureSource, isLiveView } from "./fixtures";
 import { demoQuery, parseDemoView } from "./demo-state";
 import {
   expectedRemainingCents,
@@ -19,8 +19,20 @@ import {
 
 const ACCOUNT_ID = "acct_operating_4417";
 
+/**
+ * These are tests of the derivations and of the demo data they run on, so they
+ * read the fixture source directly.
+ *
+ * `getAccountDataSource` used to be that source for every state. It is now the
+ * swap point: the bare default URL is answered by the live journal, and only
+ * the `?state=` and `?auth=pending` views are fixtures. Pointing this helper
+ * at `createFixtureSource` keeps every assertion below about the demo numbers
+ * it was written for — the DECISIONS 006 over-capture, the SETTLED
+ * disagreement, the negative available balance — rather than turning a unit
+ * test suite into one that needs a database and a seeded account.
+ */
 async function load(state: "default" | "empty" | "edge", authPending = false) {
-  const source = getAccountDataSource({ state, authPending });
+  const source = createFixtureSource({ state, authPending });
   const [summary, holds, postings] = await Promise.all([
     source.getAccountSummary({ accountId: ACCOUNT_ID }),
     source.listHolds({ accountId: ACCOUNT_ID }),
@@ -317,7 +329,7 @@ describe("reconcileBalances", () => {
 
 describe("the error state", () => {
   it("fails as a value on every method, with a stable code", async () => {
-    const source = getAccountDataSource({ state: "error", authPending: false });
+    const source = createFixtureSource({ state: "error", authPending: false });
     const results: readonly Result<unknown, ErrorShape>[] = await Promise.all([
       source.getAccountSummary({ accountId: ACCOUNT_ID }),
       source.listHolds({ accountId: ACCOUNT_ID }),
@@ -328,6 +340,28 @@ describe("the error state", () => {
       expect(isOk(result)).toBe(false);
       if (isErr(result)) expect(result.error.code).toBe("LEDGER_QUERY_FAILED");
     }
+  });
+});
+
+describe("which source answers a URL", () => {
+  it("serves the bare default state from the live ledger", () => {
+    expect(isLiveView({ state: "default", authPending: false })).toBe(true);
+  });
+
+  it("keeps every demo state a fixture", () => {
+    // An over-capture, an empty account and a failed balance query are not
+    // conditions you seed on a live ledger to show someone. They stay
+    // reachable from a URL and they write nothing.
+    for (const state of ["loading", "empty", "error", "edge"] as const) {
+      expect(isLiveView({ state, authPending: false }), state).toBe(false);
+    }
+  });
+
+  it("keeps the authorisation toggle a fixture too", () => {
+    // Landing a $50.00 authorisation means writing a hold, and this screen
+    // never writes: money movement goes through a route handler with
+    // maker-checker, never through a render.
+    expect(isLiveView({ state: "default", authPending: true })).toBe(false);
   });
 });
 

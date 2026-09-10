@@ -117,19 +117,20 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       mcc: "5542",
     });
     if (auth.token === undefined) throw new Error("Lithic returned no transaction token");
+    const transactionToken: string = auth.token;
 
     const authRow = await until(
       async () => {
         const [row] = await sql<{ id: string; account_id: string; hold_id: string }[]>`
           SELECT id, account_id, hold_id FROM card_authorization
-           WHERE provider = 'lithic' AND provider_auth_id = ${auth.token}`;
+           WHERE provider = 'lithic' AND provider_auth_id = ${transactionToken}`;
         return row ?? null;
       },
       90_000,
     );
 
     if (authRow === null) {
-      const reason = `${PIPELINE_MISSING} Observed this run: Lithic transaction ${auth.token} produced no card_authorization row within 90s.`;
+      const reason = `${PIPELINE_MISSING} Observed this run: Lithic transaction ${transactionToken} produced no card_authorization row within 90s.`;
       record("skip", reason);
       ctx.skip(reason);
       return;
@@ -147,7 +148,7 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     expect(held.holdsCents).toBeGreaterThanOrEqual(BigInt(AUTH_CENTS));
 
     // ---- the capture, over the amount authorised -------------------------
-    await lithic.simulateClearing({ token: auth.token, amountCents: CAPTURE_CENTS });
+    await lithic.simulateClearing({ token: transactionToken, amountCents: CAPTURE_CENTS });
 
     const settled = await until(
       async () => {
@@ -159,7 +160,7 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     );
 
     if (settled === null) {
-      const reason = `${PIPELINE_MISSING} Observed this run: the $73.40 clearing for ${auth.token} produced no hold_closure row for hold ${authRow.hold_id} within 90s.`;
+      const reason = `${PIPELINE_MISSING} Observed this run: the $73.40 clearing for ${transactionToken} produced no hold_closure row for hold ${authRow.hold_id} within 90s.`;
       record("skip", reason);
       ctx.skip(reason);
       return;

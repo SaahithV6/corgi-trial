@@ -79,8 +79,35 @@ export interface HoldState {
   readonly capturedCents: bigint;
   readonly sawFinal: boolean;
   readonly sawClose: boolean;
+  /** At least one authorisation or incremental has been seen. See below. */
+  readonly sawAuthorisation: boolean;
   readonly expired: boolean;
+  /**
+   * `closed(E)` exactly as `v_card_auth_hold.is_closed` computes it. This is
+   * the term `H` uses, and it must not drift from the SQL by a single case or
+   * `v_hold_drift` starts reporting.
+   */
   readonly closed: boolean;
+  /**
+   * `closed(E)` AND the closure cannot be undone by a later event.
+   *
+   * The difference is one case and it is a real one, found by running the
+   * out-of-order scenario against the database rather than by reading the
+   * model. A settlement that arrives before its authorisation creates an
+   * identity whose event set is `{clearing 3000}`: `A = 0`, which satisfies
+   * `A <= 0`, which makes `closed` TRUE. That is harmless for `H` — it is 0
+   * either way, because `max(0 − 3000, 0)` is also 0 — but `hold_closure` is
+   * APPEND-ONLY with `PRIMARY KEY (hold_id)`, so writing a closure row on the
+   * strength of it would permanently free a hold that the late authorisation
+   * is about to open. Availability reads the closure row, so the customer
+   * would spend 5000 they no longer have.
+   *
+   * `A <= 0` is only terminal once there is something to have reversed. A
+   * clearing-first identity has `A = 0` because nothing has authorised
+   * anything yet, not because everything was reversed — and telling those two
+   * apart is exactly what `sawAuthorisation` is for.
+   */
+  readonly terminallyClosed: boolean;
   /** H(E), always >= 0. */
   readonly holdCents: bigint;
   readonly eventCount: number;
@@ -121,6 +148,7 @@ export function holdState(
   let captured = 0n;
   let sawFinal = false;
   let sawClose = false;
+  let sawAuthorisation = false;
   let count = 0;
 
   for (const event of events) {
@@ -137,8 +165,12 @@ export function holdState(
       );
     }
 
-    if (RAISES_AUTH.has(event.kind)) authorised += event.amountCents;
-    else if (LOWERS_AUTH.has(event.kind)) authorised -= event.amountCents;
+    if (RAISES_AUTH.has(event.kind)) {
+      authorised += event.amountCents;
+      sawAuthorisation = true;
+    } else if (LOWERS_AUTH.has(event.kind)) {
+      authorised -= event.amountCents;
+    }
 
     if (CAPTURES.has(event.kind)) captured += event.amountCents;
 

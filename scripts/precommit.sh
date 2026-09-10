@@ -37,6 +37,33 @@ if git diff --cached --name-only --diff-filter=d | grep -qE '(\.swp|\.swo|~|\.ka
   fail "an editor scratch file is staged. These can mirror the contents of files you never meant to commit."
 fi
 
+# Scan the WHOLE tree for credential shapes, not just the staged diff.
+#
+# The staged-diff scan added in 007 missed two real credentials that had
+# already been committed in research/ NOTES files: a Plaid access token and a
+# whsec_ captured from a live API response. They were written by research
+# workers pasting real responses into their notes, and no diff scan after the
+# fact would ever look at them again.
+#
+# Uses grep -a. src/lib/webhooks/inbox.ts contains a NUL byte, which makes
+# plain grep treat it as binary and SKIP it silently — a secret scanner with a
+# blind spot is worse than none, because it reports clean.
+LEAK_RE='(access-(sandbox|development|production)-[a-f0-9]{8}-|whsec_[A-Za-z0-9+/]{20,}|sk_live_|npg_[A-Za-z0-9]{16,}|access-token-[a-f0-9]{8}-)'
+# The published Standard Webhooks test vector is documentation, not a secret.
+KNOWN_PUBLIC='whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw'
+scan_files() {
+  git ls-files | grep -vFxf .secretscanignore 2>/dev/null || git ls-files
+}
+if scan_files | while read -r f; do
+         grep -aoE "$LEAK_RE[A-Za-z0-9+/_-]*" "$f" | grep -v "$KNOWN_PUBLIC" | grep -q . && echo "$f"
+       done | grep -q .; then
+  echo "--- files containing credential-shaped strings:" >&2
+  scan_files | while read -r f; do
+    grep -aoE "$LEAK_RE[A-Za-z0-9+/_-]*" "$f" | grep -v "$KNOWN_PUBLIC" | head -2 | sed "s|^|  $f: |" >&2
+  done
+  fail "a TRACKED file contains a credential-shaped string. Redact and rotate."
+fi
+
 echo "typecheck..." && pnpm run --silent typecheck || fail "typecheck"
 echo "lint..."      && pnpm run --silent lint      || fail "lint"
 echo "test..."      && pnpm run --silent test      >/dev/null 2>&1 || fail "tests"

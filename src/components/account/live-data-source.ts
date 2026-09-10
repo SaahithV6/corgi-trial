@@ -421,6 +421,26 @@ export function createLiveAccountDataSource(
     return pending;
   };
 
+  /**
+   * The holds, read once and shared by `getAccountSummary` and `listHolds`.
+   *
+   * Not an optimisation. The summary's `activeHoldsCents` is folded from these
+   * rows and the table renders the same rows, so the headline and the
+   * arithmetic beneath it are the same query — they cannot drift into
+   * disagreeing, which is the failure the contract's reconciliation warning
+   * exists to catch.
+   */
+  const holds = new Map<string, Promise<readonly HoldRow[]>>();
+  const holdsFor = async (accountId: string): Promise<readonly HoldRow[]> => {
+    const cached = holds.get(accountId);
+    if (cached !== undefined) return cached;
+    const pending = context().then(({ conn, snapshot }) =>
+      listHoldRows(accountId, snapshot, conn),
+    );
+    holds.set(accountId, pending);
+    return pending;
+  };
+
   return {
     async getAccountSummary({ accountId }) {
       try {
@@ -428,13 +448,13 @@ export function createLiveAccountDataSource(
         const found = await account(accountId);
         if (found === null) return accountNotFound(accountId);
 
-        const [ledger, holds] = await Promise.all([
+        const [ledger, rows] = await Promise.all([
           ledgerBalanceCents(found.accountId, snapshot, conn),
-          listHoldRows(found.accountId, snapshot, conn),
+          holdsFor(found.accountId),
         ]);
 
         return ok(
-          toSummary({ account: found, snapshot, ledgerCents: ledger, holds }),
+          toSummary({ account: found, snapshot, ledgerCents: ledger, holds: rows }),
         );
       } catch (thrown) {
         return readFailure("getAccountSummary", thrown);
@@ -443,11 +463,11 @@ export function createLiveAccountDataSource(
 
     async listHolds({ accountId }) {
       try {
-        const { conn, snapshot } = await context();
+        await context();
         const found = await account(accountId);
         if (found === null) return accountNotFound(accountId);
 
-        const rows = await listHoldRows(found.accountId, snapshot, conn);
+        const rows = await holdsFor(found.accountId);
         return ok(rows.map(toHold));
       } catch (thrown) {
         return readFailure("listHolds", thrown);

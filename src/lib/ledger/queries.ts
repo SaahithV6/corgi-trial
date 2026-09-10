@@ -621,6 +621,14 @@ export interface PostingRow {
  * no ledger effect at all, so `ledgerDeltaCents` is `null` and not `0`; its
  * availability effect is the negation of the hold's movement, because a hold
  * going up is availability going down.
+ *
+ * Both predicates from `ledgerBalanceCents` apply here too, and they must:
+ * the data contract requires the summary's balance to be a fold over exactly
+ * the postings this returns. Without the `value_date` cutoff a payment booked
+ * today for tomorrow's business day would appear at the top of the table while
+ * being absent from the headline balance, and the screen's running-balance
+ * column — which walks that balance backwards through these rows — would be
+ * wrong on every line beneath it.
  */
 export async function listPostingRows(
   accountId: string,
@@ -658,6 +666,7 @@ export async function listPostingRows(
         JOIN journal_line  l ON l.entry_id = e.id
         JOIN account       a ON a.id = l.account_id
        WHERE l.account_id = ${accountId}::uuid
+         AND e.value_date  <= ${snapshot.valueDate}::date
          AND e.booking_seq <= ${snapshot.bookingWatermark}
        GROUP BY e.id
 
@@ -676,6 +685,7 @@ export async function listPostingRows(
                             AND l.account_id = h.memo_account_id
         JOIN account       a ON a.id = l.account_id
        WHERE h.account_id = ${accountId}::uuid
+         AND e.value_date  <= ${snapshot.valueDate}::date
          AND e.booking_seq <= ${snapshot.bookingWatermark}
        GROUP BY e.id
     )
