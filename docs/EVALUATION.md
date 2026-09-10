@@ -703,3 +703,71 @@ having assembled it. But it also means the freeze will arrive with this work at 
 state it happens to be in. Landing `testTimeout` and stabilising `derive.test.ts` is worth
 more than starting anything else, because **a red default `pnpm test` at freeze would cost
 more points than the entire holds module gains.**
+
+---
+
+# ITERATION 1 — 2026-09-10T20:00Z
+
+First pass of the continuous evaluation loop. This section records the delta
+since the original scoring run, which was pinned to commit `f39606a`.
+
+## Measured, not assumed
+
+    deployed commit   0cea11d          health status ok
+    integrations      4 of 7 live      webhookHealth present, degradedBy []
+    routes            / /accounts /approvals /reconciliation /statements  all 200
+    tests             939 passed, 93 skipped
+    invariants        dbcheck 14 of 14
+    docs              README 477 · CUT-LIST 327 · DEMO 422 · AGENT-LIMITS 352 · MCP 847
+
+## What changed since the base score of 62/100
+
+The base score was taken before roughly 3,800 lines landed and explicitly
+flagged that the tree was moving underneath it. Since then:
+
+- **The drain exists.** The inbox was half a pipeline: deliveries were verified
+  and stored and nothing ever turned one into a journal line. Three triggers
+  now, each failing differently.
+- **Money moves on the deployed system.** A real $50.00 Lithic authorisation
+  moved available by exactly 5,000 and left the ledger untouched, on production.
+- **The root page stopped lying.** It said "ledger not yet wired" while the
+  ledger held hundreds of entries.
+- **`/statements` exists**, which was non-negotiable 5 and gauntlet item 7.
+- **Attack 7's two missing halves shipped** — delivery freshness on health, and
+  a provider-down banner in the console shell.
+- **The secrets automatic-fail is closed.** Two real credentials were committed;
+  both rotated or already dead, history rewritten, force-pushed, and the gate
+  now scans every tracked file rather than the staged diff.
+
+## The integration count went DOWN, and that is the point
+
+5 live became 4. `card_webhooks` was reporting LIVE off the back of
+`LITHIC_WEBHOOK_SECRET` being a non-empty string, because a slot with no probe
+inherited the env-derived status — the 011 failure, reintroduced by the
+fallback inside the module written to eliminate it. It now reads
+`unprobed`, labelled SIMULATED.
+
+One fewer claimed integration is a better score on integration reality, not a
+worse one, because the rubric grades honest labelling and the brief calls
+presenting a simulated integration as live the fastest way to fail.
+
+## Graph
+
+    231 nodes: 183 done, 2 in flight, 46 todo
+    83% complete · 24.1h worker-hours remaining · 16.1h wall clock at 5 agents
+
+## Dispatched this iteration
+
+1. Re-run live fire against the current deploy — attack 7's blockers shipped, so
+   it may now pass. Attack 2 is expected to still skip and must NOT be made to
+   pass by weakening its assertion (DECISIONS 024).
+2. `docs/DEBRIEF.md` — "code you cannot explain line by line" is an automatic
+   fail and the debrief is 75 minutes of the panel driving.
+3. `docs/VIDEO-SCRIPT.md` and `docs/EVIDENCE-PACK.md` — the last two submission
+   artefacts.
+
+## Standing rule for every iteration
+
+Never claim a capability that has not been proven by a real call. A skip is not
+a pass. Four probes have already reported LIVE for capabilities that did not
+exist, and each was caught only by measuring.
