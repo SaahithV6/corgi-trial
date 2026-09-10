@@ -1042,3 +1042,90 @@ Nothing was disabled at Lithic. The subscription `ep_3J8yb9…` is enabled at
 before. The outage was induced the only reversible way — by delivering nothing
 — and closed by delivering a genuine signed body. `/api/health` reads `status:
 ok`, `degradedBy: []`, 5 of 7 live.
+
+---
+
+# ITERATION 5 — 2026-09-10T19:50Z
+
+## Measured
+
+    health · status degraded · 6 of 7 live
+      live       card_issuing card_webhooks director_kyc open_banking ach_rail stablecoin
+      simulated  business_registry   (Connect 400, re-measured today)
+    six screens 200 · 1054 tests · dbcheck 14 of 14 · doc audit clean
+    wallet fundable: 100000000000000 wei against ~390000000000 needed
+
+`degraded` is the alarm working, not a fault. `webhookHealth.providers` has
+lithic `stale` with `degradesDeployment: true` after the induced-outage test
+left the feed quiet. It self-clears at the `quiet` threshold.
+
+**A note on how that was nearly misreported.** The first read of this endpoint
+showed `status: degraded` with `degradedBy: None` and looked like the
+self-contradiction of 021 all over again. It was not. `degradedBy` is not a
+top-level key — the reader was wrong, not the endpoint. Worth recording
+because the failure mode of an evaluation loop is inventing findings, and the
+check against it is the same one applied to everything else: read the actual
+JSON before believing the summary.
+
+## The claim I got wrong, and it was mine
+
+I told the user repeatedly that the USDC payout was "all already built and
+tested, just waiting on gas." **That was false.** `src/lib/integrations/probe.ts`
+reads chain balances; nothing signs and nothing broadcasts. There is no viem
+and no ethers in the tree. The gas was necessary and nowhere near sufficient.
+
+This is the exact failure this project has caught four times in other people's
+work and twice in mine, and it is worth writing down that it recurs even with
+the discipline pointed straight at it. The correction is dispatched: a real
+ERC-20 transfer, EIP-1559, signed locally, waited on for a receipt, with the
+transaction hash computed BEFORE broadcast so it can be the idempotency key.
+
+## 6 of 7, and why 7 is not available
+
+`stablecoin` flipped on the next health call with **no deploy**, because the
+probe recomputes rather than remembering — the same property that made the
+earlier `unprobed` fix free. Gas came from the CDP faucet over its API, with a
+hand-rolled EdDSA JWT scoped to one method, one host, two minutes, rather than
+adding an SDK to the deployed app.
+
+`business_registry` is the ceiling. Every option the brief lists is shut, and
+all of them re-measured today rather than assumed: Stripe Connect still answers
+400, Middesk and Sumsub are behind sales, and Persona's signup requires a
+business email address the user does not have. Under-claiming an integration
+nobody could obtain costs nothing; the automatic fail is the other direction.
+
+## `every` is disarmed by the outage it exists to catch
+
+The best finding of the iteration, and it came from an agent sent to do
+something smaller. `card_webhooks`'s probe reads **Lithic's own `/attempts`
+log**, so it is not an independent witness: when our endpoint starts rejecting
+deliveries, the probe goes `unauthorised` too. Replaying the real 16:18
+`FAILED 500`s with lithic stale:
+
+| gate | `card_webhooks` | `degradesDeployment` | top-level |
+|---|---|---|---|
+| `some` | not live | **true** | **degraded** |
+| `every` | not live | false | ok |
+
+So under `every`, deliveries being lost silences the alarm for deliveries being
+lost. That is the 028 blind spot re-entering through a probe instead of through
+the absence of one. `some` stays, now justified by measurement rather than by a
+fact that had expired.
+
+## Fifth instance of the standing pattern
+
+The secret scanner refused to commit the faucet transaction hash, because
+`0x` + 64 hex **is** the shape of an Ethereum private key, and ours is in the
+env file it protects. There is no pattern that separates them. Allowlisting by
+shape would have opened a hole exactly the size of `USDC_SENDER_PRIVATE_KEY`.
+
+So the separation is evidence, not syntax: the hash was verified public with
+`eth_getTransactionByHash` (block 46650546) before being allowlisted, and the
+burden of proof is written into the scanner for whoever adds the next one.
+
+## Ready now
+
+    Z13  USDC payout confirming on chain    agent writing
+    Z08  five-minute video                  HUMAN, largest unstarted
+    Z09  evidence pack screenshots          HUMAN
+    T+24h email                             HUMAN, send-ready at 6 of 7

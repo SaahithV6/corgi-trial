@@ -420,7 +420,7 @@ X01 X02 X03 X04 X05
 """.split()
 
 DOING = """
-LF10 LF11 Z06
+LF10 LF11 Z13
 """.split()
 
 # Landed since the last graph update.
@@ -433,7 +433,7 @@ O02 O03 O04 O08 O09 T01 T02 T03 T04 T05 T07
 W10 W14 E04 E06 E07 E09 E10 E11 E12 E13 K04
 X06 X07 X08 X09 X10 X11
 Y01 Y02 Y03 Y04 Y06 Y07 Y08
-LF07 Z01 Z02 Z03 Z04 Z05
+LF07 Z01 Z02 Z03 Z04 Z05 Z06 Z07 Z11 Z12
 """.split()
 
 # Discovered after the deploy went live.
@@ -501,6 +501,19 @@ def _iter3():
       "finish", 60, [], "human", ["lib/kyb"],
       risk="re-measured today: Stripe Connect still 400, no Persona key exists")
 _iter3()
+
+# --- iteration 5: what the loop turned up after gas landed ---
+def _iter5():
+    N("Z11", "Attack 7's expired limit retired; 'some' vs 'every' settled by measurement",
+      "discovered", 60, [], "agent", ["app/api/health"], "done",
+      risk="'every' is disarmed by the outage itself - card_webhooks' probe reads Lithic's own log")
+    N("Z12", "Secret scanner: 0x+64hex is a tx hash AND a private key; separation is evidence",
+      "discovered", 25, [], "claude", ["ops/gate"], "done",
+      risk="allowlisting by shape would have opened a hole the size of USDC_SENDER_PRIVATE_KEY")
+    N("Z13", "USDC payout that CONFIRMS on chain, posted to the ledger",
+      "finish", 150, ["Z07"], "agent", ["lib/rails/stablecoin"], "doing",
+      risk="I claimed this was already built. It was not - the probe reads balances, nothing sends")
+_iter5()
 
 def apply_status():
     idx = {n["id"]: n for n in NODES}
