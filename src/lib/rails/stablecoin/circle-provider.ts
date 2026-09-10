@@ -188,19 +188,48 @@ export async function verifyTransferOnChain(
 
 export interface PollResult {
   readonly transaction: CircleTransaction;
+  /** Circle said COMPLETE, FAILED, CANCELLED or DENIED. */
   readonly terminal: boolean;
+  /** A transaction hash exists. This is the condition that actually matters. */
+  readonly hasChainEvidence: boolean;
   readonly waitedMs: number;
   readonly polls: number;
 }
 
 /**
- * Poll until Circle reaches a terminal state, or until the clock runs out.
+ * Poll until there is something a CHAIN can be asked about, or Circle gives up.
  *
- * `isTerminal` is consulted here and only here. A non-terminal state is never
- * interpreted, never rounded up, and never returned as anything but
- * `terminal: false`.
+ * ── WHY THE STOP CONDITION IS THE HASH AND NOT `COMPLETE` ────────────────────
+ *
+ * The first version of this waited for a terminal state, because that is what
+ * Circle's documentation points you at. Measured on the real sandbox, on the
+ * live 0.10 USDC transfer that this rail's first payout was:
+ *
+ *     t+0s     INITIATED   no txHash            (the acknowledgement)
+ *     t+~10s   CONFIRMED   txHash 0x251858a3…   (the money has moved)
+ *     t+181s   CONFIRMED   txHash 0x251858a3…   (still not COMPLETE)
+ *
+ * The USDC left the wallet at roughly ten seconds — read off Base Sepolia,
+ * 1.000000 -> 0.900000 — and Circle was still not saying `COMPLETE` three
+ * minutes later. `COMPLETE` is Circle's own finality bookkeeping, and waiting
+ * for it means waiting for the provider's OPINION about a fact the chain has
+ * already settled. That is the thing this rail exists not to do.
+ *
+ * So the loop stops on either of two conditions and reports which:
+ *
+ *   a hash appeared   -> stop, and go ask Base Sepolia what it says.
+ *   Circle is done    -> stop. With no hash, nothing reached a chain at all.
+ *
+ * This is STRICTER than waiting for `COMPLETE`, not looser. `COMPLETE` would
+ * be Circle's word for success; a receipt with `status: 0x1` and a matching
+ * `Transfer` log is ours. A transfer Circle later calls FAILED but which the
+ * chain shows as a confirmed transfer of our exact amount to our exact
+ * recipient IS a payout, and the money is gone whatever Circle's row says.
+ *
+ * `isTerminal` is still consulted, here and only here, because "Circle stopped
+ * without ever producing a hash" is a real and different ending.
  */
-export async function pollUntilTerminal(
+export async function pollForChainEvidence(
   client: CircleClient,
   transactionId: string,
   options: {
@@ -216,20 +245,25 @@ export async function pollUntilTerminal(
   let transaction = await client.getTransaction(transactionId);
   polls += 1;
 
-  while (!isTerminal(transaction.state)) {
-    if (Date.now() - startedAt >= timeoutMs) {
-      return { transaction, terminal: false, waitedMs: Date.now() - startedAt, polls };
-    }
+  const done = (): PollResult => ({
+    transaction,
+    terminal: isTerminal(transaction.state),
+    hasChainEvidence: transaction.txHash !== null,
+    waitedMs: Date.now() - startedAt,
+    polls,
+  });
+
+  while (transaction.txHash === null && !isTerminal(transaction.state)) {
+    if (Date.now() - startedAt >= timeoutMs) return done();
     options.onProgress?.(
-      `circle ${transactionId} is ${transaction.state}` +
-        `${transaction.txHash === null ? " — no txHash yet" : ` — txHash ${transaction.txHash}`} ` +
+      `circle ${transactionId} is ${transaction.state} — no txHash yet ` +
         `(${Math.round((Date.now() - startedAt) / 1000)}s)`,
     );
     await sleep(intervalMs);
     transaction = await client.getTransaction(transactionId);
     polls += 1;
   }
-  return { transaction, terminal: true, waitedMs: Date.now() - startedAt, polls };
+  return done();
 }
 
 // ---------------------------------------------------------------------------
@@ -512,8 +546,8 @@ export function circleStablecoinProvider(options: CircleProviderOptions): Stable
         `(state ${accepted.result.state}, idempotency key ${accepted.idempotencyKey}) — this is an acknowledgement, not a payment`,
     );
 
-    // 7. Poll to a terminal state. `INITIATED` is not one.
-    const polled = await pollUntilTerminal(client, accepted.result.id, {
+    // 7. Poll until there is a hash to take to the chain. `INITIATED` is not one.
+    const polled = await pollForChainEvidence(client, accepted.result.id, {
       ...(options.pollIntervalMs === undefined ? {} : { intervalMs: options.pollIntervalMs }),
       ...(options.pollTimeoutMs === undefined ? {} : { timeoutMs: options.pollTimeoutMs }),
       ...(progress === undefined ? {} : { onProgress: progress }),
@@ -537,18 +571,22 @@ export function circleStablecoinProvider(options: CircleProviderOptions): Stable
       }
     }
 
-    if (!polled.terminal) {
-      // The clock ran out. If Circle has produced a hash we hand it back as an
-      // `unconfirmed` outcome, which the ledger cannot take: the hash is a
-      // handle for a later settle, not a claim that anything is done.
-      if (tx.txHash !== null) {
-        return {
-          ...outcomeBase(instruction),
-          kind: "unconfirmed",
-          txHash: tx.txHash.toLowerCase(),
-          waitedMs: polled.waitedMs,
-        };
+    if (tx.txHash === null) {
+      if (polled.terminal) {
+        // Terminal with no hash: FAILED, CANCELLED or DENIED before anything
+        // reached a chain. Nothing to verify and nothing to post.
+        return refuse(
+          instruction,
+          "provider_declined",
+          `circle transaction ${tx.id} ended ${tx.state}` +
+            `${tx.errorReason === null ? "" : ` (${tx.errorReason})`}` +
+            `${tx.errorDetails === null ? "" : `: ${tx.errorDetails}`} with no transaction hash`,
+        );
       }
+      // The clock ran out and Circle has still produced no chain evidence.
+      // This is `INITIATED` outliving its welcome: the money may yet move, so
+      // saying "nothing happened" would be a lie, and it is not `confirmed`,
+      // so the ledger cannot take it. The provider's own id is the handle.
       return {
         ...outcomeBase(instruction),
         kind: "acknowledged",
@@ -559,21 +597,9 @@ export function circleStablecoinProvider(options: CircleProviderOptions): Stable
       };
     }
 
-    if (tx.txHash === null) {
-      // Terminal with no hash: FAILED, CANCELLED or DENIED before anything
-      // reached a chain. Nothing to verify and nothing to post.
-      return refuse(
-        instruction,
-        "provider_declined",
-        `circle transaction ${tx.id} ended ${tx.state}` +
-          `${tx.errorReason === null ? "" : ` (${tx.errorReason})`}` +
-          `${tx.errorDetails === null ? "" : `: ${tx.errorDetails}`} with no transaction hash`,
-      );
-    }
-
     if (tx.state !== CIRCLE_SUCCESS_STATE) {
       progress?.(
-        `circle transaction ${tx.id} ended ${tx.state} but named ${tx.txHash} — asking the chain rather than taking either word for it`,
+        `circle transaction ${tx.id} is ${tx.state} and named ${tx.txHash} — asking the chain rather than taking Circle's word either way`,
       );
     }
     return settleAndVerify(instruction, tx.txHash.toLowerCase(), false);

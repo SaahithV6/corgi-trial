@@ -57,7 +57,7 @@ export {
 export {
   CIRCLE_LABEL,
   circleStablecoinProvider,
-  pollUntilTerminal,
+  pollForChainEvidence,
   provisionCircleWallet,
   resolveCircleTokenId,
   resolveCircleWallet,

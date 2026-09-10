@@ -2,7 +2,13 @@
 
 **A stablecoin payout that actually confirms on a testnet is worth far more
 than a slide about one.** This is that payout, and this document is what it
-does, what it refuses to do, and the four things it does not do at all.
+does, what it refuses to do, and the things it does not do at all.
+
+Two providers move USDC over this rail: the direct-to-chain path, which signs
+its own transactions, and Circle Web3 Services, which does not. The first half
+of this document is the direct path. **The second provider starts at *The second
+provider: Circle*, below**, and the reason it is here is that "a rail is an
+adapter, not a schema" is a claim one provider cannot demonstrate.
 
 ## The transaction
 
@@ -346,4 +352,354 @@ src/lib/rails/stablecoin/
   types.ts        the outcome union
   *.test.ts       42 tests, 2 of them against the live database
 scripts/payout-usdc.mjs
+```
+
+---
+
+# The second provider: Circle
+
+A rail is an adapter, not a schema. That is a claim, and one provider cannot
+demonstrate it. This is the second one.
+
+**Nothing below the provider boundary changed to accommodate it.** Same
+`postUsdcPayout`, same chart accounts, same cents, same dust rule, same value
+date from the block's own timestamp, same idempotency key derived from the same
+on-chain transaction hash. What changed was a slug on an outcome and two
+failure modes a *mediated* provider can have that a self-signing one cannot.
+
+## The transaction
+
+Real, on the same public chain, sent by Circle's sandbox rather than by us.
+
+| | |
+|---|---|
+| Circle transaction id | `a384de2e-ff91-5bc8-8c05-7f13112ba22b` |
+| tx hash | [`0x251858a3d3daf45aa2a8e2bc970351580b33bfe97a7f18e951b207fb91d476fa`](https://sepolia.basescan.org/tx/0x251858a3d3daf45aa2a8e2bc970351580b33bfe97a7f18e951b207fb91d476fa) |
+| network | Base Sepolia, chain id 84532 (`BASE-SEPOLIA`) |
+| Circle wallet | `9a3524c0-728c-554f-8d26-a19c6ee66a4a`, EOA, developer-controlled |
+| from | `0xeaa8ce10abcbce9d7f5257126c36a078c9951e1c` |
+| to | `0x000000000000000000000000000000000000dEaD` |
+| amount | 0.100000 USDC (`100000` minor units) |
+| receipt status | `0x1` — **read off Base Sepolia by us, not reported by Circle** |
+| block | 46,657,187 · `0x002ecb5e611d35fb0d8756d63d04af49da0c487f57b01732846d36e786f711fe` |
+| block time | 2026-09-10T23:24:22Z |
+| gas | 44,843 used @ 6,000,000 wei = 269,058,000,000 wei |
+
+Wallet balance, read off the chain either side of the send:
+
+```
+circle wallet USDC   1.000000 USDC  ->  0.900000 USDC
+```
+
+And the journal entry it produced — note the provider slug in the description:
+
+```
+entry           9ad9fac3-b0e5-4d87-a5b0-55027ede22d5
+value date      2026-09-10          (from the block timestamp, in book time)
+rail            usdc
+external_ref    0x251858a3…d476fa
+idempotency_key usdc:payout:0x251858a3…d476fa
+description     USDC payout 0.100000 USDC to 0x…dead (circle sandbox payout)
+                — circle.w3s block 46657187, gas 269058000000 wei
+
+DR 2100/e274546d…   10   Ridgeline Robotics, Inc. — business current account
+CR 1140             10   USDC omnibus wallet — Base Sepolia
+   balance           0
+
+1140 before  1950 cents      1140 after  1940 cents
+```
+
+Running the posting a second time returns the same entry id and writes nothing:
+`entries with this key: 1`. That is the UNIQUE constraint on
+`journal_entry.idempotency_key`, and it is the reason **the same payout cannot be
+booked twice by two providers** — the key is derived from the on-chain hash, and
+both rails produce the identical string for the identical movement.
+
+## Which base URL, and how we know
+
+Measured, with the real key. The first three lines are the ones that matter:
+
+```
+GET  https://api.circle.com/v1/w3s/config/entity/publicKey        -> 200  (RSA PEM)
+GET  https://api.circle.com/v1/w3s/wallets                        -> 200
+GET  https://api.circle.com/v1/w3s/walletSets                     -> 200  {"walletSets":[]}
+GET  https://api.circle.com/v1/configuration                      -> 403
+POST https://api.circle.com/v1/faucet/drips                       -> 403  {"code":3,"message":"Forbidden"}
+
+GET  https://api-sandbox.circle.com/ping                          -> 200  {"message":"pong"}
+GET  https://api-sandbox.circle.com/v1/w3s/config/entity/publicKey -> 401 "Invalid credentials."
+GET  https://api-sandbox.circle.com/v1/w3s/wallets                -> 401
+```
+
+**Web3 Services has one host and the key's prefix selects the environment.**
+`api-sandbox.circle.com` is Circle *Mint*, a different product this key is not
+entitled to, which is also why `/v1/configuration` answers 403 rather than 200.
+That 403 is evidence of what the credential is scoped to, not a failure.
+
+`src/lib/rails/stablecoin/circle-config.ts` therefore **refuses any key that does
+not begin `TEST_API_KEY:`**. There is no sandbox hostname to hide behind, so the
+testnet guarantee has to be enforced on the credential itself — and "live-mode
+API keys" is an automatic fail on this trial.
+
+## The shape that makes Circle dangerous
+
+The direct path knows its transaction hash **before** the money can move: the
+hash is `keccak256` of bytes we signed. Circle inverts that.
+
+```
+POST /v1/w3s/developer/transactions/transfer
+  -> 201 {"data":{"id":"a384de2e-…","state":"INITIATED"}}
+```
+
+No hash. No chain. Nothing to look up. An acknowledgement that arrives in the
+same call as the request, carries an id you can log, and means **nothing** about
+whether money moved.
+
+`types.ts` already said there is no `submitted` outcome the ledger will accept,
+and DECISIONS 011 and 030 already said a payout is posted on a CONFIRMED
+receipt and never on an acknowledgement. `INITIATED` is precisely the
+acknowledgement those rules were written about, and it now has a provider that
+produces one.
+
+**How `INITIATED` is stopped, in three layers.** Not by a convention anyone has
+to remember:
+
+1. **It is not a payable value.** `PayoutOutcome` gained one member,
+   `acknowledged`, whose `txHash` is `null` — not optional, `null`, so it cannot
+   be read without being seen. `ConfirmedPayout` is still
+   `Extract<PayoutOutcome, {kind:"confirmed"}>` and `postUsdcPayout` still takes
+   only that. Passing an `acknowledged` outcome to the ledger is a **compile
+   error**.
+2. **There is no branch that turns a Circle state into `confirmed`.** The only
+   constructor of `confirmed` in this package is `settleTransaction`, which
+   reads a receipt off a node, asserts `status: 0x1`, and re-checks the block is
+   canonical. Circle reaches the ledger through it or not at all.
+3. **A test that would fail if either of those slipped.**
+   `circle-provider.test.ts` scripts a Circle that says `INITIATED` forever and
+   asserts `isConfirmed(outcome) === false` — and separately asserts the adapter
+   made **zero** `eth_getTransactionReceipt` calls, because there was no hash to
+   ask about.
+
+## And then we do not believe the receipt either
+
+A receipt with `status: 0x1` proves *some* transaction succeeded. For the direct
+path that is enough — we built its calldata. For Circle it is not: **Circle built
+the calldata and then told us a hash.**
+
+So after the receipt, `verifyTransferOnChain` pulls the ERC-20 `Transfer` logs
+for that exact hash, in the block the receipt named, and requires one from our
+wallet, to our recipient, for our exact minor units:
+
+```
+verified against Base Sepolia ourselves —
+  Transfer log in block 46657187 matches: 0.100000 USDC to 0x…dead
+```
+
+A mismatch is a new outcome, `unverified`, which carries the hash and posts
+nothing. Three tests drive it: no matching log at all, a log for a different
+amount, and a matching log belonging to a different transaction in the same
+block.
+
+This is the trial's own non-negotiable applied where it actually bites — *"your
+payment provider's balance is their ledger, not yours"*. Circle's async shape is
+exactly what tempts an implementation to take the provider's word, because the
+provider's word arrives first and looks authoritative.
+
+The same rule runs the other way, and there is a test for that too: **a transfer
+Circle calls `FAILED` that the chain shows as a confirmed transfer of our exact
+amount to our exact recipient IS a payout.** The money is gone whatever Circle's
+row says, and refusing to post it would leave a real movement unrecorded.
+
+## What we polled for, and the measurement that changed it
+
+The first implementation waited for a terminal state — `COMPLETE`, `FAILED`,
+`CANCELLED`, `DENIED` — because that is what the documentation points at. Then
+the live transfer ran:
+
+```
+t+0s     INITIATED   no txHash              (the acknowledgement)
+t+~10s   CONFIRMED   txHash 0x251858a3…     (the money has already moved)
+t+181s   CONFIRMED   txHash 0x251858a3…     (still not COMPLETE)
+```
+
+The USDC left the wallet at roughly ten seconds — 1.000000 → 0.900000, read off
+the chain — and Circle was still not saying `COMPLETE` three minutes later. The
+first run therefore timed out and returned `unconfirmed`, correctly posting
+nothing.
+
+**`COMPLETE` is Circle's own finality bookkeeping.** Waiting for it is waiting
+for the provider's opinion about a fact the chain has already settled, which is
+the one thing this rail exists not to do. So the loop now stops on either
+condition and reports which:
+
+```
+a hash appeared   -> stop, and go ask Base Sepolia what it says
+Circle is done    -> stop. With no hash, nothing reached a chain at all
+```
+
+That is **stricter** than waiting for `COMPLETE`, not looser: `COMPLETE` would
+be Circle's word for success; a receipt with `status: 0x1` plus a matching
+`Transfer` log is ours. `isTerminal()` is still consulted — "Circle stopped
+without ever producing a hash" is a real and different ending, and it is
+`refused: provider_declined`.
+
+## The entity secret
+
+Circle authorises a developer-controlled wallet action with an
+`entitySecretCiphertext`: the 32-byte entity secret, RSA-OAEP-SHA256 encrypted
+against the entity public key from `GET /v1/w3s/config/entity/publicKey`. Circle
+**rejects a reused ciphertext**, which is a good design — a replayed ciphertext
+is a replayed authorisation — so it cannot be computed once and cached.
+
+`CircleClient.encryptEntitySecret()` is called inside every mutating method.
+OAEP seeds randomly, so the same secret produces a different ciphertext each
+time; `circle-client.test.ts` generates a real RSA key pair, decrypts the
+ciphertext back to the entity secret to prove the encryption is exercised rather
+than mocked, and asserts three successive encryptions are three distinct
+strings. The **public** key is cached, because it is a public key.
+
+**Where the secret lives, stated plainly.** In `.env`, which is gitignored and
+has never been committed. Circle's own console warns *"Never expose your Entity
+Secret in source control, configuration files, or logs"*, and `.env` is a
+configuration file. This is a work-trial testnet credential in a local dotfile,
+not a secrets manager, and saying so is better than implying otherwise. It is
+never logged: `describeCircleConfig()` exists so operator output can describe
+the configuration without printing any of it, and a test asserts the description
+contains neither the key nor the secret.
+
+## Selection is explicit and visible
+
+```
+STABLECOIN_PROVIDER unset      -> base.usdc    the direct-to-chain rail
+STABLECOIN_PROVIDER=circle     -> circle.w3s
+STABLECOIN_PROVIDER=circl      -> base.usdc    a typo is not a provider
+```
+
+Never inferred from which credentials happen to be present. And asking for
+Circle when Circle is not configured **does not quietly get you the direct
+path** — it gets a provider that reports `not_configured` and refuses with
+`provider_not_configured`. A silent fallback would move real testnet money over
+a rail nobody chose and then write that rail's name into an append-only ledger,
+where it cannot be corrected by editing.
+
+A reader never has to guess which rail moved the money:
+
+| surface | how |
+|---|---|
+| journal entry | `— circle.w3s block 46657187, gas … wei` in the description |
+| the outcome | `outcome.provider` |
+| health | `stablecoinProviderHealth()` returns one row per rail, each with a label |
+| operator output | `describeSelection()` — `circle.w3s — Circle Web3 Services, Base Sepolia (…)` |
+
+`postUsdcPayout` writes `outcome.provider` rather than the old `USDC_PROVIDER`
+constant. That one line is the entire ledger-side change.
+
+## Health, in the DECISIONS 011 vocabulary
+
+```
+live            an authenticated round trip returned 2xx AND a wallet exists
+unauthorised    the credential was rejected (401/403), or works but cannot pay
+unreachable     network failure — status 0. We do not know.
+not_configured  no key at all
+```
+
+`unreachable` and `unauthorised` are kept apart because they need different
+human responses: one is a wrong key, the other is a bad afternoon. A credential
+that authenticates but has no `BASE-SEPOLIA` wallet is **not** `live` — it is a
+rail that cannot move money, and reporting live there claims a capability we do
+not have. That case was real: the first health probe against the new account
+returned exactly it, before the wallet was provisioned.
+
+```
+health base.usdc   live           0xd3629d…2918 on chain 84532, 99724160442266 wei of gas
+health circle.w3s  unauthorised   credential works but no sending wallet: no BASE-SEPOLIA
+                                  wallet exists on this Circle account
+```
+
+## How the wallet was funded, and why it is not in the ledger
+
+Circle's testnet faucet is not entitled on this key (`POST /v1/faucet/drips` →
+403), so the wallet was funded from our own treasury wallet:
+
+```
+gas   0x8b907a16e40c680ea68229cdcc497a919d2886c4940660b22284d61c542d15b6   30,000,000,000,000 wei
+USDC  0xf7e3d2fe42a59ec8a8562a42406fd9aef2755bc8873d207f45ba12a56b095cfc   1.000000 USDC
+```
+
+**Neither is a journal entry, deliberately.** Both wallets are ours, and 1140 is
+a single omnibus asset account covering our USDC holdings — moving tokens
+between two of our own wallets does not change it. A correct entry would be
+`DR 1140 / CR 1140` for the same amount, which nets to zero and would be
+rejected as a zero-amount line. Posting it as a payout would be worse: it would
+book a customer's deposit against a treasury transfer that no customer made.
+
+**A real thing this exposed.** The USDC funding transfer came back `reorged`:
+
+```
+kind    REORGED
+detail  receipt claims block …, chain now has …
+```
+
+The transfer had in fact succeeded — status `0x1`, and the Circle wallet held
+1.000000 USDC a moment later. `https://sepolia.base.org` is load-balanced, and
+the block-hash re-read immediately after the receipt can land on a node that has
+not yet seen that block. The adapter refused to post, which is the **safe**
+direction of that failure: it under-claims rather than over-claims, and the
+transfer is recoverable from the hash. It is a false positive on a public RPC
+endpoint, not a reorg, and the fix is a node with a consistent view rather than
+a weaker check.
+
+## What the Circle rail does not do
+
+Stated rather than discovered. In addition to the six gaps above, which all
+still apply:
+
+7. **1140 does not reconcile to the Circle wallet either.** After the payout the
+   chain says the wallet holds 0.900000 USDC and the ledger's 1140 contribution
+   from this rail is −$0.10. `circle-recon.ts` computes exactly that break and
+   reports it rather than hiding it:
+
+   ```
+   1140 BREAK on 0xeaa8ce10…1e1c: chain 90 cents, ledger 0 cents
+     — 90 cents on chain with no journal entry
+   ```
+
+   The 90 cents is the un-booked funding transfer above and nothing else. The
+   function takes `openingUnbookedCents` so a caller can net it out explicitly
+   and get `reconciled: true` with the reason written down, instead of a number
+   that looks like a mystery. It is **pure** — no database, no network — and it
+   diffs against `eth_call balanceOf`, never against Circle's
+   `/v1/w3s/wallets/{id}/balances`. That endpoint is called exactly once, to
+   resolve Circle's uuid for the USDC contract, and never as a source of truth.
+
+8. **The health surface is not wired into `/api/health`.** `stablecoinProviderHealth()`
+   returns a row per rail in the same four-word vocabulary
+   `src/lib/integrations/probe.ts` uses, and it is not called from there — that
+   module was out of scope for this change. It is a one-function call away, and
+   until it happens the endpoint reports the stablecoin slot without naming
+   which of the two providers is selected.
+
+9. **The wallet id is discovered, not pinned.** `CIRCLE_WALLET_ID` is optional;
+   absent, the provider accepts exactly one `BASE-SEPOLIA` wallet and errors on
+   zero or several rather than picking "the first" — which account paid should
+   not depend on a provider's list ordering. Setting it is one line of `.env`
+   and removes a round trip.
+
+10. **No approval gate, same as the direct path.** 0.10 USDC is far below the
+    $1,000 USDC approval threshold, so this path does not create a
+    `payment_instruction`. A production payout of size goes through
+    `src/lib/approvals/` first and this adapter second — and that is unchanged
+    by there now being two adapters, which is the point.
+
+## Files
+
+```
+src/lib/rails/stablecoin/
+  circle-config.ts     credentials; not_configured, and a live key is refused
+  circle-types.ts      Circle's wire shapes, the state machine, decimal <-> bigint
+  circle-client.ts     the API over fetch; entity secret encrypted per request
+  circle-provider.ts   instruct -> poll -> VERIFY ON CHAIN -> outcome
+  circle-registry.ts   both providers behind one interface; explicit selection
+  circle-recon.ts      1140 against the chain, never against Circle's balance
+  circle-*.test.ts     81 tests, none of them touching a network
 ```
