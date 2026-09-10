@@ -496,6 +496,55 @@ const ACTION_NAMES = new Map();
 const nameOf = (id) => (ACTION_NAMES.has(id) ? `${ACTION_NAMES.get(id)} (${id})` : id);
 
 /* ========================================================================== */
+/* The provider — Lithic's sandbox, called directly                           */
+/* ========================================================================== */
+
+/**
+ * A step that is inherently provider-driven is driven AT THE PROVIDER.
+ *
+ * A merchant reversing a settlement is not something a customer's bank has a
+ * button for; it originates at the network. So leg 6 calls Lithic's sandbox
+ * over its own API — raw HTTP, `Authorization: <key>` with no scheme, exactly
+ * as `src/lib/rails/lithic/client.ts` documents — and then waits for the real
+ * signed webhook to reach the deployed endpoint and be drained. This is the
+ * same shape as leg 4, where the deployed action makes the provider call; the
+ * only difference is that no deployed screen exposes this one.
+ *
+ * It is emphatically NOT a way around the no-application-code rule: nothing
+ * here writes to the database, and every consequence is produced by the
+ * deployment's own consumer.
+ */
+const LITHIC_BASE = process.env.LITHIC_BASE_URL ?? "https://sandbox.lithic.com/v1";
+let providerCalls = 0;
+
+async function lithic(method, path, body) {
+  providerCalls += 1;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${LITHIC_BASE}${path}`, {
+      method,
+      signal: controller.signal,
+      headers: {
+        Authorization: process.env.LITHIC_API_KEY ?? "",
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await res.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      /* a non-JSON body is reported as text */
+    }
+    return { status: res.status, json, text };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* ========================================================================== */
 /* The webhook pipeline                                                       */
 /* ========================================================================== */
 
@@ -595,6 +644,29 @@ async function facts(businessId) {
   const holds = row?.holds_cents ?? 0n;
   const uncleared = row?.uncleared_cents ?? 0n;
   return { ledger, holds, uncleared, available: ledger - holds - uncleared };
+}
+
+/**
+ * The balance of one account for everything up to a value date, AS BELIEVED at
+ * a booking watermark.
+ *
+ * Two columns, two axes, one query. `value_date` is when it happened;
+ * `booking_seq` is when we learned. Holding the value date still and moving the
+ * watermark is what "what did we believe on Wednesday" means, and it is a pure
+ * read — the corrected figure is not stored anywhere, it is this same query
+ * with the watermark left open.
+ */
+async function balanceAsOf(accountId, valueDate, watermark) {
+  const [row] = await sql`
+    SELECT COALESCE(SUM(l.amount_cents), 0)::bigint * a.normal_side AS cents
+      FROM account a
+      LEFT JOIN journal_line l
+             ON l.account_id = a.id
+            AND l.value_date  <= ${valueDate}::date
+            AND l.booking_seq <= ${watermark}::bigint
+     WHERE a.id = ${accountId}::uuid
+     GROUP BY a.normal_side`;
+  return cents(row?.cents ?? 0);
 }
 
 /** Two readings of the same four figures, formatted so the money can be followed. */
@@ -1646,134 +1718,257 @@ if (want(5)) {
 /* LEG 6 — survive a reversed settlement                                      */
 /* ========================================================================== */
 
+const RETURN_TEXT = "73.40";
+const RETURN_CENTS = usdToCents(RETURN_TEXT);
+
 if (want(6)) {
   await runLeg(LEGS[5], async (t) => {
-    if (carried.transactionToken === null || carried.settlementEntryId === null) {
-      t.skip("leg 4 produced no settlement, so there is nothing to reverse");
+    if (carried.cardToken === null) {
+      t.skip("leg 3 produced no card, so there is no transaction to correct");
+    }
+    if (!process.env.LITHIC_API_KEY) {
+      t.skip("LITHIC_API_KEY is not in this environment, so the provider cannot be asked to reverse anything");
     }
 
     /*
-     * Is there a deployed control that reverses a settlement AT ALL?
+     * WHY THIS PAIR AND NOT LEG 4's SETTLEMENT.
      *
-     * Asked of every console screen rather than assumed of one: a leg that
-     * skips is making a claim about the whole deployment, so the whole
-     * deployment is the thing measured. A form counts if the action it posts to
-     * is named like a correction, or if it carries a field named like one.
+     * The honest reversal of a card settlement is a two-step at the provider —
+     * a RETURN, then a RETURN_REVERSAL taking it back — and the second of those
+     * is what the deployment classifies as a CORRECTION. Reversing leg 4's
+     * debit clearing directly is not available in this sandbox, and each of the
+     * three ways to try it fails differently and quietly:
+     *
+     *   return_reversal on a cleared debit -> 400, "Return reversal is not
+     *                                         supported for debit transactions"
+     *   void                              -> appends AUTHORIZATION_REVERSAL and
+     *                                         never touches settled_amount
+     *   clearing with a negative amount   -> the sign is IGNORED and a second
+     *                                         capture is added instead
+     *
+     * The last of those is the dangerous one: it looks like it worked. So this
+     * leg drives the pair on its own transaction, says so, and asserts the
+     * property the brief actually asks for — the corrected figure at the value
+     * date the thing happened, and what was believed before.
      */
-    const SCREENS = [
-      CONSOLE_PATH,
-      "/payments",
-      "/approvals",
-      "/statements",
-      "/reconciliation",
-      "/standing-orders",
-      "/onboarding",
-      "/funding",
-    ];
-    const looksLikeReversal = (f) =>
-      /revers|void|correct|rebook|unwind/i.test(ACTION_NAMES.get(f.actionId) ?? "") ||
-      Object.keys(controlMap(f)).some((k) => /revers|void|correct|rebook|unwind/i.test(k));
-
-    let reversal;
-    let reversalPath = CONSOLE_PATH;
-    const surveyed = [];
-    for (const screen of SCREENS) {
-      let body;
-      try {
-        body = await getPage(screen);
-      } catch (thrown) {
-        surveyed.push(`${screen}: not reachable (${thrown.message})`);
-        continue;
-      }
-      const screenForms = parseForms(body);
-      surveyed.push(`${screen}: ${screenForms.length} form(s)`);
-      const found = screenForms.find(looksLikeReversal);
-      if (found !== undefined) {
-        reversal = found;
-        reversalPath = screen;
-        break;
-      }
-    }
-
-    const page = await getPage(CONSOLE_PATH);
-    const forms = parseForms(page);
-
-    /* Has the deployed pipeline ever produced a card correction? */
-    const [corrected] = await sql`
-      SELECT count(*)::int AS n
-        FROM journal_entry e
-       WHERE e.rail = 'card' AND e.reverses_entry_id IS NOT NULL`;
-
-    const kinds = [...new Set(forms.map((f) => nameOf(f.actionId)))];
-    const shapes = [
-      ...new Set(
-        forms.map((f) =>
-          Object.keys(controlMap(f))
-            .filter((k) => !k.startsWith("$"))
-            .join("+"),
-        ),
-      ),
-    ].filter((x) => x !== "");
-
-    if (reversal === undefined) {
-      t.skip(
-        `no control on the deployed console reverses a settlement. What ${CONSOLE_PATH} actually ` +
-          `renders, read from the page just now, is ${kinds.length} distinct server action(s) — ` +
-          `${kinds.join(", ")} — carrying the fields ${shapes.join(" | ")}; none of them corrects a ` +
-          `booked card entry. Every other console screen was surveyed for one too and none has it ` +
-          `(${surveyed.join("; ")}). The ` +
-          `correction MACHINERY is not in question: ${corrected.n} card entries on this book already ` +
-          `carry a reverses_entry_id, and the statement screen renders both readings at ` +
-          `${baseUrl}/statements?account=${DEPOSIT}&day=${carried.settlementValueDate}. What is ` +
-          `missing is a way to REACH it from the deployment, which is the half being written now ` +
-          `(src/lib/holds/, src/lib/webhooks/consumers/lithic-card.ts). Settlement ` +
-          `${carried.transactionToken} at value date ${carried.settlementValueDate} (entry ` +
-          `${carried.settlementEntryId}) is the row this leg would reverse. Reversing it any other ` +
-          `way — calling reverseAndRebook() from here, writing the row by hand — would prove the ` +
-          `library rather than the deployment, so this leg reports what is missing instead.`,
-      );
-    }
-
-    const before = await facts(BIZ);
-    const sent = await submitForm(reversalPath, reversal, { businessId: BIZ }, {});
-    t.check(sent.status === 200, `the reversal POST answered ${sent.status}`);
-    t.check(sent.state !== null, "the reversal action returned no state");
-    t.check(sent.state.status !== "refused", `the reversal was refused: ${sent.state.code}`);
-
-    const landed = await waitForDrained("the reversal", async () => {
-      const [row] = await sql`
-        SELECT e.id, e.value_date, e.booking_seq, e.reverses_entry_id, e.correction_group_id
-          FROM journal_entry e
-         WHERE e.reverses_entry_id = ${carried.settlementEntryId}::uuid
-         ORDER BY e.booking_seq DESC LIMIT 1`;
-      return row ?? null;
-    });
-    t.check(landed.ok, "no reversing entry appeared against the settlement");
+    const cardRead = await lithic("GET", `/cards/${carried.cardToken}`);
+    t.check(cardRead.status === 200, `GET /cards/<token> at Lithic answered ${cardRead.status}`);
+    const pan = cardRead.json?.pan;
     t.check(
-      day(landed.value.value_date) === carried.settlementValueDate,
-      `the reversal booked at value date ${day(landed.value.value_date)}, not the ` +
-        `settlement's ${carried.settlementValueDate} — a correction belongs to the day it happened`,
+      typeof pan === "string" && pan.length > 0,
+      "Lithic returned this card without a PAN, and the simulator is keyed by PAN rather than by token",
     );
 
-    const after = await facts(BIZ);
-    const statementPath =
-      `/statements?account=${DEPOSIT}&day=${carried.settlementValueDate}&v=1`;
-    const statement = await getPage(statementPath);
-    const readable = statement
-      .replace(/<script[\s\S]*?<\/script>/g, " ")
-      .replace(/<[^>]+>/g, "\n");
+    const before = await facts(BIZ);
+    const descriptor = `CORGI RETURN ${RUN}`.slice(0, 25);
+
+    /* ---- 1. the merchant refunds ----------------------------------------- */
+    const returned = await lithic("POST", "/simulate/return", {
+      amount: Number(RETURN_CENTS),
+      descriptor,
+      pan,
+    });
     t.check(
-      /as published/i.test(readable) && /as corrected|corrections?/i.test(readable),
-      "the statement for settlement day does not carry both readings",
+      returned.status >= 200 && returned.status < 300,
+      `POST /v1/simulate/return answered ${returned.status}: ${returned.text.slice(0, 200)}`,
+    );
+    const returnToken = returned.json?.token;
+    t.check(
+      typeof returnToken === "string" && returnToken.length > 0,
+      "Lithic accepted the return but returned no transaction token",
+    );
+
+    const original = await waitForDrained("the RETURN webhook", async () => {
+      const [row] = await sql`
+        SELECT e.id, e.value_date, e.booking_seq, e.booking_time, e.entry_type::text AS entry_type,
+               e.correction_group_id, e.external_ref
+          FROM journal_entry e
+         WHERE e.external_ref = ${returnToken} AND e.book = 'financial'
+         ORDER BY e.booking_seq ASC LIMIT 1`;
+      return row ?? null;
+    }, { attempts: 20, everyMs: 5000 });
+    t.check(
+      original.ok,
+      `the RETURN webhook never became a journal entry after ${original.waitedMs / 1000}s and ` +
+        `${original.drains.length} drains`,
+    );
+    t.check(
+      original.value.entry_type === "original",
+      `the refund booked as ${original.value.entry_type}, expected an original entry`,
+    );
+
+    const afterReturn = await facts(BIZ);
+    t.check(
+      afterReturn.ledger - before.ledger === RETURN_CENTS,
+      `the refund moved the LEDGER ${delta(before.ledger, afterReturn.ledger)}, expected ` +
+        `+${usd(RETURN_CENTS)} — money to the customer`,
+    );
+
+    const valueDate = day(original.value.value_date);
+    const believedWatermark = original.value.booking_seq;
+    const believed = await balanceAsOf(DEPOSIT, valueDate, believedWatermark);
+
+    t.note(
+      `provider      POST ${LITHIC_BASE}/simulate/return   pan ****${String(pan).slice(-4)}`,
+      `              descriptor "${descriptor}"  ${usd(RETURN_CENTS)}  -> ${returned.status}`,
+      `Lithic txn    ${returnToken}`,
+      `webhook       arrived and drained after ${original.waitedMs / 1000}s`,
+      `entry         ${original.value.id}  ${original.value.entry_type}  seq ${original.value.booking_seq}` +
+        `  value date ${valueDate}`,
+      ...positionLines("the REFUND", before, afterReturn),
+      `at this point the book believes ${valueDate} closes at ${usd(believed)} on this account.`,
+    );
+
+    /* ---- 2. the merchant takes it back ----------------------------------- */
+    await sleep(1200); // the sandbox's simulate endpoints are paced at 1 RPS
+    const reversed = await lithic("POST", "/simulate/return_reversal", { token: returnToken });
+    if (reversed.status === 400) {
+      t.skip(
+        `Lithic refused the return reversal with 400: ${reversed.text.slice(0, 300)}. The refund ` +
+          `${returnToken} is on the book at ${usd(RETURN_CENTS)} and is not corrected by this run.`,
+      );
+    }
+    t.check(
+      reversed.status >= 200 && reversed.status < 300,
+      `POST /v1/simulate/return_reversal answered ${reversed.status}: ${reversed.text.slice(0, 200)}`,
+    );
+
+    // A real signed webhook, delivered to the deployed endpoint, drained by the
+    // deployed pipeline. It takes the better part of a minute to arrive.
+    const correction = await waitForDrained("the RETURN_REVERSAL webhook", async () => {
+      const [row] = await sql`
+        SELECT e.id, e.value_date, e.booking_seq, e.booking_time, e.entry_type::text AS entry_type,
+               e.reverses_entry_id, e.correction_group_id, e.idempotency_key
+          FROM journal_entry e
+         WHERE e.reverses_entry_id = ${original.value.id}::uuid
+         ORDER BY e.booking_seq DESC LIMIT 1`;
+      return row ?? null;
+    }, { attempts: 24, everyMs: 5000 });
+    t.check(
+      correction.ok,
+      `the RETURN_REVERSAL webhook never became a correction after ${correction.waitedMs / 1000}s ` +
+        `and ${correction.drains.length} drains`,
+    );
+
+    const rev = correction.value;
+    t.check(
+      rev.entry_type === "reversal",
+      `the correction booked as ${rev.entry_type}, expected a reversal`,
+    );
+
+    /* ---- 3. BOTH TIME AXES ------------------------------------------------
+     * The whole leg is these two assertions standing at the same time. The
+     * reversal belongs to the day the thing happened — so it changes what that
+     * day now says — and it was learned later, which is why the system can
+     * still reproduce what it believed before it learned. Value date and
+     * booking date are different columns, and here is the pair of them.
+     */
+    t.check(
+      day(rev.value_date) === valueDate,
+      `the correction booked at value date ${day(rev.value_date)}, not the original's ${valueDate} — ` +
+        `a correction belongs to the day it happened, not to the day it was learned`,
+    );
+    t.check(
+      cents(rev.booking_seq) > cents(original.value.booking_seq),
+      `the correction booked at seq ${rev.booking_seq}, not after the original's ` +
+        `${original.value.booking_seq} — history is appended, never rewritten`,
+    );
+    t.check(
+      rev.correction_group_id !== null && rev.correction_group_id === original.value.correction_group_id,
+      `the correction carries group ${rev.correction_group_id}, the original ` +
+        `${original.value.correction_group_id} — a correction and its subject are one group`,
+    );
+
+    // And the classification is DATA, not an `if`: the semantics table is what
+    // sent this event down the correction path and anchored it to the original
+    // value date. Read it back rather than trusting the outcome.
+    const [semantics] = await sql`
+      SELECT provider_event_type, canonical_kind::text AS canonical_kind,
+             semantics::text AS semantics, value_date_source::text AS value_date_source
+        FROM rail_event_semantics
+       WHERE provider = 'lithic' AND provider_event_type LIKE '%RETURN_REVERSAL'`;
+    t.check(semantics !== undefined, "no semantics row classifies a Lithic RETURN_REVERSAL");
+    t.check(
+      semantics.semantics === "correction",
+      `RETURN_REVERSAL is classified "${semantics.semantics}", not "correction"`,
+    );
+    t.check(
+      semantics.value_date_source === "original.value_date",
+      `RETURN_REVERSAL is anchored to "${semantics.value_date_source}", not the original's value date`,
+    );
+
+    /* ---- 4. the corrected figure, and what was believed before ------------ */
+    const [watermark] = await sql`SELECT COALESCE(MAX(booking_seq), 0)::bigint AS seq FROM journal_entry`;
+    const corrected = await balanceAsOf(DEPOSIT, valueDate, cents(watermark.seq));
+    const stillBelieved = await balanceAsOf(DEPOSIT, valueDate, cents(rev.booking_seq) - 1n);
+
+    t.check(
+      stillBelieved === believed,
+      `read at the pre-correction watermark, ${valueDate} now closes at ${usd(stillBelieved)} but was ` +
+        `${usd(believed)} before the correction — a closed reading must be reproducible forever`,
+    );
+    t.check(
+      corrected - believed === -RETURN_CENTS,
+      `the corrected reading for ${valueDate} differs from the believed one by ` +
+        `${delta(believed, corrected)}, expected -${usd(RETURN_CENTS)}`,
+    );
+
+    const afterReversal = await facts(BIZ);
+    t.check(
+      afterReversal.ledger === before.ledger,
+      `the ledger is ${usd(afterReversal.ledger)} after the round trip, expected the opening ` +
+        `${usd(before.ledger)} — a refund taken back nets to nothing`,
+    );
+
+    /* ---- 5. the statement for that day, on the deployed screen ------------ */
+    const statementPath = `/statements?account=${DEPOSIT}&day=${valueDate}`;
+    const statement = await http(statementPath);
+    t.check(statement.status === 200, `GET ${statementPath} answered ${statement.status}`);
+    const readable = unescapeHtml(
+      statement.body.replace(/<script[\s\S]*?<\/script>/g, " ").replace(/<[^>]+>/g, "\n"),
+    );
+    t.check(
+      /as published/i.test(readable) && /as corrected/i.test(readable),
+      "the statements screen does not render both readings, so the two axes are not visible to a person",
+    );
+    t.check(
+      /booking watermark/i.test(readable),
+      "the statements screen does not name the booking watermark, which is what makes a closed day reproducible",
     );
 
     t.note(
-      `action        ${nameOf(reversal.actionId)}   POST ${reversalPath}`,
-      `reversed      entry ${carried.settlementEntryId} at value date ${carried.settlementValueDate}`,
-      `reversal      entry ${landed.value.id}  seq ${landed.value.booking_seq}` +
-        `  group ${landed.value.correction_group_id}`,
-      `statement     ${baseUrl}${statementPath}`,
-      ...positionLines("the correction", before, after),
+      "",
+      `provider      POST ${LITHIC_BASE}/simulate/return_reversal  {token}  -> ${reversed.status}`,
+      `webhook       real, signed, delivered to the deployed endpoint; drained after ` +
+        `${correction.waitedMs / 1000}s`,
+      `correction    ${rev.id}  ${rev.entry_type}  seq ${rev.booking_seq}`,
+      `              reverses ${rev.reverses_entry_id}`,
+      `              group ${rev.correction_group_id} — the same group as the original`,
+      `              idempotency ${rev.idempotency_key}`,
+      `classified by ${semantics.provider_event_type}`,
+      `              kind=${semantics.canonical_kind} semantics=${semantics.semantics}` +
+        ` value date from ${semantics.value_date_source}`,
+      `              — the semantics TABLE sent it down the correction path; no event type is`,
+      `              hard-coded in the consumer.`,
+      "",
+      `BOTH TIME AXES, on ${valueDate}, account ${DEPOSIT}:`,
+      `  value date    original ${valueDate}   correction ${day(rev.value_date)}   SAME DAY`,
+      `  booking seq   original ${original.value.booking_seq}   correction ${rev.booking_seq}   LATER`,
+      `  as believed   ${usd(believed).padStart(16)}   read at watermark ${believedWatermark}`,
+      `  as corrected  ${usd(corrected).padStart(16)}   read at watermark ${watermark.seq}`,
+      `  difference    ${delta(believed, corrected).padStart(16)}   exactly the refund taken back`,
+      `statement     ${baseUrl}${statementPath}  (renders both readings and the watermark)`,
+      ...positionLines("the ROUND TRIP", before, afterReversal),
+      `Tuesday's figure changed and Wednesday's belief is still reproducible: the correction is`,
+      `appended at the ORIGINAL value date, and the pre-correction watermark still returns the`,
+      `pre-correction number. Nothing was rewritten.`,
+      "",
+      `note          this pair runs on its own transaction rather than on leg 4's settlement, and`,
+      `              that is a provider limit rather than a choice: the sandbox refuses`,
+      `              return_reversal on a cleared debit with 400, a void appends an`,
+      `              AUTHORIZATION_REVERSAL without touching settled_amount, and a clearing with a`,
+      `              negative amount IGNORES the sign and adds a second capture. The last of those`,
+      `              looks like it worked, which is why this leg does not go near it.`,
     );
   });
 }
@@ -1972,7 +2167,8 @@ console.log(RULE);
 console.log(
   `  ${GREEN(`PASS ${totals.PASS}`)}    ${RED(`FAIL ${totals.FAIL}`)}    ${YELLOW(`SKIP ${totals.SKIP}`)}` +
     `    of ${selected.length} legs` +
-    `    ${Math.round((Date.now() - startedAt.getTime()) / 1000)}s    ${httpCalls} HTTP calls to ${baseUrl}`,
+    `    ${Math.round((Date.now() - startedAt.getTime()) / 1000)}s    ${httpCalls} HTTP calls to ${baseUrl}` +
+    `    ${providerCalls} to the Lithic sandbox`,
 );
 console.log(
   `  invariants  ${invariants.ok ? GREEN(`${invariants.passed}/14 held`) : RED(invariants.detail)}`,

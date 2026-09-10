@@ -38,7 +38,7 @@ could call them would be testing the process it runs in, not the deployment.
 | | How the run drives it |
 | --- | --- |
 | **Screens with a form** | POST the form to its server action, `multipart/form-data`, over HTTPS to the deployed origin |
-| **Provider-driven steps** | The deployed action calls the sandbox for real; the run then waits for the webhook and nudges `POST /api/drain` |
+| **Provider-driven steps** | The sandbox is called for real — by the deployed action (leg 4) or directly, where no screen exposes the call (leg 6) — and the run then waits for the real webhook and nudges `POST /api/drain` |
 | **Reading state** | `SELECT` against the live Neon database. Read only, every statement |
 | **A leg with no deployed surface** | **SKIP**, naming exactly what is missing |
 
@@ -156,8 +156,8 @@ different from a balance going up:
 
 ```
 figures                 LEDGER         HOLDS     UNCLEARED     AVAILABLE
-  before            $29,541.33       $360.00     $8,753.00    $20,428.33
-  after             $30,791.33       $360.00    $10,003.00    $20,428.33
+  before            $31,894.53       $360.00    $11,253.00    $20,281.53
+  after             $33,144.53       $360.00    $12,503.00    $20,281.53
   delta             +$1,250.00         $0.00    +$1,250.00         $0.00
 ```
 
@@ -179,13 +179,13 @@ Two POSTs and two waits.
 
 ```
 on the AUTHORISATION                 LEDGER         HOLDS     UNCLEARED     AVAILABLE
-  before            $30,791.33       $360.00    $10,003.00    $20,428.33
-  after             $30,791.33       $410.00    $10,003.00    $20,378.33
+  before            $33,144.53       $360.00    $12,503.00    $20,281.53
+  after             $33,144.53       $410.00    $12,503.00    $20,231.53
   delta                  $0.00       +$50.00         $0.00       -$50.00
 
 AUTH -> SETTLEMENT                 LEDGER         HOLDS     UNCLEARED     AVAILABLE
-  before            $30,791.33       $360.00    $10,003.00    $20,428.33
-  after             $30,717.93       $360.00    $10,003.00    $20,354.93
+  before            $33,144.53       $360.00    $12,503.00    $20,281.53
+  after             $33,071.13       $360.00    $12,503.00    $20,208.13
   delta                -$73.40         $0.00         $0.00       -$73.40
 ```
 
@@ -241,43 +241,76 @@ The leg closes by printing the instruction's whole lifecycle from
 `payment_instruction_event`, with the actor on each event, so the maker and the
 checker can be read off as two different people.
 
-### 6 — Survive a reversed settlement — **currently SKIPS**
+### 6 — Survive a reversed settlement
 
-This is the one leg that cannot be driven end to end today, and the run says so
-precisely rather than finding another way to make it green.
+The one leg with no button on any screen, because a merchant reversing a
+settlement does not originate at the customer's bank — it originates at the
+network. So it is driven **at the provider**, over Lithic's own sandbox API,
+and the deployment's consumer does the rest:
 
-Before skipping, the run **surveys every console screen** — `/accounts`,
-`/payments`, `/approvals`, `/statements`, `/reconciliation`, `/standing-orders`,
-`/onboarding`, `/funding` — for a control that would reverse a settlement, by
-action name and by field name, and prints what each screen actually renders. On
-`/accounts` that is five distinct actions
-carrying `role`, `businessId+formKey+nickname`,
-`cardToken+businessId+amount+mcc+descriptor`, `businessId`, and
-`businessId+transactionToken+amount`. None of them corrects a booked card entry.
+```
+POST https://sandbox.lithic.com/v1/simulate/return           {amount, descriptor, pan}  -> 201
+POST https://sandbox.lithic.com/v1/simulate/return_reversal   {token}                    -> 201
+```
 
-The correction *machinery* is not in question — dozens of card entries on this
-book already carry a `reverses_entry_id`, and the statement screen renders both
-readings at `/statements?account=<id>&day=<settlement day>`. What is missing is
-a way to **reach** it from the deployment, and that half is being written now
-(`src/lib/holds/`, `src/lib/webhooks/consumers/lithic-card.ts`).
+The `RETURN_REVERSAL` comes back as a **real signed webhook** to the deployed
+endpoint and is drained by the deployed pipeline. This is the same shape as leg
+4 — the only difference is that no screen exposes this call. Nothing is written
+to the database by the script; every consequence is the deployment's.
 
-The skip names the exact row it would have reversed: the settlement's provider
-transaction token, its value date, and its journal entry id.
+**The classification is data, not an `if`.** The run reads the row that sent the
+event down the correction path back out of the database and asserts it:
 
-**Why not reverse it some other way?** Two tempting shortcuts, both refused:
+```
+classified by card_transaction.updated/RETURN_REVERSAL
+              kind=refund_reversal semantics=correction value date from original.value_date
+```
 
-- *Call `reverseAndRebook()` from the script.* That proves the library, not the
-  deployment, and the whole claim of this file is that no application function
-  is in its call stack.
-- *Ask Lithic's sandbox for a `RETURN`.* Legitimate as a provider call, but a
-  Lithic return is a **new refund at today's value date**, which the consumer
-  books as `refund`. It is not a backdated correction of Tuesday's settlement,
-  so booking one and calling it a reversal would be a different claim wearing
-  this leg's name.
+`resolveEventSemanticsBatch()` routes any step whose value-date anchor is
+`original` to `src/lib/holds/corrections.ts` and `reverseAndRebook` at the
+**original entry's** value date. No event type is hard-coded in the consumer, so
+the leg asserts against the table rather than against a list of event names.
 
-When the correction control lands, the leg's assertions are already written: the
-reversing entry must carry the **original** value date, and the statement for
-settlement day must carry both readings.
+**Both time axes, which is the whole leg:**
+
+```
+BOTH TIME AXES, on 2026-09-10, account a0c41a37-2be1-5c30-bfe9-03455f048fac:
+  value date    original 2026-09-10   correction 2026-09-10   SAME DAY
+  booking seq   original 1180         correction 1181         LATER
+  as believed         $63,806.63   read at watermark 1180
+  as corrected        $63,733.23   read at watermark 1181
+  difference             -$73.40   exactly the refund taken back
+```
+
+Two assertions standing at once. The correction belongs to the day the thing
+happened, so that day's figure changed. And it was learned later, so the
+pre-correction watermark **still returns the pre-correction number** — the run
+re-reads it after the correction lands and asserts it is unchanged, because a
+closed reading that moves is not reproducible. Value date and booking date are
+different columns; `balanceAsOf(account, valueDate, watermark)` holds one still
+and moves the other, and the corrected figure is that same query with the
+watermark left open. It is not stored anywhere.
+
+The reversal is also asserted to be `entry_type = 'reversal'`, to carry the same
+`correction_group_id` as its subject, and to leave the ledger exactly where it
+started — a refund taken back nets to nothing.
+
+**One provider limit, encoded rather than fought.** The pair runs on its own
+transaction rather than on leg 4's settlement, and that is Lithic's constraint,
+not a preference:
+
+| Attempt on a cleared debit | What the sandbox does |
+| --- | --- |
+| `return_reversal` | **400** — "Return reversal is not supported for debit transactions" |
+| `void` | appends `AUTHORIZATION_REVERSAL` and never touches `settled_amount` |
+| `clearing` with a negative amount | **ignores the sign** and adds a second capture |
+
+The third is the dangerous one: it returns 201 and looks like it worked. The leg
+prints all three in its evidence and does not go near them. A bare `RETURN` on
+its own is refused for a different reason — it is a new refund at *today's*
+value date, a different claim wearing this leg's name. It is the **reversal of
+that refund** that the deployment classifies as a correction, and that is what
+is asserted.
 
 ### 7 — Reconcile the scheme file
 
@@ -340,10 +373,10 @@ failed**. Anything else fails the run.
 
 ## 5. The scoreboard
 
-Last full run — `CL-MTW54U5Y`, 2026-09-10T23:10:39Z, against
-`https://corgi-trial-psi.vercel.app`: **6 PASS, 0 FAIL, 1 SKIP**, invariants
-**14/14**, 96 HTTP calls to the deployed origin, 44 seconds, exit code 1
-(because of the skip).
+Last full run — `CL-MTW5GIX5`, 2026-09-10T23:19:44Z, against
+`https://corgi-trial-psi.vercel.app`: **7 PASS, 0 FAIL, 0 SKIP**, invariants
+**14/14**, 91 HTTP calls to the deployed origin and 3 to the Lithic sandbox,
+56 seconds, **exit code 0**.
 
 | Leg | | Proven by |
 | --- | --- | --- |
@@ -352,12 +385,14 @@ Last full run — `CL-MTW54U5Y`, 2026-09-10T23:10:39Z, against
 | 3 Issue a card | **PASS** | 9 checks — real Lithic token and last four, bound to this business's 2100/9100 |
 | 4 Authorise then settle | **PASS** | 24 checks — available −$50 with the ledger still, ledger −$73.40, hold released exactly once |
 | 5 Second approver | **PASS** | 27 checks — initiator refused, self-approval refused as `SELF_APPROVAL`, second role approves; SQLSTATE 42501 read from the trigger |
-| 6 Reversed settlement | **SKIP** | no deployed control reverses a settlement; every screen surveyed and printed |
+| 6 Reversed settlement | **PASS** | 22 checks — provider-driven `return` + `return_reversal`, real signed webhook, correction at the **original** value date with a later booking seq, as-believed vs as-corrected differing by exactly −$73.40 |
 | 7 Reconcile the scheme file | **PASS** | 11 checks — the break the screen renders, corroborated in the database, with kind, amount, age and severity |
 
-Exit code is **0 only when every leg passes**; the skip alone makes it 1, which
-is the point — a gap that does not change an exit code is a gap nobody acts on.
+Exit code is **0 only when every leg passes**. A skip alone makes it 1, which is
+the point — a gap that does not change an exit code is a gap nobody acts on.
 
-Re-run it. It is meant to be re-run, and leg 6 turns green on its own the moment
-a correction control reaches the deployment: the leg's assertions are already
-written and its survey already prints the screens it is watching.
+Leg 6 skipped when this script was first written and passed about ten minutes
+later, without the assertions changing, because the card correction path landed
+and deployed. That is the shape a run like this should have: the legs assert the
+property, the deployment either has it or does not, and the scoreboard is the
+difference.
