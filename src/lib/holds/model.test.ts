@@ -228,6 +228,7 @@ describe("H(E) — the transition table, including every pathological ordering",
         const state = holdState(order, OPEN);
         expect(state.holdCents).toBe(target.holdCents);
         expect(state.closed).toBe(target.closed);
+        expect(state.terminallyClosed).toBe(target.terminallyClosed);
         expect(state.authorisedCents).toBe(target.authorisedCents);
         expect(state.capturedCents).toBe(target.capturedCents);
       }
@@ -275,6 +276,70 @@ describe("H(E) — duplicates and the empty set", () => {
     expect(state.eventCount).toBe(0);
     expect(state.closed).toBe(false);
     expect(state.holdCents).toBe(0n);
+  });
+});
+
+describe("closed vs terminallyClosed — the bug the live suite found", () => {
+  // A settlement that beats its authorisation creates an identity whose event
+  // set is {clearing}. A = 0, which satisfies `A <= 0`, which makes `closed`
+  // true. H is 0 either way so nothing visible is wrong — until you write the
+  // append-only `hold_closure` row on the strength of it, at which point the
+  // authorisation that arrives next opens a hold that availability will never
+  // count again, and the customer spends money they no longer have.
+  //
+  // The first version of this code did exactly that. It passed every unit test
+  // here and failed scenario 5 against the live database.
+  it("a clearing-first identity is closed but NOT terminally closed", () => {
+    const state = holdState([ev("clearing", 3000n)], OPEN);
+    expect(state.authorisedCents).toBe(0n);
+    expect(state.holdCents).toBe(0n);
+    expect(state.closed).toBe(true); // matches v_card_auth_hold exactly
+    expect(state.sawAuthorisation).toBe(false);
+    expect(state.terminallyClosed).toBe(false); // ...and so no closure row
+  });
+
+  it("the late authorisation then opens the hold it should", () => {
+    const state = holdState([ev("clearing", 3000n), ev("authorization", 5000n)], OPEN);
+    expect(state.holdCents).toBe(2000n);
+    expect(state.closed).toBe(false);
+    expect(state.terminallyClosed).toBe(false);
+  });
+
+  it("a genuine full reversal IS terminal, because there was something to reverse", () => {
+    const state = holdState(
+      [ev("authorization", 10000n), ev("authorization_reversal", 10000n)],
+      OPEN,
+    );
+    expect(state.sawAuthorisation).toBe(true);
+    expect(state.closed).toBe(true);
+    expect(state.terminallyClosed).toBe(true);
+  });
+
+  it("a reversal that beats its authorisation is not terminal either", () => {
+    const early = holdState([ev("authorization_reversal", 10000n)], OPEN);
+    expect(early.authorisedCents).toBe(-10000n);
+    expect(early.closed).toBe(true);
+    expect(early.terminallyClosed).toBe(false);
+    // ...and once the authorisation lands, A nets to zero and it IS terminal.
+    const settled = holdState(
+      [ev("authorization_reversal", 10000n, { id: "r" }), ev("authorization", 10000n, { id: "a" })],
+      OPEN,
+    );
+    expect(settled.terminallyClosed).toBe(true);
+    expect(settled.holdCents).toBe(0n);
+  });
+
+  it("final, close and the clock are terminal on their own", () => {
+    expect(holdState([ev("force_post", 2500n, { isFinal: true })], OPEN).terminallyClosed).toBe(
+      true,
+    );
+    expect(holdState([ev("close", 0n)], OPEN).terminallyClosed).toBe(true);
+    expect(
+      holdState([ev("authorization", 5000n)], {
+        expiresAt: new Date("2026-09-01T00:00:00Z"),
+        now: NOW,
+      }).terminallyClosed,
+    ).toBe(true);
   });
 });
 

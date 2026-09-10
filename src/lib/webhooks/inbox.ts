@@ -633,11 +633,31 @@ export interface InboxStore {
   listParked(limit?: number): Promise<InboxEvent[]>;
 }
 
-const COLUMNS = `
-  id, provider, provider_event_id, event_type, payload, headers, raw_body,
-  received_at, signature_verified_at, state, attempts, park_attempts,
-  next_attempt_at, locked_until, processed_at, parked_on_kind, parked_on_ref,
-  parked_reason, processing_error, dead_lettered_at`;
+const COLUMN_NAMES = [
+  'id', 'provider', 'provider_event_id', 'event_type', 'payload', 'headers',
+  'raw_body', 'received_at', 'signature_verified_at', 'state', 'attempts',
+  'park_attempts', 'next_attempt_at', 'locked_until', 'processed_at',
+  'parked_on_kind', 'parked_on_ref', 'parked_reason', 'processing_error',
+  'dead_lettered_at',
+] as const;
+
+/** Unqualified list, for a plain `select ... from webhook_inbox`. */
+const COLUMNS = COLUMN_NAMES.join(', ');
+
+/**
+ * Qualified list, for the claim's `UPDATE webhook_inbox w FROM due`.
+ *
+ * `due` also has an `id`, so a bare `returning id, ...` is ambiguous and
+ * Postgres refuses the whole statement with `column reference "id" is
+ * ambiguous`. That killed the very first production drain — the inbox had four
+ * verified rows waiting and not one could be claimed.
+ *
+ * It could not fail in a test: the in-memory store never parses SQL, so a
+ * statement Postgres will not accept passes the suite. Same root cause as the
+ * jsonb double-encoding in DECISIONS 020.
+ */
+const columnsQualified = (alias: string) =>
+  COLUMN_NAMES.map((c) => `${alias}.${c}`).join(', ');
 
 export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
   const rowsToEvents = (rows: Record<string, unknown>[]) => rows.map(rowToEvent);
@@ -745,7 +765,7 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
              locked_until = $1::timestamptz + make_interval(secs => $3::double precision)
          from due
          where w.id = due.id
-         returning ${COLUMNS}`,
+         returning ${columnsQualified('w')}`,
         [now, limit, leaseMs / 1000],
       );
       return rowsToEvents(claimed.rows).sort(

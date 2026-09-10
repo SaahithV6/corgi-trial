@@ -54,9 +54,9 @@ if (!READY) {
 
 const d = READY ? describe : describe.skip;
 
-/** `2000-01-01 + n` days, in UTC so no zone can shift it. */
-function dayFromEpoch(offset: number): string {
-  const at = new Date("2000-01-01T00:00:00.000Z");
+/** `today + n` days, in UTC so no zone can shift it. */
+function daysFromToday(offset: number): string {
+  const at = new Date();
   at.setUTCDate(at.getUTCDate() + offset);
   return at.toISOString().slice(0, 10);
 }
@@ -77,7 +77,23 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
 
   const stamp = Date.now();
   const tag = stamp.toString(36).toUpperCase();
-  const businessDate = dayFromEpoch(stamp % 5000);
+  /**
+   * A FORWARD-DATED business day, unique to this run, and both halves of that
+   * are deliberate.
+   *
+   * Unique, because money tables are append-only and there is no teardown: no
+   * other file, run or journal entry shares this date, so `v_recon_break` sees
+   * exactly the four settlements this test booked and nothing else, and this
+   * run leaves no break on any real business day.
+   *
+   * Forward-dated, because the breaks screen's entry point orders runs by
+   * business date first ("the most recent run" means last night's FILE, not
+   * whichever file somebody re-ran most recently — `v_recon_run_history`), so a
+   * run dated in 2002 is unreachable from the screen however recent it is. A
+   * forward-dated file is a case the aging ladder already supports explicitly
+   * (a warehoused ACH effective date; see `ageBucketOf`).
+   */
+  const businessDate = daysFromToday(365 + (stamp % 90));
 
   /** Last night's file: four inbound ACH settlements, all of them booked. */
   const fullFile: readonly RenderRow[] = [1, 2, 3, 4].map((n) => ({
@@ -205,10 +221,14 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // And the screen an operator actually looks at.
     const view = await loadReconView({ runId: tonightRunId });
     expect(view.ok).toBe(true);
-    if (!view.ok) return;
+    if (!view.ok) throw new Error(`the breaks screen failed to load: ${view.error.message}`);
+    expect(view.value.run?.runId).toBe(tonightRunId);
     const onScreen = view.value.breaks.filter((b) => b.externalRef === deleted.externalRef);
     expect(onScreen).toHaveLength(1);
-    expect((onScreen[0] as { kind: string }).kind).toBe("in_ledger_not_file");
+    const row = onScreen[0];
+    if (row === undefined) throw new Error("unreachable");
+    expect(row.kind).toBe("in_ledger_not_file");
+    expect(row.breakAmountCents).toBe(Number(deleted.amountCents));
 
     record(
       "evidence",

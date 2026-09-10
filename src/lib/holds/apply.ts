@@ -184,13 +184,13 @@ async function recordFacts(
     const state = holdState(events, { expiresAt: identity.expiresAt, now: ctx.now });
 
     // Step 5. Closure before release. See the module header.
-    const closurePosted = state.closed
-      ? await closeHold(
-          identity.holdId,
-          closureReason(state),
-          ctx.actorId,
-          tx,
-        )
+    //
+    // `terminallyClosed`, NOT `closed`: a settlement that beat its
+    // authorisation is transiently "closed" by `A <= 0`, and `hold_closure` is
+    // append-only, so a closure written there could never be undone by the
+    // authorisation that follows. See the note on `HoldState.terminallyClosed`.
+    const closurePosted = state.terminallyClosed
+      ? await closeHold(identity.holdId, closureReason(state), ctx.actorId, tx)
       : false;
 
     return {

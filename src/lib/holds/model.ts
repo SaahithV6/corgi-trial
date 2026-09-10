@@ -185,6 +185,11 @@ export function holdState(
   // has A = 0, and that is OPEN-with-nothing-held, not CLOSED.
   const closed = sawFinal || sawClose || expired || (count > 0 && authorised <= 0n);
 
+  // Same four conditions, with the reversal one narrowed to the case a later
+  // event cannot undo. See the note on `terminallyClosed`.
+  const terminallyClosed =
+    sawFinal || sawClose || expired || (sawAuthorisation && authorised <= 0n);
+
   const remainder = authorised - captured;
   const holdCents = closed ? 0n : remainder > 0n ? remainder : 0n;
 
@@ -193,8 +198,10 @@ export function holdState(
     capturedCents: captured,
     sawFinal,
     sawClose,
+    sawAuthorisation,
     expired,
     closed,
+    terminallyClosed,
     holdCents,
     eventCount: count,
   };

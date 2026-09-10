@@ -136,7 +136,7 @@ export async function expireOne(
 
     const events = await loadCardEvents(identity.authId, tx);
     const state = holdState(events, { expiresAt: identity.expiresAt, now: args.now });
-    if (!state.closed) {
+    if (!state.terminallyClosed) {
       // Unreachable while this function is only called for due authorisations,
       // and cheap insurance if that ever stops being true: an expiry sweep must
       // never close a hold the model still considers open.

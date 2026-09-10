@@ -4,33 +4,32 @@
  * all."
  *
  * End to end, through the real provider and the deployed system. Nothing here
- * calls the hold logic directly: the test creates a card on Lithic, asks Lithic
- * to authorise $50.00 at MCC 5542, and then watches the LIVE DATABASE for the
- * effect. If the effect is right, the pipeline is right; if the pipeline does
- * not exist, no assertion here can be satisfied honestly and the test skips.
+ * calls the hold logic directly:
  *
- * ============================================================================
- * WHY THIS SKIPS TODAY.
+ *   1. create a card on Lithic and register it to a customer;
+ *   2. ask Lithic to authorise $50.00 at MCC 5542 (automated fuel dispenser);
+ *   3. let the delivery reach the DEPLOYED webhook endpoint and be drained
+ *      there — the same `/api/drain` call an operator makes in the debrief;
+ *   4. read the effect out of the LIVE database.
  *
- * `src/lib/holds/*` is being written by another worker. Until it lands there is
- * no consumer registered for Lithic's `card_transaction.updated`, nothing runs
- * `dispatchOnce()` in production, and a delivery therefore reaches
- * `webhook_inbox` and stops. The available balance cannot move because nothing
- * posts a memo entry.
+ * If the effect is right, the pipeline is right. If the delivery never becomes
+ * an authorisation, the test SKIPS with what it actually observed — the inbox
+ * row, its state, what it parked on, and what the drain answered — because a
+ * pipeline that has not run has not been proven, and posting the memo entry
+ * from the test would only assert that the TEST can do arithmetic.
  *
- * The skip is deliberate and it is not a stub. Making this pass by posting the
- * memo entry from the test would assert that the TEST can do arithmetic, which
- * is not the claim.
- * ============================================================================
+ * ISOLATION. Money tables are append-only and there is no teardown. This run
+ * creates its own Lithic card and asserts a DELTA on one business across the
+ * authorisation, so nothing it leaves behind changes the meaning of the next
+ * run.
  */
-import { existsSync } from "node:fs";
 import { appendFileSync } from "node:fs";
-import { resolve } from "node:path";
 
 import { beforeAll, describe, expect, it } from "vitest";
 
 import type * as BalancesModule from "@/lib/ledger/balances";
 import type { sql as SqlHandle } from "@/lib/ledger/db";
+import type * as Holds from "@/lib/holds";
 import type * as LithicClient from "@/lib/rails/lithic/client";
 
 const ATTACK = 1;
@@ -43,15 +42,9 @@ function record(kind: "evidence" | "skip", text: string): void {
   appendFileSync(path, `${JSON.stringify({ attack: ATTACK, name: NAME, kind, text })}\n`, "utf8");
 }
 
-/**
- * The one sentence the whole card-hold family of attacks is waiting on. Kept
- * identical in attacks 1, 2 and 4 so the scoreboard reads as one gap and not
- * three unrelated ones.
- */
-const PIPELINE_MISSING =
-  "the card authorisation pipeline does not exist yet. src/lib/holds/* is unwritten, so no webhook consumer is registered for Lithic 'card_transaction.updated' in src/lib/webhooks/dispatch.ts and nothing runs dispatchOnce() in production. A delivery reaches webhook_inbox and stops there: no card_authorization row, no hold, no memo posting, so AVAILABLE cannot move. Waiting on src/lib/holds/* plus a dispatcher run reachable from the deployment.";
-
-const PIPELINE_PRESENT = existsSync(resolve(process.cwd(), "src/lib/holds"));
+const BASE_URL = (
+  process.env["LIVEFIRE_BASE_URL"] ?? "https://corgi-trial-psi.vercel.app"
+).replace(/\/+$/, "");
 
 const MISSING: string[] = [];
 if (process.env["LIVEFIRE"] !== "1") MISSING.push("LIVEFIRE=1");
@@ -60,10 +53,8 @@ if (typeof process.env["LITHIC_API_KEY"] !== "string" || process.env["LITHIC_API
   MISSING.push("LITHIC_API_KEY");
 }
 
-const READY = MISSING.length === 0 && PIPELINE_PRESENT;
-if (!READY) {
-  record("skip", MISSING.length > 0 ? `missing: ${MISSING.join(", ")}` : PIPELINE_MISSING);
-}
+const READY = MISSING.length === 0;
+if (!READY) record("skip", `missing: ${MISSING.join(", ")}; run scripts/livefire.mjs`);
 
 const d = READY ? describe : describe.skip;
 
@@ -72,6 +63,7 @@ const AUTH_CENTS = 50_00;
 d(`ATTACK ${ATTACK} — ${NAME}`, () => {
   let sql: typeof SqlHandle;
   let bal: typeof BalancesModule;
+  let holds: typeof Holds;
   let lithic: typeof LithicClient;
 
   const tag = Date.now().toString(36).toUpperCase();
@@ -79,18 +71,22 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
   beforeAll(async () => {
     ({ sql } = await import("@/lib/ledger/db"));
     bal = await import("@/lib/ledger/balances");
+    holds = await import("@/lib/holds");
     lithic = await import("@/lib/rails/lithic/client");
   });
 
   it("available drops by exactly 5000 and the ledger does not move", async (ctx) => {
-    // Snapshot every business, because which one the card belongs to is the
-    // pipeline's decision and not ours.
-    const businesses = await sql<{ id: string }[]>`SELECT id FROM business ORDER BY id`;
-    const before = new Map<string, BalancesModule.AvailableBalance>();
-    for (const business of businesses) {
-      before.set(business.id, await bal.availableBalance(business.id));
-    }
-    const trialBefore = await bal.trialBalanceCents();
+    // A customer with both leaves of the chart: 2100 to spend from, 9100 to
+    // carry the hold. Which one is not interesting; that it is ONE and we
+    // measure the delta on it is.
+    const [customer] = await sql<{ business_id: string }[]>`
+      SELECT dep.business_id
+        FROM account dep
+        JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
+       WHERE dep.code = '2100' AND dep.business_id IS NOT NULL
+       ORDER BY dep.business_id LIMIT 1`;
+    if (!customer) throw new Error("no business has a 2100/9100 pair: run node scripts/seed.mjs");
+    const businessId = customer.business_id;
 
     const card = await lithic.createCard({
       type: "VIRTUAL",
@@ -103,6 +99,21 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     if (pan === undefined || pan === "") {
       throw new Error("Lithic returned a card with no PAN; the sandbox PCI shape has changed");
     }
+    await holds.registerCard(
+      {
+        provider: "lithic",
+        providerCardToken: card.token,
+        businessId,
+        lastFour: card.last_four,
+        nickname: `live-fire ${tag}`,
+      },
+      sql,
+    );
+
+    // Measured AFTER the card exists and BEFORE the authorisation, so the only
+    // thing between the two readings is the $50.00.
+    const before = await bal.availableBalance(businessId);
+    const trialBefore = await bal.trialBalanceCents();
 
     const auth = await lithic.simulateAuthorize({
       amount: AUTH_CENTS,
@@ -112,61 +123,72 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       mcc: "5542", // automated fuel dispenser
     });
     if (auth.token === undefined) throw new Error("Lithic returned no transaction token");
+    const transactionToken: string = auth.token;
 
-    // Wait for the pipeline to turn the delivery into an authorisation.
-    let authRow: { account_id: string; hold_id: string } | null = null;
+    let drainStatus = "not attempted";
+    const drainToken = process.env["DRAIN_TOKEN"];
     const deadline = Date.now() + 90_000;
-    while (Date.now() < deadline) {
-      const [row] = await sql<{ account_id: string; hold_id: string }[]>`
-        SELECT account_id, hold_id FROM card_authorization
-         WHERE provider = 'lithic' AND provider_auth_id = ${auth.token}`;
+    let authRow: { hold_id: string; origin: string } | null = null;
+    while (authRow === null) {
+      const [row] = await sql<{ hold_id: string; origin: string }[]>`
+        SELECT hold_id, origin FROM card_authorization
+         WHERE provider = 'lithic' AND provider_auth_id = ${transactionToken}`;
       if (row) {
         authRow = row;
         break;
       }
-      await new Promise((r) => setTimeout(r, 2_000));
+      if (Date.now() >= deadline) break;
+      // The operator's "watch, I will drain it now" — the deployed endpoint,
+      // not a local dispatcher, so what is being exercised is production.
+      if (drainToken !== undefined && drainToken !== "") {
+        const response = await fetch(`${BASE_URL}/api/drain`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${drainToken}` },
+        });
+        drainStatus = `HTTP ${response.status}`;
+      } else {
+        drainStatus = "no DRAIN_TOKEN in the environment";
+      }
+      await new Promise((r) => setTimeout(r, 3_000));
     }
 
     if (authRow === null) {
-      const [filed] = await sql<{ id: string; state: string }[]>`
-        SELECT id, state::text AS state FROM webhook_inbox
-         WHERE provider = 'lithic' AND payload->>'token' = ${auth.token}
+      const [filed] = await sql<
+        { id: string; state: string; parked_on_kind: string | null; parked_reason: string | null }[]
+      >`
+        SELECT id, state::text AS state, parked_on_kind, parked_reason
+          FROM webhook_inbox
+         WHERE provider = 'lithic' AND payload->>'token' = ${transactionToken}
          ORDER BY received_at DESC LIMIT 1`;
-      const reason = `${PIPELINE_MISSING} Observed this run: Lithic transaction ${auth.token} produced inbox row ${filed?.id ?? "(none)"} in state ${filed?.state ?? "(none)"} and no card_authorization row within 90s.`;
+      const reason =
+        `the card authorisation never reached the ledger, so AVAILABLE could not move and the attack is unproven. ` +
+        `Lithic transaction ${transactionToken} on registered card ${card.token}: inbox row ${filed?.id ?? "(none arrived)"} ` +
+        `state ${filed?.state ?? "n/a"}${filed?.parked_on_kind ? ` parked on ${filed.parked_on_kind} (${filed.parked_reason ?? ""})` : ""}; ` +
+        `POST ${BASE_URL}/api/drain answered ${drainStatus}. ` +
+        `Needs: the deployed build to register the Lithic consumer (src/lib/webhooks/consumers/lithic-card.ts) and to drain, ` +
+        `and DRAIN_TOKEN present locally so the run can nudge it rather than waiting for the 04:17 cron.`;
       record("skip", reason);
       ctx.skip(reason);
       return;
     }
 
-    const [owner] = await sql<{ business_id: string }[]>`
-      SELECT business_id FROM account WHERE id = ${authRow.account_id}::uuid`;
-    const businessId = owner?.business_id;
-    if (businessId === undefined || businessId === null) {
-      throw new Error(`card_authorization.account_id ${authRow.account_id} has no business_id`);
-    }
-
-    const priorState = before.get(businessId);
-    if (priorState === undefined) {
-      throw new Error(`the authorisation landed on business ${businessId}, which was not snapshotted`);
-    }
-
     const after = await bal.availableBalance(businessId);
 
     // THE TWO ASSERTIONS THE ATTACK IS.
-    expect(after.availableCents).toBe(priorState.availableCents - BigInt(AUTH_CENTS));
-    expect(after.ledgerCents).toBe(priorState.ledgerCents);
+    expect(after.availableCents).toBe(before.availableCents - BigInt(AUTH_CENTS));
+    expect(after.ledgerCents).toBe(before.ledgerCents);
 
     // The whole of the drop is a card-auth hold, sized from the event set
     // rather than read off the provider's status field (DECISIONS 006).
-    expect(after.holdsCents - priorState.holdsCents).toBe(BigInt(AUTH_CENTS));
-    expect(after.unclearedCents).toBe(priorState.unclearedCents);
+    expect(after.holdsCents - before.holdsCents).toBe(BigInt(AUTH_CENTS));
+    expect(after.unclearedCents).toBe(before.unclearedCents);
 
     // The hold is memo-only, so the financial book is untouched.
     expect(await bal.trialBalanceCents()).toBe(trialBefore);
 
     record(
       "evidence",
-      `business ${businessId}: available ${priorState.availableCents} -> ${after.availableCents} (delta ${after.availableCents - priorState.availableCents}, expected -${AUTH_CENTS}); ledger ${priorState.ledgerCents} -> ${after.ledgerCents} (unchanged); card-auth holds +${after.holdsCents - priorState.holdsCents}; hold ${authRow.hold_id} for Lithic transaction ${auth.token}; trial balance unchanged at ${trialBefore}`,
+      `business ${businessId}: available ${before.availableCents} -> ${after.availableCents} (delta ${after.availableCents - before.availableCents}, expected -${AUTH_CENTS}); ledger ${before.ledgerCents} -> ${after.ledgerCents} (unchanged); card-auth holds +${after.holdsCents - before.holdsCents}; hold ${authRow.hold_id} origin ${authRow.origin} for Lithic transaction ${transactionToken}; drain ${drainStatus}; trial balance unchanged at ${trialBefore}`,
     );
   });
 });

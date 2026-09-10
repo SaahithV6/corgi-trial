@@ -20,9 +20,26 @@
  *   8  expiry releases on the clock, idempotently
  *
  * Balances are read as DELTAS around each scenario rather than as absolutes,
- * because the ledger is append-only and shared: a test that asserted an
- * absolute figure would pass once and then fail for ever afterwards, which is
- * a test that asserts the order the suite happens to run in.
+ * because the ledger is append-only: a test that asserted an absolute figure
+ * would pass once and then fail for ever afterwards, which is a test that
+ * asserts the order the suite happens to run in.
+ *
+ * ─── Why this suite opens its own account ────────────────────────────────────
+ *
+ * Deltas are not enough on their own. The first version of this file measured
+ * against the seeded demo business, and it failed with AVAILABLE up 90270 where
+ * it expected it down 3300 — because another suite was posting to the same
+ * customer at the same time, four entries summing to exactly 93570. The delta
+ * was real; it was just not a delta caused by anything under test.
+ *
+ * So this suite provisions its own business and its own 2100 / 9100 / 9200
+ * leaves, once, deterministically, and every figure below is that account's
+ * alone. Provisioning needs the OWNER connection (DIRECT_URL) because
+ * `corgi_app` holds SELECT on `account` and nothing more — opening an account
+ * is an operator action, like a migration, and the application deliberately
+ * cannot express it. Every MONEY write still goes through the app role and
+ * through `postEntry()`; the owner connection opens the account and then
+ * closes, and posts nothing.
  */
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -46,7 +63,14 @@ const d = RUN ? describe : describe.skip;
 // several inside explicit transactions that hold a row lock while they run.
 // Vitest's 5s default is a timeout on the WAN, not on the code, and a suite
 // that fails on latency teaches nobody anything.
-vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
+vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
+
+/**
+ * The suite's own customer. Fixed so runs share one account instead of leaving
+ * a trail of them, and recognisable in the database so nobody mistakes it for a
+ * demo business.
+ */
+const TEST_BUSINESS_ID = "7e57b115-0000-5000-a000-000000000001";
 
 d("card holds, against the live database", () => {
   let sql: typeof SqlHandle;
@@ -71,17 +95,85 @@ d("card holds, against the live database", () => {
     model = await import("./model");
     expiry = await import("./expiry");
 
+    await provisionTestAccount();
+
     const [b] = await sql<{ business_id: string; deposit: string; memo: string }[]>`
       SELECT dep.business_id, dep.id AS deposit, memo.id AS memo
         FROM account dep
         JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
-       WHERE dep.code = '2100' AND dep.business_id IS NOT NULL
-       LIMIT 1`;
-    if (!b) throw new Error("seed first: node scripts/seed.mjs");
+       WHERE dep.code = '2100' AND dep.business_id = ${TEST_BUSINESS_ID}::uuid`;
+    if (!b) throw new Error("the holds test business was not provisioned");
     businessId = b.business_id;
     depositAccountId = b.deposit;
     memoAccountId = b.memo;
+
+    // An opening float, posted ONCE ever (fixed idempotency key) so repeated
+    // runs do not inflate the book. Every scenario below is a delta against
+    // whatever it happens to be, so the figure itself is not load-bearing — it
+    // exists so "AVAILABLE goes negative" is a fall from a real balance rather
+    // than a step from zero.
+    const { postEntry } = await import("@/lib/ledger/post");
+    const [entity] = await sql<{ id: string }[]>`SELECT id FROM book_entity LIMIT 1`;
+    const [cash] = await sql<{ id: string }[]>`
+      SELECT id FROM account WHERE code = '1110' AND business_id IS NULL LIMIT 1`;
+    const [actor] = await sql<{ id: string }[]>`
+      SELECT id FROM actor WHERE kind = 'system' AND display_name = 'ledger-poster' LIMIT 1`;
+    if (!entity || !cash || !actor) throw new Error("seed first: node scripts/seed.mjs");
+    await postEntry({
+      entityId: entity.id,
+      valueDate: "2026-09-01",
+      book: "financial",
+      description: "Opening float for the card-hold integration suite",
+      idempotencyKey: "test:holds:opening-float",
+      actorId: actor.id,
+      rail: "internal",
+      lines: [
+        { accountId: cash.id, amountCents: 50_000_00n },
+        { accountId: depositAccountId, amountCents: -50_000_00n },
+      ],
+    });
   });
+
+  /**
+   * Open the suite's own business and its three leaves, idempotently, as the
+   * OWNER. Deterministic ids so a second run reuses the first run's account
+   * rather than accumulating one per run.
+   */
+  async function provisionTestAccount(): Promise<void> {
+    const directUrl = process.env["DIRECT_URL"];
+    if (directUrl === undefined || directUrl === "") {
+      throw new Error(
+        "DIRECT_URL (the owner role) is required to open the test account; corgi_app holds only SELECT on `account`",
+      );
+    }
+    const { default: postgres } = await import("postgres");
+    const owner = postgres(directUrl, { max: 1, onnotice: () => {} });
+    try {
+      await owner`
+        INSERT INTO business (id, entity_id, legal_name, ein)
+        SELECT ${TEST_BUSINESS_ID}::uuid, e.id,
+               'Holds Integration Fixture Co.', '00-0000000'
+          FROM book_entity e LIMIT 1
+        ON CONFLICT DO NOTHING`;
+
+      // 2100 deposit (financial), 9100 card holds and 9200 uncleared holds
+      // (memo). Type, book and parent all come FROM THE HOUSE ROLLUP, so this
+      // cannot drift from the chart in src/lib/ledger/chart.ts.
+      for (const code of ["2100", "9100", "9200"] as const) {
+        await owner`
+          INSERT INTO account (entity_id, code, name, parent_id, type, book,
+                               currency, business_id, is_postable)
+          SELECT p.entity_id, p.code,
+                 'Holds Integration Fixture Co. — ' || p.name,
+                 p.id, p.type, p.book, 'USD', ${TEST_BUSINESS_ID}::uuid, true
+            FROM account p
+           WHERE p.code = ${code} AND p.business_id IS NULL
+          ON CONFLICT DO NOTHING`;
+      }
+    } finally {
+      await owner.end();
+    }
+  }
 
   /** A fresh card per scenario, so no two scenarios share an authorisation. */
   async function freshCard(): Promise<StoreModule.CardBinding> {
@@ -359,7 +451,7 @@ d("card holds, against the live database", () => {
 
     // And it shows up where an operator will see it, with an amount.
     const [over] = await sql<{ overdraft_cents: bigint }[]>`
-      SELECT overdraft_cents FROM v_overdrawn_accounts
+      SELECT overdraft_cents::bigint AS overdraft_cents FROM v_overdrawn_accounts
        WHERE account_id = ${depositAccountId}::uuid`;
     expect(over?.overdraft_cents).toBeGreaterThan(0n);
 
@@ -469,6 +561,17 @@ d("card holds, against the live database", () => {
       SELECT origin FROM card_authorization WHERE provider_auth_id = ${`auth-${run}-5-b`}`;
     expect(a?.origin).toBe("authorization");
     expect(b?.origin).toBe("clearing_first");
+
+    // And neither hold was closed. This is the assertion that caught the real
+    // bug: the clearing-first identity is transiently `closed` by `A <= 0`, and
+    // an earlier version wrote the append-only hold_closure row on it — which
+    // permanently freed a hold the late authorisation was about to open.
+    const [closures] = await sql<{ n: bigint }[]>`
+      SELECT count(*)::bigint AS n
+        FROM hold_closure hc
+        JOIN card_authorization ca ON ca.hold_id = hc.hold_id
+       WHERE ca.provider_auth_id IN (${`auth-${run}-5-a`}, ${`auth-${run}-5-b`})`;
+    expect(closures?.n).toBe(0n);
   });
 
   // =========================================================================
@@ -718,18 +821,81 @@ d("card holds, against the live database", () => {
     ).toBe(1);
   });
 
-  it("8b. the batch sweep finds due holds and is a no-op on the second pass", async () => {
-    const future = new Date(Date.now() + 9 * 86_400_000);
-    const firstPass = await expiry.sweepExpiredHolds({ now: future, limit: 200, conn: sql });
-    const secondPass = await expiry.sweepExpiredHolds({ now: future, limit: 200, conn: sql });
+  it("8b. the batch sweep releases a hold whose clock ran out, then is a no-op", async () => {
+    // Set up the one state the clock cannot be faked into: a hold that was
+    // opened while its authorisation was live, and whose expiry has since
+    // passed. `card_authorization` is immutable, so the expiry cannot be moved
+    // afterwards — the identity is created with it already behind us and the
+    // hold is opened through the same store calls the live path uses.
+    const card = await freshCard();
+    const authToken = `auth-${run}-8b`;
+    const now = new Date();
+    const actorId = await store.ledgerPosterActorId(sql);
 
+    const identity = await store.ensureAuthorization(
+      {
+        provider: "lithic",
+        providerAuthId: authToken,
+        card,
+        origin: "authorization",
+        valueDate: now.toISOString().slice(0, 10),
+        expiresAt: new Date(now.getTime() - 3_600_000), // an hour ago
+      },
+      sql,
+    );
+
+    const start = await bal.availableBalance(businessId);
+    await sql.begin(async (raw) => {
+      const tx = raw as unknown as typeof sql;
+      await store.insertCardEvents(
+        identity.authId,
+        [
+          {
+            kind: "authorization",
+            amountCents: 4500n,
+            isFinal: false,
+            valueDate: now.toISOString().slice(0, 10),
+            providerEventId: `${authToken}-e1`,
+          },
+        ],
+        null,
+        tx,
+      );
+      await store.postHoldDelta(
+        {
+          identity,
+          deltaCents: 4500n,
+          valueDate: now.toISOString().slice(0, 10),
+          providerEventId: `${authToken}-e1`,
+          description: "Hold opened before the clock ran out",
+          actorId,
+          externalRef: authToken,
+          inboxId: null,
+        },
+        tx,
+      );
+    });
+
+    const held = await bal.availableBalance(businessId);
+    expect(held.holdsCents - start.holdsCents).toBe(4500n);
+
+    // Real clock. The sweep must find this on its own merits, not because the
+    // test moved time forward — and using the real clock also means the sweep
+    // cannot reach into anything that is not genuinely expired.
+    const firstPass = await expiry.sweepExpiredHolds({ now: new Date(), limit: 200, conn: sql });
+    expect(firstPass.examined).toBeGreaterThanOrEqual(1);
+    expect(firstPass.releasedCents).toBeGreaterThanOrEqual(4500n);
+
+    const afterSweep = await bal.availableBalance(businessId);
+    expect(afterSweep.holdsCents - held.holdsCents).toBe(-4500n);
+    expect(afterSweep.ledgerCents).toBe(held.ledgerCents); // an expiry moves no money
+    expect(await store.memoHoldBalance(identity.holdId, memoAccountId)).toBe(0n);
+
+    const secondPass = await expiry.sweepExpiredHolds({ now: new Date(), limit: 200, conn: sql });
     expect(secondPass.closed).toBe(0);
     expect(secondPass.released).toBe(0);
     expect(secondPass.releasedCents).toBe(0n);
-    // The first pass may legitimately find nothing if an earlier run already
-    // swept, so the assertion is about the SECOND pass being empty, not the
-    // first being non-empty.
-    expect(firstPass.examined).toBeGreaterThanOrEqual(0);
+    expect(await bal.availableBalance(businessId)).toEqual(afterSweep);
   });
 
   // =========================================================================

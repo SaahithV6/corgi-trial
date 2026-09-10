@@ -377,13 +377,39 @@ function pageSize(limit: number | undefined): number {
   return whole > MAX_POSTINGS_LIMIT ? MAX_POSTINGS_LIMIT : whole;
 }
 
-/** Memoise a promise: the factory runs at most once per data source. */
+/**
+ * Memoise a promise: the factory runs at most once per data source.
+ *
+ * The `catch` is not error handling — the rejection is still delivered to
+ * every caller that awaits the memoised promise. It exists because a memoised
+ * read that nobody happens to await, because a sibling read failed first,
+ * would otherwise surface as an unhandled rejection and take the process down
+ * under Node's default policy. A failed balance query must render the error
+ * state, not kill the server.
+ */
 function once<T>(factory: () => Promise<T>): () => Promise<T> {
   let pending: Promise<T> | null = null;
   return () => {
-    pending ??= factory();
+    if (pending === null) {
+      pending = factory();
+      pending.catch(() => undefined);
+    }
     return pending;
   };
+}
+
+/** The same memoisation, keyed by account id. */
+function oncePerKey<T>(
+  cache: Map<string, Promise<T>>,
+  key: string,
+  factory: () => Promise<T>,
+): Promise<T> {
+  const cached = cache.get(key);
+  if (cached !== undefined) return cached;
+  const pending = factory();
+  pending.catch(() => undefined);
+  cache.set(key, pending);
+  return pending;
 }
 
 export type LiveAccountDataSourceOptions = {
@@ -413,13 +439,10 @@ export function createLiveAccountDataSource(
   });
 
   const accounts = new Map<string, Promise<DepositAccountRow | null>>();
-  const account = async (accountId: string): Promise<DepositAccountRow | null> => {
-    const cached = accounts.get(accountId);
-    if (cached !== undefined) return cached;
-    const pending = context().then(({ conn }) => findDepositAccount(accountId, conn));
-    accounts.set(accountId, pending);
-    return pending;
-  };
+  const account = (accountId: string): Promise<DepositAccountRow | null> =>
+    oncePerKey(accounts, accountId, () =>
+      context().then(({ conn }) => findDepositAccount(accountId, conn)),
+    );
 
   /**
    * The holds, read once and shared by `getAccountSummary` and `listHolds`.
@@ -431,15 +454,10 @@ export function createLiveAccountDataSource(
    * exists to catch.
    */
   const holds = new Map<string, Promise<readonly HoldRow[]>>();
-  const holdsFor = async (accountId: string): Promise<readonly HoldRow[]> => {
-    const cached = holds.get(accountId);
-    if (cached !== undefined) return cached;
-    const pending = context().then(({ conn, snapshot }) =>
-      listHoldRows(accountId, snapshot, conn),
+  const holdsFor = (accountId: string): Promise<readonly HoldRow[]> =>
+    oncePerKey(holds, accountId, () =>
+      context().then(({ conn, snapshot }) => listHoldRows(accountId, snapshot, conn)),
     );
-    holds.set(accountId, pending);
-    return pending;
-  };
 
   return {
     async getAccountSummary({ accountId }) {
