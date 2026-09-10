@@ -178,3 +178,51 @@ alone means never releasing one. The adapter promotes it explicitly.
 **Increase signup is self-serve** — confirmed by opening the dashboard, which
 offers "Sign up for Increase" rather than a sales form. That closes the
 open question in 002's fallback plan for the ACH slot.
+
+---
+
+## 006 — 2026-09-10T02:05Z — D18 settled by measurement: Lithic's status field lies
+
+Lithic sandbox key live. Measured the partial-clearing arithmetic rather than
+trusting either reading of the docs. The answer was neither option.
+
+```
+authorize 1000            status=PENDING   hold=-1000  settled=0
+clearing 600  (partial)   status=SETTLED   hold=-400   settled=-600
+clearing 300  (2nd)       status=SETTLED   hold=-100   settled=-900
+authorize 5000            status=PENDING   hold=-5000  settled=0
+clearing 7340 (over-cap)  status=SETTLED   hold=0      settled=-7340
+FINANCIAL_AUTHORIZATION   status=SETTLED   hold=0      settled=-2500
+```
+
+**The trap.** `status` flips to SETTLED while a partial hold is still live. A
+consumer that releases the hold on `status == "SETTLED"` — the obvious
+implementation, and the one most candidates will write — frees 400 cents that
+are still authorised. The status field is not a description of the hold.
+
+**Second trap.** `amounts.hold.amount` is signed negative. A naive read gets
+the direction of the money wrong as well as the amount.
+
+**Consequence for the design.** Both traps are avoided by not reading either
+field. The hold is a pure function of the event set:
+
+    H(E) = 0 if closed(E) else max(A(E) - C(E), 0)
+
+That formula was derived from first principles before this measurement, and it
+reproduces Lithic's own arithmetic in all three cases — 400, 100, and 0 on
+over-capture. It agrees with the card network precisely where the provider's
+own status field does not. The design's decision to give card_authorization no
+status column is now empirically justified rather than merely tasteful.
+
+**Force post.** FINANCIAL_AUTHORIZATION settles immediately with no hold and a
+single event, which is exactly the no-hold-to-release path an unmatched
+clearing takes. Confirms the substitute in 004 is behaviourally right, even
+though it is not literally a force post.
+
+**Correction to the research draft.** `merchant_currency` alone is rejected:
+"'merchant_currency' requires that 'merchant_amount' is set". Both go together.
+
+**Open.** /simulate/void returned 200 with a debugging_request_id but left the
+transaction PENDING at hold=-3000, unchanged. Either it is asynchronous beyond
+the wait, or it needs different parameters. Tracked as D20; the hold model does
+not depend on it, since a void is just another event in E.

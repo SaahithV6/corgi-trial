@@ -15,13 +15,31 @@
  *  - https://docs.withpersona.com/model-lifecycle
  *  - https://docs.withpersona.com/webhooks-best-practices
  *  - https://docs.withpersona.com/integration-guide-kyb-via-api
+ *  - https://docs.stripe.com/webhooks  (Stripe-Signature scheme, 300s tolerance)
+ *  - https://docs.stripe.com/connect/testing  (magic EINs incl. 222221000-222221005)
+ *  - https://docs.stripe.com/connect/testing-verification
+ *  - https://docs.stripe.com/api/accounts/object  (requirements.errors[])
  *
  * IMPORTANT (see NOTES.md): Persona's real KYB product (the Transactions-based flow,
  * Business Registry Verification, Business Watchlist) is NOT on the free self-serve
- * tier. This adapter therefore has two Persona-shaped paths:
- *   - PersonaKybProvider          -> the real thing, needs a provisioned transaction type
- *   - PersonaDirectorKycProvider  -> live sandbox individual KYC (what we can actually run free)
- * plus SimulatedRegistryProvider, which is explicitly labelled as simulated.
+ * tier. Implementations here, in the order you'd actually reach for them:
+ *
+ *   - PersonaDirectorKycProvider   live sandbox individual KYC. Free, self-serve, and
+ *                                  the only provider whose statuses can be driven from
+ *                                  the server (perform-simulate-actions).
+ *   - StripeConnectRegistryProvider  live company-registry check in Stripe test mode.
+ *                                  Free, self-serve, real failure codes.
+ *   - SimulatedRegistryProvider    labelled fallback if Connect turns out gated.
+ *                                  Always reports evidence: "simulated".
+ *   - PersonaKybProvider           the real Persona KYB. Needs a transaction type that
+ *                                  only Persona can provision. Kept so the production
+ *                                  shape is written down.
+ *   - CompositeKybProvider         person leg + business leg, strictest status wins,
+ *                                  evidence degrades to "simulated" if either leg was.
+ *
+ * Stripe Identity is deliberately absent: it is individual KYC only, and it has no
+ * documented way to force verified/requires_input/processing in test mode (no CLI
+ * trigger fixture exists), which makes it a poor fit for demoing lifecycle states.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -643,6 +661,283 @@ function toPersonaAddress(a: Address) {
     postal_code: a.postalCode,
     country_code: a.countryCode,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Stripe: webhook signature verification                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Stripe-Signature verification.
+ *
+ * VERIFIED against https://docs.stripe.com/webhooks (manual verification section):
+ *
+ *   header name : `Stripe-Signature`
+ *   format      : `t=<unix_seconds>,v1=<hex>[,v1=<hex>…][,v0=<hex>]`
+ *                 multiple v1 entries appear while a rolled secret is still active
+ *                 (up to 24h) — accept ANY of them
+ *   algorithm   : HMAC-SHA256, hex digest
+ *   signed data : `${t}.${rawBody}`  (same construction as Persona)
+ *   tolerance   : Stripe's own libraries default to 300s. Docs: "Don't use a
+ *                 tolerance value of 0. Using a tolerance value of 0 disables the
+ *                 recency check entirely."
+ *
+ * SECURITY: the docs say "To prevent downgrade attacks, ignore all schemes that
+ * aren't v1." `v0` is a deliberate decoy on test events — never accept it.
+ */
+export const STRIPE_SIGNATURE_HEADER = "Stripe-Signature";
+
+export function verifyStripeSignature(
+  rawBody: string | Buffer,
+  signatureHeader: string | undefined,
+  secret: string,
+  opts: { toleranceSeconds?: number; nowSeconds?: number } = {},
+): { valid: boolean; reason?: string } {
+  if (!signatureHeader) return { valid: false, reason: "missing_signature_header" };
+  if (!secret) return { valid: false, reason: "missing_secret" };
+
+  const body = Buffer.isBuffer(rawBody) ? rawBody.toString("utf8") : rawBody;
+  const tolerance = opts.toleranceSeconds ?? DEFAULT_TOLERANCE_SECONDS;
+
+  let t: string | undefined;
+  const v1s: string[] = [];
+  for (const element of signatureHeader.split(",")) {
+    const idx = element.indexOf("=");
+    if (idx === -1) continue;
+    const prefix = element.slice(0, idx).trim();
+    const value = element.slice(idx + 1).trim();
+    if (prefix === "t") t ??= value;
+    else if (prefix === "v1") v1s.push(value);
+    // Deliberately ignore v0 and any future scheme — downgrade protection.
+  }
+
+  if (!t || v1s.length === 0) return { valid: false, reason: "malformed_signature_header" };
+
+  if (tolerance > 0) {
+    const ts = Number.parseInt(t, 10);
+    if (!Number.isFinite(ts)) return { valid: false, reason: "malformed_timestamp" };
+    const now = opts.nowSeconds ?? Math.floor(Date.now() / 1000);
+    if (Math.abs(now - ts) > tolerance) {
+      return { valid: false, reason: "timestamp_outside_tolerance" };
+    }
+  }
+
+  const expected = createHmac("sha256", secret).update(`${t}.${body}`).digest("hex");
+  return v1s.some((sig) => safeEqualHex(expected, sig))
+    ? { valid: true }
+    : { valid: false, reason: "signature_mismatch" };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Stripe Connect: the live business-registry leg                            */
+/* -------------------------------------------------------------------------- */
+
+export interface StripeConnectConfig {
+  /** `sk_test_…` for test mode. */
+  secretKey: string;
+  baseUrl?: string;
+  /** Pin the Stripe API version. */
+  apiVersion?: string;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * VERIFIED magic values — https://docs.stripe.com/connect/testing
+ * "You can only use these values while testing with test API keys."
+ *
+ * These are the reason the business leg can be genuinely live at $0: Stripe runs a
+ * real registry check against company name / EIN / owners / directors, and these
+ * EINs force each documented failure mode.
+ */
+export const STRIPE_TEST_EINS = {
+  match: "000000000",
+  matchNonProfit: "000000001",
+  inactiveBusiness: "000000004",
+  identityMismatch: "111111111",
+  taxIdNotIssued: "111111112",
+  /** Result returned inline in the API response rather than via webhook. */
+  immediateMatch: "222222222",
+  companyNotFoundInRegistry: "222221000",
+  ownersNotFoundInRegistry: "222221001",
+  directorsNotFoundInRegistry: "222221002",
+  missingOwnersVsRegistry: "222221003",
+  missingDirectorsVsRegistry: "222221004",
+  pendingResponseFromRegistry: "222221005",
+} as const;
+
+/**
+ * Registry-shaped `requirements.errors[].code` values that should map to a hard
+ * decline rather than "needs more info".
+ * VERIFIED list — https://docs.stripe.com/api/accounts/object (requirements.errors).
+ */
+const STRIPE_REGISTRY_DECLINE_CODES = new Set([
+  "verification_failed_tax_id_match",
+  "verification_failed_tax_id_not_issued",
+  "verification_failed_name_match",
+  "verification_failed_keyed_match",
+  "verification_failed_document_match",
+  "verification_directors_mismatch",
+  "verification_legal_entity_structure_mismatch",
+  "verification_failed_address_match",
+  "invalid_company_name_denylisted",
+]);
+
+/**
+ * Business-registry verification via Stripe Connect account onboarding.
+ *
+ * Be accurate about what this is: Stripe verifying a business in order to onboard it
+ * as a connected account. It is a REAL registry check with real failure codes, and it
+ * is free and self-serve in test mode — but it is not a general-purpose KYB vendor
+ * API, and the UI copy should not imply that it is.
+ *
+ * UNCONFIRMED: https://docs.stripe.com/connect/testing-verification says "You must
+ * provide a test API key from a Stripe account which has begun Connect platform
+ * onboarding." Whether "has begun" is one Dashboard click or a review is not stated.
+ * Check this before committing to this leg; fall back to SimulatedRegistryProvider.
+ */
+export class StripeConnectRegistryProvider implements KybProvider {
+  readonly name = "stripe-connect";
+
+  constructor(private readonly cfg: StripeConnectConfig) {}
+
+  async createBusinessVerification(
+    input: CreateBusinessVerificationInput,
+  ): Promise<VerificationResult> {
+    const rep = input.associatedPeople?.[0];
+
+    // Stripe's API is form-encoded, with bracket notation for nested fields.
+    const form = new URLSearchParams();
+    form.set("type", "custom");
+    form.set("country", input.registeredAddress.countryCode);
+    form.set("business_type", "company");
+    form.set("company[name]", input.businessName);
+    // Stripe wants 9 digits, no dashes: "invalid_tax_id_format".
+    form.set("company[tax_id]", input.taxIdentificationNumber.replace(/\D/g, ""));
+    form.set("company[address][line1]", input.registeredAddress.street1);
+    if (input.registeredAddress.street2) {
+      form.set("company[address][line2]", input.registeredAddress.street2);
+    }
+    form.set("company[address][city]", input.registeredAddress.city);
+    form.set("company[address][state]", input.registeredAddress.subdivision);
+    form.set("company[address][postal_code]", input.registeredAddress.postalCode);
+    form.set("company[address][country]", input.registeredAddress.countryCode);
+    if (rep?.phoneNumber) form.set("company[phone]", rep.phoneNumber);
+    form.set("metadata[reference_id]", input.referenceId);
+
+    const account = await this.stripeRequest<any>("POST", "/v1/accounts", form, {
+      // Stripe supports Idempotency-Key on all POSTs.
+      "Idempotency-Key": `kyb-connect-${input.referenceId}`,
+    });
+
+    return this.toResult(account, input.referenceId);
+  }
+
+  async getVerification(id: string): Promise<VerificationResult> {
+    const account = await this.stripeRequest<any>(
+      "GET",
+      `/v1/accounts/${encodeURIComponent(id)}`,
+    );
+    return this.toResult(account);
+  }
+
+  verifyWebhook(
+    rawBody: string | Buffer,
+    headers: Record<string, string | string[] | undefined>,
+    secret: string,
+  ): WebhookVerificationResult {
+    const sig = headerValue(headers, STRIPE_SIGNATURE_HEADER);
+    const { valid, reason } = verifyStripeSignature(rawBody, sig, secret);
+    if (!valid) return { valid: false, reason };
+
+    const body = Buffer.isBuffer(rawBody) ? rawBody.toString("utf8") : rawBody;
+    const event = safeJson(body) as any;
+    // Stripe envelope: { id: "evt_…", type: "account.updated", data: { object: {…} } }
+    return { valid: true, eventName: event?.type, event };
+  }
+
+  private async stripeRequest<T>(
+    method: "GET" | "POST",
+    path: string,
+    form?: URLSearchParams,
+    extraHeaders: Record<string, string> = {},
+  ): Promise<T> {
+    const doFetch = this.cfg.fetchImpl ?? fetch;
+    const base = this.cfg.baseUrl ?? "https://api.stripe.com";
+    const res = await doFetch(`${base}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.cfg.secretKey}`,
+        ...(this.cfg.apiVersion ? { "Stripe-Version": this.cfg.apiVersion } : {}),
+        ...(form ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+        ...extraHeaders,
+      },
+      body: form ? form.toString() : undefined,
+    });
+
+    const text = await res.text();
+    const parsed = text ? safeJson(text) : null;
+    if (!res.ok) {
+      const msg = (parsed as any)?.error?.message ?? `Stripe ${method} ${path} -> ${res.status}`;
+      throw new Error(msg);
+    }
+    return parsed as T;
+  }
+
+  /**
+   * Read the registry outcome out of `requirements`.
+   *
+   * NOTE — a correction worth keeping: there is **no** `company.verification.status`
+   * field on the Account object. `company.verification` holds only a `document`
+   * sub-object; `verification.status` exists on Person objects. Do not build against
+   * `account.company.verification.status`.
+   */
+  private toResult(account: any, fallbackRef?: string): VerificationResult {
+    const reqs = account?.requirements ?? {};
+    const errors: any[] = Array.isArray(reqs.errors) ? reqs.errors : [];
+    const currentlyDue: string[] = reqs.currently_due ?? [];
+    const pendingVerification: string[] = reqs.pending_verification ?? [];
+
+    const checks: VerificationCheck[] = errors.map((e) => ({
+      name: e?.requirement ?? e?.code ?? "unknown",
+      status: "failed" as const,
+      reasons: [e?.code, e?.reason].filter(Boolean),
+    }));
+
+    let status: VerificationStatus;
+    if (errors.some((e) => STRIPE_REGISTRY_DECLINE_CODES.has(e?.code))) {
+      status = "declined";
+    } else if (errors.length > 0) {
+      // e.g. verification_missing_owners / _directors — recoverable, wants a human.
+      status = "needs_review";
+    } else if (pendingVerification.length > 0) {
+      // Where EIN 222221005 ("pending response from registry") lands.
+      status = "pending";
+    } else if (currentlyDue.length > 0) {
+      status = "pending";
+    } else {
+      status = "approved";
+    }
+
+    // UNCONFIRMED: `disabled_reason` values overlap with the above and may be a better
+    // primary signal for a real product. Verify against live test-mode payloads before
+    // relying on this precedence order.
+    if (reqs.disabled_reason === "rejected.fraud" || reqs.disabled_reason === "listed") {
+      status = "declined";
+    }
+
+    return {
+      id: account?.id,
+      provider: this.name,
+      status,
+      referenceId: account?.metadata?.reference_id ?? fallbackRef ?? null,
+      checks,
+      createdAt: account?.created
+        ? new Date(account.created * 1000).toISOString()
+        : undefined,
+      evidence: "live-third-party",
+      raw: account,
+    };
+  }
 }
 
 /* -------------------------------------------------------------------------- */

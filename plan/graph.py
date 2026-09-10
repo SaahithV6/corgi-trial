@@ -154,9 +154,10 @@ N("D16", "Property test: random permutations of a lifecycle, invariants hold", "
   risk="this is what makes the live fire boring. worth every minute")
 N("D17", "Hold model ASCII state diagram in the docs", "holds", 25, ["D13"], "agent", ["docs/holds"])
 
-N("D18", "SETTLE partial-clearing arithmetic against the live sandbox", "holds", 30, ["A03"], "claude", ["lib/holds"],
+N("D18", "SETTLE partial-clearing arithmetic against the live sandbox", "holds", 30, ["A03"], "claude", ["lib/holds"], "done",
   risk="docs contradict themselves. clearing 600 of a 1000 auth: hold 400/PENDING or 0/SETTLED? "
        "the hold model depends on the answer. measure it, do not assume it")
+N("D20", "Resolve /simulate/void: returned 200 but left the hold unchanged", "holds", 30, ["A03"], "agent", ["lib/rails/lithic"])
 N("D19", "Serial rate limiter: Lithic simulate writes are 1 RPS in sandbox", "holds", 30, ["A03"], "agent", ["lib/rails/lithic"],
   risk="a 50-txn seed takes 100s. biggest operational constraint on the track")
 

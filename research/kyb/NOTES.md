@@ -8,32 +8,39 @@ could not confirm from a primary source is marked **UNCONFIRMED**.
 
 ## TL;DR verdict
 
-**No. There is no free, self-serve, sign-up-today sandbox that gives you real KYB
-(business-registry) verification.** Every genuine KYB product I checked is behind either a
-sales conversation, an account-manager provisioning step, or a credit card.
+**No dedicated KYB vendor will give you a free self-serve sandbox today.** Persona,
+Middesk and Sumsub all gate business verification behind a sales conversation, an
+account-manager provisioning step, or a credit card.
+
+**But you are not stuck simulating the business leg.** The best result of this research is
+that **Stripe Connect test mode performs a real company-registry check, free and
+self-serve, with published magic EINs that force "company not found in registry", "owners
+not found in registry", "directors not found in registry" and "pending response from
+registry"** — returned as structured `requirements.errors[]` codes over signed webhooks.
+That is a genuine KYB-shaped third-party signal at $0. See [§4.4](#44--stripe-connect-test-mode--the-actual-free-kyb-shaped-signal).
 
 Note also that Persona's often-cited **$0 "Starter" plan no longer exists** — G2 and Vendr
 still list it, but it is historical. What you get today is a 60-day sandbox-only trial, one
 per business. See [§1.2](#12-what-the-free-tier-actually-is).
 
-What *is* free and self-serve today:
+| Provider | Self-serve sandbox? | KYB in that sandbox? | Can you script every state? | Verdict |
+|---|---|---|---|---|
+| **Persona** | **Yes** — immediate sandbox key. 60-day Essential trial, sandbox-only, no card, but **one trial per business, ever** | **No** — Business Verification is "Not Available" free, and a separate purchase requiring support even at $250/mo | **Yes** — `perform-simulate-actions` drives every status and fires real webhooks | **Primary, for KYC** |
+| **Stripe Connect** | **Yes** — test keys instantly (caveat: account must have "begun Connect platform onboarding") | **Effectively yes** — real registry check on company name / EIN / owners / directors | **Yes** — published magic EINs `222221000`–`222221005` | **Primary, for the business leg** |
+| Stripe Identity | **Yes** — test-mode keys instantly | **No** — individual KYC only | **No** — see the negative finding in §4.3; only `cancel` is scriptable | Backup KYC only |
+| Middesk | **No** — keys provisioned by sales; `middesk.com/pricing` 404s | (n/a) | (n/a) | Out |
+| Sumsub | Signup yes, but Sandbox is doc'd as requiring "trialing or full access", and trial activation asks for **bank card + company information** | Yes, if you get in | Yes (`testCompleted`) | Out on the $0 / no-company constraint |
 
-| Provider | Self-serve sandbox? | KYB in that sandbox? | Verdict |
-|---|---|---|---|
-| **Persona** | **Yes** — signup gives an immediate sandbox API key. 60-day Essential trial, sandbox-only, no credit card, but **one trial per business, ever** | **No** — Business Verification is "Not Available" on the free tier and is a separate purchase requiring Persona support even at $250/mo | **Use it, for KYC** |
-| Middesk | **No** — keys are provisioned by sales; `middesk.com/pricing` 404s | (n/a) | Out |
-| Sumsub | Signup yes, but Sandbox is doc'd as requiring "trialing or full access", and trial activation asks for **bank card + company information** | Yes, if you get in | Out on the $0/no-company constraint |
-| Stripe Identity | **Yes** — test-mode keys instantly | **No** — individual KYC only | Good backup / second live signal |
-
-**Recommendation: Persona sandbox for live director (control-person) KYC, plus a clearly
-labelled simulated business-registry check behind the same `KybProvider` interface.**
+**Recommendation: Persona sandbox for live director KYC (because it is the only provider
+that lets you drive pending / declined / needs-review from the server), plus Stripe Connect
+test mode for the business-registry leg, behind one `KybProvider` interface — with a
+labelled simulated registry as the fallback if Connect onboarding turns out gated.**
 See [§5](#5-recommendation--the-honest-architecture).
 
-The single best thing about Persona for this trial is the **`perform-simulate-actions`
-endpoint**: it drives a sandbox inquiry to `pending` / `approved` / `declined` /
-`needs_review` on demand *and fires the real webhooks for each transition*. That means the
-pending and failure demos are genuinely end-to-end through a third party, not faked
-locally. Nothing else on this list has an equivalent that is both free and self-serve.
+The single most valuable capability here is Persona's **`perform-simulate-actions`**
+endpoint: it drives a sandbox inquiry to `pending` / `approved` / `declined` /
+`needs_review` on demand *and fires the real webhooks for each transition*. Stripe Identity
+notably **cannot** do this — verified negative finding, §4.3.
 
 ---
 
@@ -789,7 +796,304 @@ If it were viable, the mechanics are good and worth knowing:
 
 ### 4.3 Stripe Identity — self-serve, definitely, but KYC not KYB
 
-<!-- STRIPE_SECTION -->
+#### Self-serve: yes, immediately
+
+From https://docs.stripe.com/keys: *"When you sign up for a Stripe account, we create three
+types of API keys for you"* — `pk_test_`, `rk_test_`, `sk_test_`. Nothing conditions **test**
+keys on business activation.
+
+There's an even lower-friction path — https://docs.stripe.com/cli/sandbox, verbatim:
+
+> If your CLI isn't logged into Stripe, this command provisions a new sandbox with working
+> test API keys, **without requiring an account**. … Sandbox environments expire after 7
+> days.
+
+`stripe sandbox create --email you@example.com` returns
+`{"secret_key":"rkcs_test_…","publishable_key":"pk_test_…","claim_url":…,"expires_at":…}`.
+**Caveat:** that secret is a *restricted* key and **UNCONFIRMED** whether it carries Identity
+write scope; plus the 7-day expiry. For a 48h trial, just register normally.
+
+**The one real unknown.** Every Identity guide
+(https://docs.stripe.com/identity/verify-identity-documents) opens with:
+
+> ## Before you begin
+> 1. Set up your Stripe account and **verify your business**.
+> 2. **Fill out your Stripe Identity application** (dashboard.stripe.com/identity/application).
+
+**UNCONFIRMED whether `POST /v1/identity/verification_sessions` succeeds with a test key on
+an account that has not submitted the Identity application.** Stripe's docs never say either
+way. **Verify this empirically in your first 30 minutes** — it's the highest-leverage
+de-risking action on the Stripe side. Geographic GA is GB / JP / US only
+(https://docs.stripe.com/identity/use-cases).
+
+#### Scope: individual KYC only. Confirmed, no KYB.
+
+https://docs.stripe.com/identity/verification-checks lists the *complete* check set:
+**Document | Selfie | ID Number | Phone (invite only) | Address (invite only)**. The `type`
+enum on create has exactly two values: `document`, `id_number`.
+
+- **Does**: government-ID document authenticity (120+ countries), selfie↔document face
+  match, extracted name/DOB/address/document number, SSN/national-ID validation.
+- **Does not**: company existence, EIN/TIN validation, secretary-of-state or any business
+  registry lookup, UBO discovery, business watchlist/adverse media, business
+  classification, director verification. None of it, at any price. There is no mention of
+  KYB anywhere on the Identity product or pricing pages.
+
+Pricing (https://stripe.com/identity): $1.50/verification, 50¢/ID-number lookup, charged on
+completion — but **test mode is free and runs no checks**.
+
+#### Identity API
+
+```bash
+curl https://api.stripe.com/v1/identity/verification_sessions \
+  -u "$STRIPE_SECRET_KEY:" \
+  -d type=document \
+  -d "options[document][require_matching_selfie]=true" \
+  -d "options[document][require_id_number]=true" \
+  -d "options[document][require_live_capture]=true" \
+  -d "options[document][allowed_types][]=driving_license" \
+  -d "options[document][allowed_types][]=passport" \
+  -d "provided_details[email]=user@example.com" \
+  -d client_reference_id=user_12345 \
+  -d "metadata[user_id]=12345" \
+  -d return_url="https://your-app.vercel.app/verify/done"
+```
+
+Response carries `id` (`vs_…`), `client_secret` (modal; expires 24h, single use), `url`
+(redirect; expires 48h, single use), `status`, `livemode`.
+Also: `GET /v1/identity/verification_sessions/{id}`, `POST …/{id}/cancel`, `POST …/{id}/redact`.
+
+Status enum (https://docs.stripe.com/api/identity/verification_sessions/object):
+`requires_input` | `processing` | `verified` | `canceled`.
+**Gotcha: a session is *born* `requires_input`**, so that value means both "not started" and
+"failed". Disambiguate on `last_error != null`.
+
+`last_error.code` values (https://docs.stripe.com/identity/handle-verification-outcomes):
+`consent_declined`, `under_supported_age`, `country_not_supported`, `document_expired`,
+`document_unverified_other`, `document_type_not_supported`, `selfie_document_missing_photo`,
+`selfie_face_mismatch`, `selfie_unverified_other`, `selfie_manipulated`,
+`id_number_unverified_other`, `id_number_insufficient_document_data`, `id_number_mismatch`,
+`address_mismatch`.
+
+#### ⚠️ Negative finding: Identity has NO scriptable way to force outcomes
+
+**This is verified, and it matters.** Verbatim from
+https://docs.stripe.com/api/identity/verification_sessions/create:
+
+> If your API key is in test mode, **verification checks won't actually process**, though
+> everything else will occur as if in live mode.
+
+and https://docs.stripe.com/keys (sandbox row): *"Identity doesn't perform any verification
+checks."*
+
+The only documented mechanism is a **UI picker inside the hosted flow** — *"Submit the
+session by selecting a predefined test case"* — and **Stripe never names those test cases
+anywhere in its docs.** Confirmed absences:
+
+- `docs.stripe.com/testing` has **no Identity section at all**.
+- There is no `docs.stripe.com/identity/testing` page (404 — I checked).
+- The full create-parameter tree contains **no** test/debug/simulate/outcome field.
+- **Stripe CLI triggers**: of the 121 fixtures in `stripe/stripe-cli`, the only Identity
+  ones are `identity.verification_session.created`, `.canceled`, `.redacted`. There is
+  **no `verified`, `requires_input`, or `processing` fixture** —
+  `stripe trigger identity.verification_session.verified` will not work.
+
+So, practically:
+
+| Target status | How |
+|---|---|
+| `canceled` | `POST /v1/identity/verification_sessions/{id}/cancel` — **the only fully scriptable one** |
+| `verified` | walk the hosted flow at `session.url` and pick a test case (human, or Playwright) |
+| `requires_input` (failed) | same |
+| `processing` | same, and rare — document checks usually resolve synchronously |
+
+**This is the decisive reason not to make Stripe Identity the primary provider for this
+trial.** Persona's `perform-simulate-actions` does exactly what Stripe refuses to: drives
+every state from the server and fires the real webhook. If you do use Identity, the honest
+mitigation is to hand-craft the event JSON and self-sign it with the endpoint secret using
+the scheme below — and *say in the writeup that you did that, and why*.
+
+#### Identity webhook events
+
+From https://docs.stripe.com/identity/verification-sessions#events:
+`identity.verification_session.created`, `.processing`, `.verified`, `.requires_input`,
+`.canceled`, `.redacted`.
+
+**Trap, verbatim:** `.redacted` — *"You must create a webhook endpoint which explicitly
+subscribes to this event type to access it. Webhook endpoints which subscribe to all events
+won't include this event type."*
+
+#### Stripe webhook signature scheme (verbatim)
+
+> The `Stripe-Signature` header included in each signed event contains a timestamp and one
+> or more signatures … The timestamp has a `t=` prefix, and each signature has a scheme
+> prefix. Schemes start with `v`, followed by an integer. Currently, the only valid live
+> signature scheme is `v1`. To aid with testing, Stripe sends an additional signature with
+> a fake `v0` scheme, for test events.
+
+```
+Stripe-Signature: t=1492774577,v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56ff536d0ce8e108d8bd,v0=6ffbb59b2300aae63f272406069a9788598b792a944a07aba816edb039989a39
+```
+
+> Stripe generates signatures using a hash-based message authentication code (HMAC) with
+> SHA-256. **To prevent downgrade attacks, ignore all schemes that aren't `v1`.**
+
+Steps, verbatim: split on `,` then `=`; `signed_payload` = *"The timestamp (as a string); The
+character `.`; The actual JSON payload (that is, the request body)"*; HMAC-SHA256 with the
+endpoint signing secret; constant-time compare against **every** `v1`.
+
+> Our libraries have a **default tolerance of 5 minutes** … **Don't use a tolerance value of
+> `0`.** … If Stripe retries an event … we generate a new signature and timestamp for the
+> new delivery attempt.
+
+Rotation, verbatim:
+
+> You can have multiple signatures with the same scheme-secret pair when you roll an
+> endpoint's secret, and keep the previous secret active for **up to 24 hours**. During this
+> time, your endpoint has multiple active secrets and Stripe generates one signature for
+> each secret.
+
+→ **Iterate over every `v1=` value, don't just read the first.**
+
+Trap: *"Don't verify signatures on events forwarded by the CLI using the secret from a
+Dashboard-managed endpoint, or the other way around."* Both start `whsec_`, different values.
+
+**Structural comparison with Persona, worth a line in the writeup:** both use
+`t=<unix>` + HMAC-SHA256 over `` `${t}.${rawBody}` ``. The differences are the header name,
+the multi-signature delimiter (Stripe: comma-separated `v1=` entries in one header;
+Persona: **space-separated whole groups**), Stripe's `v0` decoy scheme, and that Stripe
+publishes a tolerance while Persona publishes none. One verifier shape covers both.
+
+#### Test-mode webhooks to a deployed Vercel URL — confirmed yes
+
+The CLI listener is the fallback for people *without* a public URL, not a requirement.
+*"Registered webhook endpoints must be publicly accessible HTTPS URLs."* Register with a
+test key:
+
+```bash
+curl https://api.stripe.com/v1/webhook_endpoints \
+  -u "$STRIPE_TEST_SECRET_KEY:" \
+  -d url="https://your-app.vercel.app/api/stripe/webhook" \
+  -d "enabled_events[]"="identity.verification_session.verified" \
+  -d "enabled_events[]"="identity.verification_session.requires_input"
+```
+
+Test-mode retry policy differs: *"We retry event deliveries created in a sandbox three times
+over the course of a few hours"* (vs three days in live).
+
+**Vercel gotchas:**
+
+- **Redirects count as failures**, verbatim: *"We consider redirect responses to webhook
+  requests as failures. Set the webhook endpoint destination to the URL resolved by the
+  redirect."* Watch `www` → apex and trailing slashes. Point Stripe at the *final* URL.
+- *"Stripe webhooks support only TLS versions v1.2 and v1.3."*
+- Max 16 webhook endpoints per account.
+- Raw body: in App Router use `await req.text()`. Stripe publishes a working example at
+  `stripe-node/examples/webhook-signing/nextjs/app/api/webhooks/route.ts`.
+
+---
+
+### 4.4 ⭐ Stripe **Connect** test mode — the actual free KYB-shaped signal
+
+**This is the most useful thing in this whole document and it nearly got missed.** Stripe's
+KYB lives in **Connect account onboarding**, not Identity — and it is testable at $0 with
+published **registry** magic values.
+
+Create a Connect account with `business_type=company` (v1) or `identity.entity_type="company"`
+(v2). `requirements.currently_due` comes back as real KYB fields:
+
+```
+["business_profile.mcc","business_profile.url","company.address.city","company.address.line1",
+ "company.address.postal_code","company.address.state","company.name","company.phone",
+ "company.tax_id","relationship.representative","relationship.owner"]
+```
+
+(v2 equivalent: `identity.business_details.registered_name`,
+`identity.business_details.id_numbers.us_ein`,
+`identity.attestations.persons_provided.owners`, …)
+
+#### The published magic EINs — https://docs.stripe.com/connect/testing
+
+Gating statement, verbatim: *"You can only use these values while testing with test API keys."*
+
+| `company.tax_id` / `us_ein` | Effect |
+|---|---|
+| `000000000` | Successful business ID number match |
+| `000000001` | Successful match, as a non-profit |
+| `000000004` | **Unsuccessful** — inactive business status |
+| `111111111` | **Unsuccessful** — identity mismatch |
+| `111111112` | **Unsuccessful** — tax ID not issued |
+| `222222222` | Successful, **immediate** match (result in the API response, not a webhook) |
+| **`222221000`** | **Company not found in registry** |
+| **`222221001`** | **Owners not found in registry** |
+| **`222221002`** | **Directors not found in registry** |
+| **`222221003`** | **Missing owners** on account vs registry |
+| **`222221004`** | **Missing directors** on account vs registry |
+| **`222221005`** | **Pending response from registry** |
+
+Supporting tables: personal ID numbers (`000000000` match, `111111111` mismatch,
+`111111113` inactive, `222222222` immediate); DOBs (`1901-01-01` match, `1902-01-01`
+immediate match, **`1900-01-01` triggers an OFAC alert**); address tokens
+(`address_full_match`, `address_no_match`, `address_line1_no_match`, `address_zip_no_match`,
+`address_line1_zip_no_match`); trigger cards (`tok_visa_triggerNextRequirements`,
+`tok_visa_triggerChargeBlock`, `tok_visa_triggerPayoutBlock`); plus test **file tokens**
+for document-upload simulation.
+
+#### Where the registry result surfaces
+
+**Correction to a common assumption: there is NO `company.verification.status` field.**
+`company.verification` contains only a `document` sub-object. `verification.status` exists on
+**Person** objects, not on `company`. Don't build against it.
+
+The registry signal comes through four places:
+
+1. `requirements.currently_due` / `past_due` / `eventually_due` — field-name arrays.
+2. `requirements.pending_verification` — *"Fields that are being reviewed"*. This is where
+   `222221005` lands.
+3. **`requirements.errors[]`** — the rich one. Each entry has `code`, `reason` (human-safe
+   message) and `requirement` (which field to fix).
+4. `requirements.disabled_reason` — `requirements.pending_verification`, `under_review`,
+   `rejected.incomplete_verification`, `rejected.fraud`, `listed`, …
+
+Registry-shaped `requirements.errors[].code` values (verbatim descriptions abbreviated):
+
+| Code | Meaning |
+|---|---|
+| `verification_failed_tax_id_match` | Tax ID cannot be verified by the IRS |
+| `verification_failed_tax_id_not_issued` | Tax ID not recognized by the IRS |
+| `verification_failed_name_match` | Company name could not be verified |
+| `verification_failed_keyed_match` | Keyed-in company name / ID / address unverifiable |
+| `verification_failed_document_match` | Document could not be verified |
+| `verification_missing_owners` | Owners identified that aren't on the account |
+| `verification_missing_directors` | Directors identified that aren't on the account |
+| `verification_missing_executives` | Executives identified that aren't on the account |
+| `verification_directors_mismatch` | Directors don't match government records |
+| `verification_extraneous_directors` | Extra directors added vs registry |
+| `verification_legal_entity_structure_mismatch` | Business type/structure appears incorrect |
+| `verification_failed_address_match` | Address could not be verified |
+| `invalid_tax_id` / `invalid_tax_id_format` | 9 digits, no dashes |
+| `invalid_company_name_denylisted` | Generic/well-known names unsupported |
+| `invalid_address_registered_agent_address` / `_cmra_address` / `_private_mailbox` | Address-quality rejects |
+| `verification_document_failed_test_mode` | Explicit test-mode simulation hook |
+
+That is a genuine, machine-readable, third-party-shaped registry response — free, in test
+mode, delivered to your Vercel endpoint via signed `account.updated` webhooks.
+
+**The one caveat, verbatim** from https://docs.stripe.com/connect/testing-verification:
+
+> You must provide a test API key from a Stripe account which **has begun Connect platform
+> onboarding**. The auto-filled Stripe test API key causes these sample requests to fail.
+
+**UNCONFIRMED whether "has begun" means one click in the Dashboard or a review.** The
+wording reads self-serve (Connect platform onboarding is normally a self-serve Dashboard
+flow), but this is the thing to check first. If it turns out to be gated, fall back to the
+labelled simulated registry.
+
+**Honesty note for the writeup:** Connect is Stripe verifying a business *to onboard it as a
+Stripe-connected account*, not a general-purpose KYB API you'd sell as a compliance product.
+Using it as your registry leg is legitimate and genuinely live — but describe it accurately.
+Don't call it "a KYB vendor integration"; call it "Stripe Connect's company verification,
+which performs a real registry check and returns structured failure codes."
 
 ---
 
@@ -797,51 +1101,68 @@ If it were viable, the mechanics are good and worth knowing:
 
 ### The verdict, plainly
 
-**Free self-serve KYB does not exist.** Persona gates it behind support, Middesk behind
-sales, Sumsub behind a credit card. Anyone who tells you otherwise on a work trial has
+**No dedicated KYB vendor sandbox is free and self-serve.** Persona gates it behind
+support, Middesk behind sales, Sumsub behind a credit card. Anyone claiming otherwise has
 either not checked or is calling individual KYC "KYB".
 
-**So build the thing that is actually true**: verify the *human* for real, simulate the
-*registry* and say so loudly.
+**But the business leg does not have to be fake.** Stripe Connect test mode runs a real
+company-registry check with published failure modes. So the honest architecture is better
+than "verify the human, simulate the company" — it's **two live third-party legs, one of
+which is a payments platform's own KYB rather than a KYB vendor's**, and you say so.
 
 ### Recommended stack
 
-1. **Persona sandbox** — live, third-party, self-serve today — for **director /
-   control-person KYC** (Government ID + Selfie + Database). Real inquiry IDs, real hosted
-   flow, real signed webhooks hitting your Vercel deployment.
+1. **Persona sandbox** — live, third-party, self-serve — for the **director /
+   control-person KYC** leg (Government ID + Selfie + Database). Real inquiry IDs, real
+   hosted flow, real signed webhooks to your Vercel deployment.
 2. **`perform-simulate-actions`** as the demo control surface for pending / approved /
-   declined / needs-review. These are *Persona's own* state transitions and *Persona's own*
-   webhooks — the only thing "simulated" is the user's behaviour, which is exactly what a
-   sandbox is for.
-3. **A simulated US business-registry check** behind the *same* `KybProvider` interface,
-   returning `evidence: "simulated"` on every result, rendered as a visible badge in the UI
-   and stored on the row in the DB.
-4. **Stripe Identity test mode** as an optional second live KYC provider, to prove the
-   interface is genuinely provider-agnostic rather than a Persona wrapper with extra steps.
+   declined / needs-review. These are *Persona's own* transitions and *Persona's own*
+   webhooks — the only thing simulated is the end user's behaviour, which is what a sandbox
+   is for.
+3. **Stripe Connect test mode** — live, self-serve — for the **business-registry** leg.
+   Company name + EIN + owners + directors, verified against a registry, with
+   `222221000`–`222221005` to force *company not found* / *owners not found* / *directors
+   not found* / *pending response from registry*. Read the outcome from
+   `requirements.errors[]` (`code` / `reason` / `requirement`), not from a
+   `company.verification.status` field — that field does not exist.
+4. **`SimulatedRegistryProvider`** as the labelled fallback, used **only** if Connect
+   platform onboarding turns out to need approval. Every result carries
+   `evidence: "simulated"`, rendered as a visible badge and persisted on the row.
+5. **Stripe Identity test mode** as an optional second KYC provider — good for proving the
+   interface is genuinely provider-agnostic, but *not* the primary, because you cannot
+   script its outcomes (§4.3).
 
 ### Why this is the honest answer, not a cop-out
 
 The interface is the deliverable. `KybProvider` (see `adapter.draft.ts`) has
-`createBusinessVerification` / `getVerification` / `verifyWebhook`, and three
-implementations: `PersonaDirectorKycProvider` (live), `SimulatedRegistryProvider`
-(labelled), and `PersonaKybProvider` (the real Transactions-based KYB, written out in full
-against the published docs, ready for the day someone provisions a `transaction_type_id`).
-A reviewer can see exactly where the seam is and exactly what would change.
+`createBusinessVerification` / `getVerification` / `verifyWebhook`, with implementations for
+`PersonaDirectorKycProvider` (live KYC), `StripeConnectRegistryProvider` (live registry),
+`SimulatedRegistryProvider` (labelled fallback), and `PersonaKybProvider` — the real
+Transactions-based KYB, written out in full against the published docs, ready for the day
+someone provisions a `transaction_type_id`. A reviewer can see exactly where every seam is.
 
 `CompositeKybProvider` combines the person leg and the business leg, takes the **strictest**
-of the two statuses, and — crucially — degrades `evidence` to `"simulated"` if *either* leg
-was simulated. The system can never report "verified by a third party" when half the
-evidence was manufactured.
+of the two statuses, and degrades `evidence` to `"simulated"` if *either* leg was simulated.
+**The system can never report "verified by a third party" when half the evidence was
+manufactured.** That property is the point of the design, and it's worth calling out.
 
 ### Things to say out loud in the writeup
 
-- "Persona KYB requires contacting their team to provision a transaction type; I confirmed
-  this from their own integration guide and the Business Verification plan table. So the
-  business-registry leg is simulated and labelled as such. Here is the adapter, and here is
-  the ~40 lines that change when a key arrives."
+- "Persona KYB requires contacting their team to provision a transaction type — confirmed
+  from their own integration guide and four plan-availability tables. So the registry leg
+  runs through Stripe Connect's company verification instead, which does a real registry
+  check. Here's the adapter; here are the ~40 lines that change when a Persona KYB key
+  arrives."
 - "Pending and declined are demonstrated through Persona's real sandbox lifecycle and real
-  webhook deliveries, not by mutating my own database."
-- "Persona publishes no replay tolerance for `Persona-Signature`. I chose 300 s."
+  signed webhook deliveries, not by mutating my own database."
+- "Stripe Identity publishes no forced-outcome test values and ships no CLI trigger fixture
+  for `verified` or `requires_input` — I checked all 121 fixtures. That's why Identity is
+  the backup, not the primary."
+- "Persona publishes no replay tolerance for `Persona-Signature`. I chose 300 s, matching
+  Stripe's documented default."
+- "Stripe Connect is a payments platform verifying a business to onboard it, not a KYB
+  product I'd sell as compliance. It's a real registry check and I'm using it as one — but
+  I'm not going to call it a KYB vendor integration."
 
 ### Do this in the first 30 minutes
 
@@ -859,6 +1180,17 @@ Remember you get **one Persona trial ever**, so know what you're doing before yo
 5. Remember the 50-service trial cap may apply in sandbox — don't loop simulate-actions in
    a test suite against the live sandbox.
 6. Expect sandbox names to come back as `Alexander J Sample` regardless of what you sent.
+
+On the Stripe side, in parallel:
+
+7. Register a Stripe account, grab `sk_test_…`, and **check whether Connect platform
+   onboarding is one Dashboard click or a review**. This decides whether your business leg
+   is live or simulated — it's the single most important unknown in this document.
+8. If you also want Identity: **test whether `POST /v1/identity/verification_sessions`
+   succeeds before submitting the Identity application.** Stripe's docs are silent both
+   ways.
+9. Point the Stripe webhook at the *final* resolved URL (no `www`→apex redirect, no
+   trailing-slash redirect) — Stripe counts 3xx as a delivery failure.
 
 ---
 
@@ -909,6 +1241,23 @@ Remember you get **one Persona trial ever**, so know what you're doing before yo
 - Secure webhooks — https://docs.middesk.com/build/secure-webhooks
 - Create a business — https://docs.middesk.com/api-reference/business-verification/businesses/create-business
 - Webhook events — https://docs.middesk.com/monitor-activity/events
+
+**Stripe**
+- API keys / test mode — https://docs.stripe.com/keys
+- Sandboxes / CLI-provisioned sandbox — https://docs.stripe.com/sandboxes, https://docs.stripe.com/cli/sandbox
+- Identity overview — https://docs.stripe.com/identity
+- Identity verification checks (complete list) — https://docs.stripe.com/identity/verification-checks
+- Identity verification sessions (statuses, events) — https://docs.stripe.com/identity/verification-sessions
+- Create a VerificationSession (test-mode caveat) — https://docs.stripe.com/api/identity/verification_sessions/create
+- Verify identity documents (the "Before you begin" gate) — https://docs.stripe.com/identity/verify-identity-documents
+- Handle verification outcomes (`last_error.code`) — https://docs.stripe.com/identity/handle-verification-outcomes
+- Identity use cases / country availability — https://docs.stripe.com/identity/use-cases
+- Webhooks (signature scheme, tolerance, retries, 3xx=failure) — https://docs.stripe.com/webhooks
+- Troubleshooting signature verification — https://docs.stripe.com/webhooks/signature
+- **Connect testing — magic EINs / registry values** — https://docs.stripe.com/connect/testing
+- Connect testing verification (requirements flow, v1 + v2) — https://docs.stripe.com/connect/testing-verification
+- Account object (`requirements.errors[]`, `company`) — https://docs.stripe.com/api/accounts/object
+- Identity pricing — https://stripe.com/identity
 
 **Sumsub**
 - Authentication — https://docs.sumsub.com/reference/authentication

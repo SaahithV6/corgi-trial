@@ -599,7 +599,10 @@ deliberately:
   can never change, so the cache is *memoisation of a pure function*, not a
   second source of truth. It can be truncated at any time with no loss, it is
   never written by anything except a fold over journal lines, and
-  `v_snapshot_drift` proves it in CI. The distinction I would insist on out
+  `v_snapshot_drift` proves it in CI. It is deliberately **not** in
+  `schema.draft.sql`: an unprofiled cache is premature, and the point of
+  writing it down here is that the escape hatch exists and is safe, not
+  that I need it on day one. The distinction I would insist on out
   loud: a cache whose inputs are immutable cannot drift; a stored balance
   whose inputs are mutable always will.
 - **Available can go negative.** A force post against a spent balance
@@ -906,3 +909,38 @@ Stripe's engineering posts on immutable double-entry ledgers (append-only with
 reversals, and balances as folds). The specific things I did *not* take: an
 `ON CONFLICT DO UPDATE` upsert-based inbox, a materialised balance table as
 the source of truth, and a mutable auth status column.
+
+---
+
+## Appendix A — the tables, one line each
+
+| Table | What it is |
+| --- | --- |
+| `book_entity` | A legal entity that owns a chart of accounts; entries never cross one |
+| `business` | The customer — a US business holding a current account |
+| `actor` | Every principal that can write: human, agent, or system. `CHECK` makes non-humans unable to be approvers |
+| `account` | The chart of accounts: tree, type, normal side, book (financial/memo), optional owning business, optional rail-control marker |
+| `webhook_inbox` | Raw provider events. `UNIQUE (provider, provider_event_id)` — replay dies here, at the database |
+| `funds_availability_policy` | Versioned, effective-dated rules for when an uncleared credit becomes available |
+| `rail_event_semantics` | Per-provider event type → canonical kind, and correction-vs-new-event, as reviewable data |
+| `hold` | A hold's identity only; its balance is a `SUM` over memo postings, never a column |
+| `hold_closure` | One-shot explicit release (`PRIMARY KEY (hold_id)` makes closure exactly once) |
+| `journal_entry` | One business event: value date, booking seq/time, entry type, reversal lineage, idempotency key, hash chain |
+| `journal_line` | One posting: account, signed cents (debit +, credit −), plus immutable copies of the two clocks |
+| `card_authorization` | Immutable identity of an auth `(provider, provider_auth_id)`; no status column, by design |
+| `card_auth_event` | Append-only card facts, deduped by `(auth_id, provider_event_id)` — this is what makes the event stream a *set* |
+| `book_day` | Day close: the booking watermark pinned at close, per entity |
+| `statement` | Immutable, versioned statement headers with a content hash; a correction issues v2, never an edit |
+| `scheme_file` | An imported settlement file, hashed so re-import is a no-op |
+| `scheme_file_row` | One line of that file, as the network stated it |
+| `recon_match` | File row ↔ entry, recording **both** amounts so an amount mismatch is a match, not a guess |
+| `recon_break_note` | Append-only adjudication of a break, optionally pointing at the correcting entry |
+| `approval_policy` | Versioned thresholds and required approver counts per rail |
+| `payment_instruction` | An outbound payment request, with a `content_hash` that approvals must cite |
+| `payment_instruction_event` | Its append-only lifecycle; triggers enforce maker-checker on `approved` and `submitted` |
+
+Derived views: `v_ledger_balance`, `v_card_auth_state`, `v_card_auth_hold`,
+`v_hold_state`, `v_available_balance`, `v_trial_balance`,
+`v_overdrawn_accounts`, `v_late_postings`. Invariant views that must return
+zero rows in CI: `v_entry_unbalanced`, `v_line_denorm_drift`, `v_hold_drift`,
+`v_book_not_zero`, `v_deposit_control_drift`, plus `verify_chain(entity)`.
