@@ -63,6 +63,7 @@ import {
   type ReceiptFacts,
   type StablecoinPayoutInstruction,
   type StablecoinPayoutProvider,
+  type StablecoinProviderId,
   type UsdcPayoutRequest,
 } from "./types";
 
@@ -110,7 +111,7 @@ export interface PayoutOptions extends PayoutHooks {
 }
 
 function refuse(
-  req: UsdcPayoutRequest,
+  req: StablecoinPayoutInstruction,
   reason: PayoutRefusal,
   detail: string,
   txHash: string | null = null,
@@ -128,9 +129,17 @@ function refuse(
   };
 }
 
-function base(req: UsdcPayoutRequest) {
+/**
+ * The provider-independent half of every outcome.
+ *
+ * `provider` is a parameter rather than the constant it used to be, because a
+ * second provider now settles through `settleTransaction` and the ledger entry
+ * has to name the rail that actually moved the money. Defaulted, so nothing
+ * that was calling this had to change.
+ */
+function base(req: StablecoinPayoutInstruction, provider: StablecoinProviderId = USDC_PROVIDER) {
   return {
-    provider: USDC_PROVIDER,
+    provider,
     evidence: "live",
     amount: usdc(req.amountUnits),
     from: req.fromAddress.toLowerCase(),
@@ -149,9 +158,15 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  */
 export async function settleTransaction(
   rpc: BaseRpc,
-  req: UsdcPayoutRequest,
+  req: StablecoinPayoutInstruction,
   txHash: string,
-  options: { recovered: boolean; nonce: bigint; gas: GasFacts | null } & PayoutOptions,
+  options: {
+    recovered: boolean;
+    nonce: bigint;
+    gas: GasFacts | null;
+    /** Which rail produced this hash. Defaults to the direct path. */
+    provider?: StablecoinProviderId;
+  } & PayoutOptions,
 ): Promise<PayoutOutcome> {
   const confirmations = BigInt(req.confirmations ?? DEFAULT_CONFIRMATIONS);
   const timeoutMs = req.receiptTimeoutMs ?? DEFAULT_RECEIPT_TIMEOUT_MS;
@@ -165,10 +180,10 @@ export async function settleTransaction(
     if (!(await rpc.transactionExists(txHash))) {
       // Evicted from the mempool, or replaced. Not an error — a stated
       // outcome that still carries the hash.
-      return { ...base(req), kind: "dropped", txHash };
+      return { ...base(req, options.provider), kind: "dropped", txHash };
     }
     if (Date.now() - startedAt >= timeoutMs) {
-      return { ...base(req), kind: "unconfirmed", txHash, waitedMs: Date.now() - startedAt };
+      return { ...base(req, options.provider), kind: "unconfirmed", txHash, waitedMs: Date.now() - startedAt };
     }
     options.onProgress?.(`waiting for a receipt (${Math.round((Date.now() - startedAt) / 1000)}s)`);
     await sleep(POLL_INTERVAL_MS);
@@ -178,7 +193,7 @@ export async function settleTransaction(
   const header = await rpc.getBlockHeader(receipt.blockNumber);
   if (header === null || header.hash !== receipt.blockHash) {
     return {
-      ...base(req),
+      ...base(req, options.provider),
       kind: "reorged",
       txHash,
       detail: `receipt claims block ${receipt.blockNumber} ${receipt.blockHash}, chain now has ${header?.hash ?? "no such block"}`,
@@ -197,7 +212,7 @@ export async function settleTransaction(
   if (receipt.status !== 1n) {
     // Mined and failed. The gas is spent; the USDC never moved. Nothing may
     // post to the ledger, and the hash survives so the failure is findable.
-    return { ...base(req), kind: "reverted", txHash, receipt: facts };
+    return { ...base(req, options.provider), kind: "reverted", txHash, receipt: facts };
   }
 
   // Confirmations, then ONE more canonicality check. A block can stop being
@@ -207,7 +222,7 @@ export async function settleTransaction(
     const head = await rpc.blockNumber();
     if (head >= receipt.blockNumber + confirmations - 1n) break;
     if (Date.now() - startedAt >= timeoutMs) {
-      return { ...base(req), kind: "unconfirmed", txHash, waitedMs: Date.now() - startedAt };
+      return { ...base(req, options.provider), kind: "unconfirmed", txHash, waitedMs: Date.now() - startedAt };
     }
     options.onProgress?.(`waiting for ${confirmations} confirmation(s) — head ${head}, mined at ${receipt.blockNumber}`);
     await sleep(POLL_INTERVAL_MS);
@@ -215,7 +230,7 @@ export async function settleTransaction(
   const recheck = await rpc.getBlockHeader(receipt.blockNumber);
   if (recheck === null || recheck.hash !== receipt.blockHash) {
     return {
-      ...base(req),
+      ...base(req, options.provider),
       kind: "reorged",
       txHash,
       detail: `block ${receipt.blockNumber} was reorganised out after the receipt was read`,
@@ -223,7 +238,7 @@ export async function settleTransaction(
   }
 
   return {
-    ...base(req),
+    ...base(req, options.provider),
     kind: "confirmed",
     txHash,
     nonce: options.nonce,
@@ -250,7 +265,7 @@ export async function settleTransaction(
  */
 export async function findExistingTransfer(
   rpc: BaseRpc,
-  req: UsdcPayoutRequest,
+  req: StablecoinPayoutInstruction,
   lookbackBlocks: bigint,
 ): Promise<string | null> {
   // A wallet that has never sent anything cannot have sent this. Cheapest

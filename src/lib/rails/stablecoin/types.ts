@@ -229,6 +229,32 @@ export type PayoutOutcome =
   /** Broadcast accepted, then the node stopped knowing about it. */
   | (OutcomeBase & { readonly kind: "dropped"; readonly txHash: string })
   /**
+   * ── CIRCLE'S `INITIATED`, AND THE ONLY PLACE IT IS ALLOWED TO EXIST ──────
+   *
+   * The provider has taken the instruction and there is still no chain
+   * evidence of any kind — no hash, no receipt, nothing to look up. Circle's
+   * transfer POST returns exactly this: `{id, state: "INITIATED"}`.
+   *
+   * It is in the union so that it can be RETURNED, printed and retried rather
+   * than smuggled out as an exception or, far worse, rounded up to success.
+   * It is not `confirmed`, so `postUsdcPayout` will not take it: the ledger
+   * accepts a receipt read off a chain and nothing else. `txHash` is `null`
+   * and not optional, because the honest answer to "what is the hash" here is
+   * the word null, and a field that can be forgotten gets forgotten.
+   *
+   * This is the direct path's `unconfirmed` for a rail where the identifier is
+   * assigned by someone else and arrives late.
+   */
+  | (OutcomeBase & {
+      readonly kind: "acknowledged";
+      /** The provider's own id for the instruction. Not a transaction hash. */
+      readonly providerRef: string;
+      /** The provider's last reported state, verbatim. e.g. `INITIATED`. */
+      readonly state: string;
+      readonly waitedMs: number;
+      readonly txHash: null;
+    })
+  /**
    * ── THE OUTCOME A SECOND PROVIDER MADE NECESSARY ─────────────────────────
    *
    * The provider named a transaction, that transaction is on chain, and it
