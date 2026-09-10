@@ -59,7 +59,14 @@ for (const f of files) {
       // Allow a line that is explicitly narrating history.
       // A line that dates itself is a record, not a claim. EVALUATION.md is a
       // log of what was true at each iteration and must be allowed to say so.
-      if (/previously|used to|before|briefly|was read at|drift|as at|at that commit|at that reading|see Iteration/i.test(line)) return;
+      if (
+        /previously|used to|before|briefly|was read at|drift|as at|at that commit|at that reading|see Iteration/i.test(line) ||
+        // A line that QUOTES a past claim while reporting it is a record too.
+        // DECISIONS.md documents the bug where the email said "5 live of 7";
+        // flagging that sentence would mean the log could not describe its own
+        // corrections without failing the check that exists because of them.
+        /it said|it read|listed .* as LIVE|hours after|no longer|has since/i.test(line)
+      ) return;
       console.log(`${f}:${i + 1}  says ${m[1]} of ${m[2]}, endpoint says ${liveCount}`);
       console.log(`   ${line.trim().slice(0, 100)}`);
       problems++;
