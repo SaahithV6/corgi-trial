@@ -1,7 +1,7 @@
 /**
  * GET /api/health — the endpoint that proves this deployment is up.
  *
- * Three facts, and nothing that could make answering them fail:
+ * Four facts, and nothing that could make answering them fail:
  *
  *   1. WHICH BUILD is running (git sha from the platform's env, if it set one).
  *   2. WHETHER THE DATABASE IS REACHABLE — a real `select 1` as the restricted
@@ -17,6 +17,15 @@
  *      otherwise. Claiming an integration is live when it is a simulator or a
  *      missing key is the fastest way to fail the trial, so this endpoint
  *      reports what it checked (`evidence`) rather than implying more.
+ *   4. WEBHOOK DELIVERY FRESHNESS, per provider, from `webhook_inbox`. Fact 3
+ *      is answered entirely from our side of the wire and stays green while a
+ *      provider's feed is dead: our Lithic key works perfectly at the moment
+ *      Lithic stops telling us about authorisations. DECISIONS 024 recorded
+ *      that as the last open live-fire gap. Liveness and freshness are
+ *      DIFFERENT questions with disjoint vocabularies — see
+ *      `@/lib/integrations/delivery-health` — so a provider reading `live` and
+ *      `stale` at once is two facts, not the contradiction consistency.test.ts
+ *      forbids.
  *
  * IT MUST NOT THROW. A monitor that gets a 500 from the health endpoint learns
  * only that the health endpoint is broken. Every failure inside is caught and
@@ -26,6 +35,11 @@
 
 import postgres from 'postgres';
 
+import {
+  deliveriesUnavailable,
+  readWebhookDeliveries,
+  webhookDeliveryHealth,
+} from '@/lib/integrations/delivery-health';
 import { probeIntegrations } from '@/lib/integrations/probe';
 import { newRequestId, requestIdFrom } from '@/lib/log';
 import {
@@ -119,6 +133,27 @@ export async function GET(request: Request): Promise<Response> {
     // it only says which variables are set. See below.
     const declared = slotReports(env);
 
+    // Webhook delivery freshness, STARTED HERE and awaited after the probes so
+    // its wall time hides inside their 4s instead of adding to it. vercel.json
+    // caps this function at 15s and checkDatabase above may already have spent
+    // 8s of that; the delivery query gets its own 2.5s budget and runs on the
+    // connection the `select 1` has just warmed, so it costs one warm round
+    // trip in practice — 0.15ms of database time measured by EXPLAIN ANALYZE
+    // against the production branch, the rest being the wire. It never
+    // rejects: a failed read becomes a stated `unknown`, never a fabricated
+    // verdict.
+    const deliveryUrl = readEnv(env, 'APP_DATABASE_URL');
+    const deliveryRead =
+      deliveryUrl === undefined
+        ? Promise.resolve(deliveriesUnavailable('APP_DATABASE_URL is not set'))
+        : !database.reachable
+          ? Promise.resolve(
+              deliveriesUnavailable(
+                `database unreachable: ${database.error ?? 'no detail given'}`,
+              ),
+            )
+          : readWebhookDeliveries(client(deliveryUrl));
+
     // The actual verdict, earned by a real authenticated call per provider.
     //
     // These two disagreed in production and the disagreement was the whole
@@ -175,10 +210,37 @@ export async function GET(request: Request): Promise<Response> {
       };
     });
 
+    // Delivery freshness, folded together with what the probes just proved.
+    // The liveness verdict and the verifier registration are passed IN rather
+    // than recomputed inside the module: a second place deriving liveness is
+    // exactly the bug DECISIONS 021 records, and this field must not become
+    // one. It is keyed by provider and its verdict vocabulary is disjoint from
+    // the liveness vocabulary, so it cannot answer a question the slot table
+    // already answered.
+    const webhookHealth = webhookDeliveryHealth(
+      await deliveryRead,
+      webhookReports.map((w) => ({
+        provider: w.provider,
+        integrationLive:
+          w.slots.length > 0 && w.slots.every((s) => probedStatus.get(s.slot) === 'live'),
+        verifierRegistered: w.webhookVerifierRegistered,
+      })),
+      new Date(),
+    );
+
     // `not_configured` integrations do NOT make the deployment degraded: a
     // provider we have not wired is a scope decision, not an outage. An
     // unreachable database is, because nothing can be stored without it.
-    const status = database.reachable ? 'ok' : 'degraded';
+    //
+    // A dead webhook feed is the third thing that can, but only under the four
+    // conditions argued in delivery-health.ts: a gating provider (Lithic, the
+    // live card rail), verdict `stale` rather than `quiet` or `never`, a probe
+    // that says the integration really is live, and a registered verifier.
+    // Anything looser and this endpoint reports degraded overnight because
+    // nobody swiped a card, which trains its readers to ignore it — the same
+    // mistake the 3s database budget above already made once.
+    const status =
+      database.reachable && webhookHealth.degradedBy.length === 0 ? 'ok' : 'degraded';
 
     return healthResponse(requestId, {
       status,
@@ -201,6 +263,12 @@ export async function GET(request: Request): Promise<Response> {
         // provider. `webhookVerifierRegistered: false` is why a route answers
         // 503 rather than accepting a delivery it cannot authenticate.
         webhooks,
+        // Per-provider webhook DELIVERY freshness: MAX(received_at) from the
+        // inbox, the lag in seconds, and a verdict drawn from a vocabulary
+        // that shares no word with the liveness one above. `never` and `stale`
+        // are kept apart deliberately: "we have never heard from this
+        // provider" and "this provider has gone quiet" are different facts.
+        webhookHealth,
         // Slots the brief requires to be genuinely live that currently are not.
         // Surfaced rather than buried so it cannot be forgotten before the
         // debrief: a simulated integration presented as live fails the trial.

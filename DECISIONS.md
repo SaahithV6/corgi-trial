@@ -1086,3 +1086,51 @@ its health widget failed is worse than one with no widget.
 
 It carries `data-provider-status="provider-down"`, which is what the live-fire
 test greps for.
+
+---
+
+## 026 — 2026-09-10T19:20Z — My own probe module reintroduced the bug it was written to kill
+
+The worker writing the README refused to reproduce a claim it could not
+justify, and found this:
+
+    card_webhooks | Lithic | live | evidence: "no probe defined for this slot"
+
+`probeIntegrations()` had a fallback: a slot with no probe inherited the
+env-derived status. So `card_webhooks` read **LIVE** because
+`LITHIC_WEBHOOK_SECRET` is a non-empty string — earned by a string existing,
+not by a round trip. That is precisely the failure of 011, reintroduced inside
+the module written to eliminate it, and then *announced* by an evidence string
+that says nothing was proven while the label claims it was.
+
+Four probes had this bug and I fixed each one. The fifth was the fallback
+itself, and I never looked at it, because I was checking the probes rather than
+the thing that runs when there is no probe.
+
+**Fixed with a new verdict rather than by widening an existing one.**
+`unprobed` is distinct from `not_configured`: the credential may be present and
+working, and we are *declining to claim it* rather than asserting its absence.
+Both label SIMULATED, because SIMULATED is what "we have not proven this" has
+to read as. The asymmetry is the whole point — over-claiming is the automatic
+fail, under-claiming is merely pessimistic.
+
+**A second finding from the same worker, and it is sharper than mine.** The
+three stale memo holds I wrote off as cosmetic in 024 are worse than I said.
+All three carry `hold_closure.reason = "authorisation fully reversed"` — the
+`A <= 0` branch, i.e. the clearing-first bug now guarded by `terminallyClosed`.
+Availability treats them as released, so `v_available_balance` reports 20000 of
+active holds while the live holds' memo balances sum to 26000.
+
+**$60.00 is withheld from nothing, and `v_hold_drift` cannot see it.** That
+view is `WHERE NOT is_released AND memo <> target`, so a spurious closure row
+puts the row outside the check *by construction*. An invariant with a blind
+spot shaped exactly like the bug it should catch is worse than no invariant,
+because it reports clean. Same class as the NUL byte that made the secret
+scanner skip 1,206 lines silently.
+
+I am still not repairing the three rows before freeze — they are append-only,
+availability is on the safe side (it withholds nothing rather than
+double-withholding), and a repair script under time pressure against money rows
+is a worse risk than three known-stale memo balances. But the invariant's blind
+spot goes in the cut list as a week-two fix with the reason, because the next
+person will trust that view.

@@ -26,7 +26,20 @@ import { env, integrations, type IntegrationSlot, type SlotReport } from "@/lib/
  * human responses: one is a wrong key, the other is a bad afternoon.
  */
 
-export type Liveness = "live" | "unauthorised" | "unreachable" | "not_configured";
+export type Liveness =
+  | "live"
+  /** A real authenticated call was rejected by the provider. */
+  | "unauthorised"
+  /** Network or provider failure — we do not know, so we do not claim. */
+  | "unreachable"
+  /** No credential at all. */
+  | "not_configured"
+  /**
+   * A credential is present and no probe exists for this slot, so nothing has
+   * been proven. Distinct from `not_configured` — that asserts an absence,
+   * this declines to make a claim. Never labelled LIVE.
+   */
+  | "unprobed";
 
 export interface ProbeResult {
   readonly slot: IntegrationSlot;
@@ -322,12 +335,31 @@ export async function probeIntegrations(): Promise<readonly ProbeResult[]> {
     integrations.map(async (slot: SlotReport): Promise<ProbeResult> => {
       const probe = PROBES[slot.slot];
       if (!probe) {
+        // A slot with no probe CANNOT report live.
+        //
+        // This fell back to the env-derived status, so `card_webhooks` read
+        // LIVE because LITHIC_WEBHOOK_SECRET was a non-empty string — earned by
+        // a string existing, not by a round trip. That is exactly the failure
+        // this module was written to eliminate (DECISIONS 011), reintroduced by
+        // its own fallback and then reported with the evidence string "no probe
+        // defined for this slot", which says out loud that nothing was proven
+        // while the label claims it was.
+        //
+        // `unprobed` is its own verdict, distinct from `not_configured`: the
+        // credential may well be present and working, and we are declining to
+        // claim it rather than asserting its absence. Either way the label is
+        // SIMULATED, because SIMULATED is what "we have not proven this" must
+        // read as. Over-claiming is the automatic fail; under-claiming is only
+        // pessimistic.
+        const configured = slot.status === "live";
         return {
           slot: slot.slot, provider: slot.provider,
-          liveness: slot.status === "live" ? "live" : "not_configured",
-          label: slot.status === "live" ? "LIVE" : "SIMULATED",
+          liveness: configured ? "unprobed" : "not_configured",
+          label: "SIMULATED",
           mustBeLive: slot.mustBeLive,
-          detail: "no probe defined for this slot",
+          detail: configured
+            ? "credential present but NOT probed — no round trip proves this slot works"
+            : "no probe defined and no credential configured",
           checkedAt, latencyMs: null,
         };
       }
