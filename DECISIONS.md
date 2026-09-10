@@ -306,3 +306,38 @@ justification together rather than a silent hole.
 runs before every claim about the ledger. A README asserting immutability is a
 promise; `db:check` is evidence. It found a fatal gap in the first ninety
 seconds it was ever run.
+
+---
+
+## 009 — 2026-09-10T03:05Z — A migration changed after it was applied; rebuilt from zero
+
+**What happened.** I ran `0002_webhook_inbox.sql` while its author was still
+writing it. It applied. The author then rewrote it — correctly — as an ALTER
+migration, because `0001` already creates `webhook_inbox` (the journal
+references it). The file on disk no longer matched the database.
+
+`migrate.mjs` refused to re-apply it, which is exactly right: an applied
+migration is immutable, for the same reason a posted journal entry is. The
+refusal is the feature.
+
+**Decision.** Rebuild from zero rather than hand-patch the difference. There is
+no real data at hour three, so a rebuild costs nothing and a hand-patch would
+leave the database in a state no migration file describes — which is the thing
+migrations exist to prevent. Added `scripts/dbreset.mjs`, which refuses to run
+if `journal_entry` has any rows unless explicitly forced. After freeze that
+guard is the only thing standing between a tired operator and posted money.
+
+**Same root cause as 007.** Committing and applying another worker's
+in-progress output. Twice now. The commit gate fixed the first symptom; this
+one needed the second. Parallel work needs a rule and I now have it: nothing
+another worker owns gets committed OR applied until that worker says it is
+done.
+
+**Grant hygiene, worth recording because it nearly bit.** Granting `SELECT` on
+the fifteen views required `GRANT SELECT ON ALL TABLES IN SCHEMA public`, which
+hands back privileges on the money tables as a side effect. I re-asserted
+`REVOKE UPDATE, DELETE, TRUNCATE` immediately after, then re-ran `db:check` to
+prove the widening had not undone layer 1. It had not — 14 of 14 still pass.
+The general rule: any blanket `GRANT` is followed by the explicit `REVOKE` and
+then by the prover. A privilege model you cannot re-verify after every change
+is a privilege model you do not have.

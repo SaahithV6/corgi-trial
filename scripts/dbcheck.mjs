@@ -58,25 +58,22 @@ const grants = await sql`
   GROUP BY table_name ORDER BY table_name`;
 for (const g of grants) {
   const badPriv = ["UPDATE", "DELETE", "TRUNCATE"].filter((p) => g.privs.includes(p));
-  badPriv.length
-    ? bad(`grants on ${g.table_name}`, `holds ${badPriv.join(",")}`)
-    : ok(`grants on ${g.table_name}`, g.privs);
+  if (badPriv.length) bad(`grants on ${g.table_name}`, `holds ${badPriv.join(",")}`);
+  else ok(`grants on ${g.table_name}`, g.privs);
 }
 
 // ---- 3. every entry balances -----------------------------------------
 const unbalanced = await sql`
   SELECT entry_id, currency, SUM(amount_cents) AS delta
   FROM journal_line GROUP BY entry_id, currency HAVING SUM(amount_cents) <> 0`;
-unbalanced.length
-  ? bad("every entry sums to zero", `${unbalanced.length} unbalanced`)
-  : ok("every entry sums to zero", "checked all entries");
+if (unbalanced.length) bad("every entry sums to zero", `${unbalanced.length} unbalanced`);
+else ok("every entry sums to zero", "checked all entries");
 
 // ---- 4. trial balance --------------------------------------------------
 const [tb] = await sql`SELECT COALESCE(SUM(amount_cents),0) AS total FROM journal_line
                        WHERE currency = 'USD'`;
-String(tb.total) === "0"
-  ? ok("trial balance is zero", "sum of all lines")
-  : bad("trial balance is zero", `off by ${tb.total} cents`);
+if (String(tb.total) === "0") ok("trial balance is zero", "sum of all lines");
+else bad("trial balance is zero", `off by ${tb.total} cents`);
 
 // ---- 5. no stored balance columns anywhere ----------------------------
 const stored = await sql`
@@ -91,17 +88,18 @@ const stored = await sql`
     -- a drifting cache -- it is the as-published axis of the bitemporal model.
     -- Every other table must have no stored balance.
     AND table_name <> 'statement'`;
-stored.length
-  ? bad("no stored balance column", stored.map((s) => `${s.table_name}.${s.column_name}`).join(", "))
-  : ok("no stored balance column", "balances are derived, not stored");
+if (stored.length) {
+  bad("no stored balance column", stored.map((r) => `${r.table_name}.${r.column_name}`).join(", "));
+} else {
+  ok("no stored balance column", "balances are derived, not stored");
+}
 
 // ---- 6. denormalised clocks have not drifted --------------------------
 const drift = await sql`
   SELECT count(*) AS n FROM journal_line l JOIN journal_entry e ON e.id = l.entry_id
   WHERE l.value_date <> e.value_date OR l.booking_seq <> e.booking_seq`;
-String(drift[0].n) === "0"
-  ? ok("denormalised clocks match their entry", "zero drift")
-  : bad("denormalised clocks match their entry", `${drift[0].n} rows drifted`);
+if (String(drift[0].n) === "0") ok("denormalised clocks match their entry", "zero drift");
+else bad("denormalised clocks match their entry", `${drift[0].n} rows drifted`);
 
 console.log(`\n  ${pass} passed, ${fail} failed\n`);
 await sql.end();

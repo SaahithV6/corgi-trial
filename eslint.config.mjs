@@ -37,6 +37,16 @@ const config = [
     files: ["src/lib/log.ts"],
     rules: { "no-console": "off" },
   },
+  {
+    // scripts/** are operator CLIs whose entire purpose is printing to a
+    // terminal. Routing them through the structured JSON logger would make
+    // `pnpm db:check` unreadable at exactly the moment it matters: live, in
+    // front of the panel.
+    files: ["scripts/**/*.mjs", "scripts/**/*.js"],
+    languageOptions: { globals: { process: "readonly", console: "readonly" } },
+    rules: { "no-console": "off" },
+  },
 ];
+
 
 export default config;

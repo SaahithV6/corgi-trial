@@ -29,7 +29,7 @@ import {
   type HeaderLookup,
   type RawRequest,
 } from './rawbody';
-import { createHmac, createPublicKey, verify as cryptoVerify } from 'node:crypto';
+import { createHmac, createPublicKey, verify as cryptoVerify, type JsonWebKey } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
 // 1. Row shape
@@ -47,7 +47,7 @@ export type ProviderName = string;
 export type InboxState = 'pending' | 'parked' | 'done' | 'dead';
 
 export interface InboxEvent {
-  /** bigint identity, carried as a string — never as a JS number. */
+  /** uuid, matching the ledger's convention (journal_entry.inbox_id). */
   id: string;
   provider: ProviderName;
   providerEventId: string;
@@ -71,7 +71,7 @@ export interface InboxEvent {
   parkedOnKind: string | null;
   parkedOnRef: string | null;
   parkedReason: string | null;
-  lastError: string | null;
+  processingError: string | null;
   deadLetteredAt: Date | null;
 }
 
@@ -85,8 +85,8 @@ export interface NewInboxEvent {
   receivedAt: Date;
   signatureVerifiedAt: Date;
   /** 'pending' normally; 'dead' for a verified body we cannot even parse. */
-  state?: Extract<InboxState, 'pending' | 'dead'>;
-  lastError?: string | null;
+  state?: Extract<InboxState, 'pending' | 'dead'> | undefined;
+  processingError?: string | null | undefined;
 }
 
 /** A thing an event can refer to. `kind` is the consumer's vocabulary
@@ -182,7 +182,7 @@ export interface StandardWebhooksOptions {
    * so it is an explicit argument rather than a guess.
    */
   secretEncoding: 'base64' | 'utf8';
-  toleranceSeconds?: number;
+  toleranceSeconds?: number | undefined;
   identify: (input: IdentifyInput) => EventIdentity;
 }
 
@@ -247,7 +247,7 @@ export function standardWebhooksVerifier(opts: StandardWebhooksOptions): Webhook
  */
 export function lithicVerifier(opts: {
   secret: string | readonly string[];
-  toleranceSeconds?: number;
+  toleranceSeconds?: number | undefined;
 }): WebhookVerifier {
   return standardWebhooksVerifier({
     provider: 'lithic',
@@ -271,7 +271,7 @@ export function lithicVerifier(opts: {
  */
 export function increaseVerifier(opts: {
   secret: string | readonly string[];
-  toleranceSeconds?: number;
+  toleranceSeconds?: number | undefined;
 }): WebhookVerifier {
   return standardWebhooksVerifier({
     provider: 'increase',
@@ -298,7 +298,7 @@ export interface TimestampedHmacOptions {
    * checks none in its own sample, so 300s here is OUR policy, not Persona's.
    * Stripe documents 300s.
    */
-  toleranceSeconds?: number;
+  toleranceSeconds?: number | undefined;
   identify: (input: IdentifyInput) => EventIdentity;
 }
 
@@ -368,7 +368,7 @@ export function timestampedHmacVerifier(opts: TimestampedHmacOptions): WebhookVe
  */
 export function personaVerifier(opts: {
   secret: string | readonly string[];
-  toleranceSeconds?: number;
+  toleranceSeconds?: number | undefined;
 }): WebhookVerifier {
   return timestampedHmacVerifier({
     provider: 'persona',
@@ -389,7 +389,7 @@ export function personaVerifier(opts: {
  */
 export function stripeVerifier(opts: {
   secret: string | readonly string[];
-  toleranceSeconds?: number;
+  toleranceSeconds?: number | undefined;
 }): WebhookVerifier {
   return timestampedHmacVerifier({
     provider: 'stripe',
@@ -424,8 +424,8 @@ export interface PlaidVerifierOptions {
    */
   fetchVerificationKey: (kid: string) => Promise<PlaidJwk | null>;
   /** 'sandbox' during the trial. A stray production webhook must not land. */
-  expectedEnvironment?: 'sandbox' | 'production';
-  toleranceSeconds?: number;
+  expectedEnvironment?: 'sandbox' | 'production' | undefined;
+  toleranceSeconds?: number | undefined;
 }
 
 /**
@@ -445,8 +445,15 @@ export function plaidVerifier(opts: PlaidVerifierOptions): WebhookVerifier {
       if (!token) return { ok: false, reason: 'missing plaid-verification' };
 
       const parts = token.split('.');
-      if (parts.length !== 3) return { ok: false, reason: 'malformed JWT' };
       const [headerB64, payloadB64, signatureB64] = parts;
+      if (
+        parts.length !== 3 ||
+        headerB64 === undefined ||
+        payloadB64 === undefined ||
+        signatureB64 === undefined
+      ) {
+        return { ok: false, reason: 'malformed JWT' };
+      }
 
       // 1 + 2. Decode the JWT header WITHOUT trusting it, and pin the algorithm.
       let jwtHeader: { alg?: string; kid?: string };
@@ -463,13 +470,13 @@ export function plaidVerifier(opts: PlaidVerifierOptions): WebhookVerifier {
       // 3. Public key for this kid, from Plaid, cached by the caller.
       const jwk = await opts.fetchVerificationKey(jwtHeader.kid);
       if (!jwk) return { ok: false, reason: `no verification key for kid ${jwtHeader.kid}` };
-      if (jwk.expired_at != null) return { ok: false, reason: 'verification key is expired' };
+      if (!isLiveKey(jwk)) return { ok: false, reason: 'verification key is expired' };
 
       // 4. Signature. ES256 signatures are raw r||s, which is `ieee-p1363`.
       let signatureValid = false;
       try {
         const key = createPublicKey({
-          key: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y } as unknown as import('node:crypto').JsonWebKey,
+          key: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y } as JsonWebKey,
           format: 'jwk',
         });
         signatureValid = cryptoVerify(
@@ -528,6 +535,11 @@ export function plaidVerifier(opts: PlaidVerifierOptions): WebhookVerifier {
   };
 }
 
+/** Plaid marks a rotated-out key with a non-null `expired_at`. */
+function isLiveKey(jwk: PlaidJwk): boolean {
+  return jwk.expired_at === null || jwk.expired_at === undefined;
+}
+
 /** Per-kid cache for Plaid verification keys. Plaid rotates; their own sample
  *  caches a single key globally, which breaks on the first rotation. */
 export function cachedVerificationKeys(
@@ -538,7 +550,7 @@ export function cachedVerificationKeys(
     const hit = cache.get(kid);
     if (hit) return hit;
     const key = await fetchKey(kid);
-    if (key && key.expired_at == null) cache.set(kid, key);
+    if (key && isLiveKey(key)) cache.set(kid, key);
     return key;
   };
 }
@@ -560,6 +572,36 @@ export interface SqlExecutor {
     text: string,
     params?: readonly unknown[],
   ): Promise<{ rows: R[]; rowCount: number | null }>;
+}
+
+/**
+ * The shape of a postgres.js client, structurally, so this module does not
+ * import the driver. `sql.unsafe(text, params)` is postgres.js's parameterised
+ * escape hatch: the SQL is ours and literal, the values are bound, so this is
+ * not a string-interpolation hole.
+ */
+export interface PostgresJsLike {
+  unsafe(query: string, params?: readonly unknown[]): PromiseLike<unknown>;
+}
+
+/**
+ * Adapt the app's postgres.js client to the port above.
+ *
+ *   const sql = postgres(env.DATABASE_URL);
+ *   const store = createPostgresInboxStore(sqlExecutorFromPostgresJs(sql));
+ *
+ * postgres.js resolves a query to a RowList — an array of rows carrying a
+ * `count` property, which is the row count for a RETURNING query and the
+ * affected-row count otherwise. That count is what decides first-delivery
+ * versus replay, so it is read explicitly rather than inferred from length.
+ */
+export function sqlExecutorFromPostgresJs(sql: PostgresJsLike): SqlExecutor {
+  return {
+    async query<R = Record<string, unknown>>(text: string, params: readonly unknown[] = []) {
+      const result = (await sql.unsafe(text, params)) as R[] & { count?: number };
+      return { rows: [...result] as R[], rowCount: result.count ?? result.length };
+    },
+  };
 }
 
 export interface ClaimOptions {
@@ -595,7 +637,7 @@ const COLUMNS = `
   id, provider, provider_event_id, event_type, payload, headers, raw_body,
   received_at, signature_verified_at, state, attempts, park_attempts,
   next_attempt_at, locked_until, processed_at, parked_on_kind, parked_on_ref,
-  parked_reason, last_error, dead_lettered_at`;
+  parked_reason, processing_error, dead_lettered_at`;
 
 export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
   const rowsToEvents = (rows: Record<string, unknown>[]) => rows.map(rowToEvent);
@@ -608,8 +650,8 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
       const inserted = await sql.query<{ id: string }>(
         `insert into webhook_inbox
            (provider, provider_event_id, event_type, payload, headers, raw_body,
-            received_at, signature_verified_at, state, next_attempt_at, last_error,
-            dead_lettered_at)
+            received_at, signature_verified_at, state, next_attempt_at,
+            processing_error, dead_lettered_at)
          values ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9,
                  $7, $10, case when $9 = 'dead' then $7 else null end)
          on conflict (provider, provider_event_id) do nothing
@@ -624,11 +666,12 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
           record.receivedAt,
           record.signatureVerifiedAt,
           record.state ?? 'pending',
-          record.lastError ?? null,
+          record.processingError ?? null,
         ],
       );
-      if ((inserted.rowCount ?? inserted.rows.length) > 0) {
-        return { inserted: true, id: inserted.rows[0].id };
+      const insertedRow = inserted.rows[0];
+      if ((inserted.rowCount ?? inserted.rows.length) > 0 && insertedRow) {
+        return { inserted: true, id: insertedRow.id };
       }
       // Replay. Look the existing row up only so the caller can log an id;
       // nothing about the decision depends on this second statement.
@@ -644,34 +687,44 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
       // disjoint batches instead of blocking on each other. `attempts` is
       // incremented on CLAIM, not on failure, so a worker that crashes
       // mid-processing still burns an attempt and a poison event cannot loop
-      // for ever. Ordering is (next_attempt_at, id) = oldest first, matching
-      // the partial index in 0002_webhook_inbox.sql.
+      // for ever. Ordering is (next_attempt_at, received_at) = oldest first,
+      // matching webhook_inbox_due_idx in 0002_webhook_inbox.sql.
+      //
+      // Parked rows are claimed too, once their re-check time arrives, and the
+      // claim moves them back to 'pending'. That timer is the safety net under
+      // unparkWaitingFor: a park never depends on another event turning up for
+      // the row to be looked at again.
       const claimed = await sql.query(
         `with due as (
            select id
            from webhook_inbox
-           where state = 'pending'
+           where state in ('pending', 'parked')
              and next_attempt_at <= $1
              and (locked_until is null or locked_until <= $1)
-           order by next_attempt_at, id
+           order by next_attempt_at, received_at
            limit $2
            for update skip locked
          )
          update webhook_inbox w
          set attempts = w.attempts + 1,
+             state = 'pending',
              locked_until = $1::timestamptz + make_interval(secs => $3::double precision)
          from due
          where w.id = due.id
          returning ${COLUMNS}`,
         [now, limit, leaseMs / 1000],
       );
-      return rowsToEvents(claimed.rows).sort((a, b) => Number(BigInt(a.id) - BigInt(b.id)));
+      return rowsToEvents(claimed.rows).sort(
+        (a, b) =>
+          a.nextAttemptAt.getTime() - b.nextAttemptAt.getTime() ||
+          a.receivedAt.getTime() - b.receivedAt.getTime(),
+      );
     },
 
     async markProcessed(id, now) {
       await sql.query(
         `update webhook_inbox
-         set state = 'done', processed_at = $2, locked_until = null, last_error = null
+         set state = 'done', processed_at = $2, locked_until = null, processing_error = null
          where id = $1 and state = 'pending'`,
         [id, now],
       );
@@ -692,7 +745,7 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
     async recordFailure(id, { error, nextAttemptAt }) {
       await sql.query(
         `update webhook_inbox
-         set last_error = $2, next_attempt_at = $3, locked_until = null
+         set processing_error = $2, next_attempt_at = $3, locked_until = null
          where id = $1 and state = 'pending'`,
         [id, error, nextAttemptAt],
       );
@@ -701,7 +754,7 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
     async deadLetter(id, { error, now }) {
       await sql.query(
         `update webhook_inbox
-         set state = 'dead', dead_lettered_at = $2, last_error = $3, locked_until = null
+         set state = 'dead', dead_lettered_at = $2, processing_error = $3, locked_until = null
          where id = $1 and state <> 'done'`,
         [id, now, error],
       );
@@ -713,10 +766,12 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
       // join. Wakes every parked row whose referent has just appeared.
       const kinds = refs.map((r) => r.kind);
       const ids = refs.map((r) => r.ref);
+      // parked_on_kind / parked_on_ref are deliberately NOT cleared: the row
+      // leaves 'parked' so the partial index stops matching it anyway, and
+      // keeping them answers "what was this waiting for?" long afterwards.
       const woken = await sql.query(
         `update webhook_inbox w
-         set state = 'pending', next_attempt_at = $3, locked_until = null,
-             parked_on_kind = null, parked_on_ref = null
+         set state = 'pending', next_attempt_at = $3, locked_until = null
          from unnest($1::text[], $2::text[]) as arrived(kind, ref)
          where w.state = 'parked'
            and w.parked_on_kind = arrived.kind
@@ -792,13 +847,13 @@ function rowToEvent(row: Record<string, unknown>): InboxEvent {
     parkedOnKind: (row.parked_on_kind as string | null) ?? null,
     parkedOnRef: (row.parked_on_ref as string | null) ?? null,
     parkedReason: (row.parked_reason as string | null) ?? null,
-    lastError: (row.last_error as string | null) ?? null,
+    processingError: (row.processing_error as string | null) ?? null,
     deadLetteredAt: asDate(row.dead_lettered_at),
   };
 }
 
 function asDate(v: unknown): Date | null {
-  if (v == null) return null;
+  if (v === null || v === undefined) return null;
   return v instanceof Date ? v : new Date(v as string);
 }
 
@@ -846,7 +901,7 @@ export function createMemoryInboxStore(): InboxStore & { all(): InboxEvent[] } {
         parkedOnKind: null,
         parkedOnRef: null,
         parkedReason: null,
-        lastError: record.lastError ?? null,
+        processingError: record.processingError ?? null,
         deadLetteredAt: state === 'dead' ? record.receivedAt : null,
       });
       byNaturalKey.set(k, id);
@@ -857,14 +912,20 @@ export function createMemoryInboxStore(): InboxStore & { all(): InboxEvent[] } {
       const due = [...rows.values()]
         .filter(
           (r) =>
-            r.state === 'pending' &&
+            (r.state === 'pending' || r.state === 'parked') &&
             r.nextAttemptAt.getTime() <= now.getTime() &&
             (r.lockedUntil === null || r.lockedUntil.getTime() <= now.getTime()),
         )
-        .sort((a, b) => a.nextAttemptAt.getTime() - b.nextAttemptAt.getTime() || Number(a.id) - Number(b.id))
+        .sort(
+          (a, b) =>
+            a.nextAttemptAt.getTime() - b.nextAttemptAt.getTime() ||
+            a.receivedAt.getTime() - b.receivedAt.getTime() ||
+            Number(a.id) - Number(b.id),
+        )
         .slice(0, limit);
       for (const r of due) {
         r.attempts += 1;
+        r.state = 'pending';
         r.lockedUntil = new Date(now.getTime() + leaseMs);
       }
       return due.map(clone);
@@ -876,7 +937,7 @@ export function createMemoryInboxStore(): InboxStore & { all(): InboxEvent[] } {
       r.state = 'done';
       r.processedAt = now;
       r.lockedUntil = null;
-      r.lastError = null;
+      r.processingError = null;
     },
 
     async park(id, { waitingFor, reason, nextAttemptAt }) {
@@ -894,7 +955,7 @@ export function createMemoryInboxStore(): InboxStore & { all(): InboxEvent[] } {
     async recordFailure(id, { error, nextAttemptAt }) {
       const r = rows.get(id);
       if (!r || r.state !== 'pending') return;
-      r.lastError = error;
+      r.processingError = error;
       r.nextAttemptAt = nextAttemptAt;
       r.lockedUntil = null;
     },
@@ -904,7 +965,7 @@ export function createMemoryInboxStore(): InboxStore & { all(): InboxEvent[] } {
       if (!r || r.state === 'done') return;
       r.state = 'dead';
       r.deadLetteredAt = now;
-      r.lastError = error;
+      r.processingError = error;
       r.lockedUntil = null;
     },
 
@@ -916,8 +977,6 @@ export function createMemoryInboxStore(): InboxStore & { all(): InboxEvent[] } {
         r.state = 'pending';
         r.nextAttemptAt = now;
         r.lockedUntil = null;
-        r.parkedOnKind = null;
-        r.parkedOnRef = null;
         woken += 1;
       }
       return woken;
@@ -971,8 +1030,8 @@ export type IngestResult =
 
 export interface IngestDeps {
   store: InboxStore;
-  registry?: VerifierRegistry;
-  now?: () => Date;
+  registry?: VerifierRegistry | undefined;
+  now?: (() => Date) | undefined;
 }
 
 /**
@@ -1032,7 +1091,7 @@ export async function ingestWebhook(
       receivedAt,
       signatureVerifiedAt,
       state: 'dead',
-      lastError: err.message,
+      processingError: err.message,
     });
     return {
       status: 'dead_on_arrival',

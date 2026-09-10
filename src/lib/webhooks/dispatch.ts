@@ -26,7 +26,15 @@
  *     dead-lettered and shows up on the staff screen. Nothing retries for ever.
  */
 
+import type { Logger as AppLogger } from '../log';
 import type { EntityRef, InboxEvent, InboxStore, ProviderName } from './inbox';
+
+/**
+ * The dispatcher logs through the app's structured logger, minus the parts it
+ * has no business with (`child`, `requestId`): a cron invocation has no request
+ * to correlate to, and the three level methods are all it needs.
+ */
+export type DispatchLogger = Pick<AppLogger, 'info' | 'warn' | 'error'>;
 
 // ---------------------------------------------------------------------------
 // 1. The consumer contract
@@ -36,21 +44,21 @@ export type ConsumerResult =
   /** Effects applied (or the event was a no-op for us). `produced` names the
    *  entities this event brought into existence, which is what wakes parked
    *  events waiting for them. */
-  | { status: 'processed'; produced?: readonly EntityRef[] }
+  | { status: 'processed'; produced?: readonly EntityRef[] | undefined }
   /** A well-formed event this consumer deliberately does not act on. Ends the
    *  row's life exactly like 'processed'; it exists so the logs can tell the
    *  difference between "handled" and "recognised and skipped". */
-  | { status: 'ignored'; reason?: string }
+  | { status: 'ignored'; reason?: string | undefined }
   /** The event refers to something we have not seen yet. Not an error, not a
    *  drop: park it against the referent and try again when it shows up. */
-  | { status: 'parked'; waitingFor: EntityRef; reason?: string };
+  | { status: 'parked'; waitingFor: EntityRef; reason?: string | undefined };
 
-export const processed = (produced?: readonly EntityRef[]): ConsumerResult => ({
+export const processed = (produced?: readonly EntityRef[] | undefined): ConsumerResult => ({
   status: 'processed',
   produced,
 });
-export const ignored = (reason?: string): ConsumerResult => ({ status: 'ignored', reason });
-export const parked = (kind: string, ref: string, reason?: string): ConsumerResult => ({
+export const ignored = (reason?: string | undefined): ConsumerResult => ({ status: 'ignored', reason });
+export const parked = (kind: string, ref: string, reason?: string | undefined): ConsumerResult => ({
   status: 'parked',
   waitingFor: { kind, ref },
   reason,
@@ -61,7 +69,7 @@ export interface ConsumerContext {
   now: Date;
   /** Which delivery attempt this is (1 on the first pickup). */
   attempt: number;
-  logger: Logger;
+  logger: DispatchLogger;
 }
 
 export interface WebhookConsumer {
@@ -167,26 +175,20 @@ export function failedAttempts(event: Pick<InboxEvent, 'attempts' | 'parkAttempt
 // 3. The dispatcher
 // ---------------------------------------------------------------------------
 
-export interface Logger {
-  info?(message: string, fields?: Record<string, unknown>): void;
-  warn?(message: string, fields?: Record<string, unknown>): void;
-  error?(message: string, fields?: Record<string, unknown>): void;
-}
-
-const NULL_LOGGER: Logger = {};
+const NULL_LOGGER: DispatchLogger = { info: () => {}, warn: () => {}, error: () => {} };
 
 export interface DispatchDeps {
   store: InboxStore;
-  registry?: ConsumerRegistry;
-  policy?: RetryPolicy;
+  registry?: ConsumerRegistry | undefined;
+  policy?: RetryPolicy | undefined;
   /** Rows per batch. Small enough that a serverless invocation finishes. */
-  batchSize?: number;
+  batchSize?: number | undefined;
   /** How long a claimed row is hidden from other workers. Must comfortably
    *  exceed the slowest consumer, or two workers will run the same event. */
-  leaseMs?: number;
-  now?: () => Date;
-  random?: () => number;
-  logger?: Logger;
+  leaseMs?: number | undefined;
+  now?: (() => Date) | undefined;
+  random?: (() => number) | undefined;
+  logger?: DispatchLogger | undefined;
 }
 
 export interface DispatchSummary {
@@ -288,7 +290,7 @@ export async function dispatchOnce(deps: DispatchDeps): Promise<DispatchSummary>
             now: at,
           });
           summary.deadLettered += 1;
-          logger.error?.('webhook event dead-lettered after repeated parks', {
+          logger.error('webhook.dead_letter', {
             id: event.id,
             provider: event.provider,
             waitingFor: refText(result.waitingFor),
@@ -307,7 +309,7 @@ export async function dispatchOnce(deps: DispatchDeps): Promise<DispatchSummary>
           nextAttemptAt: new Date(at.getTime() + delay),
         });
         summary.parked += 1;
-        logger.info?.('webhook event parked', {
+        logger.info('webhook.parked', {
           id: event.id,
           provider: event.provider,
           waitingFor: refText(result.waitingFor),
@@ -324,7 +326,7 @@ export async function dispatchOnce(deps: DispatchDeps): Promise<DispatchSummary>
 /** Drain the queue in batches until a batch comes back empty, or we hit the
  *  batch cap. The cap is what keeps a serverless invocation inside its budget. */
 export async function dispatchUntilIdle(
-  deps: DispatchDeps & { maxBatches?: number },
+  deps: DispatchDeps & { maxBatches?: number | undefined },
 ): Promise<DispatchSummary> {
   const maxBatches = deps.maxBatches ?? 10;
   const total: DispatchSummary = { ...EMPTY_SUMMARY };
@@ -350,7 +352,7 @@ async function applyFailure(
   at: Date,
   random: () => number,
   summary: DispatchSummary,
-  logger: Logger,
+  logger: DispatchLogger,
 ): Promise<void> {
   // `attempts` was already incremented by claimBatch, so this count includes
   // the attempt that just failed.
@@ -361,7 +363,7 @@ async function applyFailure(
       now: at,
     });
     summary.deadLettered += 1;
-    logger.error?.('webhook event dead-lettered', {
+    logger.error('webhook.dead_letter', {
       id: event.id,
       provider: event.provider,
       providerEventId: event.providerEventId,
@@ -381,7 +383,7 @@ async function applyFailure(
     nextAttemptAt: new Date(at.getTime() + delay),
   });
   summary.retried += 1;
-  logger.warn?.('webhook event failed, will retry', {
+  logger.warn('webhook.retry_scheduled', {
     id: event.id,
     provider: event.provider,
     attempt: failures,

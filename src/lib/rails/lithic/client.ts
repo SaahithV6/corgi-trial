@@ -197,13 +197,14 @@ async function lithicRequest<T>(spec: RequestSpec, options: LithicRequestOptions
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       const onAbort = (): void => controller.abort();
       options.signal?.addEventListener('abort', onAbort, { once: true });
+      const init: RequestInit = {
+        method: spec.method,
+        headers,
+        signal: controller.signal,
+      };
+      if (spec.body !== undefined) init.body = JSON.stringify(spec.body);
       try {
-        return await doFetch(url, {
-          method: spec.method,
-          headers,
-          body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
-          signal: controller.signal,
-        });
+        return await doFetch(url, init);
       } finally {
         clearTimeout(timer);
         options.signal?.removeEventListener('abort', onAbort);
