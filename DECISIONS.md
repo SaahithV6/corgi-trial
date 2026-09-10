@@ -978,3 +978,66 @@ were told to document what they found. None was told not to paste live
 responses, and it did not occur to me to tell them. Sub-agents inherit your
 tools and your repo; they do not inherit your caution. The instruction is now
 in the scanner instead of in my memory, which is the only place it survives.
+
+---
+
+## 024 — 2026-09-10T17:45Z — The one live-fire gap I am NOT closing, and why
+
+Live fire ran against production: **6 PASS, 0 FAIL, 2 SKIP.** A skip is not a
+pass; each says exactly what could not be proven.
+
+**Attack 2 — the money is right, the row is absent.** On the fuel-pump
+over-capture the hold IS released: two memo entries netting to zero, the ledger
+posts exactly 7340 in one financial entry, and `available == ledger − holds −
+uncleared` with no clamp. What is missing is a `hold_closure` row, so the
+attack's literal wording — "the hold releases exactly once", read as one
+closure row — cannot be demonstrated. The row appears only when the seven-day
+expiry sweeper runs.
+
+The cause is a real disagreement between two of our own artefacts.
+`model.ts` computes `closed(E) = is_final OR close/expiry OR (A <= 0)`, and
+Lithic has no last-capture flag so `is_final` is never set on a CLEARING. With
+A=5000 and C=7340, A > 0, so `closed` is **false**. But DESIGN §8.3 row 2 — the
+same over-capture — says `closed = y`.
+
+**I tried to fix it and reverted.** Adding a `C >= A` arm to `closed(E)` made
+three model tests fail, and the comment on one of them explains why the fix is
+not one line:
+
+> `v_card_auth_hold` agrees; the ASCII diagram in DESIGN §8.2 is looser than
+> the SQL, and the SQL is what `v_hold_drift` compares against.
+
+The TypeScript model and the SQL view are held equal *by an invariant*.
+Changing one without the other does not fix a disagreement, it creates a worse
+one — `v_hold_drift` would start reporting drift on every over-captured hold,
+and an invariant that reports drift is indistinguishable from a ledger that has
+actually drifted.
+
+**Decision: leave it, and say so.** With seventy-five minutes to the deadline,
+changing a definition that a live invariant compares against is the wrong
+trade. Nothing about the money is wrong: H = 0 either way, availability is
+correct, `dbcheck` is 14/14, and all five invariant views return zero rows. The
+gap is between the design document's prose and the SQL, on one edge case, and
+it costs a wording nuance in one attack out of eight.
+
+What I would do in week two, in order: make `v_card_auth_hold` and `model.ts`
+close on `C >= A AND sawAuthorisation` **together, in one migration**, with
+`v_hold_drift` proving they still agree; then amend §8.2's diagram, which the
+test comment already flags as looser than the SQL.
+
+**The other skip, attack 7, is a genuine missing feature rather than a
+definition mismatch.** `/api/health` reports credential and capability liveness
+and nothing about webhook *delivery freshness*, so a webhook outage is
+invisible to it, and no provider-down state renders on the account screen. The
+data to build both already exists — `webhook_inbox.received_at`. The test greps
+for `lastDelivery`, `deliveryLag`, `secondsSinceLastDelivery`, `webhookHealth`
+or `feedStale` and will pass the moment one lands. It is the highest-value item
+left and it is on the cut list with that note.
+
+**Worth recording from the same run:** attack 4's first version reused provider
+event ids to build its out-of-order episode and measured a ledger delta of
+**zero**. `financialPostingKey` is `card:<kind>:<provider event id>` and lands
+in `journal_entry`'s unique key, so the second episode's settlement was a
+*replay* of the first. The ledger was right; the test was measuring the wrong
+thing. Same shape of false pass as 020, caught the same way — by insisting the
+evidence be real state rather than a green tick.

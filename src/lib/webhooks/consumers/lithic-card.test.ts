@@ -289,19 +289,39 @@ d("the consumer against the live database", () => {
       });
     }
 
-    // The customer's AVAILABLE balance reflects both holds; the LEDGER does
-    // not move, because Lithic told us about two authorisations and no capture.
-    const after = await availableBalance(biz.id);
-    expect(after.ledgerCents).toBe(before.ledgerCents);
-    // On a re-run the holds are already open, so the delta is 0 the second
-    // time — both readings are correct, and which one it is depends only on
-    // whether this test has run before.
-    expect([0n, 10_000n]).toContain(after.holdsCents - before.holdsCents);
+    // These two authorisations moved NO money. The claim is made about the two
+    // authorisations and not about the account's ledger balance, because the
+    // inbox is a live shared queue: this same drain legitimately processes
+    // whatever else Lithic has delivered since, clearings included, and an
+    // assertion about the whole account would be asserting that nobody else is
+    // using the sandbox.
+    const financial = await sql<{ n: bigint }[]>`
+      SELECT count(*)::bigint AS n FROM journal_entry
+       WHERE book = 'financial' AND rail = 'card'
+         AND external_ref = ANY(${[...REAL_AUTH_TOKENS]}::text[])`;
+    expect(financial[0]?.n).toBe(0n);
 
-    // Twice is one, at the dispatcher too: nothing is claimed on a second pass.
+    // ...and the memo book carries $50.00 for each of them, which is the
+    // AVAILABLE balance moving without the LEDGER balance moving.
+    const [memo] = await sql<{ cents: bigint }[]>`
+      SELECT COALESCE(SUM(hs.memo_balance_cents), 0)::bigint AS cents
+        FROM card_authorization ca
+        JOIN v_hold_state hs ON hs.hold_id = ca.hold_id
+       WHERE ca.provider = 'lithic'
+         AND ca.provider_auth_id = ANY(${[...REAL_AUTH_TOKENS]}::text[])`;
+    expect(memo?.cents).toBe(10_000n);
+
+    const after = await availableBalance(biz.id);
+    expect(after.holdsCents).toBeGreaterThanOrEqual(10_000n);
+
+    // Twice is one, at the dispatcher too: nothing due is claimed on a second
+    // pass, and no balance moves.
     const again = await dispatchUntilIdle({ store, registry, batchSize: 25 });
-    expect(again.claimed).toBe(0);
+    expect(again.processed).toBe(0);
     const settled = await availableBalance(biz.id);
     expect(settled).toEqual(after);
+    // `before` is read but not asserted against the account total, for the
+    // reason above; it is here so a failure can report where it started from.
+    expect(typeof before.ledgerCents).toBe("bigint");
   });
 });

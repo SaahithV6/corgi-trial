@@ -216,17 +216,18 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       mcc: "5542",
     });
     if (template.token === undefined) throw new Error("Lithic returned no transaction token");
+    const templateToken: string = template.token;
 
     const body = await until(async () => {
       const [row] = await sql<{ raw_body: string }[]>`
         SELECT raw_body FROM webhook_inbox
-         WHERE provider = 'lithic' AND payload->>'token' = ${template.token}
+         WHERE provider = 'lithic' AND payload->>'token' = ${templateToken}
          ORDER BY received_at DESC LIMIT 1`;
       return row ?? null;
     }, 60_000);
 
     if (body === null) {
-      const reason = `no Lithic delivery arrived for transaction ${template.token} within 60s, so there is no genuine body to reissue as the one the outage swallowed.`;
+      const reason = `no Lithic delivery arrived for transaction ${templateToken} within 60s, so there is no genuine body to reissue as the one the outage swallowed.`;
       record("skip", reason);
       ctx.skip(reason);
       return;
