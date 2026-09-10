@@ -28,6 +28,7 @@ import type {
   WiringView,
 } from "./data-contract";
 import { gateView } from "./gate-view";
+import { verdictView } from "./verdict";
 import type { DemoState } from "./demo-state";
 
 /** Fixed, so ages and screenshots are reproducible. */
@@ -52,8 +53,20 @@ const EDGE_WIRING: WiringView = {
     provider: "stripe-identity",
     evidence: "live",
     reason:
-      "Stripe Identity verification sessions — a real third-party KYC call (POST /v1/identity/verification_sessions).",
+      "Stripe Identity verification sessions — a real third-party KYC call (POST /v1/identity/verification_sessions), and on the brief's own KYC identity menu, so this half is compliant rather than substituted.",
     missingEnv: [],
+    compliance: "on-brief",
+    complianceLabel: "on the brief's menu",
+    complianceNote:
+      "The brief's KYC identity menu names Persona, Sumsub, Stripe Identity and Onfido. This leg is Stripe Identity, so it is one of the named options — compliant, not substituted.",
+    limits: [
+      "it verifies a DOCUMENT and a selfie — it does not prove that person controls this business",
+      "it does not check the ownership tree or beneficial ownership",
+      "it does not screen sanctions, PEP or adverse media",
+    ],
+    reachableStatuses: ["approved", "pending", "needs_review"],
+    reachabilityNote:
+      "MEASURED: `rejected` is not reachable on this leg. Stripe will not hand back a terminal session that still carries its refusal — POST /cancel returns 200 with `last_error` set to null — and a cancelled session with no refusal in it is not a decline.",
   },
   registry: {
     leg: "business_registry",
@@ -62,8 +75,15 @@ const EDGE_WIRING: WiringView = {
     provider: "simulated-registry",
     evidence: "simulated",
     reason:
-      "no self-serve business-registry check exists on this account: POST /v1/accounts answers 400 \"you can only create new accounts if you've signed up for Connect\", and every KYB vendor on the brief's menu is gated behind a sales conversation",
+      "forced to the labelled simulator by KYB_FORCE_SIMULATED, so this state can show the composite's degradation rule on demand. The live default for this leg is GLEIF — itself a SUBSTITUTE for the brief's named KYB vendors (Persona KYB, Middesk, Sumsub KYB), all three of which are gated behind a sales conversation.",
     missingEnv: [],
+    compliance: "simulated",
+    complianceLabel: "SIMULATED — nobody asked",
+    complianceNote:
+      "Nobody was asked. This leg is a labelled simulator and its answers are admissible as a demonstration and as nothing else.",
+    limits: ["no registry was queried, because nobody was asked"],
+    reachableStatuses: ["approved", "pending", "needs_review", "rejected"],
+    reachabilityNote: null,
   },
   evidenceCeiling: "simulated",
   healthDisagreement: null,
@@ -78,12 +98,16 @@ const EDGE_DIRECTOR_LEG: LegView = {
   status: "approved",
   evidence: "live",
   rawStatus: "verified",
+  providerCode: "stripe_identity_verified",
+  citation:
+    "Stripe Identity verification session vs_1UEDemoEDGE00000000000000 — status verified; re-readable with GET /v1/identity/verification_sessions/{id}",
   checks: [
     {
       name: "director_identity_document",
       status: "passed",
       reasons: ["stripe identity session status: verified"],
     },
+    { name: "provider_outcome", status: "passed", reasons: ["stripe_identity_verified"] },
   ],
   observedAt: "2026-09-10T18:05:00.000Z",
 };
@@ -97,12 +121,17 @@ const EDGE_REGISTRY_LEG: LegView = {
   status: "approved",
   evidence: "simulated",
   rawStatus: "simulated:approved",
+  providerCode: "simulated:approved",
+  // Deliberately null. A simulated leg cites nothing, because there is nothing
+  // to cite, and the screen renders that absence rather than filling it in.
+  citation: null,
   checks: [
     {
       name: "business_registry_match",
       status: "passed",
       reasons: ["simulated: business id number matched the registry"],
     },
+    { name: "provider_outcome", status: "passed", reasons: ["simulated:approved"] },
     {
       name: "business_watchlist",
       status: "not_applicable",
@@ -130,6 +159,20 @@ function business(
 }
 
 /**
+ * Attribution is DERIVED here exactly as it is for a live row — same function,
+ * same leg inputs. A fixture that could write its own "third-party verdict"
+ * badge would be the forgery this screen exists to make impossible.
+ */
+function withVerdict(
+  fields: Omit<BusinessKybView, "gate" | "gateIfLiveRequired" | "verdict">,
+): BusinessKybView {
+  return business({
+    ...fields,
+    verdict: verdictView(fields.status, fields.evidence, fields.legs),
+  });
+}
+
+/**
  * THE EDGE STATE.
  *
  * One business. One leg answered by a third party, one by us. Both approve, so
@@ -143,7 +186,7 @@ const EDGE: OnboardingSnapshot = {
   asOf: DEMO_NOW,
   wiring: EDGE_WIRING,
   businesses: [
-    business({
+    withVerdict({
       businessId: RIDGELINE_ID,
       legalName: "Ridgeline Robotics, Inc.",
       ein: "000000000",

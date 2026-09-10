@@ -8,7 +8,7 @@ import { FOCUS_RING } from "@/components/ui/primitives";
 import type { TransactGateView } from "./data-contract";
 
 /**
- * Three verbs on one business, one server action, one place the answer lands.
+ * Four verbs on one business, one server action, one place the answer lands.
  *
  * ============================================================================
  * "TRY TO START A PAYMENT" IS NOT A DISABLED BUTTON.
@@ -27,6 +27,25 @@ import type { TransactGateView } from "./data-contract";
  * two are disabled where they would be refused, with the reason stated, and the
  * server refuses them again regardless — `beginVerification()` checks the
  * evidence table itself.
+ *
+ * WHY `Re-check the registry` IS A FOURTH BUTTON AND NOT A PARAMETER ON REFRESH.
+ *
+ * The two legs cost different things. The director leg is a real POST that
+ * creates an object in a Stripe account; the registry leg is a GET against a
+ * public, key-less index that creates nothing and is free to repeat. More to
+ * the point, this verb asks a DIFFERENT QUESTION: with an LEI in the box the
+ * applicant has ASSERTED an identifier, and a registry can be asked about an
+ * assertion directly — it confirms it, contradicts it, or has never heard of
+ * it, and those are three different answers rather than three shades of one.
+ * Without an LEI it re-runs the name search, whose miss is `needs_review` and
+ * is correct and uninformative.
+ *
+ * THE CLAIM IS NOT STORED. `kyb_verification_leg` records what a PROVIDER said;
+ * "the applicant says their LEI is X" is not that. What lands in the table is
+ * GLEIF's answer, under GLEIF's name, with GLEIF's own code — and when the
+ * identifier does not exist, a `gleif.notfound.` reference that says so in the
+ * id itself. The row appends: the previous registry observation stays exactly
+ * where it was, so a leg that went miss -> confirmed has both rows, in order.
  * ============================================================================
  */
 
@@ -75,6 +94,8 @@ export function VerificationForm({
   const startId = useId();
   const refreshId = useId();
   const gateId = useId();
+  const leiId = useId();
+  const recheckId = useId();
 
   const started = legsOnFile > 0;
 
@@ -88,6 +109,12 @@ export function VerificationForm({
     ? FIXTURE_NOTE
     : !started
       ? "Nothing to re-read: no verification has been started for this business."
+      : null;
+
+  const recheckReason = !live
+    ? FIXTURE_NOTE
+    : !started
+      ? "Nothing to re-check against: a registry answer on its own is one leg, and the view reads a single leg as pending however good that leg is. Start a verification first."
       : null;
 
   const mine: OnboardingResult = state.businessId === businessId ? state : IDLE_RESULT;
@@ -122,6 +149,17 @@ export function VerificationForm({
         <button
           type="submit"
           name="intent"
+          value="recheck"
+          disabled={recheckReason !== null || pending}
+          aria-describedby={recheckId}
+          className={buttonClass("quiet")}
+        >
+          Re-check the registry
+        </button>
+
+        <button
+          type="submit"
+          name="intent"
           value="gate"
           disabled={!live || pending}
           aria-describedby={gateId}
@@ -130,6 +168,43 @@ export function VerificationForm({
           Try to start a payment
         </button>
       </div>
+
+      <div className="space-y-1">
+        <label
+          htmlFor={leiId}
+          className="block text-[11px] font-medium uppercase tracking-[0.08em] text-muted"
+        >
+          Asserted Legal Entity Identifier — optional
+        </label>
+        <input
+          id={leiId}
+          name="lei"
+          type="text"
+          inputMode="text"
+          maxLength={20}
+          placeholder="20 characters, ISO 17442 — leave blank to search by name"
+          aria-describedby={recheckId}
+          className={`w-full max-w-md rounded border border-border bg-surface-raised px-2.5 py-1.5 font-mono text-xs uppercase text-text placeholder:normal-case placeholder:text-muted ${FOCUS_RING}`}
+        />
+      </div>
+
+      <p id={recheckId} className="max-w-prose text-[11px] leading-relaxed text-muted">
+        {recheckReason === null ? (
+          <>
+            <span className="font-semibold">Re-check the registry: </span>a live GLEIF read, which
+            creates nothing and is free to repeat. With an identifier in the box the applicant has
+            ASSERTED one, and the registry either confirms it, contradicts it, or has never heard of
+            it — and an identifier that does not exist is a decline rather than a shrug. Without one
+            it searches by name, whose miss is <span className="font-mono">needs_review</span> and
+            can never be an approval. The claim is not stored; GLEIF&rsquo;s answer is.
+          </>
+        ) : (
+          <>
+            <span className="font-semibold">Re-check is disabled: </span>
+            {recheckReason}
+          </>
+        )}
+      </p>
 
       {startReason === null ? null : (
         <p id={startId} className="max-w-prose text-[11px] leading-relaxed text-muted">

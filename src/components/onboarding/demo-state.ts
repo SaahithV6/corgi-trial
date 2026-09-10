@@ -12,11 +12,17 @@
  *
  * THE EDGE STATE IS THE ONE THAT MATTERS HERE. It is a business whose director
  * KYC was answered by a real third party — a genuine Stripe Identity session,
- * verified — and whose registry leg was simulated, because no self-serve
- * registry check exists on this account. Both legs approve. The composite is
- * therefore `approved`, and its evidence label is `simulated`, because evidence
- * degrades and never un-degrades. A screen that showed "APPROVED · live" there
- * would be the automatic fail this whole module exists to make unrepresentable.
+ * verified — and whose registry leg was forced back to the labelled simulator
+ * with `KYB_FORCE_SIMULATED=business_registry`. Both legs approve. The composite
+ * is therefore `approved`, and its evidence label is `simulated`, because
+ * evidence degrades and never un-degrades. A screen that showed "APPROVED ·
+ * live" there would be the automatic fail this whole module exists to make
+ * unrepresentable.
+ *
+ * It is a FIXTURE of a state the live deployment no longer sits in: the registry
+ * leg defaults to GLEIF and is live. The escape hatch is kept precisely so the
+ * degradation rule can be demonstrated on demand rather than asserted, and this
+ * state is what it looks like when it is pulled.
  */
 
 export const DEMO_STATES = ["default", "loading", "empty", "error", "edge"] as const;
@@ -40,7 +46,7 @@ export const DEMO_STATE_HINTS: Record<DemoState, string> = {
   loading: "Skeleton, held open long enough to see.",
   empty: "No businesses on the book at all.",
   error: "The verification state could not be read. Nothing was written; retry is live.",
-  edge: "Director KYC really was verified by Stripe. The registry leg was not. The verification is approved and its evidence reads simulated.",
+  edge: "Director KYC really was verified by Stripe. The registry leg was forced back to the simulator. The verification is approved and its evidence reads simulated — degradation, shown rather than claimed.",
 };
 
 function first(value: string | string[] | undefined): string | undefined {

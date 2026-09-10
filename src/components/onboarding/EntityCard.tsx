@@ -1,18 +1,12 @@
 import Link from "next/link";
 
-import { Badge, FOCUS_RING, MetaList, type BadgeTone } from "@/components/ui/primitives";
+import { Badge, FOCUS_RING, MetaList } from "@/components/ui/primitives";
 import { formatTimestamp } from "@/lib/format/datetime";
 import type { KybStatus } from "@/lib/kyb";
 
-import type { BusinessKybView, LegView, TransactGateView } from "./data-contract";
+import type { BusinessKybView, TransactGateView, VerdictView } from "./data-contract";
+import { LegRow, STATUS_TONE } from "./LegRow";
 import { VerificationForm } from "./VerificationForm";
-
-const STATUS_TONE: Record<KybStatus, BadgeTone> = {
-  approved: "positive",
-  pending: "neutral",
-  needs_review: "neutral",
-  rejected: "negative",
-};
 
 const STATUS_NOTE: Record<KybStatus, string> = {
   approved: "Both legs answered and neither blocks. The only status that permits transacting.",
@@ -90,6 +84,10 @@ export function EntityCard({
       </header>
 
       <div className="border-b border-border px-5 py-4">
+        <Verdict verdict={business.verdict} />
+      </div>
+
+      <div className="border-b border-border px-5 py-4">
         <h4 className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
           Evidence on file
         </h4>
@@ -160,36 +158,6 @@ export function EntityCard({
   );
 }
 
-function LegRow({ leg }: { readonly leg: LegView }) {
-  return (
-    <li className="rounded-md border border-border bg-surface-raised px-3 py-2.5">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="text-xs font-medium">{leg.label}</span>
-        <Badge tone={STATUS_TONE[leg.status]}>{leg.status}</Badge>
-        <Badge tone={leg.evidence === "live" ? "positive" : "quiet"}>{leg.evidence}</Badge>
-        <span className="font-mono text-[11px] text-muted">{leg.provider}</span>
-      </div>
-      <p className="mt-1 break-all font-mono text-[11px] text-muted">
-        {leg.reference}
-        {leg.rawStatus === null ? null : (
-          <span className="ml-2">· provider said &ldquo;{leg.rawStatus}&rdquo;</span>
-        )}
-      </p>
-      {leg.checks.length === 0 ? null : (
-        <ul className="mt-1.5 space-y-0.5 text-[11px] leading-relaxed text-muted">
-          {leg.checks.map((check) => (
-            <li key={check.name}>
-              <span className="font-mono">{check.name}</span>: {check.status}
-              {check.reasons.length === 0 ? null : ` — ${check.reasons.join("; ")}`}
-            </li>
-          ))}
-        </ul>
-      )}
-      <p className="mt-1 text-[11px] text-muted">observed {formatTimestamp(leg.observedAt)}</p>
-    </li>
-  );
-}
-
 function GateReading({
   title,
   gate,
@@ -212,6 +180,50 @@ function GateReading({
       </p>
       <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted">{gate.message}</p>
       <p className="mt-1 max-w-prose text-[11px] leading-relaxed text-muted">{note}</p>
+    </div>
+  );
+}
+
+
+/**
+ * WHO SAID NO, ON THE CARD, ABOVE THE EVIDENCE THAT PRODUCED IT.
+ *
+ * Two businesses can both read `rejected` while one was declined by a third
+ * party over an authenticated round trip and the other by a fixture we wrote.
+ * If the only way to tell them apart is to read the source, the screen is not
+ * evidence of anything — so the derived status is never rendered without its
+ * attribution, and the attribution is DERIVED from the leg rows by
+ * `verdictView()` rather than written next to them.
+ */
+function Verdict({ verdict }: { readonly verdict: VerdictView }) {
+  return (
+    <div>
+      <div className="flex flex-wrap items-baseline gap-2">
+        <h4 className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+          Who decided this
+        </h4>
+        <Badge tone={verdict.origin === "third-party" ? "positive" : "quiet"}>
+          {verdict.originLabel}
+        </Badge>
+      </div>
+      <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted">{verdict.headline}</p>
+      {verdict.sources.length === 0 ? null : (
+        <ul className="mt-1.5 space-y-0.5 text-[11px] leading-relaxed text-muted">
+          {verdict.sources.map((source) => (
+            <li key={source.leg}>
+              <span className="font-medium text-text">{source.label}</span> —{" "}
+              <span className="font-mono">{source.provider}</span>
+              {source.providerCode === null ? null : (
+                <>
+                  {" · "}
+                  <span className="font-mono text-text">{source.providerCode}</span>
+                </>
+              )}
+              {source.citation === null ? null : <span className="block">{source.citation}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

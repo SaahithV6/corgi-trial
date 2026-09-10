@@ -45,6 +45,7 @@ vi.hoisted(() => {
 import type { sql as SqlHandle } from "@/lib/ledger/db";
 import type { Transaction, TransactionEvent, TransactionEventType } from "@/lib/rails/lithic/types";
 
+import { chooseCorrectionTarget } from "@/lib/holds/corrections";
 import { deriveCardEvents } from "@/lib/holds/lithic-events";
 
 import {
@@ -782,37 +783,65 @@ describe("the Lithic consumer parks a step nobody has classified", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. What the table says vs. what the code does, today
+// 6. What the table says vs. where the money actually lands
 // ---------------------------------------------------------------------------
 
 /**
  * The table is a set of claims. This is the only test that checks any of them
- * against the code that actually posts, and it is a CHARACTERISATION test: it
- * pins the current divergences rather than asserting they are absent, because
- * closing them means changing `src/lib/holds/*` and that is out of scope here.
+ * against the code that actually posts.
  *
- * Every `false` below is a real, reviewable gap between what the table says and
- * where the money is dated. Fixing one of them turns this test red, which is
- * the point: nobody closes a gap without being told the table already agreed
- * with the fix.
+ * It USED to be a pure characterisation test, pinning the fact that the card
+ * consumer ignored the two `correction` rows and posted them as ordinary
+ * entries at their own dates. That gap is now closed: `src/lib/holds/apply.ts`
+ * reads this table, and a step it classifies `correction` is routed to
+ * `postCardCorrection()` → `reverseAndRebook()`, which books the repair at the
+ * ORIGINAL entry's value date. So the correction rows below assert the correct
+ * behaviour rather than pinning the wrong one.
+ *
+ * Two divergences are still pinned as characterisation, both real and both
+ * labelled:
+ *
+ *   CANONICAL KIND for the three correction steps. `card_event_kind` is a
+ *     database enum with eight members and none of them is `refund_reversal`,
+ *     `correction_debit` or `correction_credit`; adding one is a migration.
+ *     The kind is therefore LOSSY on purpose — a `RETURN_REVERSAL` is stored
+ *     as `force_post` because the hold arithmetic treats it identically — and
+ *     the step name survives separately, on `DerivedCardEvents.stepTypes`,
+ *     which is what the table is keyed on and what the routing reads. Nothing
+ *     about the money depends on the enum label.
+ *
+ *   VALUE DATE for `CLEARING` and `FINANCIAL_AUTHORIZATION`. The table says
+ *     `payload.created` — the LOCAL TRANSACTION date, so a Friday dinner
+ *     clearing on Monday is Friday's spend — and the code dates them at the
+ *     clearing event's own `created`. Identical in the sandbox, where a
+ *     transaction clears the same day it is authorised; different for a real
+ *     Friday dinner. Still open, deliberately out of scope for the correction
+ *     work, and it is a `false` here so nobody can close it by accident.
  */
-describe("table vs. consumer behaviour, as it stands (characterisation)", () => {
+describe("table vs. consumer behaviour", () => {
   const TXN_CREATED = "2026-09-04T18:00:00Z"; // Friday, 14:00 in book tz
   const EVENT_CREATED = "2026-09-07T18:00:00Z"; // Monday, 14:00 in book tz
 
-  function oneStep(type: TransactionEventType, polarity?: "CREDIT" | "DEBIT"): Transaction {
-    const event: TransactionEvent = {
+  function event(
+    type: TransactionEventType,
+    over: Partial<TransactionEvent> = {},
+  ): TransactionEvent {
+    const amount = over.amount ?? 5000;
+    return {
       token: `tok-${type}`,
       type,
       created: EVENT_CREATED,
-      amount: 5000,
+      amount,
       amounts: {
-        cardholder: { amount: 5000, conversion_rate: "1.000000", currency: "USD" },
-        merchant: { amount: 5000, currency: "USD" },
-        settlement: { amount: 5000, currency: "USD" },
+        cardholder: { amount, conversion_rate: "1.000000", currency: "USD" },
+        merchant: { amount, currency: "USD" },
+        settlement: { amount, currency: "USD" },
       },
-      ...(polarity !== undefined ? { effective_polarity: polarity } : {}),
+      ...over,
     };
+  }
+
+  function txnWith(events: readonly TransactionEvent[]): Transaction {
     return {
       token: "txn-characterisation",
       account_token: "2742964f-478f-47ef-a4e9-852dc50d9c44",
@@ -827,17 +856,25 @@ describe("table vs. consumer behaviour, as it stands (characterisation)", () => 
         merchant: { amount: 0, currency: "USD" },
         settlement: { amount: 5000, currency: "USD" },
       },
-      events: [event],
+      events: [...events],
     };
+  }
+
+  function oneStep(type: TransactionEventType, polarity?: "CREDIT" | "DEBIT"): Transaction {
+    return txnWith([
+      event(type, ...(polarity !== undefined ? [{ effective_polarity: polarity }] : [])),
+    ]);
   }
 
   /**
    * step -> [does the code's canonical kind match the table's?,
-   *          does the code date it the way the table says?]
+   *          does the money land where the table says?]
    *
-   * The code dates EVERY card event at that event's own `created`
-   * (`deriveCardEvents`), and posts every one of them as an ordinary entry
-   * (`postCardMovement`) — it has no correction path at all.
+   * For a `new_event` step the money lands at the derived event's own
+   * `valueDate`, so that column is checked directly. For a `correction` step
+   * there is no payload date to check: the assertion is that the step is
+   * ROUTED to the correction path and that the path picks the entry whose
+   * value date it will inherit. Both are asserted below.
    */
   const CURRENT: Record<string, { kindMatches: boolean; datedAsTableSays: boolean }> = {
     AUTHORIZATION: { kindMatches: true, datedAsTableSays: true },
@@ -845,16 +882,15 @@ describe("table vs. consumer behaviour, as it stands (characterisation)", () => 
     AUTHORIZATION_EXPIRY: { kindMatches: true, datedAsTableSays: true },
     AUTHORIZATION_REVERSAL: { kindMatches: true, datedAsTableSays: true },
     RETURN: { kindMatches: true, datedAsTableSays: true },
-    // Table: payload.created (the LOCAL transaction date). Code: the event's
-    // own date. Identical in the sandbox, where a transaction clears the same
-    // day it is authorised; different for a Friday dinner clearing on Monday.
+    // Still open: the table wants the LOCAL TRANSACTION date, the code uses
+    // the clearing event's own. See the header.
     CLEARING: { kindMatches: true, datedAsTableSays: false },
     FINANCIAL_AUTHORIZATION: { kindMatches: true, datedAsTableSays: false },
-    // Table: correction at the ORIGINAL value date. Code: an ordinary posting
-    // at the event's own date, under a different canonical name.
-    RETURN_REVERSAL: { kindMatches: false, datedAsTableSays: false },
-    CORRECTION_DEBIT: { kindMatches: false, datedAsTableSays: false },
-    CORRECTION_CREDIT: { kindMatches: false, datedAsTableSays: false },
+    // Lossy by construction — `card_event_kind` has no member for these — and
+    // now CORRECTLY dated, at the value date of the entry each one repairs.
+    RETURN_REVERSAL: { kindMatches: false, datedAsTableSays: true },
+    CORRECTION_DEBIT: { kindMatches: false, datedAsTableSays: true },
+    CORRECTION_CREDIT: { kindMatches: false, datedAsTableSays: true },
   };
 
   const CARD_ROWS = EXPECTED.filter((e) => e.provider === "lithic");
@@ -867,7 +903,7 @@ describe("table vs. consumer behaviour, as it stands (characterisation)", () => 
     const step = e.step ?? "";
     const current = CURRENT[step];
 
-    it(`${step}: code ${current?.kindMatches ? "agrees with" : "DIVERGES from"} the table's canonical kind, and ${current?.datedAsTableSays ? "dates it" : "does NOT date it"} as the table says`, () => {
+    it(`${step}: code ${current?.kindMatches ? "agrees with" : "DIVERGES from"} the table's canonical kind`, () => {
       const derived = deriveCardEvents(
         oneStep(step as TransactionEventType, step === "CORRECTION_CREDIT" ? "CREDIT" : "DEBIT"),
       );
@@ -877,16 +913,101 @@ describe("table vs. consumer behaviour, as it stands (characterisation)", () => 
 
       expect(produced.kind === e.canonicalKind).toBe(current?.kindMatches);
 
-      // The table's date for this step, computed the way the table names it.
-      const tableDate =
-        e.semantics === "correction"
-          ? ORIGINAL_VALUE_DATE // no payload field at all
-          : e.valueDateSource === "payload.created"
-            ? "2026-09-04"
-            : "2026-09-07";
-      expect(produced.valueDate === tableDate).toBe(current?.datedAsTableSays);
+      // Whatever the enum had to call it, the STEP survives the translation —
+      // that is what the table is keyed on and what the routing reads.
+      expect(derived.stepTypes.get(produced.providerEventId)).toBe(step);
     });
+
+    if (e.semantics === "new_event") {
+      it(`${step}: money ${current?.datedAsTableSays ? "lands" : "does NOT land"} on the date the table names`, () => {
+        const derived = deriveCardEvents(
+          oneStep(step as TransactionEventType, step === "CORRECTION_CREDIT" ? "CREDIT" : "DEBIT"),
+        );
+        const produced = derived.events[0];
+        expect(produced).toBeDefined();
+        if (produced === undefined) return;
+
+        const tableDate = e.valueDateSource === "payload.created" ? "2026-09-04" : "2026-09-07";
+        expect(produced.valueDate === tableDate).toBe(current?.datedAsTableSays);
+      });
+    }
   }
+
+  /**
+   * The correction rows, asserted rather than characterised.
+   *
+   * `original.value_date` is not a payload field, so the assertion is about
+   * the ROUTING and the CHOICE: the step must be classified `correction` off
+   * the table, and `chooseCorrectionTarget` must pick the movement whose value
+   * date the repair will inherit. That the repair is then booked at that
+   * entry's date is `reverseAndRebook`'s own contract, proved end to end
+   * against the live ledger by attack 3.
+   */
+  describe("the correction steps are routed to the correction path", () => {
+    const CORRECTION_STEPS = CARD_ROWS.filter((r) => r.semantics === "correction");
+
+    it("there are three of them, and all three anchor on the original", () => {
+      expect(CORRECTION_STEPS.map((r) => r.step).sort()).toEqual([
+        "CORRECTION_CREDIT",
+        "CORRECTION_DEBIT",
+        "RETURN_REVERSAL",
+      ]);
+      for (const row of CORRECTION_STEPS) {
+        expect(row.valueDateSource).toBe(ORIGINAL_VALUE_DATE);
+      }
+    });
+
+    it("RETURN_REVERSAL picks the RETURN it undoes, not its own date", () => {
+      const derived = deriveCardEvents(
+        txnWith([
+          event("RETURN", {
+            token: "tok-return",
+            amount: 7340,
+            created: "2026-09-04T18:00:00Z",
+            effective_polarity: "CREDIT",
+          }),
+          event("RETURN_REVERSAL", {
+            token: "tok-reversal",
+            amount: 7340,
+            created: "2026-09-07T18:00:00Z",
+            effective_polarity: "DEBIT",
+          }),
+        ]),
+      );
+
+      const reversal = derived.events.find((x) => x.providerEventId === "tok-reversal");
+      const refund = derived.events.find((x) => x.providerEventId === "tok-return");
+      expect(reversal).toBeDefined();
+      expect(refund).toBeDefined();
+      if (reversal === undefined || refund === undefined) return;
+
+      // The FACT keeps its own date — it is when the network said it.
+      expect(reversal.valueDate).toBe("2026-09-07");
+      // The MONEY does not: the target is the refund, dated the 4th.
+      const choice = chooseCorrectionTarget(reversal, derived.events);
+      expect(choice.status).toBe("matched");
+      if (choice.status !== "matched") return;
+      expect(choice.target.providerEventId).toBe("tok-return");
+      expect(choice.target.valueDate).toBe("2026-09-04");
+      expect(choice.full).toBe(true);
+    });
+
+    it("a correction with nothing to correct is unmatched, never posted at its own date", () => {
+      const derived = deriveCardEvents(
+        txnWith([
+          event("RETURN_REVERSAL", {
+            token: "tok-orphan",
+            amount: 7340,
+            effective_polarity: "DEBIT",
+          }),
+        ]),
+      );
+      const orphan = derived.events[0];
+      expect(orphan).toBeDefined();
+      if (orphan === undefined) return;
+      expect(chooseCorrectionTarget(orphan, derived.events).status).toBe("unmatched");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

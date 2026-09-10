@@ -1,6 +1,31 @@
 import { Badge, Note, Panel, TD_CLASS, TH_CLASS, TableScroll } from "@/components/ui/primitives";
+import { KYB_STATUSES } from "@/lib/kyb";
 
-import type { LegWiringView, WiringView } from "./data-contract";
+import type { LegCompliance, LegWiringView, WiringView } from "./data-contract";
+
+/**
+ * THE BADGE THAT REFUSES TO AVERAGE THE TWO LEGS.
+ *
+ * Both legs are live. They are not equally compliant with the brief, and a
+ * single "live" badge across the row would quietly claim that they were.
+ *
+ *   on-brief     Stripe Identity is on the brief's own KYC identity menu
+ *                (Persona, Sumsub, Stripe Identity, Onfido). Compliant. No
+ *                apology owed, and offering one would be its own inaccuracy.
+ *   substituted  GLEIF is a real third-party registry, queried live — and it is
+ *                NOT one of the three vendors the brief names for this slot.
+ *                Both facts, in that order, wherever the leg is named.
+ *   simulated    nobody was asked.
+ *
+ * `substituted` is deliberately toned NEGATIVE rather than positive. It is the
+ * one row on this screen where a reviewer is most likely to be told what they
+ * want to hear, so it is drawn to be read rather than skimmed past.
+ */
+const COMPLIANCE_TONE: Record<LegCompliance, "positive" | "negative" | "quiet"> = {
+  "on-brief": "positive",
+  substituted: "negative",
+  simulated: "quiet",
+};
 
 /**
  * Which adapter answers each leg in THIS deployment, and what that caps the
@@ -49,6 +74,7 @@ export function WiringPanel({ wiring }: { readonly wiring: WiringView }) {
               <th className={TH_CLASS}>Leg</th>
               <th className={TH_CLASS}>Adapter</th>
               <th className={TH_CLASS}>Evidence</th>
+              <th className={TH_CLASS}>Against the brief</th>
               <th className={TH_CLASS}>Why</th>
             </tr>
           </thead>
@@ -59,13 +85,21 @@ export function WiringPanel({ wiring }: { readonly wiring: WiringView }) {
         </table>
       </TableScroll>
 
+      <div className="grid gap-x-8 gap-y-5 border-t border-border px-5 py-4 sm:grid-cols-2">
+        <LegDetail leg={wiring.director} />
+        <LegDetail leg={wiring.registry} />
+      </div>
+
       <div className="border-t border-border px-5 py-4">
         <p className="max-w-prose text-xs leading-relaxed text-muted">
-          The director leg is a real third-party call:{" "}
+          Neither call happens on render. The director leg is a real third-party write —{" "}
           <code className="font-mono">POST /v1/identity/verification_sessions</code> against Stripe,
-          returning a hosted <code className="font-mono">verify.stripe.com</code> URL. It is made
-          only when someone presses <em>Start verification</em> — never on render, because a render
-          path that creates provider objects litters a real account on every page load.
+          returning a hosted <code className="font-mono">verify.stripe.com</code> URL — and is made
+          only when someone presses <em>Start verification</em>, because a render path that creates
+          provider objects litters a real account on every page load, prefetch and bot. The registry
+          leg is a read against a public, key-less, CC0 index, so repeating it costs nothing and
+          creates nothing; it still runs from an explicit action, so the screen never quietly
+          re-asks a question on somebody else&rsquo;s server.
         </p>
       </div>
     </Panel>
@@ -83,6 +117,11 @@ function LegRow({ leg }: { readonly leg: LegWiringView }) {
       <td className={TD_CLASS}>
         <Badge tone={leg.evidence === "live" ? "positive" : "quiet"}>{leg.evidence}</Badge>
       </td>
+      <td className={TD_CLASS}>
+        <Badge tone={COMPLIANCE_TONE[leg.compliance]} title={leg.complianceNote}>
+          {leg.complianceLabel}
+        </Badge>
+      </td>
       <td className={`${TD_CLASS} max-w-prose text-xs text-muted`}>
         {leg.reason}
         {leg.missingEnv.length === 0 ? null : (
@@ -92,5 +131,59 @@ function LegRow({ leg }: { readonly leg: LegWiringView }) {
         )}
       </td>
     </tr>
+  );
+}
+
+/**
+ * What this leg does NOT prove, and which statuses it can actually reach.
+ *
+ * Printed beside the leg rather than filed in a document nobody opens. The
+ * limits are the first thing a hostile reviewer should be told, not the first
+ * thing they get to discover; and `reachableStatuses` is the difference between
+ * a mapping table and a capability — Stripe Identity's table contains a
+ * `rejected` that their API will not produce, and a screen that listed it
+ * without saying so would be advertising a refusal nobody can make.
+ */
+function LegDetail({ leg }: { readonly leg: LegWiringView }) {
+  const unreachable = KYB_STATUSES.filter((s) => !leg.reachableStatuses.includes(s));
+
+  return (
+    <div>
+      <h3 className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+        {leg.label} · <span className="font-mono normal-case">{leg.provider}</span>
+      </h3>
+
+      <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted">
+        {leg.complianceNote}
+      </p>
+
+      <p className="mt-2.5 text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+        What this does not prove
+      </p>
+      <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11px] leading-relaxed text-muted">
+        {leg.limits.map((limit) => (
+          <li key={limit}>{limit}</li>
+        ))}
+      </ul>
+
+      <p className="mt-2.5 flex flex-wrap items-baseline gap-1.5 text-[11px] text-muted">
+        <span className="font-medium uppercase tracking-[0.08em]">Reachable</span>
+        {leg.reachableStatuses.map((status) => (
+          <span key={status} className="font-mono text-text">
+            {status}
+          </span>
+        ))}
+        {unreachable.map((status) => (
+          <span key={status} className="font-mono line-through">
+            {status}
+          </span>
+        ))}
+      </p>
+      {leg.reachabilityNote === null ? null : (
+        <p className="mt-1 max-w-prose text-[11px] leading-relaxed text-muted">
+          {leg.reachabilityNote}
+        </p>
+      )}
+    </div>
   );
 }

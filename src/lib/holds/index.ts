@@ -5,6 +5,8 @@
  *   lithic-events.ts  one webhook payload → canonical facts. Pure.
  *   store.ts          every statement the machinery issues. No raw money INSERTs.
  *   apply.ts          lock, append, post, close, compare-and-append.
+ *   corrections.ts    the repair: reverse at the ORIGINAL value date. Pure choice,
+ *                     impure posting.
  *   expiry.ts         the clock release, which is bookkeeping and not a repair.
  *
  * `model.ts` and `lithic-events.ts` have no database and no clock of their own,
@@ -53,13 +55,28 @@ export {
 } from "./store";
 
 export {
+  LITHIC_LIFECYCLE_EVENT,
   LITHIC_PROVIDER,
   applyCardTransaction,
   settleHoldPosting,
   type ApplyContext,
   type ApplyResult,
   type HoldOutcome,
+  type UnmatchedCorrection,
 } from "./apply";
+
+export {
+  chooseCorrectionTarget,
+  correctionRebookKey,
+  directionOf,
+  postCardCorrection,
+  readTargetEntry,
+  type CorrectionPosted,
+  type CorrectionResult,
+  type CorrectionTargetChoice,
+  type CorrectionUnmatched,
+  type MoneyDirection,
+} from "./corrections";
 
 export {
   expireOne,

@@ -36,17 +36,27 @@
  * module honours that order — it only reaches for Identity when the Persona
  * keys are absent.
  *
- * THE REGISTRY LEG IS SIMULATED, AND SAYS SO.
+ * A STRIPE IDENTITY SESSION CAN REACH THREE OF OUR FOUR STATUSES, AND THE
+ * FOURTH IS EARNED RATHER THAN ASSUMED. See `stripeIdentityStatusToKyb`.
  *
- * Not a fallback, and specifically not the "try live, fall back on error" the
- * factory's header forbids: it is a declared selection with a measured reason.
- * `POST /v1/accounts` answers 400 "you can only create new accounts if you've
- * signed up for Connect" on this account (DECISION 017), and every KYB vendor
- * on the brief's menu is gated behind a sales conversation (DECISION 018). So
- * the leg is simulated, it is labelled `simulated`, and — by the composite's
- * rule 2 — every verification this deployment produces is labelled `simulated`
- * even when the director leg was genuinely live. That degradation is the whole
- * point of the module and this file exists partly to make it visible.
+ * THE REGISTRY LEG IS LIVE, AND IT IS GLEIF.
+ *
+ * `src/lib/kyb/gleif.ts` queries `api.gleif.org` — the Global LEI index, a real
+ * third-party registry, no key, no account, CC0 data, every record validated by
+ * an accredited LOU against a named government company register. It replaces
+ * the labelled simulator that stood here while every KYB vendor on the brief's
+ * menu turned out to be gated behind a sales conversation (DECISION 018) and
+ * Stripe Connect behind platform onboarding (DECISION 017).
+ *
+ * The rule that leg brings with it, and it is the reason it is honest: A HIT IS
+ * AUTHORITATIVE, A MISS IS EVIDENCE OF NOTHING. GLEIF covers entities required
+ * to hold an LEI, not every company that exists, so an absent record is
+ * `needs_review` and can never be an approval. The seeded demo businesses are
+ * fictional and therefore miss — which is the correct answer, arrived at by an
+ * authenticated round trip rather than asserted by us.
+ *
+ * `KYB_FORCE_SIMULATED=business_registry` still switches that leg back to the
+ * labelled simulator without a deploy, and the screen then says so.
  */
 
 import "server-only";
@@ -67,18 +77,25 @@ import type {
 // The one place a `TransactDecision` becomes something renderable, shared with
 // the fixtures so a live row and a fixture row are described identically.
 import { gateView } from "@/components/onboarding/gate-view";
+import { verdictView } from "@/components/onboarding/verdict";
 
-import { CompositeKybProvider, type CompositeKybResult } from "./composite";
+import { CompositeKybProvider, CompositeKybResult, failedLeg } from "./composite";
+import { GLEIF_LIMITS, GLEIF_PROVIDER_NAME, isLeiFormat } from "./gleif";
 import { KYB_ENV, selectKybLegs } from "./index";
+import { chooseRegistryProvider, rungForProviderName } from "./registry-precedence";
 import { SimulatedDirectorKycProvider, SimulatedRegistryProvider } from "./simulated-registry";
 import {
   asEvidence,
   asKybStatus,
   businessKybStateFromRow,
   canTransact,
+  citationFromChecks,
   KybGateError,
   KybProviderError,
+  providerCodeFromChecks,
+  KYB_CITATION_CHECK,
   KYB_LEG_LABEL,
+  KYB_PROVIDER_CODE_CHECK,
   type BusinessKybState,
   type CreateKybVerificationInput,
   type Evidence,
@@ -130,26 +147,92 @@ export const STRIPE_IDENTITY_STATUS_MAP: Readonly<Record<string, KybStatus>> = {
 };
 
 /**
- * `requires_input` means two different things and the difference matters.
+ * ===========================================================================
+ * FOUR STATUSES OUT OF TWO STRIPE FIELDS, AND EVERY ONE OF THEM MEASURED.
  *
- * With no `last_error`, nobody has submitted anything yet — the session is in
- * flight, which is `pending`. With a `last_error`, a document WAS submitted and
- * Stripe could not verify it; the session sits back at `requires_input` and a
- * person has to decide whether to re-invite or decline. That is `needs_review`,
- * not `pending`, and never `rejected`: Stripe Identity has no terminal decline,
- * which is exactly why DECISION 018 keeps Persona ahead of it.
+ * Stripe Identity's session status is a small vocabulary — `requires_input`,
+ * `processing`, `verified`, `canceled` — and on its own it cannot express a
+ * decline. `last_error` is the other half of the sentence, and reading the two
+ * together is what lets a refusal be a refusal instead of a shrug.
+ *
+ *   verified                      -> approved      Stripe verified the document.
+ *   processing                    -> pending       Stripe is still looking.
+ *   requires_input, no last_error -> pending       nobody has submitted yet.
+ *   requires_input + last_error   -> needs_review  STRIPE REFUSED THIS ATTEMPT.
+ *                                                  Not terminal: `url` is still
+ *                                                  live and a retry is open, so
+ *                                                  a person decides what next.
+ *   canceled, no last_error       -> needs_review  the session was closed with
+ *                                                  nothing decided either way.
+ *                                                  MEASURED: this is every
+ *                                                  cancelled session, because
+ *                                                  cancel erases last_error.
+ *   canceled + last_error         -> rejected      Stripe refused the document
+ *                                                  AND the session accepts no
+ *                                                  further input. UNREACHABLE
+ *                                                  on today's API — see below.
+ *   anything else                 -> needs_review  fail closed.
+ *
+ * THE LAST ROW IS UNREACHABLE ON TODAY'S STRIPE, AND SAYING SO IS THE POINT.
+ *
+ * `rejected` in this build means "a decision to say no, terminal". An earlier
+ * draft of this comment asserted that a cancelled session carried the refusal
+ * that preceded it. RE-MEASURED against the live test-mode API on 2026-09-10,
+ * and that is FALSE:
+ *
+ *   GET  /v1/identity/verification_sessions/vs_1UEFoWDgSL5WTGpmMCJLolW6
+ *        -> 200, status `requires_input`, last_error
+ *           {code: "document_unverified_other", reason: "The document is invalid."}
+ *   POST /v1/identity/verification_sessions/vs_1UEFoWDgSL5WTGpmMCJLolW6/cancel
+ *        -> 200, status `canceled`, and **last_error is now null**, along with
+ *           `url` and `client_secret`. Cancelling ERASES the refusal.
+ *   GET  the same session again -> 200, still `canceled`, still last_error null.
+ *        Not a quirk of the cancel response: the object itself no longer
+ *        carries the code.
+ *   POST .../cancel a second time -> 200, a no-op, so the state is stable.
+ *   POST /v1/identity/verification_sessions/vs_1UEDLcDgSL5WTGpmif87HEZ7/cancel
+ *        -> 400 "You cannot cancel this VerificationSession because it has a
+ *        status of \"verified\". Only a VerificationSession in
+ *        \"requires_input\" status may be canceled." Stripe enforces the
+ *        transition itself, which is what makes `canceled` a provider fact and
+ *        not a local flag.
+ *   POST .../redact -> 200, `redaction: {status: "processing"}`, status stays
+ *        `canceled` and last_error stays null.
+ *
+ * CONSEQUENCE, STATED PLAINLY RATHER THAN LEFT FOR SOMEBODY TO FIND: on Stripe
+ * Identity, this build cannot reach `rejected` on real evidence. Every terminal
+ * state Stripe will sell us has had the refusal deleted out of it, and a
+ * `canceled` with no `last_error` is NOT a decline — there is no refusal left to
+ * point at, and manufacturing one out of an operator's click is exactly the
+ * forgery this module exists to prevent. So the director leg's worst real
+ * outcome is `needs_review`.
+ *
+ * The composite still reaches `rejected` on live third-party evidence, and it
+ * does so on the OTHER leg: GLEIF answers `entity.status INACTIVE` /
+ * `registration.status RETIRED` for a real withdrawn company, and HTTP 404 for
+ * an LEI an applicant asserted that does not exist. Strictest-wins carries
+ * either of those to the composite. A rejected verification on this book is a
+ * real registry's refusal, not a button we pressed.
+ *
+ * The `canceled + last_error -> rejected` row is KEPT rather than deleted,
+ * because it is the correct reading if Stripe ever stops erasing the field, and
+ * a mapping that is right only for the states a provider happens to emit this
+ * month is a mapping that fails silently when they add one. It is dead today
+ * and labelled dead.
  *
  * `Object.hasOwn` rather than a bare index, for the same reason
  * `personaStatusToKyb` uses it: `MAP['toString']` walks the prototype chain and
  * returns a FUNCTION, which `?? 'needs_review'` would pass straight through as
  * a status. A provider's status field is untrusted input like any other, and
  * this build's own test suite caught it here.
+ * ===========================================================================
  */
 export function stripeIdentityStatusToKyb(
   raw: string | null | undefined,
   lastErrorCode: string | null = null,
 ): KybStatus {
   if (typeof raw !== "string") return "needs_review";
+  if (raw === "canceled" && lastErrorCode !== null) return "rejected";
   if (raw === "requires_input" && lastErrorCode !== null) return "needs_review";
   if (!Object.hasOwn(STRIPE_IDENTITY_STATUS_MAP, raw)) return "needs_review";
   return STRIPE_IDENTITY_STATUS_MAP[raw] ?? "needs_review";
@@ -182,9 +265,35 @@ export function identitySessionToLeg(
           `stripe identity session status: ${rawStatus ?? "(absent)"}`,
           ...(lastErrorCode === null ? [] : [`last_error.code: ${lastErrorCode}`]),
           ...(lastErrorReason === null ? [] : [lastErrorReason]),
-          ...(rawStatus !== null && !(rawStatus in STRIPE_IDENTITY_STATUS_MAP)
+          ...(rawStatus === "canceled" && lastErrorCode !== null
+            ? [
+                "the session is canceled, so Stripe accepts no further document for it: url and client_secret are null and a re-cancel is a no-op",
+              ]
+            : []),
+          ...(rawStatus !== null && !Object.hasOwn(STRIPE_IDENTITY_STATUS_MAP, rawStatus)
             ? ["status not recognised by this build; held for review"]
             : []),
+        ],
+      },
+      // The provider's OWN machine-readable code, under the reserved name, so
+      // the screen can print `document_unverified_other` rather than a mood.
+      // A session with no error still emits the row, carrying the session
+      // status, because "no code" is itself worth being able to see.
+      {
+        name: KYB_PROVIDER_CODE_CHECK,
+        status: status === "approved" ? "passed" : lastErrorCode === null ? "pending" : "failed",
+        reasons: [
+          lastErrorCode ?? `stripe_identity_${rawStatus ?? "unknown"}`,
+          ...(lastErrorReason === null ? [] : [lastErrorReason]),
+        ],
+      },
+      {
+        name: KYB_CITATION_CHECK,
+        status: "passed",
+        reasons: [
+          `Stripe Identity verification session ${readString(session, ["id"]) ?? "(no id)"} — status ${rawStatus ?? "(absent)"}${
+            lastErrorCode === null ? "" : `, last_error.code ${lastErrorCode}`
+          }; re-readable with GET /v1/identity/verification_sessions/{id}`,
         ],
       },
     ],
@@ -312,11 +421,16 @@ export interface WiredSelection {
 }
 
 /**
- * Why the registry leg is the simulator, in one sentence the screen prints
- * verbatim. Measured, not assumed — see DECISIONS 015, 017 and 018.
+ * Why the registry leg WOULD be the simulator, in one sentence the screen
+ * prints verbatim when `KYB_FORCE_SIMULATED` names it. Measured, not assumed —
+ * see DECISIONS 015, 017 and 018.
+ *
+ * It is no longer the default: `GleifRegistryProvider` answers this leg live.
+ * The sentence is kept because the escape hatch is kept, and a leg that has
+ * been forced back to the simulator has to say why it is one.
  */
 export const REGISTRY_SIMULATED_REASON =
-  "no self-serve business-registry check exists on this account: POST /v1/accounts answers 400 \"you can only create new accounts if you've signed up for Connect\", and every KYB vendor on the brief's menu (Middesk, Persona KYB, Sumsub KYB) is gated behind a sales conversation";
+  "forced to the labelled simulator. The live registry (GLEIF) is available with no credentials; every KYB *vendor* on the brief's menu (Middesk, Persona KYB, Sumsub KYB) is gated behind a sales conversation, and Stripe Connect behind platform onboarding, which is why the simulator exists at all";
 
 /**
  * `KYB_FORCE_SIMULATED`, parsed.
@@ -390,16 +504,66 @@ export function selectWiredLegs(env: EnvBag = process.env): WiredSelection {
                 ],
           };
 
-  return {
-    director,
-    registry: {
+  return { director, registry: selectRegistryLeg(env) };
+}
+
+/**
+ * The registry leg, chosen off the PRECEDENCE LADDER.
+ *
+ * ===========================================================================
+ * GLEIF IS A RUNG, NOT A HARD-CODING, AND THAT IS THE WHOLE POINT.
+ *
+ * `./registry-precedence.ts` holds the order — Persona KYB, Middesk, Sumsub,
+ * Stripe Connect, GLEIF — and this function walks it. Every vendor named by the
+ * brief sits ABOVE GLEIF, so the day a credential for one of them arrives, the
+ * next boot picks it up and nothing in this file, in `composite.ts`, in the
+ * screen or in the database changes. That is what makes the substitution a
+ * considered fallback rather than the only thing anyone tried.
+ *
+ * `selectKybLegs()` in ./index.ts walks the SAME table, which is why
+ * `/api/health` and this screen cannot describe this leg differently.
+ *
+ * LIVE WITHOUT A CREDENTIAL, at the bottom rung: `api.gleif.org` is a public,
+ * key-less, CC0 index, so that rung always matches and this leg can never be
+ * misconfigured into silently pretending. Every variable on the ladder UPGRADES
+ * the leg; none of them is required for it to be live.
+ *
+ * The one switch is `KYB_FORCE_SIMULATED=business_registry`, honoured ahead of
+ * the whole ladder, which puts the labelled simulator back. It is deliberately
+ * still here: it is the documented way to demonstrate the composite's
+ * degradation rule on demand, and the screen prints `REGISTRY_SIMULATED_REASON`
+ * verbatim when it is used.
+ * ===========================================================================
+ */
+function selectRegistryLeg(env: EnvBag): WiredLeg {
+  if (isForcedSimulated(env, "business_registry")) {
+    return {
       leg: "business_registry",
       mode: "simulated",
       provider: new SimulatedRegistryProvider(),
       evidence: "simulated",
-      reason: REGISTRY_SIMULATED_REASON,
+      reason: `${REGISTRY_SIMULATED_REASON} (set by ${KYB_ENV.forceSimulated})`,
+      // A forced leg is not a misconfigured one: naming an env var here would
+      // send the next operator looking for a key that does not exist.
       missingEnv: [],
-    },
+    };
+  }
+
+  const choice = chooseRegistryProvider(env);
+  return {
+    leg: "business_registry",
+    mode: "live",
+    provider: choice.provider,
+    evidence: "live",
+    // A rung whose credential is present but whose adapter is unwritten does not
+    // disappear quietly. It is named here, in the sentence the wiring panel
+    // prints, because a deployment that set MIDDESK_API_KEY and is still running
+    // GLEIF looks exactly like one where the key took effect.
+    reason:
+      choice.blocked.length === 0
+        ? choice.rung.reason
+        : `${choice.rung.reason} — BUT NOTE: ${choice.blocked.join(" ")}`,
+    missingEnv: [],
   };
 }
 
@@ -432,14 +596,95 @@ export function wiringView(env: EnvBag = process.env): WiringView {
     registry,
     evidenceCeiling:
       director.mode === "live" && registry.mode === "live" ? "live" : "simulated",
+    // Both surfaces derive the registry leg from the same `selectKybLegs()`
+    // rule now, so this is normally null. It is KEPT, and computed rather than
+    // deleted, because "the health endpoint and the screen describe the same
+    // leg differently" is the precise failure this codebase has caught five
+    // times (DECISIONS 011, 015, 016, 017, 026) and a check that only exists
+    // while it is failing is not a check.
     healthDisagreement:
-      health.registry.mode === "live"
-        ? `/api/health reports the business-registry leg as LIVE because ${KYB_ENV.stripeSecretKey} is set, but no request path uses Stripe Connect — this screen wires the simulator. Set ${KYB_ENV.forceSimulated}=business_registry so both surfaces say the same thing.`
-        : null,
+      health.registry.mode === registry.mode && health.director.mode === director.mode
+        ? null
+        : `/api/health describes this deployment's legs as director=${health.director.mode}, registry=${health.registry.mode}; this screen wires director=${director.mode}, registry=${registry.mode}. Two surfaces disagreeing about live-vs-simulated is how a simulated integration ends up presented as a live one, so it is reported rather than smoothed over.`,
   };
 }
 
+/**
+ * ===========================================================================
+ * THE FRAMING, COMPUTED FROM THE WIRING RATHER THAN WRITTEN INTO A PARAGRAPH.
+ *
+ * The two legs are live for different reasons and they are not equally
+ * compliant with the brief, so this function refuses to describe them with one
+ * sentence:
+ *
+ *   DIRECTOR KYC IS ON THE BRIEF. The brief's KYC menu names Persona, Sumsub,
+ *   Stripe Identity and Onfido. Stripe Identity is on it. This half is
+ *   compliant and needs no apology, and pretending otherwise out of modesty
+ *   would be its own kind of inaccuracy.
+ *
+ *   BUSINESS REGISTRY IS A SUBSTITUTION. The brief names Persona KYB, Middesk
+ *   and Sumsub. GLEIF is none of them. Measured: Persona's KYB guide opens by
+ *   telling you to contact their team and signup needs a business email this
+ *   build does not have; Middesk and Sumsub KYB are both behind a sales
+ *   conversation; Stripe Connect was the fourth candidate and is gated behind
+ *   platform onboarding (DECISION 017). So the leg is live AND substituted, and
+ *   the badge says both words rather than picking the flattering one.
+ *
+ * `limits` and `reachableStatuses` are the two fields that keep this from being
+ * marketing. The first says what a hit does NOT prove; the second says which
+ * statuses the provider will actually produce, which for Stripe Identity is
+ * fewer than its own mapping table contains.
+ * ===========================================================================
+ */
+const DIRECTOR_LIMITS_STRIPE: readonly string[] = [
+  "it verifies a DOCUMENT and a selfie — it does not prove that person controls this business",
+  "it does not check the ownership tree or beneficial ownership",
+  "it does not screen sanctions, PEP or adverse media",
+];
+
+const DIRECTOR_LIMITS_SIMULATED: readonly string[] = [
+  "no identity document was examined by anyone, because nobody was asked",
+];
+
+/**
+ * MEASURED 2026-09-10, and the reason this field exists at all.
+ *
+ * Cancelling a Stripe Identity session ERASES its `last_error`, so the only
+ * terminal state their API will sell us is one with the refusal deleted out of
+ * it. A cancel with no refusal to point at is not a decline. The director leg
+ * therefore cannot reach `rejected` on real evidence, and the composite's
+ * `rejected` is earned on the registry leg instead — see
+ * `stripeIdentityStatusToKyb` for the full transcript.
+ */
+const STRIPE_IDENTITY_REACHABILITY =
+  "MEASURED: `rejected` is not reachable on this leg. Stripe will not hand back a terminal session that still carries its refusal — POST /cancel returns 200 with `last_error` set to null — and a cancelled session with no refusal in it is not a decline. A `rejected` on this book is the REGISTRY leg's: GLEIF answering INACTIVE/RETIRED for a withdrawn company, or 404 for an asserted LEI that does not exist.";
+
+const GLEIF_REACHABILITY =
+  "All four are reachable and three of them have been produced live: approved (Apple Inc., California Secretary of State entry 806592), rejected (RESILIENCE PARENT, LLC — entity INACTIVE, registration RETIRED; and HTTP 404 on an asserted LEI), needs_review (every seeded business, plus LAPSED registrations and PARTIALLY_CORROBORATED records). `pending` arrives only when GLEIF itself does not answer.";
+
 function toLegWiringView(leg: WiredLeg): LegWiringView {
+  const isGleif = leg.provider.name === GLEIF_PROVIDER_NAME;
+  const isStripeIdentity = leg.provider.name === STRIPE_IDENTITY_PROVIDER_NAME;
+
+  /**
+   * COMPLIANCE IS READ OFF THE LADDER, NOT OFF A HARD-CODED NAME.
+   *
+   * `onBrief` is a property of the rung that won, so the day the Persona KYB
+   * rung is selected this badge flips to "on the brief's menu" with no edit
+   * here — and if somebody adds a rung and forgets to say whether the brief
+   * names it, the honest default is that it does not.
+   */
+  const rung = leg.leg === "business_registry" ? rungForProviderName(leg.provider.name) : undefined;
+
+  const compliance: LegWiringView["compliance"] =
+    leg.mode === "simulated"
+      ? "simulated"
+      : leg.leg === "business_registry"
+        ? (rung?.onBrief ?? false)
+          ? "on-brief"
+          : "substituted"
+        : "on-brief";
+
   return {
     leg: leg.leg,
     label: KYB_LEG_LABEL[leg.leg],
@@ -448,6 +693,32 @@ function toLegWiringView(leg: WiredLeg): LegWiringView {
     evidence: leg.evidence,
     reason: leg.reason,
     missingEnv: leg.missingEnv,
+    compliance,
+    complianceLabel:
+      compliance === "on-brief"
+        ? "on the brief's menu"
+        : compliance === "substituted"
+          ? "LIVE, but a SUBSTITUTION"
+          : "SIMULATED — nobody asked",
+    complianceNote:
+      compliance === "on-brief"
+        ? "The brief's KYC identity menu names Persona, Sumsub, Stripe Identity and Onfido. This leg is Stripe Identity, so it is one of the named options — compliant, not substituted."
+        : compliance === "substituted"
+          ? "The brief names Persona KYB, Middesk and Sumsub for this slot and GLEIF is none of them. All three were measured shut: Persona's KYB guide starts with \"contact our team\" and signup wants a business email this build has not got; Middesk and Sumsub KYB are behind a sales conversation; Stripe Connect, the fourth candidate, is gated behind platform onboarding. So this leg is a real third-party registry queried live AND an explicit substitution. Both, in that order, every time it is named."
+          : "Nobody was asked. This leg is a labelled simulator and its answers are admissible as a demonstration and as nothing else.",
+    limits: isGleif
+      ? GLEIF_LIMITS
+      : isStripeIdentity
+        ? DIRECTOR_LIMITS_STRIPE
+        : DIRECTOR_LIMITS_SIMULATED,
+    reachableStatuses: isStripeIdentity
+      ? ["approved", "pending", "needs_review"]
+      : ["approved", "pending", "needs_review", "rejected"],
+    reachabilityNote: isStripeIdentity
+      ? STRIPE_IDENTITY_REACHABILITY
+      : isGleif
+        ? GLEIF_REACHABILITY
+        : null,
   };
 }
 
@@ -579,12 +850,21 @@ async function loadBusiness(businessId: string, conn: Sql): Promise<BusinessRow 
   return rows[0] ?? null;
 }
 
-function inputFor(business: BusinessRow): CreateKybVerificationInput {
+/**
+ * The `business` table holds a legal name and an EIN and nothing else, so an
+ * asserted LEI can only come from the operator, per action. It is threaded
+ * through rather than stored: `kyb_verification_leg` records what a PROVIDER
+ * said, and an applicant's claim about themselves is not that. What survives is
+ * the answer — the leg's `provider_reference` becomes the LEI GLEIF confirmed,
+ * or `gleif.notfound.<LEI>` when GLEIF says that identifier does not exist.
+ */
+function inputFor(business: BusinessRow, lei: string | null): CreateKybVerificationInput {
   return {
     referenceId: business.id,
     businessName: business.legal_name,
     taxIdentificationNumber: business.ein,
     registeredAddress: PLACEHOLDER_REGISTERED_ADDRESS,
+    ...(lei === null || lei.trim() === "" ? {} : { lei: lei.trim().toUpperCase() }),
   };
 }
 
@@ -593,6 +873,12 @@ export interface WireOptions {
   readonly conn?: Sql | undefined;
   readonly provider?: CompositeKybProvider | undefined;
   readonly log?: Logger | undefined;
+  /**
+   * A Legal Entity Identifier the operator says belongs to this business.
+   * Optional; absent means the registry leg falls back to a name search, whose
+   * miss is `needs_review` and never an approval. See ./gleif.ts.
+   */
+  readonly lei?: string | undefined;
 }
 
 /**
@@ -627,7 +913,7 @@ export async function beginVerification(
   const provider = options.provider ?? createWiredKybProvider(options.env ?? process.env);
   let result: CompositeKybResult;
   try {
-    result = await provider.begin(inputFor(business));
+    result = await provider.begin(inputFor(business, options.lei ?? null));
   } catch (error) {
     // The composite converts a leg failure into a `pending` leg, so reaching
     // here means something outside a leg broke. Nothing was written.
@@ -700,6 +986,248 @@ export async function refreshVerification(
   return ok(toOutcome(business, result));
 }
 
+/**
+ * ASK THE REGISTRY AGAIN, ABOUT A SPECIFIC IDENTIFIER.
+ *
+ * ===========================================================================
+ * This is the third verb, and it exists because of an asymmetry in what the two
+ * legs cost.
+ *
+ * `begin()` refuses a business that already has evidence on file, because the
+ * DIRECTOR leg is a real `POST` to Stripe and a screen that created a session
+ * per click would litter a live account. The REGISTRY leg has no such cost:
+ * GLEIF is a public read, it creates nothing, and repeating it is free.
+ *
+ * What makes this worth a verb rather than a parameter is that it asks a
+ * DIFFERENT QUESTION. Without an LEI the registry leg does a name search, whose
+ * miss is `needs_review` — correct, and uninformative. With one, the applicant
+ * has ASSERTED an identifier, and a registry can be asked about an assertion
+ * directly: it confirms it, or it contradicts it, or it has never heard of it,
+ * and those are three different answers rather than three shades of one.
+ *
+ * The claim is not stored. `kyb_verification_leg` records what a provider said,
+ * and "the applicant says their LEI is X" is not that. What lands in the table
+ * is GLEIF's answer, under GLEIF's name, with GLEIF's own code — and, when the
+ * identifier does not exist, a `gleif.notfound.` reference that says so in the
+ * id itself.
+ *
+ * It appends. It never edits: the previous registry observation stays exactly
+ * where it was, and "latest wins" is a fold over the table rather than an
+ * UPDATE. So a business whose registry leg went miss -> confirmed has both rows,
+ * in order, with both timestamps.
+ * ===========================================================================
+ */
+export async function recheckRegistry(
+  businessId: string,
+  options: WireOptions = {},
+): Promise<Result<VerificationOutcome, ErrorShape>> {
+  const conn = options.conn ?? sql;
+  const env = options.env ?? process.env;
+  const log = (options.log ?? rootLogger).child({ businessId });
+
+  const business = await loadBusiness(businessId, conn);
+  if (business === null) {
+    return fail("BUSINESS_NOT_FOUND", "No business on this book has that id. Nothing was asked of anyone.");
+  }
+
+  const legs = (await latestLegs(conn, businessId)).get(businessId) ?? [];
+  const director = legs.find((l) => l.leg === "director_kyc");
+  if (director === undefined) {
+    return fail(
+      "KYB_NOT_STARTED",
+      "There is no verification on file. Start one first — a registry answer on its own is one leg, and the view reads a single leg as pending however good that leg is.",
+    );
+  }
+
+  const selection = selectWiredLegs(env);
+  const registryProvider = selection.registry.provider;
+  const input = inputFor(business, options.lei ?? null);
+
+  let registryLeg: KybLegResult;
+  try {
+    registryLeg = await registryProvider.begin(input);
+  } catch (error) {
+    // Same rule as everywhere else in this module: a provider that did not
+    // answer produces a leg WE wrote, so it is labelled simulated and it is
+    // pending. There is no silent fallback to a plausible answer.
+    log.warn("kyb.registry.recheck.failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    registryLeg = failedLeg("business_registry", registryProvider.name, error);
+  }
+
+  const result = CompositeKybResult.rehydrate(businessId, [
+    legResultFromView(director),
+    registryLeg,
+  ]);
+
+  await conn`
+    INSERT INTO kyb_verification_leg
+      (business_id, leg, provider, provider_reference, status, evidence, raw_status, checks, observed_at)
+    VALUES
+      (${businessId}::uuid,
+       ${"business_registry"}::kyb_leg,
+       ${legRow(businessId, registryLeg).provider},
+       ${legRow(businessId, registryLeg).providerReference},
+       ${registryLeg.status}::kyb_status,
+       ${registryLeg.evidence}::kyb_evidence,
+       ${registryLeg.rawStatus},
+       ${conn.json(checksAsJson(registryLeg.checks))},
+       ${registryLeg.observedAt}::timestamptz)`;
+
+  log.info("kyb.registry.recheck.recorded", {
+    provider: registryLeg.provider,
+    status: registryLeg.status,
+    evidence: registryLeg.evidence,
+    assertedLei: (options.lei ?? "").trim() !== "",
+  });
+
+  return ok(toOutcome(business, result));
+}
+
+// ---------------------------------------------------------------------------
+// 4b. ASK THE REGISTRY ABOUT SOMETHING THAT IS NOT ON THIS BOOK
+// ---------------------------------------------------------------------------
+
+/**
+ * ===========================================================================
+ * THE REGISTRY PROBE, AND WHY IT IS A SEPARATE VERB THAT WRITES NOTHING.
+ *
+ * Every business seeded on this book is fictional, so GLEIF answers `not in the
+ * LEI registry` for all three, and that is the CORRECT answer — a miss is
+ * evidence of nothing and can never be an approval. It is also, on its own, a
+ * screen that only ever shows one outcome, which would leave a reviewer unable
+ * to tell a registry that works from a registry that always shrugs.
+ *
+ * The dishonest fix is to seed a real company's name onto a demo row and let
+ * the screen imply we verified it. This is the honest one: a probe that asks
+ * the SAME live adapter about any name or LEI a reviewer types, renders the
+ * verdict with its citation, and is labelled — in the type, in the action and
+ * on the screen — as a question about the registry rather than a verification
+ * of anybody.
+ *
+ * IT WRITES NOTHING. No row, no leg, no status. `kyb_verification_leg` records
+ * what a provider said ABOUT A BUSINESS ON THIS BOOK, and an answer about Apple
+ * Inc. is not that. A probe that persisted would be one INSERT away from a
+ * business whose evidence cites a company it has no relationship with.
+ * ===========================================================================
+ */
+export interface RegistryProbeView {
+  /** Exactly what was asked, echoed back. */
+  readonly query: string;
+  /** Which question it became: an exact identifier lookup, or a name search. */
+  readonly kind: "lei" | "name";
+  /** The verdict, in the same shape a real leg is rendered in. */
+  readonly leg: LegView;
+}
+
+/**
+ * The sentinel `referenceId` a probe carries.
+ *
+ * It is not a business id and is not a uuid, deliberately: if this value ever
+ * reached the `kyb_verification_leg` INSERT it would be refused by the column
+ * type rather than filed against a real row. The type system says a probe does
+ * not persist; this makes the database say it too.
+ */
+export const REGISTRY_PROBE_REFERENCE_ID = "probe.not-a-business";
+
+/**
+ * Ask the live registry adapter one question. Reads only.
+ *
+ * The country is asserted as US because this is a US business-account product
+ * and the cross-border guard in `gleif.ts` needs something to compare against —
+ * it is what makes an Irish company called "Apple Computer, Inc." come back
+ * `needs_review` instead of `approved`.
+ */
+export async function probeRegistry(
+  query: string,
+  options: {
+    readonly env?: EnvBag;
+    readonly log?: Logger;
+    /**
+     * Test seam, matching the one every other verb in this module has. The
+     * suite injects a recording stub so it can assert HOW the adapter was
+     * asked — `refresh` for an identifier, `begin` for a name — which is a
+     * claim about this function and not about GLEIF's data.
+     */
+    readonly registryProvider?: KybLegProvider<"live"> | undefined;
+  } = {},
+): Promise<Result<RegistryProbeView, ErrorShape>> {
+  const trimmed = query.trim();
+  if (trimmed === "") {
+    return fail("PROBE_EMPTY", "Nothing was asked, so nothing was sent to the registry.");
+  }
+
+  const registry =
+    options.registryProvider ?? selectWiredLegs(options.env ?? process.env).registry.provider;
+  const asLei = isLeiFormat(trimmed);
+
+  const input: CreateKybVerificationInput = {
+    referenceId: REGISTRY_PROBE_REFERENCE_ID,
+    businessName: trimmed,
+    taxIdentificationNumber: "(not asserted — a probe carries no EIN)",
+    registeredAddress: PLACEHOLDER_REGISTERED_ADDRESS,
+  };
+
+  let leg: KybLegResult;
+  try {
+    /**
+     * AN IDENTIFIER LOOKUP ASSERTS NO NAME, so it goes through `refresh()`.
+     *
+     * The bug this replaced: `begin()` takes an application, and an application
+     * always carries the applicant's `businessName` for the adapter to
+     * re-verify a candidate against. A probe has no applicant — the only thing
+     * typed was the LEI — so passing the LEI string as the name made every
+     * identifier lookup re-verify a real legal name against twenty random
+     * characters and come back `lei_name_mismatch`. Measured: LEI
+     * 254900ZT6ZFUC887FB87 is a decline (entity INACTIVE, registration RETIRED)
+     * and the probe reported it as a name mismatch, hiding the very outcome
+     * this panel exists to demonstrate.
+     *
+     * `refresh()` is the verb for "re-read this identifier, asserting nothing
+     * about who it belongs to", which is exactly what a probe is. It asserts no
+     * country either — the cross-border guard is a check on an APPLICATION, and
+     * there is no application here.
+     */
+    leg = asLei ? await registry.refresh(trimmed.toUpperCase()) : await registry.begin(input);
+  } catch (error) {
+    // Same rule as everywhere else: a provider that did not answer produces a
+    // leg WE wrote, labelled simulated and pending. No silent fallback.
+    (options.log ?? rootLogger).warn("kyb.registry.probe.failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    leg = failedLeg("business_registry", registry.name, error);
+  }
+
+  return ok({
+    query: trimmed,
+    kind: asLei ? "lei" : "name",
+    leg: toLegViewFromResult(leg),
+  });
+}
+
+/**
+ * A stored leg row, back into the shape the composite folds.
+ *
+ * `hostedUrl` is null on the way back and that is correct rather than lossy: a
+ * provider's hosted URL is single-use and short-lived, which is why it is never
+ * stored, so a leg read from the table genuinely has none.
+ */
+function legResultFromView(leg: LegView): KybLegResult {
+  return {
+    leg: leg.leg,
+    provider: leg.provider,
+    reference: leg.reference,
+    referenceId: null,
+    status: leg.status,
+    rawStatus: leg.rawStatus,
+    checks: leg.checks,
+    hostedUrl: null,
+    observedAt: leg.observedAt,
+    evidence: leg.evidence,
+  };
+}
+
 function toOutcome(business: BusinessRow, result: CompositeKybResult): VerificationOutcome {
   const legs = result.legs.map(toLegViewFromResult);
   const director = result.directorLeg;
@@ -724,6 +1252,10 @@ function toLegViewFromResult(leg: KybLegResult): LegView {
     status: leg.status,
     evidence: leg.evidence,
     rawStatus: leg.rawStatus,
+    // Both are READ OUT OF the evidence rather than passed alongside it, so the
+    // code the screen prints is the code that was stored, not a second copy.
+    providerCode: providerCodeFromChecks(leg.checks),
+    citation: citationFromChecks(leg.checks),
     checks: leg.checks,
     observedAt: leg.observedAt,
   };
@@ -817,6 +1349,7 @@ function toLegViewFromRow(row: LegRowRead): LegView | null {
   const evidence = asEvidence(row.evidence);
   if (leg === null || status === null || evidence === null) return null;
 
+  const checks = parseChecks(row.checks);
   return {
     leg,
     label: KYB_LEG_LABEL[leg],
@@ -825,7 +1358,9 @@ function toLegViewFromRow(row: LegRowRead): LegView | null {
     status,
     evidence,
     rawStatus: row.raw_status,
-    checks: parseChecks(row.checks),
+    providerCode: providerCodeFromChecks(checks),
+    citation: citationFromChecks(checks),
+    checks,
     observedAt: row.observed_at.toISOString(),
   };
 }
@@ -865,17 +1400,21 @@ function toBusinessView(
   const status = asKybStatus(row.kyb_status);
   const evidence = asEvidence(row.kyb_evidence);
 
+  // The view's CASE guarantees a value; the fallbacks are the same fail-closed
+  // reading the gate applies to a row it cannot parse.
+  const derivedStatus = status ?? "needs_review";
+  const derivedEvidence = evidence ?? "simulated";
+
   return {
     businessId: row.business_id,
     legalName: row.legal_name,
     ein: row.ein,
-    // The view's CASE guarantees a value; the fallbacks are the same
-    // fail-closed reading the gate applies to a row it cannot parse.
-    status: status ?? "needs_review",
-    evidence: evidence ?? "simulated",
+    status: derivedStatus,
+    evidence: derivedEvidence,
     legsOnFile: Number(row.legs_on_file),
     decidedAt: row.decided_at === null ? null : row.decided_at.toISOString(),
     legs,
+    verdict: verdictView(derivedStatus, derivedEvidence, legs),
     gate: gateView(canTransact(state, policy)),
     gateIfLiveRequired: gateView(canTransact(state, { requireLiveEvidence: true })),
     depositAccount: account,

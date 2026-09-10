@@ -30,16 +30,21 @@ import { rootLogger, type Logger } from '../log';
 import type { EnvBag } from '../webhooks/route-handler';
 import { CompositeKybProvider } from './composite';
 import { PersonaDirectorKycProvider } from './persona';
+import { chooseRegistryProvider, REGISTRY_ENV, rungForProviderName } from './registry-precedence';
 import { SimulatedDirectorKycProvider, SimulatedRegistryProvider } from './simulated-registry';
-import { StripeConnectRegistryProvider } from './stripe-registry';
 import { KybConfigError, KYB_LEG_LABEL, type Evidence, type KybLegKind, type KybLegProvider } from './types';
 
 export const KYB_ENV = {
-  personaApiKey: 'PERSONA_API_KEY',
+  /**
+   * The registry ladder's variables first, so one object names every variable
+   * this module reads. `personaApiKey` and `stripeSecretKey` are declared there
+   * and are NOT restated below: two spellings of one variable name is how a
+   * rename half-lands.
+   */
+  ...REGISTRY_ENV,
   personaInquiryTemplateId: 'PERSONA_INQUIRY_TEMPLATE_ID',
   personaVerificationTemplateId: 'PERSONA_VERIFICATION_TEMPLATE_ID',
   personaEnvironmentId: 'PERSONA_ENVIRONMENT_ID',
-  stripeSecretKey: 'STRIPE_SECRET_KEY',
   /**
    * Comma-separated legs to force onto the simulator even when a key exists:
    * `business_registry`, `director_kyc`, or `all`. The documented escape hatch
@@ -53,7 +58,19 @@ export const KYB_ENV = {
 /** Env vars each leg needs before it can run live. */
 export const KYB_REQUIRED_ENV: Record<KybLegKind, readonly string[]> = {
   director_kyc: [KYB_ENV.personaApiKey, KYB_ENV.personaInquiryTemplateId],
-  business_registry: [KYB_ENV.stripeSecretKey],
+  /**
+   * EMPTY, AND NOT AN OVERSIGHT. The registry leg runs down a PRECEDENCE LADDER
+   * (./registry-precedence.ts) whose last live rung is GLEIF, and GLEIF's API
+   * needs no key, no account and no header. So there is no variable whose
+   * absence degrades this leg: every variable on that ladder UPGRADES it, to a
+   * vendor named by the brief. `requiredEnv` means "absent and this leg is a
+   * simulator", and nothing here has that property.
+   *
+   * The upgrade variables are not invisible — `REGISTRY_PRECEDENCE` is the list,
+   * `kybHealthReport()` prints the rung that won, and docs/KYB.md gives the two
+   * variables that move this leg to Persona KYB.
+   */
+  business_registry: [],
 };
 
 export type KybMode = 'live' | 'simulated';
@@ -132,33 +149,48 @@ function selectDirectorLeg(env: EnvBag): KybLegSelection {
   };
 }
 
+/**
+ * The registry leg, live by default, chosen off the precedence ladder.
+ *
+ * There is no credential branch HERE because the branching is the ladder's job
+ * and lives in exactly one file (./registry-precedence.ts), read by this
+ * function and by `selectWiredLegs()` in ./wire.ts. Two surfaces walking one
+ * table cannot describe the same leg differently, which is the failure this
+ * codebase has caught five times.
+ *
+ * The only way this leg becomes simulated is `KYB_FORCE_SIMULATED`, and it then
+ * says so.
+ */
 function selectRegistryLeg(env: EnvBag): KybLegSelection {
   const required = KYB_REQUIRED_ENV.business_registry;
-  const missingEnv = required.filter((key) => readEnv(env, key) === undefined);
-  const forced = isForced('business_registry', env);
 
-  if (forced || missingEnv.length > 0) {
+  if (isForced('business_registry', env)) {
     return {
       leg: 'business_registry',
       mode: 'simulated',
       provider: new SimulatedRegistryProvider(),
       evidence: 'simulated',
       requiredEnv: required,
-      missingEnv,
-      reason: forced
-        ? `forced to the simulator by ${KYB_ENV.forceSimulated}`
-        : `no live registry check: ${missingEnv.join(', ')} not set`,
+      missingEnv: [],
+      reason: `forced to the simulator by ${KYB_ENV.forceSimulated}`,
     };
   }
 
+  const choice = chooseRegistryProvider(env);
   return {
     leg: 'business_registry',
     mode: 'live',
-    provider: new StripeConnectRegistryProvider({ secretKey: mustRead(env, KYB_ENV.stripeSecretKey) }),
+    provider: choice.provider,
     evidence: 'live',
     requiredEnv: required,
     missingEnv: [],
-    reason: "Stripe Connect test-mode company verification (real registry check, not a KYB vendor)",
+    // A blocked rung is reported IN THE REASON, not swallowed: a deployment
+    // that set MIDDESK_API_KEY and is still running GLEIF must say so wherever
+    // it names this leg, or the key looks like it took effect.
+    reason:
+      choice.blocked.length === 0
+        ? choice.rung.reason
+        : `${choice.rung.reason} — BUT NOTE: ${choice.blocked.join(' ')}`,
   };
 }
 
@@ -287,7 +319,11 @@ export function kybHealthReport(env: EnvBag = process.env): KybHealthReport {
     legs,
     note:
       ceiling === 'live'
-        ? 'Both legs are live third-party integrations. Persona verifies the director; Stripe Connect test mode performs the company registry check.'
+        ? `Both legs are live third-party integrations, and they are not equally compliant with the brief. DIRECTOR KYC is on the brief's own menu (Persona / Sumsub / Stripe Identity / Onfido) and needs no apology. The BUSINESS REGISTRY leg is answered by ${selection.registry.provider.name}, chosen off the registry precedence ladder${
+            rungForProviderName(selection.registry.provider.name)?.onBrief === true
+              ? ", a vendor the brief names for this slot — so this half is compliant too"
+              : ": a SUBSTITUTION, because all three KYB vendors the brief names (Persona KYB, Middesk, Sumsub KYB) are gated behind a sales conversation. GLEIF is the Global LEI index — it cites the government register each record was validated against, and proves neither control of the entity, nor beneficial ownership, nor sanctions, nor an EIN. Every vendor rung sits above it, so a credential displaces it without a code change"
+          }. A live CEILING is a statement about the wiring and never a claim that anything has been verified.`
         : `At least one leg is simulated, so every verification is labelled simulated. Missing: ${legs
             .flatMap((l) => l.missingEnv)
             .join(', ') || '(none — a leg was forced to the simulator)'}.`,
@@ -367,6 +403,7 @@ export {
 export {
   legFromPersonaEvent,
   PersonaDirectorKycProvider,
+  PersonaKybRegistryProvider,
   personaDemoScript,
   personaStatusToKyb,
   PERSONA_EVENTS,
@@ -375,6 +412,35 @@ export {
   type PersonaDemoOutcome,
   type PersonaSimulateAction,
 } from './persona';
+export {
+  chooseRegistryProvider,
+  REGISTRY_ENV,
+  REGISTRY_PRECEDENCE,
+  rungForProviderName,
+  type RegistryRung,
+} from './registry-precedence';
+export {
+  decodeGleifReference,
+  describeSearch,
+  gleifRecordToVerdict,
+  GleifRegistryProvider,
+  GLEIF_CODES,
+  GLEIF_LEG_REASON,
+  GLEIF_LIMITS,
+  GLEIF_MISS_HEADLINE,
+  GLEIF_PROVIDER_NAME,
+  isLeiFormat,
+  namesMatch,
+  nameMatchesRecord,
+  normaliseEntityName,
+  placeOf,
+  readRecord as readGleifRecord,
+  type GleifAuthority,
+  type GleifConfig,
+  type GleifRecordView,
+  type GleifSearch,
+  type GleifVerdict,
+} from './gleif';
 export {
   legFromStripeAccountEvent,
   normaliseEin,
@@ -404,8 +470,12 @@ export {
   degradeEvidence,
   DEFAULT_TRANSACT_POLICY,
   EVIDENCE_LABEL,
+  citationFromChecks,
   isEvidence,
   isKybStatus,
+  providerCodeFromChecks,
+  KYB_CITATION_CHECK,
+  KYB_PROVIDER_CODE_CHECK,
   KybConfigError,
   KybGateError,
   KybProviderError,

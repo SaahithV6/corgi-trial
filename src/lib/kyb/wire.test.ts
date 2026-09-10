@@ -39,6 +39,7 @@ vi.hoisted(() => {
     "postgresql://placeholder:placeholder@127.0.0.1:5432/placeholder";
 });
 
+import { selectKybLegs } from "./index";
 import { SimulatedRegistryProvider } from "./simulated-registry";
 import { CompositeKybProvider } from "./composite";
 import type { CreateKybVerificationInput, KybLegProvider, KybLegResult } from "./types";
@@ -49,6 +50,7 @@ import {
   identitySessionToLeg,
   legRow,
   PLACEHOLDER_REGISTERED_ADDRESS,
+  probeRegistry,
   selectWiredLegs,
   STRIPE_IDENTITY_STATUS_MAP,
   StripeIdentityDirectorKycProvider,
@@ -282,23 +284,88 @@ describe("selectWiredLegs", () => {
     expect(selection.director.reason).toContain("KYB_FORCE_SIMULATED");
   });
 
-  it("always wires the registry leg to the simulator, with the measured reason", () => {
+  it("wires the registry leg live, on the ladder's credential-free floor", () => {
     for (const env of [{}, { STRIPE_SECRET_KEY: "sk_test_x" }]) {
       const selection = selectWiredLegs(env);
-      expect(selection.registry.provider.name).toBe("simulated-registry");
-      expect(selection.registry.evidence).toBe("simulated");
-      expect(selection.registry.reason).toContain("signed up for Connect");
+      expect(selection.registry.provider.name).toBe("gleif-lei");
+      expect(selection.registry.evidence).toBe("live");
+      expect(selection.registry.missingEnv).toEqual([]);
+      // Live AND a substitution, and the reason has to say both.
+      expect(selection.registry.reason).toContain("SUBSTITUTE");
     }
   });
 
-  it("never claims a live ceiling, because the registry leg can never be live here", () => {
-    expect(wiringView({ STRIPE_SECRET_KEY: "sk_test_x" }).evidenceCeiling).toBe("simulated");
+  it("puts the same ladder under this screen as under /api/health", () => {
+    // The failure this pins: two surfaces choosing a registry provider by two
+    // different rules, so a leg reads live on one and simulated on the other.
+    for (const env of [
+      {},
+      { STRIPE_SECRET_KEY: "sk_test_x" },
+      { STRIPE_SECRET_KEY: "sk_test_x", STRIPE_CONNECT_KYB: "1" },
+      { PERSONA_API_KEY: "k", PERSONA_KYB_TEMPLATE_ID: "itmpl_B" },
+      { MIDDESK_API_KEY: "mk" },
+      { KYB_FORCE_SIMULATED: "business_registry" },
+    ]) {
+      expect(selectWiredLegs(env).registry.provider.name).toBe(
+        selectKybLegs(env).registry.provider.name,
+      );
+    }
+  });
+
+  it("a brief-named vendor credential displaces GLEIF with no code change", () => {
+    const selection = selectWiredLegs({
+      STRIPE_SECRET_KEY: "sk_test_x",
+      PERSONA_API_KEY: "persona_sandbox_k",
+      PERSONA_KYB_TEMPLATE_ID: "itmpl_BUSINESS",
+    });
+    expect(selection.registry.provider.name).toBe("persona-kyb-inquiry");
+    // ...and the compliance badge follows the RUNG, so it stops saying
+    // "substitution" the moment a named vendor answers.
+    const view = wiringView({
+      STRIPE_SECRET_KEY: "sk_test_x",
+      PERSONA_API_KEY: "persona_sandbox_k",
+      PERSONA_KYB_TEMPLATE_ID: "itmpl_BUSINESS",
+    });
+    expect(view.registry.compliance).toBe("on-brief");
+  });
+
+  it("labels GLEIF live AND substituted, never one without the other", () => {
+    const view = wiringView({ STRIPE_SECRET_KEY: "sk_test_x" });
+    expect(view.registry.mode).toBe("live");
+    expect(view.registry.evidence).toBe("live");
+    expect(view.registry.compliance).toBe("substituted");
+    expect(view.registry.complianceLabel).toContain("SUBSTITUTION");
+    expect(view.registry.complianceNote).toContain("Middesk");
+    // And it prints what a hit does not prove, rather than filing it away.
+    expect(view.registry.limits.join(" ")).toContain("beneficial ownership");
+  });
+
+  it("does not advertise a director rejection Stripe will not produce", () => {
+    const view = wiringView({ STRIPE_SECRET_KEY: "sk_test_x" });
+    expect(view.director.reachableStatuses).not.toContain("rejected");
+    expect(view.director.reachabilityNote).toContain("last_error");
+    // The registry leg CAN reach all four, and says so.
+    expect(view.registry.reachableStatuses).toContain("rejected");
+  });
+
+  it("claims a live ceiling only when BOTH legs are live", () => {
+    // Registry live, director live (Stripe Identity): a live ceiling, which is
+    // a statement about the wiring and not about any verification.
+    expect(wiringView({ STRIPE_SECRET_KEY: "sk_test_x" }).evidenceCeiling).toBe("live");
+    // Director simulated: the ceiling is the worst leg.
+    expect(wiringView({}).evidenceCeiling).toBe("simulated");
   });
 
   it("reports the disagreement with /api/health instead of smoothing it over", () => {
-    expect(wiringView({ STRIPE_SECRET_KEY: "sk_test_x" }).healthDisagreement).toContain(
-      "KYB_FORCE_SIMULATED=business_registry",
-    );
+    // Both surfaces walk the same registry ladder, so the registry leg cannot
+    // disagree. The DIRECTOR leg still can: `selectKybLegs()` knows only about
+    // Persona and calls it simulated, while this screen reaches for Stripe
+    // Identity. That is a real difference and it is reported rather than hidden.
+    const view = wiringView({ STRIPE_SECRET_KEY: "sk_test_x" });
+    expect(view.healthDisagreement).toContain("director=simulated");
+    expect(view.healthDisagreement).toContain("director=live");
+    // With no Stripe key, neither surface upgrades the director leg, so there
+    // is nothing to report.
     expect(wiringView({}).healthDisagreement).toBeNull();
   });
 });
@@ -356,9 +423,107 @@ describe("the composite this deployment builds", () => {
   });
 
   it("builds from the environment without touching a network", () => {
+    // Constructing an adapter opens no socket: `GleifRegistryProvider` holds a
+    // base URL and a timeout and nothing else, so this asserts the wiring
+    // without asking anybody's server anything.
     const composite = createWiredKybProvider({ STRIPE_SECRET_KEY: "sk_test_x" });
     expect(composite.wiring.director_kyc.provider).toBe("stripe-identity");
-    expect(composite.wiring.business_registry.provider).toBe("simulated-registry");
+    expect(composite.wiring.business_registry.provider).toBe("gleif-lei");
+    expect(composite.wiring.business_registry.evidence).toBe("live");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5b. THE REGISTRY PROBE — a question about the registry, not about anybody
+// ---------------------------------------------------------------------------
+
+describe("probeRegistry", () => {
+  /** A registry stub that records HOW it was asked, not just what it answered. */
+  function spy(): { provider: KybLegProvider<"live">; calls: string[] } {
+    const calls: string[] = [];
+    const leg = (reference: string): KybLegResult<"live"> => ({
+      leg: "business_registry",
+      provider: "gleif-lei",
+      reference,
+      referenceId: null,
+      status: "rejected",
+      rawStatus: "INACTIVE/RETIRED",
+      checks: [],
+      hostedUrl: null,
+      observedAt: "2026-09-10T18:00:00.000Z",
+      evidence: "live",
+    });
+    return {
+      calls,
+      provider: {
+        leg: "business_registry",
+        name: "gleif-lei",
+        evidence: "live",
+        begin: (input: CreateKybVerificationInput) => {
+          calls.push(`begin:${input.businessName}`);
+          return Promise.resolve(leg("by-name"));
+        },
+        refresh: (reference: string) => {
+          calls.push(`refresh:${reference}`);
+          return Promise.resolve(leg(reference));
+        },
+      } as unknown as KybLegProvider<"live">,
+    };
+  }
+
+  it("reads an LEI through refresh, because a probe asserts no applicant name", async () => {
+    // THE BUG THIS PINS. `begin()` takes an application, and an application
+    // always carries the applicant's name for the adapter to re-verify a
+    // candidate against. A probe has no applicant. Passing the typed LEI as
+    // the name made every identifier lookup compare a real legal name to
+    // twenty random characters and answer `lei_name_mismatch` — so LEI
+    // 254900ZT6ZFUC887FB87, a genuine decline (entity INACTIVE, registration
+    // RETIRED), reported as a name mismatch and hid the outcome the panel
+    // exists to demonstrate.
+    const { provider, calls } = spy();
+    const result = await probeRegistry("254900ZT6ZFUC887FB87", {
+      env: {},
+      registryProvider: provider,
+    });
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual(["refresh:254900ZT6ZFUC887FB87"]);
+    if (result.ok) expect(result.value.kind).toBe("lei");
+  });
+
+  it("reads a NAME through begin, where the name check belongs", async () => {
+    const { provider, calls } = spy();
+    const result = await probeRegistry("  Apple Inc.  ", { env: {}, registryProvider: provider });
+    expect(calls).toEqual(["begin:Apple Inc."]);
+    if (result.ok) {
+      expect(result.value.kind).toBe("name");
+      // Echoed back trimmed, so the screen quotes what was actually asked.
+      expect(result.value.query).toBe("Apple Inc.");
+    }
+  });
+
+  it("refuses an empty query without troubling anybody's server", async () => {
+    const { provider, calls } = spy();
+    const result = await probeRegistry("   ", { env: {}, registryProvider: provider });
+    expect(result.ok).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it("a provider that throws becomes an unanswered leg, never a plausible answer", async () => {
+    const provider = {
+      leg: "business_registry",
+      name: "gleif-lei",
+      evidence: "live",
+      begin: () => Promise.reject(new Error("ETIMEDOUT")),
+      refresh: () => Promise.reject(new Error("ETIMEDOUT")),
+    } as unknown as KybLegProvider<"live">;
+
+    const result = await probeRegistry("Apple Inc.", { env: {}, registryProvider: provider });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.leg.status).toBe("pending");
+    // WE wrote this row, so it is labelled ours.
+    expect(result.value.leg.evidence).toBe("simulated");
+    expect(result.value.leg.provider).toBe("gleif-lei-unavailable");
   });
 });
 

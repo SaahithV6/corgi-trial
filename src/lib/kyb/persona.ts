@@ -35,9 +35,11 @@
 
 import {
   KybProviderError,
+  KYB_PROVIDER_CODE_CHECK,
   type CreateKybVerificationInput,
   type KybAddress,
   type KybCheck,
+  type KybLegKind,
   type KybLegProvider,
   type KybLegResult,
   type KybPerson,
@@ -147,36 +149,40 @@ export const PERSONA_EVENTS: readonly string[] = [
 // ---------------------------------------------------------------------------
 
 /**
- * Live Persona sandbox KYC.
+/**
+ * ===========================================================================
+ * THE MACHINERY BOTH PERSONA LEGS SHARE.
  *
- * Typed `KybLegProvider<'live'>`: the compiler will not let this class return a
- * result labelled anything else, and the factory in ./index.ts will not build
- * it at all unless a key is present.
+ * Extracted so a Persona KYB template can be dropped in as a CREDENTIAL rather
+ * than a refactor. The Inquiries API is one endpoint — `POST /inquiries` with
+ * an `inquiry-template-id` — and the template decides what the inquiry collects.
+ * Auth, versioning, key-inflection, idempotency, the status vocabulary, the
+ * hosted-link fallback and the webhook envelope are identical for both, so they
+ * live here once and neither subclass reimplements any of them.
+ *
+ * `evidence` is `'live'` on the base, which is what holds every subclass to
+ * `KybLegProvider<'live'>`: no descendant can return a manufactured answer.
+ * ===========================================================================
  */
-export class PersonaDirectorKycProvider implements KybLegProvider<'live'> {
-  readonly leg = 'director_kyc' as const;
-  readonly name = 'persona-inquiry';
+abstract class PersonaInquiryProvider implements KybLegProvider<'live'> {
+  abstract readonly leg: KybLegKind;
+  abstract readonly name: string;
   readonly evidence = 'live' as const;
 
-  constructor(private readonly cfg: PersonaConfig) {}
+  protected constructor(protected readonly cfg: PersonaConfig) {}
 
-  /**
-   * Create an inquiry for the business's control person.
-   *
-   * `Idempotency-Key` is keyed on our business id, so a retried create returns
-   * the same inquiry instead of a second one — Persona's trial is metered and
-   * duplicate inquiries burn it.
-   *
-   * Inquiries expire 24h after creation by default, so this is called when the
-   * director is about to verify, not at signup.
-   */
+  /** The `fields` object for this leg's template. */
+  protected abstract fieldsFor(input: CreateKybVerificationInput): Record<string, string>;
+
+  /** Prefix for the idempotency key, so the two legs cannot collide. */
+  protected abstract idempotencyPrefix(): string;
+
   async begin(input: CreateKybVerificationInput): Promise<KybLegResult<'live'>> {
-    const director = input.associatedPeople?.[0];
     const body = {
       data: {
         attributes: {
           'inquiry-template-id': this.cfg.inquiryTemplateId,
-          fields: personaFields(director),
+          fields: this.fieldsFor(input),
         },
       },
       meta: {
@@ -188,7 +194,7 @@ export class PersonaDirectorKycProvider implements KybLegProvider<'live'> {
     };
 
     const response = await this.request('POST', '/inquiries', body, {
-      'Idempotency-Key': `kyb-director-${input.referenceId}`,
+      'Idempotency-Key': `${this.idempotencyPrefix()}-${input.referenceId}`,
     });
     return this.toLeg(response, input.referenceId);
   }
@@ -198,31 +204,7 @@ export class PersonaDirectorKycProvider implements KybLegProvider<'live'> {
     return this.toLeg(response, null);
   }
 
-  /**
-   * SANDBOX ONLY. Drive an inquiry through real lifecycle transitions.
-   *
-   * Every action fires the corresponding real webhook from Persona's servers to
-   * our deployed endpoint, which is the entire reason this provider is the
-   * primary: `pending`, `declined` and `needs_review` in the demo are Persona's
-   * transitions arriving over Persona's signature, not database edits.
-   *
-   * Metered against the trial's service cap. Never call it in a test loop.
-   */
-  async simulate(inquiryId: string, actions: readonly PersonaSimulateAction[]): Promise<KybLegResult<'live'>> {
-    const response = await this.request(
-      'POST',
-      `/inquiries/${encodeURIComponent(inquiryId)}/perform-simulate-actions`,
-      { meta: { 'simulate-actions': actions } },
-    );
-    return this.toLeg(response, null);
-  }
-
-  /** The four demo states, as ready-made action scripts. */
-  scriptFor(outcome: PersonaDemoOutcome): PersonaSimulateAction[] {
-    return personaDemoScript(outcome, this.cfg.verificationTemplateId);
-  }
-
-  private toLeg(response: unknown, fallbackReference: string | null): KybLegResult<'live'> {
+  protected toLeg(response: unknown, fallbackReference: string | null): KybLegResult<'live'> {
     const data = readObject(response, ['data']);
     const attributes = readObject(response, ['data', 'attributes']);
     const rawStatus = readString(attributes, ['status']);
@@ -233,14 +215,14 @@ export class PersonaDirectorKycProvider implements KybLegProvider<'live'> {
       referenceId: readString(attributes, ['reference-id']) ?? fallbackReference,
       status: personaStatusToKyb(rawStatus),
       rawStatus,
-      checks: personaChecks(rawStatus),
+      checks: personaChecks(rawStatus, this.leg),
       hostedUrl: this.hostedUrlFor(response, readString(data, ['id'])),
       observedAt: readString(attributes, ['updated-at']) ?? new Date().toISOString(),
       evidence: this.evidence,
     };
   }
 
-  private hostedUrlFor(response: unknown, inquiryId: string | null): string | null {
+  protected hostedUrlFor(response: unknown, inquiryId: string | null): string | null {
     // UNVERIFIED against a live response: `auto-create-one-time-link` is
     // documented, the exact key carrying the link back is not. Both plausible
     // locations are read, and the deterministic hosted-flow URL — which IS a
@@ -258,7 +240,7 @@ export class PersonaDirectorKycProvider implements KybLegProvider<'live'> {
     return `https://${host}/verify?${params.toString()}`;
   }
 
-  private async request(
+  protected async request(
     method: 'GET' | 'POST',
     path: string,
     body?: unknown,
@@ -308,6 +290,112 @@ export class PersonaDirectorKycProvider implements KybLegProvider<'live'> {
   }
 }
 
+/**
+ * ===========================================================================
+ * PERSONA KYB — THE BUSINESS-REGISTRY LEG, WIRED BUT NOT PROVEN.
+ *
+ * This class exists so that the day Corgi hands us a provisioned Persona KYB
+ * template, moving the registry leg off GLEIF is TWO ENVIRONMENT VARIABLES and
+ * no code change: `PERSONA_API_KEY` and `PERSONA_KYB_TEMPLATE_ID`. The
+ * precedence ladder in ./registry-precedence.ts already puts this rung above
+ * GLEIF, so it is picked up automatically.
+ *
+ * WHAT IS PROVEN AND WHAT IS NOT, because the difference is the whole point of
+ * this codebase. PROVEN: the endpoint, the auth, the versioning header, the
+ * status vocabulary and the webhook envelope are the Inquiries API's, shared
+ * with the director leg, exercised by this file's tests. NOT PROVEN: the field
+ * names a BUSINESS template expects, because Persona's KYB is gated behind a
+ * sales conversation (research/kyb/NOTES.md §1.3) and nobody here has ever seen
+ * one. The field mapping below is a best reading of Persona's business-field
+ * conventions and is labelled as such.
+ *
+ * That risk is bounded on purpose. Wrong field names produce an inquiry that
+ * collects the data from the human instead of being prefilled — Persona ignores
+ * unknown fields — so the failure mode is a longer hosted flow, not a wrong
+ * verdict. Nothing about the STATUS mapping depends on the fields, and
+ * `personaStatusToKyb` still refuses to let an unrecognised status reach
+ * `approved`.
+ *
+ * IT IS NOT SELECTED TODAY. No `PERSONA_KYB_TEMPLATE_ID` is set, so the ladder
+ * walks past this rung. If one is set and it turns out to be wrong, the leg
+ * fails loudly through `failedLeg()` — a `pending` leg labelled `simulated` —
+ * and never silently degrades into GLEIF wearing Persona's name.
+ * ===========================================================================
+ */
+export class PersonaKybRegistryProvider extends PersonaInquiryProvider {
+  readonly leg = 'business_registry' as const;
+  readonly name = 'persona-kyb-inquiry';
+
+  constructor(cfg: PersonaConfig) {
+    super(cfg);
+  }
+
+  protected override idempotencyPrefix(): string {
+    return 'kyb-registry';
+  }
+
+  /**
+   * UNVERIFIED FIELD NAMES. See the class header. Persona ignores fields a
+   * template does not declare, so the downside of being wrong here is a hosted
+   * flow that asks a human for what we could have prefilled.
+   */
+  protected override fieldsFor(input: CreateKybVerificationInput): Record<string, string> {
+    const address = input.registeredAddress;
+    return compactFields({
+      'business-name': input.businessName,
+      'business-tax-identification-number': input.taxIdentificationNumber,
+      'business-address-street-1': address.street1,
+      'business-address-street-2': address.street2,
+      'business-address-city': address.city,
+      'business-address-subdivision': address.subdivision,
+      'business-address-postal-code': address.postalCode,
+      'business-address-country-code': address.countryCode,
+    });
+  }
+}
+
+export class PersonaDirectorKycProvider extends PersonaInquiryProvider {
+  readonly leg = 'director_kyc' as const;
+  readonly name = 'persona-inquiry';
+
+  constructor(cfg: PersonaConfig) {
+    super(cfg);
+  }
+
+  protected override idempotencyPrefix(): string {
+    return 'kyb-director';
+  }
+
+  protected override fieldsFor(input: CreateKybVerificationInput): Record<string, string> {
+    return personaFields(input.associatedPeople?.[0]);
+  }
+
+  /**
+   * SANDBOX ONLY. Drive an inquiry through real lifecycle transitions.
+   *
+   * Every action fires the corresponding real webhook from Persona's servers to
+   * our deployed endpoint, which is the entire reason this provider is the
+   * primary: `pending`, `declined` and `needs_review` in the demo are Persona's
+   * transitions arriving over Persona's signature, not database edits.
+   *
+   * Metered against the trial's service cap. Never call it in a test loop.
+   */
+  async simulate(inquiryId: string, actions: readonly PersonaSimulateAction[]): Promise<KybLegResult<'live'>> {
+    const response = await this.request(
+      'POST',
+      `/inquiries/${encodeURIComponent(inquiryId)}/perform-simulate-actions`,
+      { meta: { 'simulate-actions': actions } },
+    );
+    return this.toLeg(response, null);
+  }
+
+  /** The four demo states, as ready-made action scripts. */
+  scriptFor(outcome: PersonaDemoOutcome): PersonaSimulateAction[] {
+    return personaDemoScript(outcome, this.cfg.verificationTemplateId);
+  }
+
+}
+
 // ---------------------------------------------------------------------------
 // 4. Webhooks: map an ALREADY-VERIFIED delivery
 // ---------------------------------------------------------------------------
@@ -346,7 +434,7 @@ export function legFromPersonaEvent(payload: unknown): KybLegResult<'live'> | nu
     referenceId: readString(attributes, ['reference-id']),
     status: personaStatusToKyb(rawStatus),
     rawStatus,
-    checks: personaChecks(rawStatus, eventName),
+    checks: personaChecks(rawStatus, 'director_kyc', eventName),
     hostedUrl: null,
     observedAt:
       readString(attributes, ['updated-at']) ??
@@ -409,7 +497,20 @@ export function personaDemoScript(
 // 6. Small helpers
 // ---------------------------------------------------------------------------
 
-function personaChecks(rawStatus: string | null, eventName?: string): readonly KybCheck[] {
+/**
+ * The named checks a Persona inquiry produces.
+ *
+ * `leg` decides the check NAME, because the two legs answer different
+ * questions and a screen that labelled a business inquiry `director_identity`
+ * would be mis-citing its own evidence. `provider_outcome` carries Persona's
+ * own status verbatim under the reserved name, so the screen prints their word
+ * rather than our paraphrase of it.
+ */
+function personaChecks(
+  rawStatus: string | null,
+  leg: KybLegKind,
+  eventName?: string,
+): readonly KybCheck[] {
   const status = personaStatusToKyb(rawStatus);
   const reasons = [
     `persona inquiry status: ${rawStatus ?? 'unknown'}`,
@@ -420,7 +521,27 @@ function personaChecks(rawStatus: string | null, eventName?: string): readonly K
   ];
   const checkStatus: KybCheck['status'] =
     status === 'approved' ? 'passed' : status === 'rejected' ? 'failed' : 'pending';
-  return [{ name: 'director_identity', status: checkStatus, reasons }];
+  return [
+    {
+      name: leg === 'director_kyc' ? 'director_identity' : 'business_registry_match',
+      status: checkStatus,
+      reasons,
+    },
+    {
+      name: KYB_PROVIDER_CODE_CHECK,
+      status: checkStatus,
+      reasons: [`persona_inquiry_${(rawStatus ?? 'unknown').trim().toLowerCase()}`],
+    },
+  ];
+}
+
+/** Drop empty and absent values, so no `fields` key is sent as a blank. */
+function compactFields(fields: Record<string, string | undefined>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (typeof value === 'string' && value.trim() !== '') out[key] = value;
+  }
+  return out;
 }
 
 /**

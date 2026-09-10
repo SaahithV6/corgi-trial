@@ -47,7 +47,9 @@ import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import type { Transaction } from "@/lib/rails/lithic/types";
+import { resolveEventSemanticsBatch } from "@/lib/rails/semantics";
 
+import { postCardCorrection, type CorrectionPosted } from "./corrections";
 import { deriveCardEvents, type DerivedCardEvents } from "./lithic-events";
 import { holdState, type CardEvent, type HoldState } from "./model";
 import {
@@ -66,6 +68,9 @@ import {
 } from "./store";
 
 export const LITHIC_PROVIDER = "lithic";
+
+/** The only Lithic webhook type that carries the lifecycle. See semantics.ts. */
+export const LITHIC_LIFECYCLE_EVENT = "card_transaction.updated";
 
 export interface ApplyContext {
   readonly provider?: string;
@@ -90,6 +95,17 @@ export interface HoldOutcome {
   readonly memoEntryId: string | null;
   readonly financialEntryIds: readonly string[];
   /**
+   * Corrections applied by this call, each a reversal at the ORIGINAL entry's
+   * value date. Empty for every ordinary lifecycle event.
+   */
+  readonly corrections: readonly CorrectionPosted[];
+  /**
+   * Correction steps that arrived with nothing to correct, or with an
+   * ambiguous choice. The caller PARKS on these — it must not post them at
+   * their own date, which is exactly the wrong answer this path exists to fix.
+   */
+  readonly unmatchedCorrections: readonly UnmatchedCorrection[];
+  /**
    * The rail adapter's independent reading of the same transaction disagrees
    * with ours. Not an error and never resolved silently — it is a
    * reconciliation signal, and the honest place for it is a break, not a guess.
@@ -97,10 +113,28 @@ export interface HoldOutcome {
   readonly providerDisagrees: boolean;
 }
 
+export interface UnmatchedCorrection {
+  readonly providerEventId: string;
+  /** The Lithic step, as `rail_event_semantics` names it. */
+  readonly stepType: string;
+  readonly reason: string;
+}
+
 export type ApplyResult =
   | ({ readonly status: "applied" } & HoldOutcome)
   /** The card token is not registered. The caller parks; it must not guess. */
-  | { readonly status: "unknown_card"; readonly providerCardToken: string };
+  | { readonly status: "unknown_card"; readonly providerCardToken: string }
+  /**
+   * A step in this payload has no `rail_event_semantics` row, so nobody has
+   * decided whether it is a correction at the original value date or a new
+   * event at its own. Nothing was applied. The caller parks.
+   *
+   * The consumer resolves the same table before it calls here and parks first,
+   * so in the webhook path this is unreachable — it exists because
+   * `applyCardTransaction` is also called directly, and a direct caller must
+   * not be the one path that gets a silent default.
+   */
+  | { readonly status: "unclassified_step"; readonly key: string };
 
 function expiryFor(createdAt: Date): Date {
   return new Date(createdAt.getTime() + CARD_AUTH_EXPIRY_DAYS * 86_400_000);
@@ -112,6 +146,15 @@ function expiryFor(createdAt: Date): Date {
  */
 async function recordFacts(
   derived: DerivedCardEvents,
+  /**
+   * The provider event ids `rail_event_semantics` classified `correction`.
+   *
+   * A correction is still a FACT and still enters `E` — the network really did
+   * say this — but it must not post an ordinary entry at its own date, so the
+   * financial posting is skipped here and `postCardCorrection` reverses the
+   * entry it corrects at the ORIGINAL date instead.
+   */
+  correctionIds: ReadonlySet<string>,
   ctx: Required<Pick<ApplyContext, "provider" | "now" | "actorId">> & {
     inboxId: string | null;
     conn: Sql;
@@ -164,6 +207,12 @@ async function recordFacts(
     // a redelivery re-posts nothing even though we attempt all of them again.
     const financialEntryIds: string[] = [];
     for (const event of derived.events) {
+      // The one branch in the money path, and it is the table's decision, not
+      // this module's: a `correction` row means this event restates a figure
+      // that was already booked, so posting it here would put the repair on
+      // today's statement and leave the day it repairs wrong for ever.
+      if (correctionIds.has(event.providerEventId)) continue;
+
       const entryId = await postCardMovement(
         {
           identity,
@@ -267,6 +316,45 @@ export async function settleHoldPosting(
 }
 
 /**
+ * Ask `rail_event_semantics` which of this payload's steps are CORRECTIONS.
+ *
+ * The table is the decision source and there is no fallback: an unclassified
+ * step ends the whole call, because acting on the classified half of a payload
+ * would post some of a transaction's money and park the rest. See the
+ * all-or-nothing note on `resolveEventSemanticsBatch`.
+ */
+async function correctionEventIds(
+  derived: DerivedCardEvents,
+  conn: Sql,
+): Promise<{ ok: true; ids: ReadonlySet<string> } | { ok: false; key: string }> {
+  const steps = [...derived.stepTypes.values()];
+  if (steps.length === 0) return { ok: true, ids: new Set() };
+
+  const resolution = await resolveEventSemanticsBatch(
+    {
+      provider: LITHIC_PROVIDER,
+      eventType: LITHIC_LIFECYCLE_EVENT,
+      nestedSteps: steps,
+    },
+    { conn },
+  );
+  if (resolution.status === "unclassified") return { ok: false, key: resolution.key };
+
+  const correcting = new Set(
+    resolution.resolved
+      .filter((r) => r.valueDateAnchor === "original")
+      .map((r) => r.row.providerEventType),
+  );
+
+  const ids = new Set<string>();
+  for (const [eventId, stepType] of derived.stepTypes) {
+    // The table's key is `<webhook type>/<step>`; the map holds the bare step.
+    if (correcting.has(`${LITHIC_LIFECYCLE_EVENT}/${stepType}`)) ids.add(eventId);
+  }
+  return { ok: true, ids };
+}
+
+/**
  * Apply one `card_transaction.updated` payload end to end.
  *
  * Idempotent by construction at three layers: the inbox refuses a redelivered
@@ -274,6 +362,11 @@ export async function settleHoldPosting(
  * refuses a redelivered posting. Calling this twice with the same payload
  * produces the same database as calling it once, and the second call is decided
  * by Postgres at every one of those layers rather than by a check in here.
+ *
+ * A CORRECTION step takes the fourth path, and it is the one this system is
+ * graded on: it is recorded as a fact like everything else, but its money goes
+ * through `reverseAndRebook()` at the value date of the entry it corrects, so
+ * that day's statement corrects itself rather than growing a second line.
  */
 export async function applyCardTransaction(
   txn: Transaction,
@@ -287,8 +380,52 @@ export async function applyCardTransaction(
 
   const derived = deriveCardEvents(txn);
 
-  const recorded = await recordFacts(derived, { provider, now, actorId, inboxId, conn });
+  const classified = await correctionEventIds(derived, conn);
+  if (!classified.ok) return { status: "unclassified_step", key: classified.key };
+
+  const recorded = await recordFacts(derived, classified.ids, {
+    provider,
+    now,
+    actorId,
+    inboxId,
+    conn,
+  });
   if (recorded.status === "unknown_card") return recorded;
+
+  // Corrections, in their own transactions. AFTER `recordFacts` has committed,
+  // because a correction reverses an entry the same delivery may have just
+  // posted — Lithic sends the whole `events[]` array every time, so a payload
+  // routinely carries a movement and its correction together.
+  const corrections: CorrectionPosted[] = [];
+  const unmatchedCorrections: UnmatchedCorrection[] = [];
+  for (const event of recorded.events) {
+    if (!classified.ids.has(event.providerEventId)) continue;
+    const stepType = derived.stepTypes.get(event.providerEventId);
+    // Only steps carried by THIS payload are acted on: the reloaded set can
+    // hold events from earlier deliveries whose step name we no longer have,
+    // and their corrections were applied when they arrived.
+    if (stepType === undefined) continue;
+
+    const result = await postCardCorrection(
+      {
+        identity: recorded.identity,
+        event,
+        events: recorded.events,
+        externalRef: derived.providerAuthId,
+        actorId,
+        inboxId,
+        stepType,
+      },
+      conn,
+    );
+    if (result.status === "posted") corrections.push(result);
+    else
+      unmatchedCorrections.push({
+        providerEventId: event.providerEventId,
+        stepType,
+        reason: result.reason,
+      });
+  }
 
   // The event whose arrival prompted this recompute. Deterministic: the last
   // member of the payload's derived set, so a replay of the same payload
@@ -321,6 +458,8 @@ export async function applyCardTransaction(
     deltaCents: settled.deltaCents,
     memoEntryId: settled.entryId,
     financialEntryIds: recorded.financialEntryIds,
+    corrections,
+    unmatchedCorrections,
     // The adapter reads the same events by a different route and also reports
     // what Lithic itself claims. Disagreement is surfaced, never reconciled by
     // preferring one side — guessing in the webhook handler is worse than a

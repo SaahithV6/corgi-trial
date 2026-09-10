@@ -7,6 +7,7 @@ import { isErr } from "@/lib/result";
 import { EntityCard } from "./EntityCard";
 import { ErrorPanel } from "./ErrorPanel";
 import { OnboardingSkeleton } from "./OnboardingSkeleton";
+import { RegistryProbe } from "./RegistryProbe";
 import { WiringPanel } from "./WiringPanel";
 import type { OnboardingDataSource } from "./data-contract";
 import { createFixtureSource } from "./fixtures";
@@ -56,6 +57,25 @@ export async function OnboardingView({ view }: { readonly view: View }) {
     <div className="space-y-6">
       <Header role={role} live={live} asOf={snapshot.asOf} />
 
+      <Note title="Every seeded business misses the registry, and that is the correct answer">
+        <p>
+          The three businesses on this book are fictional, so GLEIF — a real registry, queried live
+          — answers <span className="font-mono">not_in_lei_registry</span> for all three, and the
+          registry leg reads <span className="font-mono">needs_review</span>. That is not a broken
+          check. GLEIF holds 3,426,836 records, 360,275 of them US, against tens of millions of US
+          entities; its population is financial-market participants, so a real, active, ordinary
+          corporation can be absent. <strong>A hit is strong evidence; a miss is evidence of
+          nothing</strong>, and a miss that quietly approved would be strictly worse than the
+          labelled simulator it replaced.
+        </p>
+        <p className="mt-2">
+          <em>Ask the registry</em> below runs the same live adapter against anything you type, so
+          an approval with a Secretary of State citation, a decline on a withdrawn company and a 404
+          on an invented identifier are all reproducible without a single false claim about a demo
+          row. It writes nothing.
+        </p>
+      </Note>
+
       <Note title="Gate the account: unverified entities can look but not transact">
         <p>
           Two independent mechanisms, and the weaker-looking one is the stronger. A business gets
@@ -77,6 +97,8 @@ export async function OnboardingView({ view }: { readonly view: View }) {
       </Note>
 
       <WiringPanel wiring={snapshot.wiring} />
+
+      {live ? <RegistryProbe registry={snapshot.wiring.registry} /> : null}
 
       {snapshot.businesses.length === 0 ? (
         <p className="rounded-lg border border-border bg-surface px-5 py-8 text-sm text-muted">

@@ -187,6 +187,17 @@ export interface CreateKybVerificationInput {
   readonly physicalAddress?: KybAddress | undefined;
   /** The first entry is treated as the control person / representative. */
   readonly associatedPeople?: readonly KybPerson[] | undefined;
+  /**
+   * A Legal Entity Identifier the APPLICANT asserts is theirs, when they have
+   * one. Twenty characters, ISO 17442.
+   *
+   * It is optional and it is not a formality: an asserted identifier is a
+   * claim a registry can be asked about directly, so supplying one turns a
+   * fuzzy name search into an exact lookup — and, when the identifier does not
+   * exist, into a decline rather than a shrug. `src/lib/kyb/gleif.ts` treats
+   * the two cases very differently and says why.
+   */
+  readonly lei?: string | undefined;
 }
 
 /** One named check inside a leg, with the provider's own reason strings. */
@@ -194,6 +205,46 @@ export interface KybCheck {
   readonly name: string;
   readonly status: 'passed' | 'failed' | 'pending' | 'not_applicable';
   readonly reasons: readonly string[];
+}
+
+/**
+ * TWO RESERVED CHECK NAMES, AND WHY THEY ARE A CONVENTION RATHER THAN COLUMNS.
+ *
+ * `kyb_verification_leg` (db/migrations/0005_kyb.sql) stores `checks` as jsonb
+ * and has no column for a provider's error code or for a registry citation.
+ * Adding two would mean a migration, and — worse — two more columns that a
+ * later UPDATE could disagree with the evidence about. So both travel inside
+ * the evidence itself, under fixed names, and are read back out with the two
+ * functions below.
+ *
+ * `provider_outcome`   reasons[0] is the provider's OWN machine-readable code:
+ *                      `document_unverified_other`, `entity_status_inactive`,
+ *                      `not_in_lei_registry`. reasons[1..] are its own prose.
+ * `registry_citation`  reasons[0] is a checkable citation — which authority,
+ *                      which entry, at what corroboration level.
+ *
+ * A screen that renders "rejected" and a screen that renders "rejected,
+ * because gleif-lei answered `entity_status_inactive` for LEI 2549…, cited
+ * against the Delaware Secretary of State" are different products, and only
+ * the second one can be audited by someone who does not trust us.
+ */
+export const KYB_PROVIDER_CODE_CHECK = 'provider_outcome';
+export const KYB_CITATION_CHECK = 'registry_citation';
+
+function firstReasonOf(checks: readonly KybCheck[], name: string): string | null {
+  const found = checks.find((c) => c.name === name);
+  const reason = found?.reasons[0];
+  return typeof reason === 'string' && reason.trim() !== '' ? reason : null;
+}
+
+/** The provider's own code for this leg's answer, or null if it gave none. */
+export function providerCodeFromChecks(checks: readonly KybCheck[]): string | null {
+  return firstReasonOf(checks, KYB_PROVIDER_CODE_CHECK);
+}
+
+/** The registry citation for this leg, or null if the leg cites nothing. */
+export function citationFromChecks(checks: readonly KybCheck[]): string | null {
+  return firstReasonOf(checks, KYB_CITATION_CHECK);
 }
 
 /** The two halves of KYB. Persona answers the first, Stripe Connect the second. */

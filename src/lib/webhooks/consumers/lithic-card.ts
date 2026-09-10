@@ -34,6 +34,22 @@ import "server-only";
  * all. Replaying it PAST the inbox (a lease expiry, a redelivery under a new
  * envelope id) is refused at the second and third. Twice is one, three times
  * over, and none of the three is an `if` statement in this process.
+ *
+ * ─── Corrections ────────────────────────────────────────────────────────────
+ *
+ * A card event is not always a new line. `rail_event_semantics` carries a
+ * reviewed row per lifecycle step saying whether the step is a NEW EVENT at its
+ * own value date or a CORRECTION at the value date of the entry it repairs, and
+ * the card rail has two of the latter: `RETURN_REVERSAL` and
+ * `CORRECTION_DEBIT`/`CORRECTION_CREDIT`. This consumer resolves the table,
+ * `applyCardTransaction` routes the correction steps through
+ * `reverseAndRebook()`, and the day that was misstated is made whole rather
+ * than a second line appearing on the day we found out. A correction that
+ * cannot be matched to what it corrects PARKS; it is never posted at its own
+ * date, because that is the exact bug the path exists to remove.
+ *
+ * See docs/CARD-CORRECTIONS.md, which also records what Lithic's sandbox can
+ * and cannot originate, measured.
  */
 
 import { applyCardTransaction, LITHIC_PROVIDER } from "@/lib/holds";
@@ -184,6 +200,9 @@ export const lithicCardConsumer: WebhookConsumer = {
       // The table's answer, in the log, because "why is that dated Tuesday" is
       // the question this system will be asked and this is the answer.
       steps: describeResolutions(semantics.resolved),
+      // And the count that matters: how many of them are repairs of a past day
+      // rather than new lines on this one.
+      corrections: semantics.resolved.filter((r) => r.valueDateAnchor === "original").length,
     });
 
     const result = await applyCardTransaction(txn, {
@@ -191,6 +210,17 @@ export const lithicCardConsumer: WebhookConsumer = {
       inboxId: event.id,
       now: ctx.now,
     });
+
+    if (result.status === "unclassified_step") {
+      // Unreachable from here — the batch above already parked on exactly this
+      // — but the two answers must agree, and a consumer that ignored the
+      // second one would be relying on a coincidence of ordering.
+      return parked(
+        "rail_event_semantics",
+        result.key,
+        `no rail_event_semantics row for '${result.key}'`,
+      );
+    }
 
     if (result.status === "unknown_card") {
       // The card is not registered to any customer. PARK — do not guess an
@@ -223,7 +253,32 @@ export const lithicCardConsumer: WebhookConsumer = {
       memoEntryId: result.memoEntryId,
       financialEntries: result.financialEntryIds.length,
       providerDisagrees: result.providerDisagrees,
+      // One line per repair, naming the day that was made whole. This is the
+      // audit answer to "when did you learn, and which day did you fix".
+      corrections: result.corrections.map(
+        (c) =>
+          `${c.providerEventId} reversed ${c.targetEntryId} @ ${c.valueDate}` +
+          (c.rebookEntryId === null ? "" : ` re-booked ${c.netCustomerCents} as ${c.rebookEntryId}`),
+      ),
     });
+
+    if (result.unmatchedCorrections.length > 0) {
+      // A correction with nothing to correct. Almost always the out-of-order
+      // case — the repair overtook the movement it repairs — and the answer is
+      // the same one the rest of this consumer gives: PARK, do not post it at
+      // its own date. Posting it there is precisely the bug the correction path
+      // exists to remove, and doing it as a "fallback" would reintroduce it
+      // under a friendlier name.
+      const first = result.unmatchedCorrections[0];
+      if (first !== undefined) {
+        ctx.logger.warn("lithic.card_transaction.correction_unmatched", {
+          inboxId: event.id,
+          authId: result.authId,
+          unmatched: result.unmatchedCorrections.map((u) => `${u.stepType} ${u.providerEventId}: ${u.reason}`),
+        });
+        return parked("card_correction_target", first.providerEventId, first.reason);
+      }
+    }
 
     if (result.providerDisagrees) {
       // Surfaced, never resolved. The ledger cannot tell a genuine divergence

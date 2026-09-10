@@ -66,6 +66,19 @@ export interface DerivedCardEvents {
   readonly providerCardToken: string;
   /** Canonical events, in payload order, deduplicated on `providerEventId`. */
   readonly events: readonly CardEvent[];
+  /**
+   * `providerEventId` → the Lithic step type it came from.
+   *
+   * The canonical kind is deliberately lossy: `RETURN_REVERSAL` and
+   * `CORRECTION_DEBIT` both become `force_post`, because `card_event_kind` has
+   * no member for either and the hold arithmetic treats them identically. But
+   * `rail_event_semantics` is keyed on the STEP, not on our kind, so the step
+   * has to survive the translation or the table cannot be consulted about the
+   * one thing it exists to decide. It is carried beside the events rather than
+   * on them so `CardEvent` — which `model.ts` reasons about and the database
+   * stores — keeps exactly the fields the arithmetic needs.
+   */
+  readonly stepTypes: ReadonlyMap<string, string>;
   /** What the first event we can see says about how this auth began. */
   readonly origin: AuthOrigin;
   /** `txn.created` in book time. The authorisation's own value date. */
@@ -222,14 +235,16 @@ export function deriveCardEvents(txn: Transaction): DerivedCardEvents {
   });
 
   const events: CardEvent[] = [];
+  const stepTypes = new Map<string, string>();
   const seen = new Set<string>();
   let runningAuthorised = 0n;
   let origin: AuthOrigin | null = null;
 
-  const push = (event: CardEvent): void => {
+  const push = (event: CardEvent, stepType: TransactionEventType): void => {
     if (seen.has(event.providerEventId)) return;
     seen.add(event.providerEventId);
     events.push(event);
+    stepTypes.set(event.providerEventId, stepType);
     if (RAISES.has(event.kind)) runningAuthorised += event.amountCents;
     else if (event.kind === "authorization_reversal") runningAuthorised -= event.amountCents;
     if (origin === null) {
@@ -263,32 +278,39 @@ export function deriveCardEvents(txn: Transaction): DerivedCardEvents {
       // function of the payload and therefore still order-free.
       const delta = amountCents - runningAuthorised;
       if (delta === 0n) continue;
-      push({
-        kind: delta > 0n ? "incremental_authorization" : "authorization_reversal",
-        amountCents: delta > 0n ? delta : -delta,
-        isFinal: false,
-        valueDate,
-        providerEventId: token,
-      });
+      push(
+        {
+          kind: delta > 0n ? "incremental_authorization" : "authorization_reversal",
+          amountCents: delta > 0n ? delta : -delta,
+          isFinal: false,
+          valueDate,
+          providerEventId: token,
+        },
+        lithicEvent.type,
+      );
       continue;
     }
 
     const kind = canonicalKind(lithicEvent.type, lithicEvent.effective_polarity);
     if (kind === null) continue;
 
-    push({
-      kind,
-      amountCents,
-      isFinal: isFinal(lithicEvent.type),
-      valueDate,
-      providerEventId: token,
-    });
+    push(
+      {
+        kind,
+        amountCents,
+        isFinal: isFinal(lithicEvent.type),
+        valueDate,
+        providerEventId: token,
+      },
+      lithicEvent.type,
+    );
   }
 
   return {
     providerAuthId: txn.token,
     providerCardToken: txn.card_token,
     events,
+    stepTypes,
     // An identity with no usable events yet is still an identity; calling its
     // origin 'clearing_first' would be a guess, and 'authorization' would be a
     // lie, so an empty payload inherits the neutral case.

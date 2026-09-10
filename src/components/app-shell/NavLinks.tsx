@@ -23,6 +23,7 @@ const LIVE = [
   // gate this screen demonstrates runs before any of the others can move money.
   { href: "/onboarding", label: "Onboarding" },
   { href: "/accounts", label: "Accounts" },
+  { href: "/funding", label: "Funding" },
   { href: "/payments", label: "Payments" },
   { href: "/approvals", label: "Approvals" },
   { href: "/standing-orders", label: "Standing orders" },
