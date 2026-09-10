@@ -26,6 +26,7 @@
 
 import postgres from 'postgres';
 
+import { probeIntegrations } from '@/lib/integrations/probe';
 import { newRequestId, requestIdFrom } from '@/lib/log';
 import {
   integrationReports,
@@ -114,7 +115,40 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const env: EnvBag = process.env;
     const database = await checkDatabase(env);
-    const slots = slotReports(env);
+    // Key presence, from env.schema. This is NOT the live/simulated verdict —
+    // it only says which variables are set. See below.
+    const declared = slotReports(env);
+
+    // The actual verdict, earned by a real authenticated call per provider.
+    //
+    // These two disagreed in production and the disagreement was the whole
+    // point: env said business_registry was LIVE because STRIPE_SECRET_KEY is
+    // set, and stablecoin was LIVE because the USDC variables are set. Neither
+    // can do its job — Connect is not enabled, and the wallet holds no gas. A
+    // health endpoint reporting key presence as liveness is the automatic-fail
+    // dressed as a green check.
+    //
+    // If a probe cannot run at all we fall back to the declared status, and
+    // say so in the detail, rather than inventing a verdict.
+    let probes: Awaited<ReturnType<typeof probeIntegrations>> = [];
+    try {
+      probes = await probeIntegrations();
+    } catch {
+      probes = [];
+    }
+    const byId = new Map(probes.map((p) => [p.slot, p]));
+    const slots = declared.map((d) => {
+      const p = byId.get(d.slot);
+      if (!p) return { ...d, evidence: 'declared-only: probe did not run' };
+      return {
+        ...d,
+        // The probe wins. Only a proven round trip earns 'live'.
+        status: p.liveness === 'live' ? ('live' as const) : ('simulated' as const),
+        liveness: p.liveness,
+        evidence: p.detail,
+        latencyMs: p.latencyMs,
+      };
+    });
     const webhooks = integrationReports(env);
 
     // `not_configured` integrations do NOT make the deployment degraded: a
@@ -136,7 +170,8 @@ export async function GET(request: Request): Promise<Response> {
       integrations: {
         live: slots.filter((s) => s.status === 'live').length,
         total: slots.length,
-        // The authoritative table, verbatim from env.schema's own function.
+        // The authoritative table: env's declaration, overridden by what a
+        // real call to each provider actually proved.
         slots,
         // The same verdicts, joined to the webhook endpoint that serves each
         // provider. `webhookVerifierRegistered: false` is why a route answers
