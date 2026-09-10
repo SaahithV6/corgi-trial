@@ -9,6 +9,7 @@ import {
   integrationReports,
   WEBHOOK_PROVIDERS,
   type EnvBag,
+  type WebhookHttpRequest,
 } from './route-handler';
 
 // ---------------------------------------------------------------------------
@@ -108,7 +109,7 @@ function brokenStore(): InboxStore {
 
 async function post(
   provider: string,
-  req: ReturnType<typeof delivery>,
+  req: WebhookHttpRequest,
   store: InboxStore,
   log?: ReturnType<typeof logger>,
 ) {
@@ -446,6 +447,21 @@ describe('integration catalogue', () => {
     // The webhook secret is still there, so deliveries still verify — the
     // report says both things rather than collapsing them into one word.
     expect(lithic?.webhookVerifierRegistered).toBe(true);
+  });
+
+  it('reads the verdict from env.schema rather than deciding for itself', () => {
+    const lithic = integrationReports(ENV).find((i) => i.provider === 'lithic');
+    // The cited slots ARE env.schema's INTEGRATION_SLOTS rows; if that table
+    // ever changes its mind, this endpoint changes with it.
+    expect(lithic?.slots.map((s) => s.slot).sort()).toEqual(['card_issuing', 'card_webhooks']);
+    expect(lithic?.slots.every((s) => s.status === 'live')).toBe(true);
+  });
+
+  it('reports statuses even when the environment as a whole is invalid', () => {
+    // No APP_DATABASE_URL here, so a strict parse throws. /api/health must
+    // still answer — that is exactly when someone is reading it.
+    expect(() => integrationReports({})).not.toThrow();
+    expect(integrationReports({}).every((i) => i.status === 'not_configured')).toBe(true);
   });
 
   it('treats an empty string as a missing key', () => {

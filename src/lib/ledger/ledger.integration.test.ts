@@ -13,17 +13,22 @@
  */
 import { describe, expect, it, beforeAll } from "vitest";
 
+import type * as BalancesModule from "./balances";
+import type { sql as SqlHandle } from "./db";
+import type { postEntry as PostEntry, reverseAndRebook as ReverseAndRebook } from "./post";
+
 const RUN = process.env.RUN_DB_TESTS === "1";
 const d = RUN ? describe : describe.skip;
 
 d("ledger, against the live database", () => {
-  let sql: typeof import("./db").sql;
-  let postEntry: typeof import("./post").postEntry;
-  let reverseAndRebook: typeof import("./post").reverseAndRebook;
-  let bal: typeof import("./balances");
+  // Imported dynamically inside beforeAll so that a missing DATABASE_URL does
+  // not blow up at module load when these tests are skipped in CI.
+  let sql: typeof SqlHandle;
+  let postEntry: typeof PostEntry;
+  let reverseAndRebook: typeof ReverseAndRebook;
+  let bal: typeof BalancesModule;
   let entityId: string;
   let actorId: string;
-  let businessId: string;
   let depositAccountId: string;
   let cashAccountId: string;
 
@@ -43,8 +48,10 @@ d("ledger, against the live database", () => {
     const [c] = await sql<{ id: string }[]>`
       SELECT id FROM account WHERE code = '1110' AND business_id IS NULL LIMIT 1`;
     if (!e || !a || !b || !c) throw new Error("seed first: node scripts/seed.mjs");
-    entityId = e.id; actorId = a.id; businessId = b.id;
-    depositAccountId = b.account_id; cashAccountId = c.id;
+    entityId = e.id;
+    actorId = a.id;
+    depositAccountId = b.account_id;
+    cashAccountId = c.id;
   });
 
   const run = Date.now();

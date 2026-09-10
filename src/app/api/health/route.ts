@@ -7,13 +7,16 @@
  *   2. WHETHER THE DATABASE IS REACHABLE — a real `select 1` as the restricted
  *      application role, with a hard timeout so a wedged connection cannot make
  *      the health check itself the outage.
- *   3. PER-PROVIDER INTEGRATION STATUS, read from the single catalogue in
- *      `@/lib/webhooks/route-handler` that also builds the verifier registry.
- *      An integration is `live` only when every credential it needs is present;
- *      a missing API key is `not_configured`, always, with no path by which it
- *      could be reported otherwise. Claiming an integration is live when it is
- *      a simulator or a missing key is the fastest way to fail the trial, so
- *      this endpoint reports what it can check and names what it cannot.
+ *   3. PER-PROVIDER INTEGRATION STATUS, read from `INTEGRATION_SLOTS` in
+ *      `@/lib/env.schema` — the single place the live-vs-simulated decision is
+ *      made for the whole system. This route computes nothing of its own: it
+ *      renders that table, plus the one thing the slot table does not know
+ *      (whether a webhook verifier is registered). An integration is `live`
+ *      only when every credential it needs is present; a missing API key is
+ *      `not_configured`, always, with no path by which it could be reported
+ *      otherwise. Claiming an integration is live when it is a simulator or a
+ *      missing key is the fastest way to fail the trial, so this endpoint
+ *      reports what it checked (`evidence`) rather than implying more.
  *
  * IT MUST NOT THROW. A monitor that gets a 500 from the health endpoint learns
  * only that the health endpoint is broken. Every failure inside is caught and
@@ -24,7 +27,12 @@
 import postgres from 'postgres';
 
 import { newRequestId, requestIdFrom } from '@/lib/log';
-import { integrationReports, readEnv, type EnvBag } from '@/lib/webhooks/route-handler';
+import {
+  integrationReports,
+  readEnv,
+  slotReports,
+  type EnvBag,
+} from '@/lib/webhooks/route-handler';
 
 /**
  * Node runtime: this route opens a Postgres connection through `postgres`,
@@ -40,8 +48,14 @@ export const dynamic = 'force-dynamic';
  * The database probe budget. Short on purpose: this endpoint is polled by
  * uptime monitors and by the deploy pipeline, and a health check that blocks
  * for 30s on a dead database has become the incident.
+ *
+ * 3s, not 1s, and the number is measured rather than guessed. Against the Neon
+ * branch this deploys to: 1,775ms on the first request after the compute had
+ * scaled to zero, 692ms on the next, then 69-73ms warm. A 1s budget would
+ * report `degraded` every time the branch woke up, which trains whoever reads
+ * this endpoint to ignore it — the worst possible outcome for a health check.
  */
-const DB_TIMEOUT_MS = 2_000;
+const DB_TIMEOUT_MS = 3_000;
 
 /**
  * Where each platform puts the commit sha, in the order we trust them. Vercel
@@ -84,7 +98,8 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const env: EnvBag = process.env;
     const database = await checkDatabase(env);
-    const integrations = integrationReports(env);
+    const slots = slotReports(env);
+    const webhooks = integrationReports(env);
 
     // `not_configured` integrations do NOT make the deployment degraded: a
     // provider we have not wired is a scope decision, not an outage. An
@@ -103,9 +118,25 @@ export async function GET(request: Request): Promise<Response> {
       },
       database,
       integrations: {
-        live: integrations.filter((i) => i.status === 'live').length,
-        total: integrations.length,
-        providers: integrations,
+        live: slots.filter((s) => s.status === 'live').length,
+        total: slots.length,
+        // The authoritative table, verbatim from env.schema's own function.
+        slots,
+        // The same verdicts, joined to the webhook endpoint that serves each
+        // provider. `webhookVerifierRegistered: false` is why a route answers
+        // 503 rather than accepting a delivery it cannot authenticate.
+        webhooks,
+        // Slots the brief requires to be genuinely live that currently are not.
+        // Surfaced rather than buried so it cannot be forgotten before the
+        // debrief: a simulated integration presented as live fails the trial.
+        warnings: slots
+          .filter((s) => s.mustBeLive && s.status !== 'live')
+          .map((s) => ({
+            slot: s.slot,
+            provider: s.provider,
+            message: `${s.slot} must be live for the trial but is ${s.status}`,
+            missingEnv: s.missing,
+          })),
       },
       durationMs: Date.now() - startedAt,
     });

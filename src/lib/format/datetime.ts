@@ -24,6 +24,25 @@ const dateFormat = new Intl.DateTimeFormat("en-US", {
   day: "2-digit",
 });
 
+/**
+ * A calendar date is not an instant, and shifting one by a timezone is how a
+ * value date lands on the wrong business day.
+ *
+ * `new Date("2026-09-09")` is midnight **UTC**, which is 20:00 the previous
+ * evening in New York — so formatting a bare `YYYY-MM-DD` in the banking
+ * timezone would print `Sep 08` for a posting whose value date is the 9th, and
+ * every daily statement would be off by one. Date-only strings are therefore
+ * formatted in UTC, which is a no-op that returns the digits that were given.
+ */
+const calendarDateFormat = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+});
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
 const timeFormat = new Intl.DateTimeFormat("en-US", {
   timeZone: BANKING_TIME_ZONE,
   hour: "2-digit",
@@ -47,7 +66,9 @@ export function formatTimestamp(iso: string): string {
 export function formatDate(iso: string): string {
   const at = parse(iso);
   if (at === null) return "—";
-  return dateFormat.format(at);
+  return DATE_ONLY.test(iso)
+    ? calendarDateFormat.format(at)
+    : dateFormat.format(at);
 }
 
 /** `09:00 ET`. */

@@ -28,6 +28,14 @@
 
 import postgres from 'postgres';
 
+import {
+  ENV_KEYS,
+  parseEnv,
+  reportIntegrations,
+  type Env,
+  type IntegrationSlot,
+  type SlotReport,
+} from '../env.schema';
 import { logger, requestIdFrom, type Logger } from '../log';
 import {
   cachedVerificationKeys,
@@ -60,16 +68,24 @@ export interface WebhookIntegration {
   readonly label: string;
   readonly purpose: string;
   /**
-   * The env var holding this provider's API key. If it is absent the
-   * integration is `not_configured` on /api/health — never `live`. Requirement
-   * 6's rule lives here, in the catalogue, rather than in the health route,
-   * because a rule stated once cannot disagree with itself.
+   * The `INTEGRATION_SLOTS` entries in `env.schema.ts` whose live-vs-simulated
+   * verdict IS this provider's integration status.
+   *
+   * This module does NOT decide whether an integration is live. `env.schema.ts`
+   * says it is "the ONLY place that decision is made", and it is right: a
+   * system with two opinions about whether an integration is live will
+   * eventually present the wrong one. All this catalogue does is name which
+   * slots belong to which webhook endpoint. The API key lives in the slot, so
+   * "never live when the API key is absent" is enforced there, once.
    */
-  readonly apiKeyEnv: string;
+  readonly slots: readonly IntegrationSlot[];
   /**
    * Every env var that must be present before an inbound delivery from this
    * provider can be verified. Absent => no verifier is registered => the route
    * answers 503, because a webhook we cannot authenticate must not be accepted.
+   *
+   * This one IS local knowledge: nothing outside this directory knows that
+   * Plaid's verifier needs the API credentials rather than a shared secret.
    */
   readonly verificationEnv: readonly string[];
   /** Built only when every `verificationEnv` key is present. */
@@ -88,7 +104,7 @@ export const WEBHOOK_INTEGRATIONS: readonly WebhookIntegration[] = [
     provider: 'lithic',
     label: 'Lithic',
     purpose: 'card issuing — authorisations and clearings',
-    apiKeyEnv: 'LITHIC_API_KEY',
+    slots: ['card_issuing', 'card_webhooks'],
     verificationEnv: ['LITHIC_WEBHOOK_SECRET'],
     makeVerifier: (env) => lithicVerifier({ secret: mustRead(env, 'LITHIC_WEBHOOK_SECRET') }),
   },
@@ -96,7 +112,7 @@ export const WEBHOOK_INTEGRATIONS: readonly WebhookIntegration[] = [
     provider: 'persona',
     label: 'Persona',
     purpose: 'KYB / KYC — inquiry and case status',
-    apiKeyEnv: 'PERSONA_API_KEY',
+    slots: ['director_kyc'],
     verificationEnv: ['PERSONA_WEBHOOK_SECRET'],
     makeVerifier: (env) => personaVerifier({ secret: mustRead(env, 'PERSONA_WEBHOOK_SECRET') }),
   },
@@ -104,7 +120,7 @@ export const WEBHOOK_INTEGRATIONS: readonly WebhookIntegration[] = [
     provider: 'plaid',
     label: 'Plaid',
     purpose: 'open banking — account funding and item health',
-    apiKeyEnv: 'PLAID_SECRET',
+    slots: ['open_banking'],
     // Plaid has no shared webhook secret: verification is an ES256 JWT checked
     // against a key fetched from Plaid itself, which needs the API credentials.
     verificationEnv: ['PLAID_CLIENT_ID', 'PLAID_SECRET'],
@@ -118,15 +134,15 @@ export const WEBHOOK_INTEGRATIONS: readonly WebhookIntegration[] = [
     provider: 'increase',
     label: 'Increase',
     purpose: 'ACH — transfer lifecycle and returns',
-    apiKeyEnv: 'INCREASE_API_KEY',
+    slots: ['ach_rail'],
     verificationEnv: ['INCREASE_WEBHOOK_SECRET'],
     makeVerifier: (env) => increaseVerifier({ secret: mustRead(env, 'INCREASE_WEBHOOK_SECRET') }),
   },
   {
     provider: 'stripe',
     label: 'Stripe',
-    purpose: 'collections — the fifth provider, proving the registry is generic',
-    apiKeyEnv: 'STRIPE_SECRET_KEY',
+    purpose: 'business registry — the fifth provider, proving the registry is generic',
+    slots: ['business_registry'],
     verificationEnv: ['STRIPE_WEBHOOK_SECRET'],
     makeVerifier: (env) => stripeVerifier({ secret: mustRead(env, 'STRIPE_WEBHOOK_SECRET') }),
   },
@@ -153,9 +169,9 @@ export function webhookPathFor(provider: ProviderName): string {
  * `live` means: every credential this integration needs is present, so the
  * route will verify and accept its deliveries. It does NOT mean we have just
  * pinged the provider — that is why `evidence` says what was actually checked.
- * Anything less than every credential present is `not_configured`, never
- * `live`, and never `degraded`: a missing key is a deployment fact, not a
- * transient one.
+ * Anything less is `not_configured`, never `live`: a missing key is a
+ * deployment fact, not a transient one, and reporting it as anything softer is
+ * how a simulated integration ends up presented as a live one.
  */
 export type IntegrationStatus = 'live' | 'not_configured';
 
@@ -167,30 +183,90 @@ export interface IntegrationReport {
   readonly webhookPath: string;
   /** True once a verifier is registered, i.e. the route will not answer 503. */
   readonly webhookVerifierRegistered: boolean;
+  /** The env.schema slots this verdict was read from, with their own verdicts. */
+  readonly slots: readonly SlotReport[];
   /** Env var NAMES that are absent. Never values — this is a public endpoint. */
   readonly missingEnv: readonly string[];
   readonly evidence: 'credentials_present' | 'credentials_missing';
 }
 
-/** Per-provider status for /api/health. Pure: reads env, touches no network. */
+/**
+ * Per-provider status for /api/health. Pure: reads env, touches no network.
+ *
+ * The live-vs-simulated verdict is NOT computed here — it is read from
+ * `reportIntegrations` in `env.schema.ts`, which owns that decision for the
+ * whole system (the rail factory and the README table read the same function).
+ * This adds exactly one thing the slot table does not know: whether a verifier
+ * is registered, which is what decides 503 versus a real answer on the route.
+ */
 export function integrationReports(env: EnvBag = process.env): IntegrationReport[] {
+  const slots = new Map<IntegrationSlot, SlotReport>(
+    slotReports(env).map((slot) => [slot.slot, slot]),
+  );
+
   return WEBHOOK_INTEGRATIONS.map((integration) => {
-    const required = [integration.apiKeyEnv, ...integration.verificationEnv];
-    const missingEnv = [...new Set(required)].filter((key) => readEnv(env, key) === undefined);
-    const live = missingEnv.length === 0;
+    const mine = integration.slots.flatMap((name) => {
+      const report = slots.get(name);
+      return report === undefined ? [] : [report];
+    });
+    const verifierRegistered = integration.verificationEnv.every(
+      (key) => readEnv(env, key) !== undefined,
+    );
+    const missingEnv = [
+      ...new Set([
+        ...mine.flatMap((slot) => slot.missing),
+        ...integration.verificationEnv.filter((key) => readEnv(env, key) === undefined),
+      ]),
+    ];
+    // Every owning slot live AND a verifier registered. Never looser than the
+    // slot table — a provider cannot be live here and simulated there.
+    const live = mine.every((slot) => slot.status === 'live') && verifierRegistered;
+
     return {
       provider: integration.provider,
       label: integration.label,
       purpose: integration.purpose,
       status: live ? 'live' : 'not_configured',
       webhookPath: webhookPathFor(integration.provider),
-      webhookVerifierRegistered: integration.verificationEnv.every(
-        (key) => readEnv(env, key) !== undefined,
-      ),
+      webhookVerifierRegistered: verifierRegistered,
+      slots: mine,
       missingEnv,
       evidence: live ? 'credentials_present' : 'credentials_missing',
     };
   });
+}
+
+/**
+ * The whole `INTEGRATION_SLOTS` table — including slots with no webhook, like
+ * the stablecoin payout — evaluated without throwing.
+ *
+ * This is `env.schema.ts`'s own `reportIntegrations`, wrapped so `/api/health`
+ * can call it against a possibly-broken environment. It is not a second
+ * opinion: the verdicts are entirely that function's.
+ */
+export function slotReports(env: EnvBag = process.env): readonly SlotReport[] {
+  return reportIntegrations(asEnv(env));
+}
+
+/**
+ * Coerce a raw env bag into the shape `reportIntegrations` reads, WITHOUT ever
+ * throwing. `/api/health` must answer even when the environment is invalid —
+ * that is precisely the moment someone is looking at it — so a parse failure
+ * falls back to the raw values for the keys the slot table reads. The fallback
+ * cannot report anything as more configured than it is: `reportIntegrations`
+ * only ever asks whether a key is present.
+ */
+function asEnv(raw: EnvBag): Env {
+  try {
+    return parseEnv({ ...raw });
+  } catch {
+    const cleaned: Record<string, string | undefined> = {};
+    for (const key of ENV_KEYS) {
+      const value = readEnv(raw, key);
+      if (value !== undefined) cleaned[key] = value;
+    }
+    return cleaned as unknown as Env;
+  }
 }
 
 // ---------------------------------------------------------------------------

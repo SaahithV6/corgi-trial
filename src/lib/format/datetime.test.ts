@@ -55,4 +55,12 @@ describe("fixed banking timezone", () => {
     expect(formatDate(NOW)).toBe("Sep 09, 2026");
     expect(formatTimeOfDay("2026-09-10T13:00:00.000Z")).toBe("09:00 ET");
   });
+
+  it("does not shift a value date across a day boundary", () => {
+    // `new Date("2026-09-09")` is midnight UTC, which is Sep 08 in New York.
+    // A value date is a calendar date and must survive formatting unchanged,
+    // or every daily statement is off by one.
+    expect(formatDate("2026-09-09")).toBe("Sep 09, 2026");
+    expect(formatDate("2026-01-01")).toBe("Jan 01, 2026");
+  });
 });
