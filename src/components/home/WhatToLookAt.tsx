@@ -4,11 +4,17 @@ import type { Route } from "next";
 import { FOCUS_RING } from "@/components/ui/primitives";
 
 /**
- * Four things worth clicking, and what to look at once you are there.
+ * Reviewer's notes, at the very bottom of the page.
  *
- * Not a feature list. Each item names one screen, one figure on it, and the
- * reason that figure is the interesting one — the questions this build was
- * made to answer out loud, in the order they are quickest to check.
+ * Not a feature list, and deliberately the last thing on the front door. Each
+ * item names one screen, one figure on it, and the reason that figure is the
+ * interesting one — the questions this build was made to answer out loud, in
+ * the order they are quickest to check.
+ *
+ * This used to sit above the fold, which was the wrong place for it: narrative
+ * aimed at a reviewer is not what an operator opens a console to read, and a
+ * page that leads with its own commentary is a brochure. The information is
+ * worth keeping and none of it was cut — it is simply last.
  */
 
 export interface LookAtItem {
@@ -55,10 +61,11 @@ export function WhatToLookAt() {
     >
       <header className="border-b border-border px-5 py-4">
         <h2 id="look-at-heading" className="text-sm font-semibold tracking-tight">
-          What to look at
+          Notes for a reviewer
         </h2>
         <p className="mt-1 max-w-prose text-xs text-muted">
-          Four specific things, rather than a tour.
+          Four specific things worth checking, rather than a tour. Last on the
+          page on purpose — the console above is the product.
         </p>
       </header>
 

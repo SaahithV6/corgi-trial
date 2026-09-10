@@ -48,3 +48,8 @@ coverage/
 .env*
 .scratch/
 __pycache__/
+
+# One-shot diagnostic scripts written by workers at the repo root. Three have
+# appeared and each one turned the commit gate red for whoever committed next.
+*.tmp.mjs
+*.tmp.js

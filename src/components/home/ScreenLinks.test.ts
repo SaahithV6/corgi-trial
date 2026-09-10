@@ -3,7 +3,7 @@
  *
  * One rule, and it is the reason the console's own nav renders unbuilt sections
  * as disabled text: a link on the front door must lead somewhere that exists.
- * These tests pin the four routes this build actually serves, and assert that
+ * These tests pin the routes this build actually serves, and assert that
  * every "what to look at" item points at one of them rather than at a URL a
  * grader would have to guess at.
  */
@@ -33,10 +33,11 @@ function routesUnder(dir: string, prefix: string): string[] {
 }
 
 describe("SCREENS", () => {
-  it("names the six things that exist", () => {
+  it("names the seven things that exist", () => {
     expect(SCREENS.map((s) => s.href)).toEqual([
       "/onboarding",
       "/accounts",
+      "/payments",
       "/approvals",
       "/reconciliation",
       "/statements",
@@ -81,7 +82,7 @@ describe("LOOK_AT", () => {
       // Query strings select a demo state on a real screen; the route itself
       // still has to be one of the four.
       const route = item.href.split("?")[0] ?? item.href;
-      expect(hrefs.has(route), `${item.href} is not one of the four screens`).toBe(true);
+      expect(hrefs.has(route), `${item.href} is not one of the screens`).toBe(true);
     }
   });
 

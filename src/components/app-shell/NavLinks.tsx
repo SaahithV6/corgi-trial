@@ -8,21 +8,26 @@ import { FOCUS_RING } from "../ui/primitives";
 /**
  * Primary navigation.
  *
- * Only routes that exist are links. The rest of the console is named but
+ * Only routes that exist are links. The rest of the console was named and
  * rendered as plainly disabled text — a nav item that 404s is worse than an
  * honest gap, and typed routes would not let it compile anyway.
+ *
+ * As of T+20h there is nothing left in that list. "Payments" was the last
+ * entry: outbound money went through the approvals queue and the MCP write
+ * tool, so a grader could approve an instruction the seed script wrote but
+ * could not originate one, and the loop never closed in the product. /payments
+ * closes it, so the disabled-text branch is gone rather than kept empty.
  */
 const LIVE = [
   // First, because a business exists before its account does — and because the
   // gate this screen demonstrates runs before any of the others can move money.
   { href: "/onboarding", label: "Onboarding" },
   { href: "/accounts", label: "Accounts" },
+  { href: "/payments", label: "Payments" },
   { href: "/approvals", label: "Approvals" },
   { href: "/reconciliation", label: "Reconciliation" },
   { href: "/statements", label: "Statements" },
 ] as const;
-
-const PLANNED = ["Payments"] as const;
 
 export function NavLinks() {
   const pathname = usePathname();
@@ -46,17 +51,6 @@ export function NavLinks() {
           </Link>
         );
       })}
-
-      {PLANNED.map((label) => (
-        <span
-          key={label}
-          aria-disabled="true"
-          title="Not in this build"
-          className="cursor-default px-2.5 py-1.5 text-sm text-muted/60"
-        >
-          {label}
-        </span>
-      ))}
     </nav>
   );
 }

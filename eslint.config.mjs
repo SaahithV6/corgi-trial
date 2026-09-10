@@ -16,8 +16,12 @@ const config = [
       // Gitignored diagnostic scratch. eslint 9's flat config does NOT read
       // .gitignore, so an ignored-by-git file is still linted, and a throwaway
       // query script turned the gate red for two workers who had not written
-      // it and could not delete it.
+      // it and could not delete it. Three more have appeared at the repo root
+      // since, from three different workers, so the pattern is matched too
+      // rather than the incident being cleaned up one file at a time.
       ".scratch/**",
+      "*.tmp.mjs",
+      "*.tmp.js",
     ],
   },
   ...nextCoreWebVitals,

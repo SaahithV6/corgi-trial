@@ -4,8 +4,9 @@
 cannot explain when someone points at it. This document is the 30-minute
 version of the whole build: the five ideas everything else hangs off, a file
 tour, the questions a hostile expert actually asks with answers that cite a
-file, the weak spots said out loud before they are found, three things to
-volunteer, and a ten-minute demo.
+file, the weak spots said out loud before they are found, the findings to
+volunteer, the one pattern this build taught that generalises, and a ten-minute
+demo.
 
 Rules for the room, in order of how much they help:
 
@@ -25,9 +26,10 @@ Rules for the room, in order of how much they help:
 | --- | --- | --- |
 | 0–8 | **§1**, all five, out loud | These are the only things that must be recallable with no page in front of you. Everything in §2 and §3 is derivable from them. |
 | 8–14 | **§4**, the framing sentence of each | The section that is rehearsal, not reference. Whichever weakness they find, you want to have said it first. |
-| 14–20 | **§5**, the three findings | Get 5.1 and 5.2 into the first fifteen minutes of the debrief. |
-| 20–26 | **§6**, the click path | Walk it once in a browser while reading, so the numbers are familiar rather than surprising. |
-| 26–30 | **§3.1, §3.5, §3.6** | The three questions most likely to be asked first and hardest. |
+| 14–19 | **§5**, the findings | Get 5.1, 5.2 and 5.4 into the first fifteen minutes of the debrief. |
+| 19–22 | **§6**, the five guards | One table, one sentence. It is the only claim in here that generalises past this repo, so it is the one to be able to defend under push-back. |
+| 22–27 | **§7**, the click path | Walk it once in a browser while reading, so the numbers are familiar rather than surprising. |
+| 27–30 | **§3.1, §3.5, §3.6** | The three questions most likely to be asked first and hardest. |
 
 **§2 is reference, not reading.** It is one entry per module, ordered by the
 path money takes; open it when they point at something. The appendix at the
@@ -596,14 +598,18 @@ and returns one of five verdicts: `live`, `unauthorised`, `unreachable`,
 provider last delivered anything — from `webhook_inbox.received_at`.
 
 **Know the number before you quote it.** Everything now says **6 live of 7** —
-README, DEMO, the T+24h email and the endpoint — after `card_webhooks` moved
-from `live` to `unprobed` when the fallback bug was fixed. It briefly disagreed,
-which is the point: docs drift from systems, so read `/api/health` on the day.
-Load `/api/health` on the day and read its number, and if they notice the
-difference, that *is* the answer: one fewer claimed integration is a better score
-on integration reality, not a worse one, because the rubric grades honest
-labelling and the brief calls presenting a simulated integration as live the
-fastest way to fail the trial.
+README, DEMO, the T+24h email and the endpoint — with `business_registry` the
+only simulated slot. The number has moved in both directions during this build
+and each move was earned: `card_webhooks` went *down* to `unprobed` when the
+fallback bug was fixed, then back up when it got a real probe; `stablecoin`
+became live only when a payout confirmed on chain. Load `/api/health` on the day
+and read its number, and if they notice a document disagreeing, that *is* the
+answer: one fewer claimed integration is a better score on integration reality,
+not a worse one, because the rubric grades honest labelling and the brief calls
+presenting a simulated integration as live the fastest way to fail the trial.
+`node scripts/audit-claims.mjs` is the mechanical version of that sentence — it
+reads the endpoint and fails if any tracked Markdown file states a different
+count or presents a simulated slot as live.
 
 **Questioned:** *"`unreachable` isn't `live`, but it isn't a failure either. Why
 does it read as SIMULATED?"*
@@ -635,6 +641,46 @@ It is deliberate — it is what makes the parameterless `POST /v1/accounts` Stri
 probe work at all, since a Connect-enabled account answers with a
 parameter-validation 400 — but it is a rule worth stating rather than being
 caught by.
+
+**Questioned — and this is the one to want:** *"`some`? So one live slot out of
+two is enough to raise an alarm about the other."* The line is
+`integrationLive: w.slots.some((s) => probedStatus.get(s.slot) === 'live')` in
+`route.ts`, and the comment above it is long on purpose, because **the original
+reason for it has expired and the decision survived**. It was `every` until
+`DECISIONS.md` 028: Lithic owns `card_issuing` and `card_webhooks`,
+`card_webhooks` had no probe and was honestly `unprobed`, so `every` was false
+for ever, `degradesDeployment` could never be true, and no webhook outage could
+move the top-level status — measured then, Lithic stale at 184s with `status:
+"ok"`. `card_webhooks` now has a real probe and reads `live`, so that argument is
+gone and `every` would work today.
+
+**It is still wrong, and now for a measured reason.** `card_webhooks`'s probe
+reads Lithic's *own* `/attempts` log, so its verdict is a **function of the
+delivery loop's health** — it is not an independent witness. Feed
+`judgeWebhookSubscription` the two degraded shapes this account has actually
+produced and it returns not-live for both: a latest attempt of `FAILED 500`
+(the real 16:18 incident — Lithic delivering, our endpoint refusing, deliveries
+being *lost*) reads `unauthorised`, and an unreadable `/attempts` reads
+`unreachable`. Replay this outage's own published facts through
+`webhookDeliveryHealth` with `card_webhooks` forced not-live, same instant, same
+threshold, only the gate changed:
+
+    some  + card_webhooks not live -> degradesDeployment true,  degradedBy [lithic], degraded
+    every + card_webhooks not live -> degradesDeployment false, degradedBy [],       "ok"
+
+So **`every` is disarmed by the outage it exists to catch.** `some` is not
+incidentally correct; it is the only one of the two that the failure cannot
+silence, because no single slot's degradation reaches it. And it is the right
+question anyway: the gate asks "do we have a working integration with this
+provider whose silence would mean something", and one live slot answers it. An
+`unprobed`, `unreachable` or `unauthorised` sibling is an absence of evidence
+about one leg — and this system deliberately manufactures honest absences of
+evidence, so an alarm that any of them can disarm is not an alarm.
+
+`src/test/livefire/attack-07-provider-outage.test.ts` asserts both shapes rather
+than only the live one, because both Lithic slots read `live` today so the live
+escalation assertion would pass under `every` too and would say nothing about the
+regression. See §6 — this is the fourth of five guards to fail this exact way.
 
 ### 2.14 KYB — `src/lib/kyb/*`, `db/migrations/0005_kyb.sql`
 
@@ -681,6 +727,101 @@ not select Persona even with a key. And if the module *were* wired to
 `/api/health` unchanged it would reintroduce the 021 two-opinions bug, because
 `selectRegistryLeg` marks the Stripe leg live on key presence alone while
 `probe.ts` proves that same credential cannot do the job.
+
+### 2.15 The USDC rail — `src/lib/rails/stablecoin/*`, `scripts/payout-usdc.mjs`, `docs/STABLECOIN.md`
+
+Ten modules and 42 tests behind one real payout: `0xb47c5a36…86a1`, receipt
+`0x1`, block 46,651,201, 0.500000 USDC, 44,843 gas. `adapter.ts` is
+refuse / sign / broadcast / wait / state-an-outcome; `ledger.ts` is the posting,
+through `postEntry()` and nothing else; `allocation.ts` holds the two pure
+decisions (minor units → balanced cents, block timestamp → value date) and is
+separate precisely so it is testable in a CI that holds no credentials.
+
+**The thing to point at first is the identifier, not the transfer.** An Ethereum
+transaction hash is `keccak256` of the signed transaction's own bytes — nothing
+about it is assigned by the network — so the name of this money movement exists
+on our machine *before* a byte goes over the wire, and the script prints it
+there. That is what lets it be the **idempotency key** rather than a receipt for
+one. `journal_entry.idempotency_key` is UNIQUE, so a second posting is a no-op
+decided by Postgres. The alternative — broadcast, then ask the node what it
+called the transaction — has a window in which money has moved under a name we
+do not yet know, and that is where double spends live.
+
+**Questioned:** *"You hand-rolled a signer."* Yes, and the alternative was worse:
+putting `viem` or `ethers` into the deployed application so an operator script
+can sign a transaction. `keccak.ts` is not `createHash("sha3-256")` — FIPS-202
+pads with `0x06`, Ethereum's pre-standard Keccak pads with `0x01`, and node's
+OpenSSL has no `keccak256` at all. None of it was trusted until it was checked:
+`keccak.test.ts` and `tx.test.ts` pin published vectors including the **EIP-155
+example transaction**, whose exact `r` and `s` come back out — which is only
+possible if the address derivation, the RLP, the hash and the signer are
+simultaneously right. `tx.test.ts` then re-encodes *this* transaction from fields
+read back with `eth_getTransactionByHash` and asserts the hash the network has,
+with no private key involved. Volunteer the limit in the same breath: `pointMul`
+is plain double-and-add and says so in its own comment, so the signer is not
+constant-time and belongs in a KMS in production.
+
+**Questioned:** *"Why is `evidence` on the outcome a literal?"* Same reason as
+the KYB composite: an outcome that can claim `live` without a receipt is a
+forgery route. `postUsdcPayout` takes a `ConfirmedPayout`, which is only
+constructible after a receipt has been read, `status: 0x1` asserted and the block
+re-checked as canonical. Broadcast, `reverted`, `reorged`, `unconfirmed`,
+`dropped` and `refused` outcomes **cannot be passed to it at all**, so "we posted
+a payment that never happened" is a compile error, not a code review. Every
+non-refusal outcome carries the transaction hash, because an exception that
+unwinds the stack with the hash inside it is how a payout becomes unfindable.
+
+**The three gaps are §4.7 and they get volunteered, not defended.**
+
+### 2.16 The commit gate — `scripts/precommit.sh`, `.secretscanignore`
+
+Three scans and the three CI checks, chained with `&&` because a gate joined
+with `;` is decoration. The scans are worth knowing apart, because each exists
+because of a different real incident: an exact-value scan of staged files
+(`DECISIONS.md` 032), a shape scan of provider prefixes, an editor-scratch-file
+refusal (013), and a whole-tree credential scan with `grep -a` (023, and the NUL
+byte that hid 1,206 lines).
+
+**Questioned:** *"A grep for `0x` plus 64 hex is the obvious rule for a private
+key. Why is it gone?"* Because it worked until this repo started doing
+elliptic-curve arithmetic, and then the curve order, the field prime, both
+generator coordinates, every keccak vector and the published EIP-155 signature
+all matched it — **24 matches across `src/lib/rails/stablecoin/`, 23 distinct
+values, not one of them a secret.** The failure mode of that rule is not the
+false positive; it is that a rule firing on 24 innocent constants gets switched
+off by whoever is in a hurry, and then it protects nothing. It now compares
+against the **literal values in `.env`**, which has no false positives at all and
+is strictly stronger for every secret this project holds, because it catches a
+leaked key in any encoding position — prefix or not, hex or not.
+
+**Questioned:** *"How does it know which `.env` values are secret?"* By key name,
+and the direction is the point: it is a **whitelist of secret-bearing names**
+(`KEY|SECRET|TOKEN|PASSWORD|PRIVATE|CREDENTIAL|DSN`, plus `DATABASE_URL`,
+`DIRECT_URL` and `APP_DATABASE_URL` named explicitly), not a blacklist of public
+ones. You can enumerate your own credential names; you cannot enumerate every
+public value that might legitimately appear in a document. The blacklist version
+fired three times in one afternoon — on the wallet address, on the public RPC
+endpoint, and on the literal string `business_registry` from a feature flag,
+which appears in every document that discusses that slot. Note the three URLs:
+they end in `_URL` like the public ones and carry a password in the userinfo, so
+a suffix rule would have classed them as public. Proof rather than reasoning: the
+real private key was planted in a staged file, the gate refused it, and it
+flagged nothing else. The refusal prints the offending *file* and never the
+matching line, because a gate that echoes the secret it caught has just put it in
+a terminal scrollback and a CI log.
+
+**Own this one before they find it:** a comment in that file says
+`scripts/precommit.sh --audit` prints the classification "so the assumption can
+be checked rather than trusted", and no argument handling exists in the script,
+so the flag does nothing. It is a comment claiming a capability the file does not
+have — the same class of over-claim as a probe reporting live without a round
+trip — and the fix is one function or one deleted sentence.
+
+**`.secretscanignore` is a file with justifications, not an inline exception.**
+Two entries, each carrying the burden of proof: the scanner itself (its pattern
+list contains the prefixes it hunts, so it matches itself) and `env.test.ts`,
+whose `sk_live_abc123` is a deliberate **negative** fixture proving the
+environment layer refuses live keys at boot. Deleting it would delete the proof.
 
 ---
 
@@ -992,7 +1133,56 @@ approving agent unrepresentable.
 Then volunteer the four debatable lines from §2.11 — it is a stronger answer than
 a clean one.
 
-### 3.10 Others they are likely to ask
+### 3.10 "Kill your payout script after the broadcast. What happens when you run it again?"
+
+The best question they can ask about the USDC rail, and there are exactly three
+places to die, because a payout is two writes to two systems that cannot share a
+transaction.
+
+**1. Before broadcast.** Nothing was signed onto the wire. Nothing moved, nothing
+posted, and a re-run reads the same nonce and sends exactly one transfer. Safe by
+construction.
+
+**2. After broadcast, before the receipt — the window that pays twice.** A
+transaction sits in the mempool at nonce *N* and we never learned its fate. The
+naive re-run reads `eth_getTransactionCount(pending)`, which **already counts the
+in-flight transaction**, builds a second transfer at nonce *N+1*, and pays twice.
+Closed by reading `pending` and `latest` separately and refusing while they
+disagree:
+
+    kind    REFUSED
+    reason  transaction_in_flight
+    detail  nonce pending=1 latest=0: 1 transaction(s) from this wallet are
+            unmined. Broadcasting now would take nonce 1 and send a SECOND
+            payout. Wait for the mempool to clear, then re-run.
+
+If it mines, case 3 finds it; if it is dropped, `pending` falls back to `latest`
+and the re-run sends one. Either way the hash was printed *before* the broadcast,
+so `--settle <hash>` resumes directly. Step 5 of `sendUsdcPayout` in
+`adapter.ts`.
+
+**3. After the receipt, before the ledger write.** The money moved and nothing
+records it. Closed by asking **the chain**, not a local row: `eth_getLogs` for an
+ERC-20 `Transfer` from this wallet, to this recipient, for this amount, over the
+last 10,000 blocks. A hit returns that transaction's receipt as `confirmed` with
+`recovered: true`, having sent nothing, and the caller posts under the same
+idempotency key. That is also why the second run of the demo prints
+`already on chain as 0xb47c5a36…86a1 — sending nothing`, the same entry id, and
+`entries with this key: 1`.
+
+**Volunteer the limit of (3) rather than waiting for it.** The on-chain evidence
+is `(token, from, to, amount)`, so two payouts agreeing on all four are
+indistinguishable to the scan, and it reaches back 10,000 blocks and no further.
+A production system carries a durable intent id, and the natural home for it is a
+`usdc_payout` table this build does not have. It is correct for one payout
+instruction at a time, which is what it claims and no more.
+
+**And one deliberate `throw`:** if the node returns a hash different from the one
+computed locally. That cannot happen unless the keccak or the RLP is wrong, and
+if it does, the idempotency key names a transaction that does not exist — so the
+process stops rather than posting.
+
+### 3.11 Others they are likely to ask
 
 **"Why no status column on the authorisation?"** Status is a view over events. A
 status column is a cache with no key and no invalidation story, and it is the
@@ -1075,12 +1265,29 @@ trade.
 agree, then amend DESIGN §8.2's diagram, which a test comment already flags as
 looser than the SQL.
 
-### 4.2 Live-fire attack 7 — the outage was invisible, and the fix landed after the last run
+### 4.2 Live-fire attack 7 — the outage used to be invisible, and the gap it left was in the alarm, not the report
 
-**Say:** "At the last recorded live-fire run this skipped, because `/api/health`
-reported credential liveness and nothing about delivery freshness. Both missing
-pieces have since landed and I have not re-run live fire against them, so I am
-not claiming it passes — here is the command that decides it."
+**Say:** "This one skipped for most of the build because `/api/health` reported
+credential liveness and nothing about delivery freshness. It now passes, and it
+passes by *inducing* the outage rather than by asserting round a missing feature
+— the last full run was **7 PASS, 0 FAIL, 1 SKIP**, and the remaining skip is
+attack 2 and is deliberate (§4.1)."
+
+The suite delivers nothing for 180s, watches Lithic cross `fresh → stale` at lag
+184s inside its own 180–900s band, cross-checks the published `lastDelivery`
+against `MAX(webhook_inbox.received_at)` read straight from the database, and
+asserts the *degraded* banner specifically rather than any banner, because the
+"cannot reach health" variant carries the same attribute and would prove the
+opposite. If the silence cannot be induced it SKIPs and names what stopped it.
+
+**And the part worth volunteering** is what that run found: the escalation gate
+read `slots.every(live)`, Lithic owned an honestly `unprobed` sibling slot, so
+`degradesDeployment` was false permanently and **no webhook outage could move the
+top-level status** — a reader of `webhookHealth` saw the outage and a monitor
+watching `status` did not. It is `some` now, for a reason that has since been
+re-derived from measurement rather than from that history (§2.13), and the test
+asserts both gate shapes rather than only the one in use. That is guard four of
+the five in §6.
 
 What already held through the dark window: the trial balance does not move, the
 swallowed event has zero inbox rows, nothing is invented; on recovery a doubled
@@ -1093,11 +1300,13 @@ in the console shell — deliberately saying "the feed has gone quiet and the
 balances below are still correct for every event we have received", never
 "healthy" from an absence, and never blanking the page.
 
-**Command:** `node scripts/livefire.mjs --only 7`.
-**Week two:** run it, and if it passes, update `src/test/livefire/README.md` §4
-and `docs/CUT-LIST.md` §2.5, which both still describe it as missing.
+**Command:** `node scripts/livefire.mjs --only 7`. Re-run it before the room and
+quote that run, not this paragraph.
+**Week two:** `src/test/livefire/README.md` §4 and `docs/CUT-LIST.md` §2.5 still
+describe delivery freshness as missing. Both are stale in the under-claiming
+direction; say it before they read it.
 
-### 4.3 The two simulated slots
+### 4.3 The simulated slot, and the one that stopped being simulated
 
 **`business_registry`.** Say: "Every KYB option on the brief's own menu is gated,
 and I measured that rather than reading it off a support page." Persona KYB and
@@ -1109,11 +1318,17 @@ string. **Week two:** it is not on the list — the honest position is that this
 slot cannot be made live inside a trial, and the fix is a Middesk or Persona KYB
 sales conversation, not code.
 
-**`stablecoin`.** Say: "We hold twenty dollars of USDC and zero wei of gas, so
-the rail can read the chain and cannot move a cent." The probe used to call
-`balanceOf`, get a 200, and report LIVE. **Week two:** item 5 — gas from Coinbase
-CDP, then a payout that confirms on Base Sepolia. It is blocked on a faucet, not
-on code, and it is the difference between five live slots and six.
+**`stablecoin` — this is the one that moved, and the framing changes with it.**
+For most of the build the honest sentence was "we hold twenty dollars of USDC and
+zero wei of gas, so the rail can read the chain and cannot move a cent", after a
+probe that called `balanceOf`, got a 200 and reported LIVE. Gas landed, and the
+payout confirmed: `0xb47c5a36…86a1`, receipt `0x1`, block 46,651,201, 0.500000
+USDC. The probe reads the token balance, the gas balance and the gas price
+together and claims live only if a transfer is fundable, so the slot is live
+because a transfer *can* be paid for and a transfer *was*. **Say:** "That slot
+was simulated four hours ago and the reason it is not any more is a transaction
+you can open in a block explorer." Its three honest gaps are §4.7 and they get
+volunteered with it.
 
 ### 4.4 Three stale memo holds, and the invariant that cannot see them
 
@@ -1224,21 +1439,70 @@ and a paid plan.
   is not the control that stops an attacker — the token, the tenant scope and the
   approval queue are.
 - **Several documents are stale in the under-claiming direction.** README says
-  "24 entries" (there are 26) and that there is no statement renderer; CUT-LIST
+  "24 entries" (there are 33) and that there is no statement renderer; CUT-LIST
   §3.4 and `src/test/livefire/README.md` §4 say the same, and CUT-LIST §2.5 says
-  delivery freshness is missing. All of those landed after the docs were written.
-  Say it before they do — under-claiming is the safe direction, but only if you
-  are the one who points at it.
+  delivery freshness is missing. `src/test/livefire/attack-07-provider-outage.test.ts`'s
+  own header records that it read 5 of 7 slots live, which was true at that
+  commit and is 6 now. All of those landed or moved after the docs were
+  written. Say it before they do — under-claiming is the safe direction, but only
+  if you are the one who points at it, and the mechanical version is
+  `node scripts/audit-claims.mjs`, which checks the counts against the live
+  endpoint and passes today.
 - **No authentication.** Cut on day one, never built, and `docs/DEMO.md` says so
   in its first section rather than presenting a role switch as a login.
 
+### 4.7 The USDC payout's three honest gaps
+
+**The opening sentence:** "The payout is real and confirmed. Three things about
+it are not finished, and I would rather list them than have you find them."
+`docs/STABLECOIN.md` §*What this does not do* is the written version, and it
+carries three more (no durable intent table, a signer that is not constant-time
+and is not a KMS, and a single confirmation).
+
+**1. The ledger carries USDC in cents rather than as its own currency.**
+`journal_line.currency` is `char(3)`, every seeded account is `'USD'`, and
+`assert_entry_balanced()` requires **each currency in an entry to net to zero
+independently** — so an entry whose debit is USD and whose credit is USDC cannot
+balance, by construction, without an FX bridge account pair this chart does not
+have. Widening the column would not fix that; it would move it. Chart account
+1140 anticipated this and states its own unit — "carried in cents at 1 USDC = 100
+cents … with sub-cent dust going to 2900 rather than being truncated" — which is
+why there is no migration 0012. The two are still kept apart where they could
+actually be added together by accident: `rails/types.ts` gives USDC its own
+`Currency` code and the `Money` crossing the rail boundary is
+`{ amount: 500000n, currency: 'USDC' }`; the narrowing to cents happens once,
+visibly, at the posting boundary. USDC has six decimals, so 1.234567 USDC is
+123.4567 cents and the four digits below the ledger's resolution post to a real
+line (DR 124 / CR 123 / CR 1 to 2900) rather than being truncated. 0.50 USDC has
+no dust and posts two lines.
+
+**2. Gas is not posted.** Account 5300 ("Blockchain gas — USDC transfers") is the
+right home and is deliberately empty. Gas is paid in ETH; the chart has no
+ETH-denominated asset account to credit, and converting wei to cents needs an
+ETH/USD rate this system has no live source for. **Inventing one would be worse
+than the gap.** On Base Sepolia the figure is 269,058,000,000 wei — 2.7×10⁻⁷ ETH,
+on the order of a tenth of a cent, so it rounds to zero cents and would be
+rejected as a zero-amount line — but the accumulated figure is real on mainnet.
+The actual `gasCostWei` is carried on the outcome and written into the entry
+description, so nothing is lost, only unposted.
+
+**3. Account 1140 does not reconcile to the wallet.** The ledger says 1140 is
+−$0.50; the chain says the wallet holds 19.50 USDC. The difference is exactly the
+opening 20 USDC, which arrived from the Circle faucet and never entered the
+books. Booking it needs an equity-contribution account the chart does not have —
+3000 is a non-postable rollup and 3100 is retained earnings — and inventing one
+under time pressure against money rows is the wrong trade, the same call as the
+three stale memo holds in §4.4. **The gap is the un-booked opening balance and
+nothing else**, which is a stronger sentence than "it does not reconcile" and is
+the one to say.
+
 ---
 
-## 5. The three findings to volunteer unprompted
+## 5. The findings to volunteer unprompted
 
-These are the ones that show the work was done against reality. Get at least the
-first two out early — they are the strongest evidence in the build that the
-design was tested rather than described.
+These are the ones that show the work was done against reality. Get 5.1, 5.2 and
+5.4 out early — they are the strongest evidence in the build that the design was
+tested rather than described.
 
 ### 5.1 Lithic's `status` flips to SETTLED while a partial hold is still live
 
@@ -1295,7 +1559,9 @@ caught by measuring rather than reading:
 3. **The USDC probe called `balanceOf`, got 200, and reported LIVE on a wallet
    with zero gas** (016). That one was worse than the others: it overstated a slot
    I was counting as one of two live integrations, in a README and in an email.
-   We hold twenty dollars and can move none of it.
+   We held twenty dollars and could move none of it — and the correction is the
+   reason a payout exists at all (§5.4), because the probe was what forced the
+   gas problem into the open instead of leaving it to be discovered in this room.
 4. **The *fixed* Stripe probe called `GET /v1/accounts`** — which also returns 200
    with Connect disabled, because reading connected accounts is permitted when you
    have none and can create none (017). I replaced a wrong probe with a
@@ -1321,9 +1587,112 @@ one, because "we have not proven this" and "there is no credential" need
 different words and both must read as SIMULATED. (`DECISIONS.md` 011, 015, 016,
 017, 026.)
 
+### 5.4 The transaction hash is computed before the broadcast, so it is the idempotency key rather than a receipt for one
+
+The brief's own provider notes say a stablecoin payout that actually confirms on
+a testnet is worth far more than a slide about one. This is that payout, and it
+is verifiable by anyone in the room while you are talking:
+
+    tx        0xb47c5a368f79786f73947c4f1980615557ff1800cd92818bd33070f7ed7986a1
+    network   Base Sepolia, chain id 84532
+    amount    0.500000 USDC (500000 minor units)
+    nonce     0 — this wallet's first transaction ever
+    receipt   status 0x1
+    block     46651201 @ 2026-09-10T20:04:50Z
+    gas       44843 used @ 6000000 wei = 269058000000 wei
+
+    entry     9ab676c5-6c84-4124-bede-d2b9facf8558   rail usdc
+              DR 2100/<business>  50
+              CR 1140             50      balance 0
+    value date 2026-09-10, from the BLOCK's own timestamp in book time
+
+**The design idea, not the demo.** An Ethereum transaction hash is `keccak256`
+of the signed transaction's own bytes; nothing about it is assigned by the
+network. So the identifier for this money movement exists on our machine *before*
+a byte goes over the wire, and `scripts/payout-usdc.mjs` prints it there —
+`tx hash 0xb47c5a36…86a1 <- known BEFORE broadcast`. That is what makes it usable
+as the **idempotency key**: `journal_entry.idempotency_key` is UNIQUE, so a second
+posting of the same transfer is a no-op decided by Postgres. The alternative —
+broadcast, then ask the node what it called the transaction — has a window in
+which money has moved under a name we do not yet know, and that window is where
+double spends live. The three crash points that fall out of it are §3.10, and the
+one to lead with is the middle one: `getTransactionCount(pending)` already counts
+the in-flight transaction, so the naive retry builds a second transfer at the next
+nonce and pays twice. It refuses while `pending` and `latest` disagree.
+
+**Say the value date out loud too.** It comes from the block's own timestamp
+converted to America/New_York, not `Date.now()` and not when the receipt was
+read — so a process restarted tomorrow that recovers yesterday's transfer still
+posts it on yesterday, and a block at 02:00 UTC belongs to the previous New York
+business day. `ledger.test.ts` pins that case.
+
+**Volunteer §4.7 in the same breath.** The cents-not-USDC ledger, the unposted
+gas and the wallet that 1140 does not reconcile to. The payout is the strongest
+single artefact in the build and the three gaps are the reason it is worth
+believing.
+
 ---
 
-## 6. A ten-minute demo script
+## 6. Five guards, one failure shape
+
+If they take one thing away that is not about this repo, make it this. It is also
+the one claim in here they can push back on, so it is worth having the
+counter-argument ready.
+
+    guard              the exclusion             what it let through
+    ---------------------------------------------------------------------------
+    v_hold_drift       WHERE NOT is_released     a wrong closure row
+    secret scanner     plain grep                1,206 lines after a NUL byte
+    escalation gate    slots.every(live)         any outage, once a slot was
+                                                 honestly unprobed
+    doc auditor        "N of 7" only             it read past "4/7 live", its
+                                                 own log's shorthand
+    secret scanner v2  0x + 64 hex shape         would have fired on 24 curve
+                                                 constants, and a rule that noisy
+                                                 gets switched off
+
+**Every one of those exclusions is shaped exactly like the failure the guard
+exists to catch, and every one reported healthy while blind.** `v_hold_drift`
+excludes released holds and the bug *is* a spurious release (§4.4). The scanner
+skipped what looked binary, and a credential hiding past a NUL byte is precisely
+what it would miss (`DECISIONS.md` 023). The gate required *every* slot live, and
+an outage is what makes a slot not live (§2.13, §4.2). The auditor understood one
+spelling of the claim it guards, and the drifted document was written in the
+other spelling — its own iteration log's (`scripts/audit-claims.mjs`). The shape
+rule matched 64 hex characters, and this repo's honest constants are 64 hex
+characters (§2.16).
+
+**The one-line lesson: a guard must be tested against the thing it guards
+against, not merely run.** Running it proves it does not crash. Only the failure
+case proves it can see.
+
+**The push-back to expect, and the answer.** *"That is just 'write a negative
+test'."* It is more specific than that, and the extra specificity is what makes
+it actionable: the negative test has to be constructed out of **the guard's own
+exclusion clause** — the `WHERE NOT`, the `every`, the regex's one spelling, the
+implicit "text files only". That clause is the line nobody reads twice, because
+it is the part that was added to stop the guard being annoying. Whoever narrowed
+it was solving a real false-positive problem, which is why the narrowing always
+looks reasonable and why the fifth one here (the 24-constant rule) is a guard
+that would have been switched off rather than one that was wrong.
+
+**The honest part, and say it.** Four of these were found one at a time, each by
+accident, by something else failing — an evaluator's clean scan, a README worker
+refusing a claim it could not justify, a live-fire run, a stale checkpoint email.
+Only the fifth was found by going looking on purpose, after the pattern had
+already been written down. The general rule came *after* the fourth instance, not
+before the first, and claiming otherwise would be exactly the kind of tidying-up
+this document exists to avoid. `DECISIONS.md` 033.
+
+**And the audit is not finished.** `v_hold_drift`'s blind spot is still open and
+is in the cut list with its reason (§4.4). The same read has not been done over
+the other four invariant views. The table above is what the audit found in the
+guards that were looked at — not a clean bill of health for the ones that were
+not.
+
+---
+
+## 7. A ten-minute demo script
 
 Have two things open before you start: the deployed URL and a terminal with
 `set -a; . ./.env; set +a` already run. Say the sentence, then let the number do
@@ -1337,22 +1706,26 @@ evidence column is the string the probe returned. If the README ever disagrees
 with this page, the page is right."
 
 **Point at:** `integrations.live` — **read the number off the page, do not quote
-the README's 5**; it is 6 of 7 as of the last measured run. `card_webhooks`
-moved to `unprobed` and has since been earned back by a real probe. Then the `simulated` rows and their evidence
-strings — *"Connect not enabled…"* and *"holds 20.00 USDC but only
-0 wei gas; a transfer needs ~390000000000 — cannot send"*; then `webhookHealth`,
-which is a *different* question with a deliberately disjoint vocabulary
+any number written down here**; it was 6 of 7 at the last measured run, with
+`business_registry` the only simulated row and its evidence string *"Connect not
+enabled…"*. Then the `stablecoin` row, whose evidence string is now
+*"19.50 USDC and … wei gas — a transfer is fundable"* and which reports live
+because a transfer can be paid for and one was. Then `webhookHealth`, which is a
+*different* question with a deliberately disjoint vocabulary
 (`fresh | stale | quiet | never | unknown`) so a provider can be live and stale at
 once with no contradiction to resolve.
 
-**Volunteer:** "The count went *down* during this build and that is the point.
-`card_webhooks` used to read `live` off the back of a non-empty
-`LITHIC_WEBHOOK_SECRET`, because a slot with no probe inherited the env-derived
-status — announced by an evidence string that said 'no probe defined for this
-slot' while the label claimed otherwise. It now reads `unprobed`, labelled
-SIMULATED. What actually backs that slot is stronger than a probe would be: the
-endpoint is registered at Lithic, real signed deliveries arrive, and they drain
-into journal lines — but the page will not claim what it has not proven."
+**Volunteer:** "The count went *down* during this build before it went up, and
+that is the point. `card_webhooks` used to read `live` off the back of a
+non-empty `LITHIC_WEBHOOK_SECRET`, because a slot with no probe inherited the
+env-derived status — announced by an evidence string that said 'no probe defined
+for this slot' while the label claimed otherwise. It dropped to `unprobed`,
+labelled SIMULATED, and stayed there until it earned a real probe: two
+authenticated reads, the subscription list and that subscription's `/attempts`
+log showing Lithic's own record of our endpoint answering 202. `stablecoin` went
+the same way for a different reason — it was simulated while the wallet held
+twenty dollars and no gas, and it is live because a payout confirmed on chain.
+Nothing on this page is labelled by a string existing."
 
 ### 1:30 — `/accounts` → open **Operating ••4417**, then add `?auth=pending`
 
@@ -1451,7 +1824,7 @@ verification running **now** rather than being baked at build time.
 **Volunteer:** the README and CUT-LIST still say this does not exist. It landed
 after they were written.
 
-### 8:30 — the terminal, twice
+### 8:30 — the terminal, three times
 
 ```bash
 pnpm db:check
@@ -1475,19 +1848,38 @@ twenty-four hours, so no consumer runs inline. The inbox row is durable before a
 of the three triggers runs, so losing all three loses latency and cannot lose
 money."
 
+```bash
+node scripts/payout-usdc.mjs
+```
+
+**Say:** "This already ran once, so watch what it does the second time. It reads
+the chain, finds an ERC-20 `Transfer` from this wallet to that recipient for that
+amount, and settles *that* transaction instead of sending a new one." The output
+is `already on chain as 0xb47c5a36…86a1 — sending nothing`, `recovered yes`, the
+same entry id `9ab676c5-…`, and `entries with this key 1`.
+
+**Then say the thing that makes it work:** "The idempotency key is the
+transaction hash, and the hash is `keccak256` of the signed bytes, so it exists on
+this machine *before* the broadcast. That is why it is a key and not a receipt.
+The alternative — broadcast, then ask the node what it called the transaction —
+has a window where money has moved under a name we do not yet know." If there is
+time, `--check` reads the chain and sends nothing, and §3.10 is the three crash
+points. Volunteer §4.7's three gaps here rather than at the end.
+
 ### 10:00 — hand over
 
-**Closing sentence:** "The last full live-fire run against production was six
-pass, zero fail, two skip — and a skip is not a pass, so each one prints the
-sentence naming exactly what could not be proven. The decision log is 26 entries,
-append-only, and the entries where I was wrong are still in it above the entries
-that correct them. Point at anything."
+**Closing sentence:** "The last full live-fire run against production was seven
+pass, zero fail, one skip — and a skip is not a pass, so it prints the sentence
+naming exactly what could not be proven, and that one is deliberate. The decision
+log is 33 entries, append-only, and the entries where I was wrong are still in it
+above the entries that correct them. Point at anything."
 
 **Before the debrief, re-run it** — `node scripts/livefire.mjs` — and use that
-run's scoreboard rather than the recorded one. Two reasons: attack 7's two
-missing halves have landed since, and attack 8 is sensitive to Lithic's rate
-limit, so a run that shared the budget with something else can fail for a reason
-that has nothing to do with the claim. If it does, say which.
+run's scoreboard rather than the recorded one, and run
+`node scripts/audit-claims.mjs` so no document contradicts the endpoint on the
+day. Attack 8 is sensitive to Lithic's rate limit, so a run that shared the
+budget with something else can fail for a reason that has nothing to do with the
+claim. If it does, say which.
 
 **If they want to drive the code rather than the console:**
 `node scripts/livefire.mjs --only 5` proves the maker-checker refusal at the
@@ -1537,4 +1929,13 @@ with a tampered-signature negative control.
 | What was cut, what is deliberately unfinished, week two | `docs/CUT-LIST.md` |
 | Five liveness verdicts, earned by a round trip | `src/lib/integrations/probe.ts` |
 | Five freshness verdicts, disjoint by construction | `src/lib/integrations/delivery-health.ts` |
+| Why the escalation gate is `some` and not `every` | `src/app/api/health/route.ts` (the comment above `integrationLive`) |
+| The outage induced, and both gate shapes asserted | `src/test/livefire/attack-07-provider-outage.test.ts` |
+| The payout: refuse, sign, broadcast, wait, state an outcome | `src/lib/rails/stablecoin/adapter.ts` |
+| The hash that exists before the broadcast | `src/lib/rails/stablecoin/tx.ts` |
+| Minor units → balanced cents; block timestamp → value date | `src/lib/rails/stablecoin/allocation.ts` |
+| Only a `ConfirmedPayout` can reach the ledger | `src/lib/rails/stablecoin/ledger.ts` |
+| The transaction, the three crash points, and what it does not do | `docs/STABLECOIN.md` |
+| The commit gate, and the shape rule that was replaced | `scripts/precommit.sh`, `.secretscanignore` |
+| Every document checked against the live endpoint | `scripts/audit-claims.mjs` |
 | Every decision, in order, including the reversed ones | `DECISIONS.md` |

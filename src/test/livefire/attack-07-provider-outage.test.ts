@@ -70,7 +70,7 @@
  *   1. `card_webhooks` earned a real probe — `GET /v1/event_subscriptions` plus
  *      that subscription's `/attempts` log showing Lithic's own record of our
  *      endpoint answering HTTP 202. It is `live` now, not `unprobed`, and
- *      `/api/health` reports 5 of 7 slots live.
+ *      `/api/health` reports 6 of 7 slots live.
  *   2. The gate became `some` (DECISIONS 028), so no single slot's degradation
  *      can silence the alarm.
  *

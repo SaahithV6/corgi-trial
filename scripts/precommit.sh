@@ -11,6 +11,23 @@ cd "$(dirname "$0")/.."
 
 fail() { echo "GATE FAILED: $*" >&2; exit 1; }
 
+# --audit: print how every key in .env is classified, and exit.
+#
+# This existed as a sentence in a comment before it existed as code, which is
+# the same species of over-claim this gate is here to catch — caught by a
+# worker reading the file rather than by anything automated. The point of the
+# flag is that the whitelist below is an ASSUMPTION, and an assumption you
+# cannot inspect is one you are trusting.
+if [ "${1:-}" = "--audit" ]; then
+  SECRET_KEY_RE='(KEY|SECRET|TOKEN|PASSWORD|PRIVATE|CREDENTIAL|DSN|^DATABASE_URL|^DIRECT_URL|^APP_DATABASE_URL)'
+  echo "treated as SECRET (values compared against every staged file):"
+  grep -E '^[A-Z0-9_]+=.+' .env | grep -E "^[A-Z0-9_]*${SECRET_KEY_RE}[A-Z0-9_]*=" | cut -d= -f1 | sort | sed 's/^/  /'
+  echo
+  echo "treated as PUBLIC (ignored — check nothing sensitive is listed here):"
+  grep -E '^[A-Z0-9_]+=.+' .env | grep -vE "^[A-Z0-9_]*${SECRET_KEY_RE}[A-Z0-9_]*=" | cut -d= -f1 | sort | sed 's/^/  /'
+  exit 0
+fi
+
 git ls-files | grep -qE '^\.env$' && fail ".env is tracked by git. Secrets must never be committed."
 git diff --cached --name-only | grep -qE '^\.env$' && fail ".env is staged."
 
