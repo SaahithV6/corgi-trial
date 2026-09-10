@@ -420,7 +420,7 @@ X01 X02 X03 X04 X05
 """.split()
 
 DOING = """
-LF10 LF11
+LF10 LF11 Z06
 """.split()
 
 # Landed since the last graph update.
@@ -433,6 +433,7 @@ O02 O03 O04 O08 O09 T01 T02 T03 T04 T05 T07
 W10 W14 E04 E06 E07 E09 E10 E11 E12 E13 K04
 X06 X07 X08 X09 X10 X11
 Y01 Y02 Y03 Y04 Y06 Y07 Y08
+LF07 Z01 Z02 Z03 Z04 Z05
 """.split()
 
 # Discovered after the deploy went live.
@@ -464,6 +465,42 @@ def _late():
     N("X10", "Rubric evaluator, run repeatedly against the brief", "discovered", 60, [], "agent", ["docs/eval"])
     N("X11", "T+24h email drafted in a non-AI register", "discovered", 50, [], "agent", ["thread"])
 _late()
+
+# ---------------------------------------------------------------------------
+# ITERATION 3 — T+19.5h. Everything below was discovered by the evaluation loop
+# refusing to accept a claim it could not reproduce, not by planning.
+# ---------------------------------------------------------------------------
+def _iter3():
+    N("Z01", "card_webhooks: earn LIVE via event_subscriptions + /attempts log",
+      "discovered", 75, [], "agent", ["lib/probe"], "done",
+      risk="the attempts log is the ONLY evidence separating 'never sent' from 'sent and we 500ed'")
+    N("Z02", "rail_event_semantics: 22 rows, zero readers, called 'the mechanism'",
+      "discovered", 120, [], "agent", ["lib/rails/semantics"], "done",
+      risk="highest-risk artefact in the design was decorative; now parks on an unknown step")
+    N("Z03", "hold_closure_reversal + v_hold_release_drift; $60 over-release repaired",
+      "discovered", 90, [], "claude", ["db/migrations"], "done",
+      risk="v_hold_drift excluded released holds, so it was blind to exactly the rows the bug made")
+    N("Z04", "director_kyc: evidence names the branch that ran, not a hardcoded string",
+      "discovered", 25, [], "agent", ["lib/probe"], "done",
+      risk="a REJECTED Persona key rendered as an ABSENT one on the authoritative endpoint")
+    N("Z05", "audit-claims: block-level dating + the N/7 format it could not read",
+      "discovered", 30, [], "claude", ["ops/audit"], "done",
+      risk="the guard was blind to the shorthand its own log was written in")
+    N("Z06", "KYB wired to a request path; canTransact() actually called",
+      "finish", 110, [], "agent", ["lib/kyb"], "doing",
+      risk="non-negotiable 'unverified entities can look but not transact'; 0 external imports before")
+    N("Z07", "Base Sepolia gas so the USDC payout confirms on chain",
+      "finish", 15, [], "human", ["ops/chain"],
+      risk="the brief names this explicitly as worth far more than a slide; blocked on a faucet, not code")
+    N("Z08", "Record the five-minute video", "submission", 60, [], "human", ["submission"],
+      risk="largest unstarted submission item; a scored requirement regardless of the code")
+    N("Z09", "Capture the evidence pack (Lithic + Increase delivery logs)",
+      "submission", 40, [], "human", ["submission"],
+      risk="the two screenshots with no in-repo equivalent")
+    N("Z10", "business_registry off simulated (needs Persona or Connect)",
+      "finish", 60, [], "human", ["lib/kyb"],
+      risk="re-measured today: Stripe Connect still 400, no Persona key exists")
+_iter3()
 
 def apply_status():
     idx = {n["id"]: n for n in NODES}

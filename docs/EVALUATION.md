@@ -831,3 +831,92 @@ Each was an exclusion shaped exactly like the failure it existed to catch, and
 each reported healthy. **A guard must be tested against the thing it guards
 against, not merely run.** The doc auditor was the first guard built that way
 from the start.
+
+---
+
+# ITERATION 3 — 2026-09-10T19:20Z
+
+## Measured
+
+    health d601e1f · status ok · degradedBy none
+    integrations 5 of 7 live
+      live       card_issuing card_webhooks director_kyc open_banking ach_rail
+      simulated  business_registry stablecoin
+    / /accounts /approvals /reconciliation /statements   all 200
+    /onboarding                                          404  (uncommitted, agent still writing)
+    1054 tests passed, 96 skipped · dbcheck 14 of 14 · doc audit clean
+
+## The slot that was never broken, only unproven
+
+`card_webhooks` moved SIMULATED -> LIVE, and the interesting part is that
+nothing about the integration changed. It was `unprobed` because no probe
+existed, and 026 had correctly refused to infer liveness from a non-empty
+credential. Lithic exposes `GET /v1/event_subscriptions` and, per subscription,
+an `/attempts` log.
+
+The attempts log is the only evidence that can settle this slot at all. Every
+other probe reaches outward and reads its own answer. The webhook leg runs
+INWARD, and nothing on our side can distinguish *Lithic never sent it* from
+*Lithic sent it and we answered 500* — our inbox is empty in both cases. Their
+log separates them, and it still holds the receipts for the 020 inbox bug: two
+FAILED 500s at 16:18 recovering to SUCCESS 202.
+
+So the verdict is end-to-end, not a ping. `/api/webhooks/lithic` verifies the
+Standard Webhooks signature before anything else and answers 401 when it
+cannot. A SUCCESS attempt carrying our 202 therefore proves Lithic signed with
+the secret it holds and this deployment verified with the secret we hold, as
+witnessed by a third party.
+
+## Four guards, all blind in the shape of what they guard
+
+This iteration made it four, and the pattern is now the most useful thing in
+this document.
+
+| Guard | Exclusion | What it therefore could not see |
+|---|---|---|
+| `v_hold_drift` | `WHERE NOT is_released` | a wrong closure row — the thing it exists to catch |
+| secret scanner | plain `grep` | 1,206 lines after a NUL byte |
+| escalation gate | `slots.every(live)` | any outage, once one slot was honestly `unprobed` |
+| doc auditor | `"N of 7"` only | `"4/7 live"`, the shorthand its own log is written in |
+
+Every one of them reported healthy. `v_hold_release_drift` and the auditor's
+block-dating were both built by first writing the failure and watching the
+guard miss it.
+
+## The $60 was real, and my own note had it backwards
+
+`REMAINING.md` recorded three stale holds as "$60 withheld from nothing". The
+live database says the opposite: **$60 spendable that is still authorised**.
+Three holds carried a closure reading "authorisation fully reversed" whose
+authorisation was never reversed — `origin = clearing_first` on all three,
+residue of the bug `terminallyClosed` fixed, permanent because `hold_closure`
+is append-only. Corrected by a compensating append; the closure rows are still
+there and still say what they said. Available fell by exactly 6000 cents.
+
+The direction mattered. Withheld-from-nothing is a customer complaint;
+spendable-while-authorised is a loss.
+
+## Two claims retracted by the workers who were told to reproduce them
+
+- **`rail_event_semantics` is now load-bearing** — delete a row and the
+  consumer parks rather than guessing. It also disproved the brief it was
+  given: there is no correction path for cards at all, and five rows diverge
+  from the code today. Pinned by a characterisation test that fails on purpose
+  if one is closed silently.
+- **`director_kyc`'s evidence string was a hardcoded lie waiting for a key.**
+  It printed "(Persona not configured)" on the Stripe success path while the
+  Persona branch falls through on a 401 — so a rejected key rendered as an
+  absent one, on the endpoint this trial calls authoritative. True only because
+  the key is currently blank.
+
+## Ready now, and what each is blocked on
+
+    Z06  KYB wired to a request path          agent writing
+    Z07  Base Sepolia gas                     HUMAN — faucet, ~390000000000 wei
+    Z08  five-minute video                    HUMAN — largest unstarted item
+    Z09  evidence pack screenshots            HUMAN
+    Z10  business_registry off simulated      HUMAN — needs Persona or Connect
+
+The critical path is now entirely historical: every node on it has landed. What
+remains is not dependency-bound, it is human-bound. Scheduling cannot compress
+it and neither can more agents.
