@@ -1535,3 +1535,59 @@ open and is in the cut list with the reason; the honest position is that the
 same audit has not been run over the other invariant views. The list above is
 what the audit found in the guards I did look at, not a clean bill of health for
 the ones I did not.
+
+---
+
+## 034 — 2026-09-10T22:10Z — I turned a slot LIVE by clicking a button, and the probe believed me
+
+**What happened.** Chasing the last simulated integration, I clicked "Get
+started" on Stripe Connect in the dashboard. The API's answer to the probe's
+`POST /v1/accounts` changed from
+
+    "You can only create new accounts if you've signed up for Connect"
+
+to
+
+    "Stripe no longer recommends Accounts v1 for new Connect integrations.
+     Create connected accounts with POST /v2/core/accounts instead"
+
+The probe tested for the first string and treated **anything else** as
+parameter validation, therefore entitled, therefore `live`. Within seconds
+`/api/health` was reporting **7 of 7 live** with `business_registry: live`,
+while the registry leg was still the simulator and `KYB_FORCE_SIMULATED` was
+still set.
+
+**That is the automatic fail of this trial, produced by a click and an
+else-branch.** No code changed. No deploy happened. A dashboard button in a
+different browser tab moved a production endpoint from an honest label to a
+false one.
+
+**The fix.** Entitlement is necessary and not sufficient. The probe now
+distinguishes three answers rather than two:
+
+| Stripe says | Verdict | Why |
+|---|---|---|
+| "signed up for Connect" | `unauthorised` | not entitled |
+| "Accounts v1 … use /v2/core/accounts" | `unauthorised` | entitled, but through an API this system does not speak |
+| a genuine parameter error | `live` | entitled AND callable |
+
+**What this is the fourth instance of.** `v_hold_drift` excluded released
+holds. The secret scanner used plain `grep`. The escalation gate used `every`.
+Each was an exclusion shaped exactly like the failure it existed to catch. This
+one is the same shape wearing different clothes: **an `else` that means
+"success" is a claim, and a claim needs a reason.** The other three were caught
+by tests or by a screen. This one was caught only because I re-read the
+endpoint after touching something unrelated to it.
+
+**The uncomfortable part, said plainly for the debrief.** Every other bug of
+this shape in this project was found by an instrument. This one was found by
+habit. If I had enabled Connect and moved on, the submission would have shipped
+claiming a live integration it did not have — and the probe, the invariants,
+the doc auditor and the live-fire suite would all have stayed green, because
+none of them asks whether an integration the endpoint calls `live` is one the
+application actually uses.
+
+**Also corrected:** README, DEMO, EVIDENCE-PACK and both email drafts said
+"Connect not enabled", which had become false in the other direction. The
+honest statement is that Connect *is* enabled and the leg is still simulated
+for a different reason than this morning.

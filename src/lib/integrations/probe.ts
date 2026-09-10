@@ -201,13 +201,37 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
     if (msg.includes("signed up for Connect")) {
       return {
         liveness: "unauthorised",
-        detail: "Connect not enabled. Every KYB option the brief lists (Middesk, Persona KYB, Sumsub KYB) is gated behind sales or business verification; registry runs simulated and is labelled so.",
+        detail:
+          "Connect not enabled. Every KYB option the brief lists (Middesk, Persona KYB, Sumsub KYB) is gated behind sales or business verification; registry runs simulated and is labelled so.",
         ms,
       };
     }
-    // Any other 400 is Stripe complaining about the missing parameters, which
-    // means it got past the entitlement check: Connect is live.
-    return { liveness: "live", detail: "Connect enabled (account creation is entitled)", ms };
+    // Entitled, but through an API this system does not speak.
+    //
+    // FOURTH bug in this probe, and the first one I caused myself. Enabling
+    // Connect in the dashboard changed Stripe's 400 from an entitlement
+    // refusal to a DEPRECATION notice: v1 account creation is gone and the
+    // replacement is POST /v2/core/accounts, which nothing here calls. The
+    // fallthrough below read "not the entitlement message" as "parameter
+    // validation, therefore live", and /api/health went to 7 of 7 with
+    // business_registry LIVE while the registry leg was still the simulator.
+    //
+    // That is the automatic fail of this trial, produced by a click. The
+    // lesson is the one the other three taught: an else-branch that means
+    // "success" is a claim, and a claim needs a reason. Entitlement is
+    // necessary and not sufficient — the question is whether THIS system can
+    // create a connected account, not whether the account is allowed to.
+    if (msg.includes("Accounts v1") || msg.includes("v2/core/accounts")) {
+      return {
+        liveness: "unauthorised",
+        detail:
+          "Connect is enabled, but Stripe has retired Accounts v1 for new integrations and POST /v2/core/accounts is not wired here, so no connected account can be created; the registry leg runs simulated and is labelled so.",
+        ms,
+      };
+    }
+    // A genuine parameter-validation error means the entitlement check passed
+    // AND the endpoint is one we can call. Only then is the capability real.
+    return { liveness: "live", detail: `Connect enabled, account creation entitled (POST /v1/accounts -> ${res.status} parameter validation)`, ms };
   },
 
   director_kyc: async () => {

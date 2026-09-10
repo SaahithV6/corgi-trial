@@ -38,7 +38,7 @@ Read at 2026-09-10T17:41:58Z. `integrations.live` **5** of `integrations.total`
 | `card_issuing` *(must be live)* | Lithic sandbox | **live** | `GET /v1/cards -> 200` |
 | `card_webhooks` | Lithic | **simulated** | `credential present but NOT probed — no round trip proves this slot works` |
 | `director_kyc` *(must be live)* | Persona sandbox, or Stripe Identity | **live** | `Stripe Identity enabled (Persona not configured)` |
-| `business_registry` | Stripe Connect (gated) — simulated | **simulated** | `Connect not enabled. Every KYB option the brief lists (Middesk, Persona KYB, Sumsub KYB) is gated behind sales or business verification; registry runs simulated and is labelled so.` |
+| `business_registry` | Stripe Connect (enabled, but v1 retired) — simulated | **simulated** | `Connect is enabled, but Stripe has retired Accounts v1 for new integrations and POST /v2/core/accounts is not wired here, so no connected account can be created; the registry leg runs simulated and is labelled so.` |
 | `open_banking` | Plaid sandbox | **live** | `POST /institutions/get -> 200` |
 | `ach_rail` | Increase sandbox | **live** | `GET /accounts -> 200` |
 | `stablecoin` | USDC on Base Sepolia | **simulated** | `holds 20.00 USDC but only 0 wei gas; a transfer needs ~390000000000 — cannot send` |

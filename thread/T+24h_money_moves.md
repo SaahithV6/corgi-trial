@@ -37,7 +37,7 @@ disagrees with that page, believe the page. It reports 6 live of 7.
   LIVE       open_banking       Plaid sandbox       POST /institutions/get -> 200
   LIVE       director_kyc       Stripe Identity     Stripe Identity enabled
   LIVE       stablecoin         USDC, Base Sepolia  0.50 USDC sent and confirmed on chain
-  SIMULATED  business_registry  Stripe Connect      Connect not enabled
+  SIMULATED  business_registry  Stripe Connect      enabled, but Accounts v1 retired and v2 not wired
 
 card_webhooks took the longest route to that label and the route is the point.
 It said live off the back of the webhook secret being a non-empty string: a slot
@@ -95,10 +95,15 @@ signing are all simultaneously right.
 That leaves one simulated, said plainly. Business registry is simulated because
 every KYB provider on your menu is gated. Middesk and Sumsub want a sales
 conversation, Persona's own KYB guide opens with "contact your Persona team",
-Persona's signup wants a business email address I do not have, and Stripe
-Connect needs business verification first - I re-ran POST /v1/accounts today and
-it still answers 400 with "you can only create new accounts if you've signed up
-for Connect". I stopped rather than invent a company to get past a form.
+Persona's signup wants a business email address I do not have. Stripe Connect
+moved during the trial and the honest version is worth stating: it was gated,
+I enabled it, and POST /v1/accounts now answers 400 with "Stripe no longer
+recommends Accounts v1 for new Connect integrations, use POST /v2/core/accounts
+instead". The entitlement check passes and the API I would have called is
+retired, so the leg is still simulated - for a different reason than this
+morning. My own probe briefly reported it LIVE off that changed message, which
+is the automatic fail of this trial produced by a click, and the fix is in the
+decision log.
 
 HOW THE MONEY ACTUALLY GETS THERE
 

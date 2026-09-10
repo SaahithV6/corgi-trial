@@ -327,7 +327,7 @@ started    2026-09-10T17:56:26.860Z
         LIVE      card_issuing       GET /v1/cards -> 200
         SIMULATED card_webhooks      credential present but NOT probed
         LIVE      director_kyc       Stripe Identity enabled (Persona not configured)
-        SIMULATED business_registry  Connect not enabled. Every KYB option the brief lists (Middesk, Persona KYB, Sumsub KYB) is gated behind sales or business verification; registry runs simulated and is labelled so.
+        SIMULATED business_registry  Connect is enabled, but Stripe has retired Accounts v1 for new integrations and POST /v2/core/accounts is not wired here, so no connected account can be created; the registry leg runs simulated and is labelled so.
         LIVE      open_banking       POST /institutions/get -> 200
         LIVE      ach_rail           GET /accounts -> 200
         SIMULATED stablecoin         holds 20.00 USDC but only 0 wei gas; a transfer needs ~390000000000 — cannot send
