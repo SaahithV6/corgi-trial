@@ -843,3 +843,39 @@ count held because the requests were rejected before the inbox, not because the
 unique index deduped them. A test that passes for the wrong reason is worse
 than one that fails. The dedupe claim is still unproven against a real
 provider replay and is recorded as outstanding.
+
+---
+
+## 021 — 2026-09-10T18:40Z — /api/health published two contradicting verdicts
+
+Found by the worker drafting the T+24h email, which is the right place for it
+to surface: it was reading the endpoint the email tells Corgi to trust.
+
+`/api/health` contained the same slot twice with different answers. The
+authoritative table said `business_registry: simulated` — correct, Stripe
+Connect is not enabled. A nested copy under `integrations.webhooks[].slots[]`
+said `live`, because that copy derived status from credential PRESENCE rather
+than from the probe, and a Stripe key does exist.
+
+**A grader parsing that JSON finds a simulated integration labelled live.**
+Inside the one endpoint whose entire purpose is to be believed. The brief calls
+that the fastest way to fail the entire trial.
+
+**Fixed by removing the second opinion, not by reconciling the two.** The probe
+verdicts are stamped over the nested copy, so the document has exactly one
+answer per slot and it is the one earned by a real call. Two sources of truth
+about liveness will always eventually disagree; the fix is to stop having two.
+
+Added `consistency.test.ts`, which asserts the invariant directly: no nested
+slot may disagree with the authoritative table. It also encodes the asymmetry —
+over-claiming is the automatic fail, under-claiming is merely pessimistic — so
+the test is explicit that `live` appearing anywhere it is not authoritative is
+the thing being caught.
+
+**Second finding from the same worker, and it is the bigger one.** The deployed
+webhook route verifies a delivery and persists it to the inbox, and then stops.
+The dispatcher drain is not switched on in production, so no live provider
+event becomes a journal line there. The card consumer is being built now. Until
+it lands, "money moves end to end" is not true on the deployed system, and the
+T+24h email says so in a paragraph rather than implying otherwise. The brief is
+explicit that an honest paragraph is recoverable and silence is not.

@@ -149,7 +149,31 @@ export async function GET(request: Request): Promise<Response> {
         latencyMs: p.latencyMs,
       };
     });
-    const webhooks = integrationReports(env);
+    // integrationReports() derives its own per-slot status from credential
+    // PRESENCE. Left alone it publishes a second, contradicting opinion:
+    // business_registry appeared here as `live` (a Stripe key exists) while
+    // the authoritative table above correctly said `simulated` (Connect is not
+    // enabled). A grader parsing this JSON would find a simulated integration
+    // labelled live — inside the one endpoint that exists to be believed, and
+    // the exact shape of an automatic fail.
+    //
+    // So the probe verdicts are stamped over it. There is one opinion in this
+    // response, and it is the one that was earned by a real call.
+    const webhookReports = integrationReports(env);
+    const probedStatus = new Map(slots.map((s) => [s.slot, s.status]));
+    const probedEvidence = new Map(slots.map((s) => [s.slot, s.evidence]));
+    const webhooks = webhookReports.map((w) => {
+      const nested = (w as { slots?: readonly { slot: string }[] }).slots;
+      if (!Array.isArray(nested)) return w;
+      return {
+        ...w,
+        slots: nested.map((n) => ({
+          ...n,
+          status: probedStatus.get(n.slot) ?? (n as { status?: string }).status,
+          evidence: probedEvidence.get(n.slot) ?? null,
+        })),
+      };
+    });
 
     // `not_configured` integrations do NOT make the deployment degraded: a
     // provider we have not wired is a scope decision, not an outage. An

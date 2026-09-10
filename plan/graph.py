@@ -405,18 +405,36 @@ DELEGATE = [
 # moved since the last update. Updated as work lands.
 # ---------------------------------------------------------------------------
 DONE = """
-H01 H05 H06 H08 H09 H10 H11 C01
+H01 H02 H03 H04 H05 H06 H10 H11 H12 H17 H18 H19 C01
 R01 R02 R03 R04 R05 R06 R08 R12
 S01 S02 S03 S04 S05 S06 S07 S08 S09 S10
 L01 L02 L03 L04 L05 L06 L07 L19
 W01 W02 W03 W08 W11
-A02 A03 D18 D19 O05 E02
+A02 A03 A04 A05 A06 A07 A11 A12 A13 D18 D19 D20 O05 O06
+E01 E02 E03 E05 E08 K01 K02 K03 K05 K06 K07
+N01 N02 N03 N04 N05 N06 N07 N08
+M01 M02 M03 M04 M05 M06 M07 M08 M09
+U01 U02 U03 U11 W04 W05 W06 W07 W09 W12 W13
+L08 L09 L10 L11 L12 L13 O01 O04
 X01 X02 X03 X04 X05
 """.split()
 
 DOING = """
-L08 O01 A04 A06 A07 W04 W05 W06 W07 U01 U02 U03 U11 M01
+D03 D05 D13 D14 U04 U09 L15 L16 LF01 LF02 LF10
 """.split()
+
+# Discovered after the deploy went live.
+def _late():
+    N("X06", "Probe by capability, not credential (3 iterations)", "discovered", 90, [], "claude", ["lib/probe"], "done",
+      risk="four probes reported LIVE for capabilities that did not exist")
+    N("X07", "jsonb double-encoding + parameter casts in the inbox", "discovered", 60, [], "claude", ["lib/verify/lithic"], "done",
+      risk="payload stored as a jsonb STRING; no unit test could catch it")
+    N("X08", "Register webhooks on 3 providers via their APIs", "discovered", 45, [], "claude", ["providers"], "done")
+    N("X09", "Prove dedupe against a REAL provider replay", "discovered", 40, ["X08"], "agent", ["test/livefire"],
+      risk="my first attempt passed for the wrong reason - 401, not dedupe")
+    N("X10", "Rubric evaluator, run repeatedly against the brief", "discovered", 60, [], "agent", ["docs/eval"])
+    N("X11", "T+24h email drafted in a non-AI register", "discovered", 50, [], "agent", ["thread"])
+_late()
 
 def apply_status():
     idx = {n["id"]: n for n in NODES}
