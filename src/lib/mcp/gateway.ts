@@ -456,7 +456,16 @@ async function snapshot(
                SELECT 1 FROM hold_closure c
                 WHERE c.hold_id = h.id
                   AND (${closureCutoff}::timestamptz IS NULL
-                       OR c.closed_at <= ${closureCutoff}::timestamptz))
+                       OR c.closed_at <= ${closureCutoff}::timestamptz)
+                  -- ...and the closure has not been reversed as at the same
+                  -- cut-off. Without this an agent reads a balance $60.00
+                  -- higher than the customer's, on holds that are still
+                  -- authorised. See migration 0011.
+                  AND NOT EXISTS (
+                        SELECT 1 FROM hold_closure_reversal r
+                         WHERE r.hold_id = c.hold_id
+                           AND (${closureCutoff}::timestamptz IS NULL
+                                OR r.reversed_at <= ${closureCutoff}::timestamptz)))
     ),
     sized AS (
       SELECT s.id, s.kind,

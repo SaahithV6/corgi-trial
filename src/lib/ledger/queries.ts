@@ -388,7 +388,21 @@ export async function listHoldRows(
     WITH held AS (
       SELECT h.id, h.kind, h.external_ref, h.created_at, h.expires_at,
              h.available_at, h.memo_account_id, h.policy_id,
-             EXISTS (SELECT 1 FROM hold_closure hc WHERE hc.hold_id = h.id) AS has_closure
+             -- A closure that has been reversed is not a closure. Migration
+             -- 0011 added hold_closure_reversal because hold_closure is
+             -- append-only and three rows in it were simply wrong; the fix
+             -- taught availableBalance() and v_hold_state about the reversal
+             -- and MISSED this reader and two others. The console found it:
+             -- availableBalance() reported $310.00 of holds while this query
+             -- reported $250.00 for the same account, a $60.00 disagreement
+             -- between two functions in the same library.
+             EXISTS (
+               SELECT 1 FROM hold_closure hc
+                WHERE hc.hold_id = h.id
+                  AND NOT EXISTS (
+                        SELECT 1 FROM hold_closure_reversal hr WHERE hr.hold_id = hc.hold_id
+                      )
+             ) AS has_closure
         FROM hold h
        WHERE h.account_id = ${accountId}::uuid
     ),

@@ -510,7 +510,15 @@ export async function findExpiredAuthorizations(
       JOIN hold    h ON h.id = ca.hold_id
       JOIN account a ON a.id = ca.account_id
      WHERE ca.expires_at <= ${now.toISOString()}::timestamptz
-       AND NOT EXISTS (SELECT 1 FROM hold_closure hc WHERE hc.hold_id = ca.hold_id)
+       -- A hold whose closure was reversed is OPEN again, so the expiry
+       -- sweeper must be able to see it. Otherwise a wrong closure, once
+       -- corrected, leaves a hold nothing will ever close. See migration 0011.
+       AND NOT EXISTS (
+             SELECT 1 FROM hold_closure hc
+              WHERE hc.hold_id = ca.hold_id
+                AND NOT EXISTS (
+                      SELECT 1 FROM hold_closure_reversal hr WHERE hr.hold_id = hc.hold_id
+                    ))
      ORDER BY ca.expires_at
      LIMIT ${limit}`;
   return rows.map((row) => ({
