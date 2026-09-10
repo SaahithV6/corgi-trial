@@ -55,7 +55,23 @@ export const dynamic = 'force-dynamic';
  * report `degraded` every time the branch woke up, which trains whoever reads
  * this endpoint to ignore it — the worst possible outcome for a health check.
  */
-const DB_TIMEOUT_MS = 3_000;
+// 3s was measured locally (Neon cold 1775ms, warm ~70ms) and is wrong in
+// production for two compounding reasons found on the first real deploy:
+//
+//  1. The function runs in sfo1 and Neon is in us-east-2, so every round trip
+//     crosses the country before the query even starts.
+//  2. A Neon compute that has scaled to zero has to wake, and that wake lands
+//     on top of the cross-region latency rather than instead of it.
+//
+// The first production health check timed out at 3004ms and reported the
+// database unreachable while it was in fact perfectly healthy — a false alarm
+// on the one endpoint whose job is to be believed. 8s is comfortably past a
+// cold start and still fast enough that a genuinely dead database is reported
+// as dead well inside any sensible monitoring interval.
+//
+// The better fix is co-locating the function with the database; see
+// vercel.json, which pins the region to iad1.
+const DB_TIMEOUT_MS = 8_000;
 
 /**
  * Where each platform puts the commit sha, in the order we trust them. Vercel

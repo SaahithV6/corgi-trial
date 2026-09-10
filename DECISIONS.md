@@ -443,3 +443,46 @@ Verified live, end to end: a real Lithic key reports LIVE; the string
 table something the system computes about itself and can be challenged on, in
 front of the panel, by hitting /api/health. It is no longer a claim I wrote
 down and hoped stayed true.
+
+---
+
+## 012 — 2026-09-10T14:05Z — First real deployment, and the two things it caught
+
+Deployed and public at https://corgi-trial-psi.vercel.app. `/` and
+`/api/health` both 200. The health endpoint immediately reported two problems,
+which is the entire reason it exists.
+
+**1. The database probe timed out and reported a healthy database as dead.**
+3004ms against a 3000ms budget. That budget was measured locally — Neon cold
+1775ms, warm ~70ms — and is wrong in production for two compounding reasons:
+the function ran in `sfo1` while Neon is in `us-east-2`, so every round trip
+crosses the country before the query starts; and a Neon compute scaled to zero
+has to wake, and that wake lands *on top of* the cross-region latency rather
+than instead of it.
+
+A false alarm on the one endpoint whose job is to be believed is worse than no
+endpoint. Two fixes, in order of which actually solves it:
+
+- `vercel.json` pins functions to `iad1`, the nearest region to `us-east-2`.
+  Co-location is the real fix; the timeout is the safety margin.
+- `DB_TIMEOUT_MS` raised to 8s — comfortably past a cold start, still fast
+  enough that a genuinely dead database is reported dead inside any sensible
+  monitoring interval.
+
+**2. Every integration reported `simulated` with its key "missing", including
+LITHIC_API_KEY — which is set in the dashboard.**
+
+This is the blank-value rule from 011 doing exactly its job. `parseEnv` strips
+environment variables whose value is empty *before* validation, because
+"declared but blank" and "absent" must mean the same thing — a dashboard where
+someone adds the key and leaves the value empty produces `""`, and treating
+that as present would mark a slot LIVE with no credential behind it.
+
+So the fourteen variables added ahead of time are declared and empty. The
+system is telling the truth: it has no working credential for any of them. The
+fix is to put real values in, not to loosen the rule. `APP_DATABASE_URL` is the
+one I set myself with a real value, and it is the one that worked.
+
+Worth noting what did NOT happen: the app booted. Under the original contract
+where all fifteen keys were required, this deployment would have crash-looped
+instead of telling us precisely which fourteen values were blank.
