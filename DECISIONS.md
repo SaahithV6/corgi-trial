@@ -700,3 +700,42 @@ looked green. The rule has to be stated more precisely than "probe the
 capability" — it is: **probe with the call that the slot's real work depends
 on, and confirm it fails when the capability is absent.** A probe nobody has
 watched fail is not a probe.
+
+---
+
+## 018 — 2026-09-10T17:20Z — Re-read the brief's provider menu; Stripe was in the wrong slot
+
+Prompted to check the build against the brief's own provider menu rather than
+the shape the research had drifted into. It was worth doing.
+
+**The menu lists Stripe twice, and neither time as a KYB provider.**
+
+    KYC: identity   Persona, Sumsub, Stripe Identity, Onfido
+    Payments        Stripe test mode, GoCardless sandbox
+    KYB: business   Middesk, Persona KYB, Sumsub KYB
+
+Using Stripe Connect for the business-registry leg was our invention, not the
+brief's suggestion. It is also gated, so it was an invention that did not work.
+
+**Stripe Identity, which the brief does list, works in test mode right now.**
+Measured: `POST /v1/identity/verification_sessions` returns 200 with
+`status: requires_input` and a hosted verify.stripe.com URL — no application,
+no business verification. That closes the second of the two UNCONFIRMED items
+the KYB research left open.
+
+**So the slots are restructured to match reality and the brief:**
+
+- `director_kyc` (mustBeLive) — Persona preferred, Stripe Identity as a live
+  fallback. Persona is first because `perform-simulate-actions` drives an
+  inquiry to pending / declined / needs_review *and fires the real webhooks*,
+  which is what makes the non-happy-path states genuinely third-party. Stripe
+  Identity cannot force an outcome — there is no scriptable path to a decision
+  — so it is second, and the reason is written next to it.
+- `business_registry` — simulated, and the label now says why: every KYB option
+  the brief lists is gated behind either a sales conversation (Persona KYB,
+  Sumsub) or business verification (Middesk, Stripe Connect).
+
+**The correction worth naming.** I spent three probe iterations on Stripe
+Connect for a slot the brief never asked Stripe to fill, while the Stripe
+product the brief *does* list sat untested in the same account. Reading the
+spec again beat debugging the thing I had already built.

@@ -112,8 +112,8 @@ export const ENV_KEYS = Object.keys(envSchema.shape) as ReadonlyArray<keyof Env>
 export const INTEGRATION_SLOTS = {
   card_issuing: { keys: ["LITHIC_API_KEY"], mustBeLive: true, provider: "Lithic sandbox" },
   card_webhooks: { keys: ["LITHIC_WEBHOOK_SECRET"], mustBeLive: false, provider: "Lithic" },
-  director_kyc: { keys: ["PERSONA_API_KEY"], mustBeLive: true, provider: "Persona sandbox" },
-  business_registry: { keys: ["STRIPE_SECRET_KEY"], mustBeLive: false, provider: "Stripe Connect test mode" },
+  director_kyc: { keys: [], mustBeLive: true, provider: "Persona sandbox, or Stripe Identity" },
+  business_registry: { keys: ["STRIPE_SECRET_KEY"], mustBeLive: false, provider: "Stripe Connect (gated) — simulated" },
   open_banking: { keys: ["PLAID_CLIENT_ID", "PLAID_SECRET"], mustBeLive: false, provider: "Plaid sandbox" },
   ach_rail: { keys: ["INCREASE_API_KEY"], mustBeLive: false, provider: "Increase sandbox" },
   stablecoin: {

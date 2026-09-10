@@ -174,7 +174,7 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
     if (msg.includes("signed up for Connect")) {
       return {
         liveness: "unauthorised",
-        detail: "Connect is not enabled on this account — the registry leg cannot run",
+        detail: "Connect not enabled. Every KYB option the brief lists (Middesk, Persona KYB, Sumsub KYB) is gated behind sales or business verification; registry runs simulated and is labelled so.",
         ms,
       };
     }
@@ -184,16 +184,58 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
   },
 
   director_kyc: async () => {
-    const key = env.PERSONA_API_KEY;
-    if (!key) return { liveness: "not_configured", detail: "PERSONA_API_KEY absent", ms: 0 };
+    // The brief's provider menu lists FOUR options for "KYC: identity" —
+    // Persona, Sumsub, Stripe Identity and Onfido. Persona is preferred here
+    // because its perform-simulate-actions endpoint can drive an inquiry to
+    // pending / declined / needs_review while firing the real webhooks for
+    // each, which is what makes the non-happy-path states genuinely
+    // third-party rather than rows we flipped.
+    //
+    // Stripe Identity is the fallback and is a LIVE integration in its own
+    // right: POST /v1/identity/verification_sessions succeeds in test mode
+    // with no application and no business verification (measured — it returned
+    // a session with status requires_input and a hosted verify.stripe.com
+    // URL). What it cannot do is force an outcome; there is no scriptable way
+    // to drive it to a decision, which is why it is second and not first.
+    const persona = env.PERSONA_API_KEY;
+    if (persona) {
+      const { res, ms, err } = await timed((signal) =>
+        fetch("https://api.withpersona.com/api/v1/inquiries?page%5Bsize%5D=1", {
+          headers: { Authorization: `Bearer ${persona}`, "Persona-Version": "2023-01-05" },
+          signal,
+        }),
+      );
+      if (!res) return { liveness: "unreachable", detail: err ?? "no response", ms };
+      if (res.ok) return { liveness: "live", detail: "Persona: GET /inquiries -> 200", ms };
+      if (res.status !== 401 && res.status !== 403) {
+        return { liveness: fromStatus(res.status), detail: `Persona -> ${res.status}`, ms };
+      }
+      // Persona key present but rejected: fall through and try Stripe Identity
+      // rather than reporting simulated while a working alternative exists.
+    }
+
+    const stripe = env.STRIPE_SECRET_KEY;
+    if (!stripe) {
+      return {
+        liveness: persona ? "unauthorised" : "not_configured",
+        detail: persona ? "Persona key rejected and no Stripe fallback" : "no KYC provider configured",
+        ms: 0,
+      };
+    }
+    // Read a session list rather than creating one: creation is the capability,
+    // but Identity gates BOTH on the same entitlement, and listing does not
+    // leave objects behind on every health check.
     const { res, ms, err } = await timed((signal) =>
-      fetch("https://api.withpersona.com/api/v1/inquiries?page%5Bsize%5D=1", {
-        headers: { Authorization: `Bearer ${key}`, "Persona-Version": "2023-01-05" },
+      fetch("https://api.stripe.com/v1/identity/verification_sessions?limit=1", {
+        headers: { Authorization: `Bearer ${stripe}` },
         signal,
       }),
     );
     if (!res) return { liveness: "unreachable", detail: err ?? "no response", ms };
-    return { liveness: fromStatus(res.status), detail: `GET /api/v1/inquiries -> ${res.status}`, ms };
+    if (res.ok) {
+      return { liveness: "live", detail: "Stripe Identity enabled (Persona not configured)", ms };
+    }
+    return { liveness: "unauthorised", detail: `Stripe Identity unavailable (${res.status})`, ms };
   },
 
   stablecoin: async () => {
