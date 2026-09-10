@@ -139,39 +139,48 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
   business_registry: async () => {
     const key = env.STRIPE_SECRET_KEY;
     if (!key) return { liveness: "not_configured", detail: "STRIPE_SECRET_KEY absent", ms: 0 };
-    // Probe the CAPABILITY, not the credential.
+
+    // Third attempt at this probe, and the first two were both wrong in the
+    // same direction — they reported LIVE for a slot that cannot function.
     //
-    // The obvious probe is GET /v1/balance, which proves the key is accepted.
-    // That would be a lie here: this slot's job is the business-registry leg of
-    // KYB, which runs through Stripe Connect, and Connect requires the platform
-    // account to have completed "Verify your business" before it will create or
-    // report on connected accounts. A valid test key with Connect not enabled
-    // would answer 200 on /v1/balance while the leg it is supposed to power
-    // cannot function at all.
+    //   GET /v1/balance   -> 200 with Connect disabled. Proves the credential.
+    //   GET /v1/accounts  -> 200 with Connect disabled, returning an empty
+    //                        list. READING connected accounts is allowed even
+    //                        when you have none and cannot make any.
+    //   POST /v1/accounts -> 400 "You can only create new accounts if you've
+    //                        signed up for Connect". This is the only call
+    //                        that tells the truth.
     //
-    // So the probe lists connected accounts. If Connect is not enabled the
-    // account is not a platform, and this is the call that says so. Measured
-    // rather than assumed: the dashboard states plainly "Your account is not
-    // set up as a Connect platform", and its onboarding guide's next step is
-    // "Verify your business".
+    // A parameterless POST is safe to use as a health check: Stripe evaluates
+    // the Connect entitlement BEFORE it validates parameters, so with Connect
+    // disabled you get the Connect message and with Connect enabled you get a
+    // parameter-validation error. Measured both directions. Nothing is created
+    // in either case, which is what makes it usable from /api/health.
     const { res, ms, err } = await timed((signal) =>
-      fetch("https://api.stripe.com/v1/accounts?limit=1", {
+      fetch("https://api.stripe.com/v1/accounts", {
+        method: "POST",
         headers: { Authorization: `Bearer ${key}` },
         signal,
       }),
     );
     if (!res) return { liveness: "unreachable", detail: err ?? "no response", ms };
-    if (res.ok) return { liveness: "live", detail: "GET /v1/accounts -> 200, Connect enabled", ms };
     if (res.status === 401 || res.status === 403) {
       return { liveness: "unauthorised", detail: `credentials rejected (${res.status})`, ms };
     }
-    // 400 here is Stripe saying "you are not a Connect platform". The key
-    // works; the capability does not. That is SIMULATED, not LIVE.
-    return {
-      liveness: "unauthorised",
-      detail: `Connect not enabled on this account (${res.status})`,
-      ms,
-    };
+    const body = (await res.json().catch(() => null)) as
+      | { error?: { message?: string } }
+      | null;
+    const msg = body?.error?.message ?? "";
+    if (msg.includes("signed up for Connect")) {
+      return {
+        liveness: "unauthorised",
+        detail: "Connect is not enabled on this account — the registry leg cannot run",
+        ms,
+      };
+    }
+    // Any other 400 is Stripe complaining about the missing parameters, which
+    // means it got past the entitlement check: Connect is live.
+    return { liveness: "live", detail: "Connect enabled (account creation is entitled)", ms };
   },
 
   director_kyc: async () => {

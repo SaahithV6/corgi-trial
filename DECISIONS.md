@@ -653,3 +653,50 @@ in this build:** probe the capability the slot claims to provide, never the
 credential or the connection that would provide it. Three probes have now had
 this bug — placeholder keys (011), Stripe without Connect (015), USDC without
 gas (016). Each looked healthy and each was lying.
+
+---
+
+## 017 — 2026-09-10T17:00Z — Third attempt at the Stripe probe, and the first two both lied
+
+Plaid, Increase and Stripe keys arrived. All three verified live:
+
+    PLAID     200  institutions/get OK
+    INCREASE  200  accounts endpoint OK
+    STRIPE    200  key valid
+
+Then the Connect question, measured properly rather than read off a dashboard:
+
+    GET  /v1/balance   -> 200   proves the credential, nothing else
+    GET  /v1/accounts  -> 200   EMPTY LIST, with Connect disabled
+    POST /v1/accounts  -> 400   "You can only create new accounts if you've
+                                 signed up for Connect"
+
+**Both of my earlier probes would have reported this slot LIVE.** The first
+called /v1/balance, which I already knew was wrong. The fix in 015 called
+`GET /v1/accounts` — and that *also* returns 200 with Connect disabled, because
+reading connected accounts is permitted when you have none and cannot create
+any. I replaced a wrong probe with a differently wrong probe and wrote a
+decision entry congratulating myself for it.
+
+**The probe that actually distinguishes** is a parameterless `POST
+/v1/accounts`. Stripe evaluates the Connect entitlement *before* it validates
+parameters, so:
+
+- Connect disabled -> the Connect message
+- Connect enabled  -> a parameter-validation error
+
+Nothing is created in either case, which is what makes it safe from a health
+endpoint. Both directions measured.
+
+**What this run cost, and what it bought.** Three attempts at one probe. What
+it bought is the thing worth having: the live/simulated table is now derived
+from a call that fails exactly when the capability is absent, for the one slot
+where the two came apart most subtly.
+
+**And the pattern is now unmissable.** Four probes, four instances of the same
+mistake, each caught only by measuring: placeholder keys (011), Stripe via
+balance (015), USDC without gas (016), Stripe via a *read* (017). Every one
+looked green. The rule has to be stated more precisely than "probe the
+capability" — it is: **probe with the call that the slot's real work depends
+on, and confirm it fails when the capability is absent.** A probe nobody has
+watched fail is not a probe.
