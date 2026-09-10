@@ -647,13 +647,32 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
       // The whole of requirement 2 is these six lines. No SELECT first, no
       // if-statement: the unique index is the decision, and `rowCount` is how
       // we learn what it decided.
+      //
+      // EVERY reused parameter is cast explicitly, on every use.
+      //
+      // $7 appears three times (received_at, next_attempt_at, and the CASE for
+      // dead_lettered_at) and $9 twice (the state column and the CASE's
+      // comparison). Postgres deduces a type per use site and refuses the
+      // statement outright when two deductions disagree — "inconsistent types
+      // deduced for parameter $N". The CASE arms are the usual culprit: a
+      // bare NULL on one branch leaves the other branch's type unpinned.
+      //
+      // This failed ONLY in production, against a real Lithic delivery. The
+      // in-memory test double used by the unit tests never parses SQL, so a
+      // statement Postgres will not accept passes every test. The signature
+      // verified correctly; the row simply never landed, and the route
+      // answered 500 — which is right, because it makes the provider retry.
       const inserted = await sql.query<{ id: string }>(
         `insert into webhook_inbox
            (provider, provider_event_id, event_type, payload, headers, raw_body,
             received_at, signature_verified_at, state, next_attempt_at,
             processing_error, dead_lettered_at)
-         values ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9,
-                 $7, $10, case when $9 = 'dead' then $7 else null end)
+         values ($1, $2, $3, $4::jsonb, $5::jsonb, $6,
+                 $7::timestamptz, $8::timestamptz,
+                 $9::webhook_inbox_state,
+                 $7::timestamptz, $10,
+                 case when $9::webhook_inbox_state = 'dead'
+                      then $7::timestamptz else null end)
          on conflict (provider, provider_event_id) do nothing
          returning id`,
         [
