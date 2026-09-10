@@ -144,12 +144,22 @@ export interface SlotReport {
  * present the wrong one, and presenting a simulated integration as live fails
  * the entire trial.
  */
-export function reportIntegrations(e: Env): readonly SlotReport[] {
+export function reportIntegrations(e: Partial<Env>): readonly SlotReport[] {
   return (Object.keys(INTEGRATION_SLOTS) as IntegrationSlot[]).map((slot) => {
     const spec = INTEGRATION_SLOTS[slot];
     const missing = spec.keys.filter((k) => {
       const v = e[k as keyof Env];
-      return v === undefined || v === "";
+      if (v === undefined || v === "") return true;
+      // A value the schema would REJECT must never count towards "live".
+      //
+      // /api/health deliberately reads the environment leniently, so that a
+      // broken environment still produces a report instead of a blank 500.
+      // That leniency must not become a way for an unusable credential to be
+      // presented as a live integration: presenting a simulated or
+      // non-functional integration as live fails the entire trial. So the
+      // per-key rules that would reject a value at boot are re-applied here.
+      if (!isUsable(k as keyof Env, v)) return true;
+      return false;
     });
     return {
       slot,
@@ -159,6 +169,26 @@ export function reportIntegrations(e: Env): readonly SlotReport[] {
       missing,
     };
   });
+}
+
+/**
+ * Would this value survive envSchema? Used by reportIntegrations so a lenient
+ * read cannot label a rejected credential "live". Kept deliberately narrow —
+ * it encodes only the rules that make a value UNUSABLE, not merely unusual.
+ */
+function isUsable(key: keyof Env, value: string): boolean {
+  switch (key) {
+    case "STRIPE_SECRET_KEY":
+      // A live key is refused at boot. It is not a working test integration.
+      return !value.startsWith("sk_live");
+    case "USDC_SENDER_PRIVATE_KEY":
+      return EVM_PRIVATE_KEY.test(value);
+    case "USDC_SENDER_ADDRESS":
+    case "USDC_CONTRACT_ADDRESS":
+      return EVM_ADDRESS.test(value);
+    default:
+      return true;
+  }
 }
 
 export class EnvironmentError extends Error {

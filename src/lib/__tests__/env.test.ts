@@ -54,3 +54,29 @@ describe("environment contract", () => {
     expect(report.find((r) => r.slot === "card_issuing")?.status).toBe("simulated");
   });
 });
+
+describe("a rejected credential is never reported live", () => {
+  it("an sk_live key does not make the business_registry slot live", () => {
+    // /api/health reads the environment leniently so a broken env still
+    // reports. That must not become a path by which an unusable credential
+    // is presented as a live integration.
+    const report = reportIntegrations({
+      APP_DATABASE_URL: "postgresql://u:p@h/db",
+      STRIPE_SECRET_KEY: "sk_live_abc123",
+    });
+    const slot = report.find((r) => r.slot === "business_registry");
+    expect(slot?.status).toBe("simulated");
+    expect(slot?.missing).toContain("STRIPE_SECRET_KEY");
+  });
+
+  it("a malformed private key does not make the stablecoin slot live", () => {
+    const report = reportIntegrations({
+      APP_DATABASE_URL: "postgresql://u:p@h/db",
+      USDC_SENDER_PRIVATE_KEY: "not-a-key",
+      USDC_SENDER_ADDRESS: "0xd3629d7399945A1Ff2C5a1c5b0F7C9d32D3c2918",
+      BASE_SEPOLIA_RPC_URL: "https://sepolia.base.org",
+      USDC_CONTRACT_ADDRESS: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    });
+    expect(report.find((r) => r.slot === "stablecoin")?.status).toBe("simulated");
+  });
+});

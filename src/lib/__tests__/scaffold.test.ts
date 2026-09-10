@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { ENV_KEYS, EnvironmentError, parseEnv } from "@/lib/env.schema";
+import { parseEnv } from "@/lib/env.schema";
+import type { EnvironmentError } from "@/lib/env.schema";
 import { logger } from "@/lib/log";
 import { err, fail, isErr, isOk, ok, toResponseBody, unwrap } from "@/lib/result";
 
