@@ -677,7 +677,7 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
       );
     },
 
-    async park(id, { waitingFor, reason, now, nextAttemptAt }) {
+    async park(id, { waitingFor, reason, nextAttemptAt }) {
       await sql.query(
         `update webhook_inbox
          set state = 'parked',
@@ -687,7 +687,6 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
          where id = $1 and state = 'pending'`,
         [id, waitingFor.kind, waitingFor.ref, reason, nextAttemptAt],
       );
-      void now;
     },
 
     async recordFailure(id, { error, nextAttemptAt }) {
