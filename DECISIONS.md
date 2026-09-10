@@ -226,3 +226,37 @@ though it is not literally a force post.
 transaction PENDING at hold=-3000, unchanged. Either it is asynchronous beyond
 the wait, or it needs different parameters. Tracked as D20; the hold model does
 not depend on it, since a void is just another event in E.
+
+---
+
+## 007 — 2026-09-10T02:25Z — I turned CI red by committing another worker's half-written files
+
+**What happened.** Running parallel workers, I ran `git add -A` and committed
+while one of them was still mid-write. Its files landed on main in an
+incomplete state and CI failed twice (9eee7ec, c9247a0). The failures are real
+type errors, not flakes: the scaffold set `exactOptionalPropertyTypes` and
+`noUncheckedIndexedAccess`, and those flags bind every worker's code, not just
+the worker that chose them.
+
+**Why it is worth writing down.** The mistake is not the type errors. It is
+that `git add -A` is unsafe whenever anything else is writing to the tree, and
+I used it four times before it bit. Parallelism moved the bottleneck from
+typing to coordination, and I did not move my commit discipline with it.
+
+**The fix, in order of how much it actually helps.**
+
+1. `scripts/precommit.sh` runs the same three checks CI runs and refuses the
+   commit if any fails, plus refuses outright if `.env` is staged or tracked.
+   The gate now fails locally in ten seconds instead of remotely in ten
+   minutes.
+2. Fix forward rather than reverting. The owning worker has been sent the exact
+   errors and is repairing its own files. Reverting would have raced it.
+3. Do not edit files a running worker owns. That is what caused this; doing it
+   again to fix it would be worse.
+
+**Second thing this surfaced.** Two workers independently implemented Standard
+Webhooks signature verification — one generic in the webhook inbox, one
+Lithic-local. Both cannot ship. The generic one wins, because a per-provider
+copy of a shared scheme is how the fifth provider gets verified differently
+from the first four. The Lithic-local copy gets deleted, not kept "just in
+case".
