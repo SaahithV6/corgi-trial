@@ -221,8 +221,23 @@ export async function GET(request: Request): Promise<Response> {
       await deliveryRead,
       webhookReports.map((w) => ({
         provider: w.provider,
-        integrationLive:
-          w.slots.length > 0 && w.slots.every((s) => probedStatus.get(s.slot) === 'live'),
+        // SOME, not EVERY.
+        //
+        // A provider owns more than one slot. Lithic owns `card_issuing` (the
+        // rail, probed live) and `card_webhooks` (the delivery secret, which
+        // has no probe and is therefore reported `unprobed` — DECISIONS 026).
+        // With `every`, one unprobed slot made this false forever, so
+        // `degradesDeployment` could never be true and NO webhook outage could
+        // move the top-level status. Measured live: Lithic went stale at 184s
+        // and `status` stayed "ok".
+        //
+        // That was a blind spot shaped exactly like the thing it should catch,
+        // introduced by the fix that made unprobed slots honest. The question
+        // this gate is actually asking is "do we have a working integration
+        // with this provider whose silence would mean something" — and one
+        // live slot answers it. An unprobed sibling is an absence of evidence
+        // about a secret, not evidence that the rail is dead.
+        integrationLive: w.slots.some((s) => probedStatus.get(s.slot) === 'live'),
         verifierRegistered: w.webhookVerifierRegistered,
       })),
       new Date(),

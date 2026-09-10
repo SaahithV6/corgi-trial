@@ -427,7 +427,7 @@ parameters, and nothing is created either way.
 
 ## Honest current state
 
-**Live fire against production: 6 PASS, 0 FAIL, 2 SKIP.** A skip is not a pass.
+**Live fire against production: 7 PASS, 0 FAIL, 1 SKIP.** A skip is not a pass.
 Each one prints the sentence naming exactly what could not be proven.
 
 **Attack 2 — the money is right and one row is absent.** On the $50

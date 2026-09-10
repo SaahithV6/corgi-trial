@@ -1197,3 +1197,56 @@ landed. Verified: neither credential appears in any reachable blob on `main` or
 `origin/main`, and all 46 commits retain their timestamps, which the brief says
 they read. The "NOT DONE, and blocked" paragraph above describes the state at
 the time it was written and nothing later.
+
+---
+
+## 028 — 2026-09-10T19:10Z — Live fire 7/8, and the honesty fix that blinded the alarm
+
+Re-ran against production. **7 PASS, 0 FAIL, 1 SKIP**, up from 6/0/2. Attack 7
+flipped once delivery freshness and the provider-down banner shipped, and it
+was proven properly: the suite *induces* the outage — delivers nothing for
+180s, watches Lithic go `fresh -> stale` at lag 184s inside its own 180-900s
+band, cross-checks the published `lastDelivery` against
+`MAX(webhook_inbox.received_at)` read straight from the database, and asserts
+the *degraded* banner specifically rather than any banner, because the
+"cannot reach health" variant carries the same attribute and would have proven
+the opposite.
+
+**And it found a blind spot I introduced two hours earlier.** The escalation
+gate read:
+
+    integrationLive: w.slots.every((s) => probedStatus.get(s.slot) === 'live')
+
+Lithic owns two slots: `card_issuing`, probed live, and `card_webhooks`, which
+has no probe and is now correctly reported `unprobed` after 026. With `every`,
+one unprobed sibling made this false permanently — so `degradesDeployment` was
+always false, `degradedBy` always empty, and **no webhook outage could ever
+move the top-level status.** Measured: Lithic stale at 184s, `status: "ok"`.
+
+So the fix that stopped a slot over-claiming liveness silently disabled the
+alarm that liveness gates. A reader of `webhookHealth` saw the outage; a
+monitor watching `status` did not.
+
+Changed to `some`. The question the gate actually asks is "is there a working
+integration with this provider whose silence would mean something", and one
+live slot answers it. An unprobed sibling is an absence of evidence about a
+secret, not evidence that the rail is dead.
+
+**Third instance of one pattern**, and it is the most valuable thing this build
+has taught me: `v_hold_drift` is `WHERE NOT is_released`, so a spurious closure
+row escapes it; the secret scanner used plain grep, so a NUL byte hid 1,206
+lines; this gate used `every`, so an honest `unprobed` disabled it. Each was an
+exclusion shaped exactly like the failure it existed to catch, and each looked
+healthy. **A guard has to be tested against the thing it guards against, not
+just run.**
+
+**Two harness bugs the agent fixed, both worth recording.** Evidence was being
+written to `.next/livefire/`, and a concurrent `next build` deleted `.next`
+wholesale mid-run — attack 7's assertions all passed and it was scored FAIL
+with a filesystem error. And attack 7's money assertions froze a *shared*
+business's whole position, so another worker's suite moving that ledger by
+67,899 cents inside the 20-second window produced a false FAIL blaming our
+system for someone else's writes. Now asserted by attribution, with the
+whole-position freeze applied only when the window was genuinely quiet.
+Attacks 1, 2 and 4 carry the same latent vulnerability and are untouched
+because they passed — noted rather than fixed.

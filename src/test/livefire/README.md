@@ -193,8 +193,32 @@ says five minutes; five minutes of a rehearsal suite is five minutes nobody
 runs, and the claim is about state rather than duration. Set it to 300 for the
 real thing.
 
-The other two claims — the health endpoint reporting it, the UI showing a
-provider-down state — SKIP. See §4.
+The money half is asserted BY ATTRIBUTION — the swallowed transaction produced
+zero inbox rows and zero authorisations; the recovered hold's own memo account
+carries exactly one entry of −5000 and zero financial entries — and the
+customer's whole position is additionally asserted frozen **when the window was
+quiet**. That condition is not decoration: this Neon branch is shared with the
+database-backed integration suite, and a concurrent run of it moved this same
+seeded business's ledger by 67,899 cents inside one 20s window and failed this
+attack for another process's writes. When the window is not quiet the freeze
+cross-check is reported as not evaluated, with the count, and the attribution
+stands alone. A suite that reports someone else's writes as our system
+inventing money is worse than one that says which it could not tell apart.
+
+**The other two claims now pass, and they are INDUCED rather than found.**
+`/api/health` publishes `integrations.webhookHealth` and the console shell
+renders a banner from it — but neither says anything at rest, deliberately: a
+feed nobody has poked reads `quiet` or `never` and neither is an outage. So the
+second test opens a real, deliberate silence measured from the delivery the
+first test just made, watches Lithic cross its own 180s threshold from `fresh`
+to `stale`, and cross-checks the published `lastDelivery` against
+`MAX(webhook_inbox.received_at)` read straight out of the database; the third
+reads the deployed console inside that same window and asserts the degraded
+banner specifically — the "cannot reach the health endpoint" banner carries the
+same `data-provider-status` attribute and would prove the opposite — plus that
+the rendered lag matches the endpoint's own figure and the balances underneath
+are still rendered. One limit is recorded on the scoreboard rather than
+asserted away: see §4.
 
 ### 8 — the real provider replay
 
@@ -244,6 +268,14 @@ produced in order. Test timeouts are raised to 240s because these tests poll liv
 systems and Vitest's 5s default would fail them for being honest about how long a
 real webhook takes to arrive.
 
+The evidence file lives under `node_modules/.cache/livefire/`, not `.next/`. A
+concurrent `next build` in this repo removes `.next` wholesale, and a run has
+already lost its evidence to exactly that: the file vanished mid-flight, every
+`record()` after it threw ENOENT, and an attack whose assertions had all passed
+was scored FAIL with a filesystem error as its reason. `record()` also recreates
+the directory before appending. Evidence must never be the thing that fails a
+live-fire run.
+
 **What a run leaves behind**, all of it deliberate and none of it removable:
 Lithic cards and transactions in the sandbox; `webhook_inbox` rows; card
 authorisations, holds and memo postings; one financial settlement per
@@ -254,8 +286,7 @@ business day; and one approved ACH payment instruction in the queue.
 
 ## 4. What is not proven, and exactly what is missing
 
-Three claims currently SKIP. Each is printed on the scoreboard with the sentence
-below.
+**One claim SKIPs.** It is printed on the scoreboard with the sentence below.
 
 **Attack 2 — the `hold_closure` row.** The hold IS released: the memo balance
 goes to zero, one release posting, available exactly right. But no
@@ -273,18 +304,46 @@ expiry sweeper closes it. This is a bookkeeping divergence and not a money error
 — available is correct either way, because `availableBalance` reads the memo
 balance as well as the closure row.
 
-**Attack 7 — the health endpoint.** `/api/health` answers 200 and reports
-credential and capability liveness per slot, and says nothing about webhook
-DELIVERY freshness, so a webhook outage is invisible to it. Missing: a
-per-provider last-delivery instant (or lag in seconds) on the health body —
-`webhook_inbox.received_at` already holds the data — plus a degraded verdict
-derived from it.
+**This one is deliberately NOT closed.** The one-line `C >= A` fix was written
+and reverted: `v_hold_drift` holds the TypeScript model and the SQL view equal
+*by invariant*, so moving one side alone converts a prose mismatch into a live
+drift alarm, and an invariant reporting drift is indistinguishable from a ledger
+that has actually drifted (DECISIONS 024). The assertion must not be weakened to
+make the scoreboard greener; the skip is the finding.
 
-**Attack 7 — the provider-down UI.** No provider-down state is rendered on the
-deployed account screen. `src/components/account/data-contract.ts` carries
-balances, holds and postings but no provider or feed health field, and no
-component renders one. Missing: a provider-health field on that contract plus a
-banner that shows it.
+---
+
+## 4b. What PASSES but is narrower than it sounds
+
+Not a skip — a pass whose limit belongs next to it rather than in a footnote.
+
+**Attack 7 — the outage is REPORTED but does not ESCALATE.** With Lithic
+genuinely stale, `/api/health` publishes
+`webhookHealth.providers[lithic].verdict = "stale"` with the lag in seconds, and
+the console renders the provider-down banner. But `degradesDeployment` is
+`false`, `degradedBy` is empty and the top-level `status` stays `"ok"`.
+
+That is not a threshold being missed. `delivery-health.ts` gates escalation on
+four conditions, one of which is that the provider's integration is probed live,
+and `route.ts` derives that as **every** Lithic slot reading `live`:
+
+```ts
+integrationLive: w.slots.length > 0 && w.slots.every((s) => probedStatus.get(s.slot) === 'live')
+```
+
+Lithic owns two slots. `card_webhooks` has no probe, so since DECISIONS 026 it
+reads `unprobed` and is labelled `simulated` — correctly, because nothing has
+proven it by a round trip. `every(... === 'live')` is therefore permanently
+false, so the escalation clause **can never fire on this deployment** and no
+webhook outage can move the top-level status. The note the endpoint prints in
+that state says the integration "is not live", which is true of `card_webhooks`
+and misleading about the card rail as a whole.
+
+A reader of `webhookHealth` sees the outage. A monitor watching `status` alone
+does not. Same shape as the `v_hold_drift` blind spot in DECISIONS 026: a check
+whose exclusion is shaped exactly like the thing it should catch. The test
+asserts the claim the attack makes — the endpoint reports it — and records this
+limit as evidence on the scoreboard.
 
 ---
 

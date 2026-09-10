@@ -60,9 +60,9 @@ a scored failure regardless of the code.
       [x] seed script · [x] `.env.example` · [x] cut list
 
 ### 1.2 Re-run live fire against the final commit
-The headline "6 PASS, 0 FAIL, 2 SKIP" was earned at an earlier commit. It must
-be re-earned against whatever ships, or the README quotes a number that was
-true yesterday. In flight now.
+Re-run and re-earned: **7 PASS, 0 FAIL, 1 SKIP**. Attack 7 flipped once
+delivery freshness and the provider-down banner shipped. It must be re-earned
+once more against whatever finally ships, because the number rots.
 
 ### 1.3 Debrief preparation
 "Code you cannot explain line by line when we point at it" is an **automatic

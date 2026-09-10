@@ -271,12 +271,44 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     const before = await positionOf(businessId);
     const trialBefore = await bal.trialBalanceCents();
     const startedAt = Date.now();
+    const windowOpenedAt = new Date();
     await new Promise((r) => setTimeout(r, OUTAGE_SECONDS * 1_000));
 
-    // Nothing was invented from an event we were never told about.
-    const during = await positionOf(businessId);
-    expect(during).toEqual(before);
+    // NOTHING WAS INVENTED FROM AN EVENT WE WERE NEVER TOLD ABOUT.
+    //
+    // Asserted BY ATTRIBUTION, which is the claim itself: the swallowed
+    // transaction reached no inbox row and produced no authorisation. Nothing
+    // else writing to this database can satisfy either of these on our behalf
+    // or break them.
+    const [absent] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM webhook_inbox
+       WHERE provider = 'lithic' AND payload->>'token' = ${missedToken}`;
+    expect(absent?.n).toBe(0);
+    const [invented] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM card_authorization
+       WHERE provider = 'lithic' AND provider_auth_id = ${missedToken}`;
+    expect(invented?.n).toBe(0);
+
+    // And double entry still balances over every financial line in the
+    // database — an invariant, so it holds whoever else is writing.
     expect(await bal.trialBalanceCents()).toBe(trialBefore);
+
+    // ALSO ASSERTED BY FREEZE: the customer's whole position is unchanged.
+    // That is the stronger statement and it is only meaningful when nothing
+    // ELSE is writing. This Neon branch is shared with the database-backed
+    // integration suite, and a concurrent run of it moved this same seeded
+    // business's ledger by 67,899 cents inside one 20s window while this
+    // attack was measuring. So the freeze is asserted when the window really
+    // was quiet, and its absence is REPORTED rather than asserted away when it
+    // was not: a suite that reports another process's writes as our system
+    // inventing money is worse than one that says which it could not tell
+    // apart. The attribution above is unconditional either way.
+    const during = await positionOf(businessId);
+    const [foreign] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM journal_entry
+       WHERE booking_time >= ${windowOpenedAt}`;
+    const foreignWrites = foreign?.n ?? 0;
+    if (foreignWrites === 0) expect(during).toEqual(before);
 
     // And the system is still answering while its feed is dark.
     const health = (await (await fetch(`${BASE_URL}/api/health`, { cache: "no-store" })).json()) as {
@@ -284,12 +316,6 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       database?: { reachable?: boolean };
     };
     expect(health.database?.reachable).toBe(true);
-
-    // The event genuinely never reached us.
-    const [absent] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM webhook_inbox
-       WHERE provider = 'lithic' AND payload->>'token' = ${missedToken}`;
-    expect(absent?.n).toBe(0);
 
     // ---- THE FEED COMES BACK --------------------------------------------
     // The provider catches up, and retries, which is what providers do.
@@ -323,13 +349,39 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       return;
     }
 
-    // NOTHING LOST: the withheld $50.00 is now held, exactly once.
+    // NOTHING LOST: the withheld $50.00 is now held, exactly once, and it is
+    // memo-only. Measured on THE HOLD THE BACKLOG CREATED — every memo line
+    // against that hold's own memo account — so the figure is ours by
+    // construction, and then, when the episode was quiet, cross-checked
+    // against the customer's whole position for the same reason as above.
     const after = await positionOf(businessId);
-    expect(after.availableCents).toBe(before.availableCents - BigInt(AUTH_CENTS));
-    expect(after.holdsCents).toBe(before.holdsCents + BigInt(AUTH_CENTS));
-    // NOTHING INVENTED: an authorisation is memo-only.
-    expect(after.ledgerCents).toBe(before.ledgerCents);
+    const [heldByUs] = await sql<{ entries: number; cents: bigint }[]>`
+      SELECT count(DISTINCT e.id)::int AS entries,
+             COALESCE(SUM(l.amount_cents), 0)::bigint AS cents
+        FROM journal_entry e
+        JOIN journal_line  l ON l.entry_id = e.id
+        JOIN hold          h ON h.id = e.hold_id
+       WHERE e.hold_id = ${recovered.hold_id}::uuid
+         AND e.book = 'memo'
+         AND l.account_id = h.memo_account_id`;
+    expect(heldByUs?.entries).toBe(1); // one opening, however many deliveries
+    expect(heldByUs?.cents).toBe(-BigInt(AUTH_CENTS)); // credit: $50.00 withheld
+    // NOTHING INVENTED: an authorisation posts nothing to the financial book.
+    const [financial] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM journal_entry
+       WHERE book = 'financial' AND external_ref = ${missedToken}`;
+    expect(financial?.n).toBe(0);
     expect(await bal.trialBalanceCents()).toBe(trialBefore);
+
+    const [foreignAfter] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM journal_entry
+       WHERE booking_time >= ${windowOpenedAt} AND book = 'financial'`;
+    const quietEpisode = (foreignAfter?.n ?? 0) === 0;
+    if (quietEpisode) {
+      expect(after.availableCents).toBe(before.availableCents - BigInt(AUTH_CENTS));
+      expect(after.holdsCents).toBe(before.holdsCents + BigInt(AUTH_CENTS));
+      expect(after.ledgerCents).toBe(before.ledgerCents);
+    }
 
     // NOTHING DOUBLE-COUNTED: two deliveries, one fact, one posting.
     const [facts] = await sql<{ n: number }[]>`
@@ -344,11 +396,11 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
 
     record(
       "evidence",
-      `dark window ${Math.round((Date.now() - startedAt) / 1000)}s (LIVEFIRE_OUTAGE_SECONDS=${OUTAGE_SECONDS}): business ${businessId} ledger ${before.ledgerCents} available ${before.availableCents} unchanged throughout; trial balance ${trialBefore} unchanged; the swallowed event ${missedToken} had 0 inbox rows; /api/health answered with database reachable`,
+      `dark window ${Math.round((Date.now() - startedAt) / 1000)}s (LIVEFIRE_OUTAGE_SECONDS=${OUTAGE_SECONDS}): the swallowed event ${missedToken} produced 0 inbox rows and 0 authorisations; trial balance ${trialBefore} unchanged; /api/health answered with database reachable. ${foreignWrites === 0 ? `The window was quiet, so business ${businessId}\u0027s whole position was additionally asserted frozen at ledger ${before.ledgerCents} / available ${before.availableCents}.` : `${foreignWrites} journal entr${foreignWrites === 1 ? "y was" : "ies were"} booked against this shared database by another process during the window, so the position-freeze cross-check was NOT evaluated — it would have measured their writes, not ours. The attribution above is unaffected.`}`,
     );
     record(
       "evidence",
-      `recovery: the backlog delivered twice (HTTP ${catchUp.join(" then ")}) produced 1 inbox row, 1 card_auth_event and 1 hold ${recovered.hold_id}; available ${before.availableCents} -> ${after.availableCents} (exactly -${AUTH_CENTS}), ledger unchanged at ${after.ledgerCents}; drain ${drainStatus}`,
+      `recovery: the backlog delivered twice (HTTP ${catchUp.join(" then ")}) produced 1 inbox row, 1 card_auth_event and 1 hold ${recovered.hold_id}, whose memo account carries exactly 1 entry of ${heldByUs?.cents} (the $${(AUTH_CENTS / 100).toFixed(2)} withheld once, not twice) and 0 financial entries; ${quietEpisode ? `the episode was quiet, so available ${before.availableCents} -> ${after.availableCents} (exactly -${AUTH_CENTS}) and ledger unchanged at ${after.ledgerCents} were asserted too` : `another process wrote to this shared database during the episode, so the whole-position deltas were reported rather than asserted: available ${before.availableCents} -> ${after.availableCents}, ledger ${before.ledgerCents} -> ${after.ledgerCents}`}; drain ${drainStatus}`,
     );
   });
 
