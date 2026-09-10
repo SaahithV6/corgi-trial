@@ -127,12 +127,27 @@ export async function availableBalance(
        GROUP BY d.normal_side
     ),
     active_holds AS (
+      -- A hold's size is the balance of ITS OWN memo account only.
+      --
+      -- Two bugs lived here and both produced silent zeros rather than errors
+      -- you would notice:
+      --
+      -- 1. The hold table has no business_id. It has account_id (the customer's
+      --    deposit account) and memo_account_id (their 9100/9200). Tenancy is
+      --    reached through the deposit account, not stored on the hold.
+      -- 2. Summing every line of a hold's memo ENTRIES gives zero, always.
+      --    assert_entry_balanced() applies to the memo book exactly as it does
+      --    to the financial book, so both legs of a memo entry are in that sum
+      --    and they cancel. The hold is one SIDE of that entry, so the sum has
+      --    to be restricted to lines hitting hold.memo_account_id.
       SELECT h.id, h.kind,
              COALESCE(SUM(l.amount_cents), 0)::bigint AS cents
         FROM hold h
+        JOIN account a ON a.id = h.account_id
         LEFT JOIN journal_entry e ON e.hold_id = h.id
         LEFT JOIN journal_line  l ON l.entry_id = e.id
-       WHERE h.business_id = ${businessId}::uuid
+                                 AND l.account_id = h.memo_account_id
+       WHERE a.business_id = ${businessId}::uuid
          AND NOT EXISTS (SELECT 1 FROM hold_closure c WHERE c.hold_id = h.id)
        GROUP BY h.id, h.kind
     )

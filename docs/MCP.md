@@ -275,7 +275,7 @@ and does it silently.
 
 ## 4. `get_balance` with both time axes
 
-The same account, asked as we believed it seventeen minutes earlier:
+The same account, asked as we believed it half an hour earlier:
 
 ```json
 {
@@ -309,11 +309,16 @@ The same account, asked as we believed it seventeen minutes earlier:
 > believed at 2026-09-10T14:30:00Z (booking_seq <= 5): ledger balance $186.60,
 > available $186.60.
 
-$186.60 at 14:30, $9,460.34 now. Neither answer overwrote the other, nothing was
-edited, and the watermark that produced the first is returned so the caller can
-reproduce it. `as_of_value_date` moves along valid time; `as_of_booking_time`
-moves along transaction time; they are independent, and the `basis` field names
-which cut was applied.
+$186.60 as believed at 14:30, $30,576.93 now — the reconciliation demo booked a
+great many settlements in between. Neither answer overwrote the other, nothing
+was edited, and the watermark that produced the first is returned so the caller
+can reproduce it exactly. `as_of_value_date` moves along valid time;
+`as_of_booking_time` moves along transaction time; they are independent, and the
+`basis` field names which cut was applied — `current`, `as_of_value_date` or
+`as_believed` — so a caller is never guessing which question it asked.
+
+This is the published live-fire question, exposed as two tool arguments: show
+Tuesday's statement now, and prove what you believed on Wednesday.
 
 ## 5. `list_transactions` — the two dates, separately
 
@@ -404,17 +409,21 @@ debit.
 }
 ```
 
-**HTTP 200** (one break shown; the summary is over all three)
+**HTTP 200** (one of the three breaks shown; the summary is over all three)
 
 ```json
 {
   "content": [
     {
       "type": "text",
-      "text": "3 open break(s) for Ridgeline Robotics, Inc., $13,111.66 out in total: 3 booked but absent from the settlement file, 0 matched with an amount disagreement, 0 in the file with no entry. Oldest is 8899 day(s), and 3 have survived two or more book-day closes. 5 further unmatched file row(s) cannot be attributed to a business."
+      "text": "3 open break(s) for Ridgeline Robotics, Inc., $399.99 out in total: 3 booked but absent from the settlement file, 0 matched with an amount disagreement, 0 in the file with no entry. Oldest is 8998 day(s), and 3 have survived two or more book-day closes. 20 further unmatched file row(s) cannot be attributed to a business."
     }
   ],
   "structuredContent": {
+    "business": {
+      "id": "e274546d-6bdd-5266-b0fb-cc839a7811f9",
+      "legal_name": "Ridgeline Robotics, Inc."
+    },
     "as_of_book_date": "2026-09-10",
     "open_breaks": [
       {
@@ -423,35 +432,47 @@ debit.
         "reason_code": "unmatched_reference",
         "reason": "No counterpart under this reference",
         "severity": "critical",
-        "age_days": 45,
+        "age_days": 8998,
         "age_bucket": "31+",
-        "break_key": "d05aeb7e-c1cc-4f42-977a-b8866b74243a",
-        "external_ref": "ACH-LEDGER-ONLY-20260727",
-        "value_date": "2026-07-27",
+        "break_key": "0c9c3234-7e1f-415f-a029-76c18265bf23",
+        "external_ref": "PLANT-MTVNMTYV-3",
+        "value_date": "2002-01-21",
         "rail": "ach",
         "provider": "achsim",
-        "entry_id": "d05aeb7e-c1cc-4f42-977a-b8866b74243a",
-        "ledger_amount": { "cents": "1284500", "display": "$12,845.00" },
+        "entry_id": "0c9c3234-7e1f-415f-a029-76c18265bf23",
+        "ledger_amount": { "cents": "13333", "display": "$133.33" },
         "file_amount": null,
-        "break_amount": { "cents": "1284500", "display": "$12,845.00" },
-        "description": "ACH settlement notified by webhook, absent from the ODFI file",
+        "break_amount": { "cents": "13333", "display": "$133.33" },
+        "description": "Planted settlement PLANT-MTVNMTYV-3",
         "explained_by": null
       }
     ],
     "counts_by_category": { "in_ledger_not_file": 3, "amount_mismatch": 0, "in_file_not_ledger": 0 },
     "counts_by_severity": { "critical": 3 },
-    "oldest_age_days": 8899,
-    "total_break_amount": { "cents": "1311166", "display": "$13,111.66" },
-    "unattributable_open_breaks": 5,
+    "oldest_age_days": 8998,
+    "total_break_amount": { "cents": "39999", "display": "$399.99" },
+    "unattributable_open_breaks": 20,
     "note": "Categories, reason codes, age buckets and severities come from the reconciliation engine's own view (v_recon_break) and aging rules, not from a second calculation here. Severity is about day closes, not about money: aged means somebody signed off a book day with this break open. This tool reads breaks and cannot adjudicate, resolve or adjust one — that needs a human and a correcting entry."
   }
 }
 ```
 
-Note `unattributable_open_breaks: 5`. Those are `in_file_not_ledger` breaks: a
+Two things worth pointing at.
+
+**The diff is not re-implemented here.** The categories come from
+`v_recon_break`, and the age bucket and severity from `recon/aging.ts`, via that
+module's own `toReconBreak`. What this surface adds is one predicate — the
+tenant filter — pushed into the `WHERE` clause rather than applied in TypeScript
+after the fetch, which is both the faster plan (185ms scoped versus 708ms for the
+whole view, measured on this branch) and the safer one: there is no moment at
+which this process holds another business's break in memory.
+
+**`unattributable_open_breaks: 20`.** Those are `in_file_not_ledger` breaks. A
 settlement-file row with no journal entry has no account, so it has no owner, and
 attributing it to a tenant would mean guessing. They are counted rather than
-listed, so an agent is never told "no breaks" when the truth is "none of yours".
+listed, so an agent is never told "no breaks" when the truth is "none of yours,
+and twenty nobody owns" — which is the answer that would let it reassure a
+customer that the books tie out.
 
 ## 7. `initiate_payment` — lands in the queue, moves nothing
 
@@ -472,8 +493,8 @@ listed, so an agent is never told "no breaks" when the truth is "none of yours".
         "account_number_last4": "6789",
         "account_type": "checking"
       },
-      "reason": "Invoice NWC-2026-0512, September machining run, 30-day terms, due today",
-      "idempotency_key": "invoice-NWC-2026-0512"
+      "reason": "Invoice NWC-2026-0603, September machining run, 30-day terms, due today",
+      "idempotency_key": "invoice-NWC-2026-0603"
     }
   }
 }
@@ -489,17 +510,17 @@ listed, so an agent is never told "no breaks" when the truth is "none of yours".
     "content": [
       {
         "type": "text",
-        "text": "NO MONEY HAS MOVED. A payment instruction for $4,200.00 by ach to Northwind Components LLC (ACH 021000021 ••6789) dated 2026-09-10 is sitting in the approval queue as instruction 02265193-7f3f-4efe-bff0-3442bcb0eaa4, state \"requested\". It debits Ridgeline Robotics, Inc. — business current account only if and when a human releases it. It needs 1 human approval(s) from someone other than the requester; it holds 0. This agent cannot approve it: the actor table forbids a non-human approver and the maker-checker trigger refuses the initiator."
+        "text": "NO MONEY HAS MOVED. A payment instruction for $4,200.00 by ach to Northwind Components LLC (ACH 021000021 ••6789) dated 2026-09-10 is sitting in the approval queue as instruction 7f9187c9-0156-4792-bacd-6d64c2d2b2f2, state \"requested\". It debits Ridgeline Robotics, Inc. — business current account only if and when a human releases it. It needs 1 human approval(s) from someone other than the requester; it holds 0. This agent cannot approve it: the actor table forbids a non-human approver and the maker-checker trigger refuses the initiator."
       }
     ],
     "structuredContent": {
       "status": "queued_for_human_approval",
       "money_moved": false,
-      "instruction_id": "02265193-7f3f-4efe-bff0-3442bcb0eaa4",
+      "instruction_id": "7f9187c9-0156-4792-bacd-6d64c2d2b2f2",
       "replayed": false,
       "state": "requested",
       "content_hash": "e423ad6eefa640e5b0bece049c9784e17a4305ad5f5bc76eb74fa029da1af3eb",
-      "requested_at": "2026-09-10T14:52:01.996Z",
+      "requested_at": "2026-09-10T15:02:29.021Z",
       "requested_by": {
         "actor_id": "3743dc53-4e1c-577e-9a0f-e4469ffc1761",
         "kind": "agent",
@@ -535,7 +556,7 @@ listed, so an agent is never told "no breaks" when the truth is "none of yours".
         ]
       },
       "funds_check": {
-        "available_before": { "cents": "946034", "display": "$9,460.34" },
+        "available_before": { "cents": "3125592", "display": "$31,255.92" },
         "binding": false,
         "note": "Checked when this instruction was queued, not when it will be released. The balance at release is what actually governs."
       },
@@ -548,17 +569,20 @@ listed, so an agent is never told "no breaks" when the truth is "none of yours".
 
 The prose leads with `NO MONEY HAS MOVED` because the caller is usually a model
 relaying to a person, and "payment initiated" is a sentence that gets repeated as
-"your payment has been sent".
+"your payment has been sent". `state` is folded from the event stream by
+`approvals/state.ts` rather than read off a status column, and `approvals_held`
+is counted the way the trigger counts them, so the screen and the agent cannot
+disagree about whether this is releasable.
 
 ### What that actually wrote
 
 Queried directly, as the restricted `corgi_app` role:
 
 ```
-id               | 02265193-7f3f-4efe-bff0-3442bcb0eaa4
+id               | 7f9187c9-0156-4792-bacd-6d64c2d2b2f2
 amount_cents     | 420000
-requested_by     | Corgi payments agent  (kind = agent)
-idempotency_key  | mcp:e274546d-…-cc839a7811f9:3743dc53-…-e4469ffc1761:invoice-NWC-2026-0512
+requested_by     | Corgi payments agent (kind = agent)
+idempotency_key  | mcp:e274546d-6bdd-5266-b0fb-cc839a7811f9:3743dc53-4e1c-577e-9a0f-e4469ffc1761:invoice-NWC-2026-0603
 content_hash     | e423ad6eefa640e5b0bece049c9784e17a4305ad5f5bc76eb74fa029da1af3eb
 events           | requested
 journal_entries  | 0
@@ -570,16 +594,17 @@ collide with — or be used to probe for — another's instruction.
 
 ### And the agent cannot approve it
 
-Going around the application entirely, connecting to Postgres directly and
-inserting the approval as the agent, citing the correct content hash:
+Going around the application entirely: connect to Postgres directly and insert
+the approval as the agent, citing the correct content hash.
 
 ```sql
 INSERT INTO payment_instruction_event
   (instruction_id, kind, actor_id, approved_content_hash, value_date)
 VALUES
-  ('02265193-7f3f-4efe-bff0-3442bcb0eaa4', 'approved',
+  ('7f9187c9-0156-4792-bacd-6d64c2d2b2f2', 'approved',
    '3743dc53-4e1c-577e-9a0f-e4469ffc1761',
-   decode('e423ad6e…da1af3eb','hex'), CURRENT_DATE);
+   decode('e423ad6eefa640e5b0bece049c9784e17a4305ad5f5bc76eb74fa029da1af3eb','hex'),
+   CURRENT_DATE);
 ```
 
 ```
@@ -588,7 +613,9 @@ actor 3743dc53-4e1c-577e-9a0f-e4469ffc1761 (kind agent) is not an approver
 ```
 
 No TypeScript was in the way. `src/lib/mcp/mcp.integration.test.ts` runs this
-same attempt against the live database on every `RUN_DB_TESTS=1` run.
+same attempt against the live database on every `RUN_DB_TESTS=1` run, and also
+proves the row underneath it: inserting an `actor` with `kind = 'agent'` and
+`can_approve = true` is refused by `actor_only_humans_approve`.
 
 ## 8. Replaying an idempotency key
 
@@ -598,7 +625,7 @@ The same call again, unchanged:
 {
   "status": "queued_for_human_approval",
   "money_moved": false,
-  "instruction_id": "13551a7b-f4a4-4895-ba5a-9db16eab3086",
+  "instruction_id": "7f9187c9-0156-4792-bacd-6d64c2d2b2f2",
   "replayed": true,
   "content_hash": "e423ad6eefa640e5b0bece049c9784e17a4305ad5f5bc76eb74fa029da1af3eb"
 }
@@ -689,61 +716,73 @@ business and there is no argument that could carry it across.
 ## 10. The audit log
 
 Every call above produced exactly one line, including the ones that were
-refused. Verbatim from stdout, reformatted for width:
+refused. Verbatim from stdout, reformatted for width and with the constant
+fields dropped after the first:
 
 ```json
-{"event":"mcp.audit","requestId":"req_46eaf972958f4f218047c8231200cadd","method":"tools/call",
+{"event":"mcp.audit","requestId":"req_…","method":"tools/call",
  "tool":"initiate_payment","outcome":"ok","errorCode":null,
  "actorId":"3743dc53-4e1c-577e-9a0f-e4469ffc1761",
  "businessId":"e274546d-6bdd-5266-b0fb-cc839a7811f9",
- "grantLabel":"ridgeline-ops-agent","grantFingerprint":"7b5c37ab","clientKey":"::ffff:127.0.0.1",
+ "grantLabel":"ridgeline-ops-agent","grantFingerprint":"7b5c37ab",
+ "clientKey":"::ffff:127.0.0.1",
  "argumentsRedacted":{"rail":"ach","amount_cents":"420000",
    "destination":{"type":"ach","holder_name":"Northwind Components LLC",
      "routing_number":"021000021","account_number_last4":"6789","account_type":"checking"},
-   "reason":"Invoice NWC-2026-0512, September machining run, 30-day terms, due today",
-   "idempotency_key":"invoice-NWC-2026-0512"},
- "durationMs":2253,
- "result":{"instruction_id":"02265193-7f3f-4efe-bff0-3442bcb0eaa4","replayed":false,
+   "reason":"Invoice NWC-2026-0603, September machining run, 30-day terms, due today",
+   "idempotency_key":"invoice-NWC-2026-0603"},
+ "durationMs":1069,
+ "result":{"instruction_id":"7f9187c9-0156-4792-bacd-6d64c2d2b2f2","replayed":false,
    "content_hash":"e423ad6eefa640e5b0bece049c9784e17a4305ad5f5bc76eb74fa029da1af3eb",
    "money_moved":false}}
 
-{"event":"mcp.audit","tool":"get_balance","outcome":"tool_error","errorCode":"ACCOUNT_NOT_FOUND",
- "actorId":"3743dc53-…","businessId":"e274546d-…","grantLabel":"ridgeline-ops-agent",
- "argumentsRedacted":{"account_code":"1110"},"durationMs":71,"result":null}
+{"tool":"initiate_payment","outcome":"ok","argumentsRedacted":{…same…},
+ "durationMs":768,
+ "result":{"instruction_id":"7f9187c9-0156-4792-bacd-6d64c2d2b2f2","replayed":true,
+   "content_hash":"e423ad6e…da1af3eb","money_moved":false}}
 
-{"event":"mcp.audit","tool":"approve_payment","outcome":"protocol_error","errorCode":"UNKNOWN_TOOL",
- "actorId":"3743dc53-…","grantLabel":"ridgeline-ops-agent",
- "argumentsRedacted":{"instruction_id":"fb9fa201-531f-4ade-b6af-f826620b45c7"},"durationMs":1}
+{"tool":"get_balance","outcome":"tool_error","errorCode":"ACCOUNT_NOT_FOUND",
+ "businessId":"e274546d-…","grantLabel":"ridgeline-ops-agent","grantFingerprint":"7b5c37ab",
+ "argumentsRedacted":{"account_code":"1110"},"durationMs":856}
 
-{"event":"mcp.audit","tool":"get_balance","outcome":"protocol_error","errorCode":"INVALID_ARGUMENTS",
- "actorId":"3743dc53-…","grantLabel":"ridgeline-ops-agent",
+{"tool":"approve_payment","outcome":"protocol_error","errorCode":"UNKNOWN_TOOL",
+ "businessId":"e274546d-…","grantLabel":"ridgeline-ops-agent","grantFingerprint":"7b5c37ab",
+ "argumentsRedacted":{"instruction_id":"7f9187c9-0156-4792-bacd-6d64c2d2b2f2"},"durationMs":1}
+
+{"tool":"get_balance","outcome":"protocol_error","errorCode":"INVALID_ARGUMENTS",
+ "businessId":"e274546d-…","grantLabel":"ridgeline-ops-agent","grantFingerprint":"7b5c37ab",
  "argumentsRedacted":{"business_id":"1151e7b5-b75b-5f58-bdbf-68cd714178ce"},"durationMs":1}
 
-{"event":"mcp.audit","tool":"get_balance","outcome":"tool_error","errorCode":"ACCOUNT_NOT_FOUND",
- "actorId":"3743dc53-…","businessId":"1151e7b5-b75b-5f58-bdbf-68cd714178ce",
+{"tool":"get_balance","outcome":"tool_error","errorCode":"ACCOUNT_NOT_FOUND",
+ "businessId":"1151e7b5-b75b-5f58-bdbf-68cd714178ce",
  "grantLabel":"kettle-ops-agent","grantFingerprint":"6daedd00",
- "argumentsRedacted":{},"durationMs":130}
+ "argumentsRedacted":{},"durationMs":135}
 
-{"event":"mcp.audit","tool":"get_balance","outcome":"ok",
- "actorId":"3743dc53-…","businessId":"e274546d-…","grantLabel":"ridgeline-ops-agent",
+{"tool":"get_balance","outcome":"ok","businessId":"e274546d-…",
+ "grantLabel":"ridgeline-ops-agent","grantFingerprint":"7b5c37ab",
  "argumentsRedacted":{"as_of_value_date":"2026-09-10","as_of_booking_time":"2026-09-10T14:30:00Z"},
- "durationMs":614,"result":{"basis":"as_believed"}}
+ "durationMs":631,"result":{"basis":"as_believed"}}
 ```
 
 Points worth making about that log:
 
 - **The attempt is recorded, not just the success.** `approve_payment` does not
-  exist, and the fact that something asked for it is in the log with the
-  arguments it tried.
+  exist; the fact that something asked for it, and the instruction id it named,
+  are in the log. A surface that only logs what it allowed cannot answer the
+  question people actually ask after an incident, which is "what did it try?"
+- **Two different tokens, two different `grantFingerprint` values**, and the
+  `businessId` on each line is the one the token is scoped to, never one that
+  came from an argument.
 - **`grantFingerprint`, not `tokenFingerprint`.** `@/lib/log` redacts any field
   whose name contains "token"; this value is four bytes of a sha256 and is
   deliberately non-secret, because it is what distinguishes two tokens sharing a
   label during an investigation. A field that is always `[redacted]` is a field
-  that is not in the audit log.
+  that is not in the audit log. (This one was named `tokenFingerprint` first, and
+  the log said `[redacted]` until it was renamed.)
 - **Arguments are redacted before they are written.** The routing number
   survives — it is published by the Fed and is what identifies the receiving
-  institution — and anything matching a secret or a full account number does
-  not. There is no full account number to redact here in the first place: the
+  institution — and anything matching a secret or a full account number does not.
+  There is no full account number to redact here in the first place: the
   destination schema only accepts `account_number_last4`.
 - **Where it lands.** One JSON line per call through `@/lib/log`, the same drain
   the rest of the system writes to. A durable `mcp_audit` table is a
@@ -753,8 +792,6 @@ Points worth making about that log:
   `payment_instruction` and its `requested` event record the agent's actor id,
   the amount, the destination, the value date and the content hash, on tables
   `corgi_app` holds no `UPDATE` or `DELETE` on.
-
----
 
 ## Rate limits
 
