@@ -192,18 +192,17 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       );
 
     if (!reportsDeliveryHealth) {
-      record(
-        "skip",
-        `/api/health answers 200 and reports credential/capability liveness per slot, but carries NO webhook delivery-freshness field, so a webhook outage is invisible to it. Missing: a per-provider last-delivery instant (or lag in seconds) on the health body, and a degraded verdict derived from it. Checked keys: lastDelivery, deliveryLagSeconds, secondsSinceLastDelivery, webhookHealth.`,
-      );
-      expect.getState(); // no-op: the skip below is the outcome
-      return void ctxSkip();
+      const reason =
+        "/api/health answers 200 and reports credential/capability liveness per slot, but carries NO webhook delivery-freshness field, so a webhook outage is invisible to it. Missing: a per-provider last-delivery instant (or lag in seconds) on the health body, and a degraded verdict derived from it. Looked for: lastDelivery, deliveryLagSeconds, secondsSinceLastDelivery, webhookHealth.";
+      record("skip", reason);
+      ctx.skip(reason);
+      return;
     }
 
     record("evidence", `/api/health reports webhook delivery health: ${serialised.slice(0, 300)}`);
   });
 
-  it("the account UI shows a provider-down state", async () => {
+  it("the account UI shows a provider-down state", async (ctx) => {
     const response = await fetch(`${BASE_URL}/accounts`, { cache: "no-store" });
     expect(response.status).toBe(200);
     const html = await response.text();
@@ -212,26 +211,13 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       /data-provider-status|provider-down|provider unavailable|issuing provider/i.test(html);
 
     if (!showsProviderState) {
-      record(
-        "skip",
-        `no provider-down state is rendered anywhere in src/components/account/*: the account data contract (src/components/account/data-contract.ts) carries balances, holds and postings but no provider/feed health field, and the account view has no banner for one. Missing: a provider-health field on the account data contract and a component that renders it (looked for data-provider-status, provider-down, "issuing provider").`,
-      );
-      return void ctxSkip();
+      const reason =
+        'no provider-down state is rendered on the deployed account screen: the account data contract (src/components/account/data-contract.ts) carries balances, holds and postings but no provider/feed health field, and no component renders one. Missing: a provider-health field on the account data contract plus a component that renders it. Looked for: data-provider-status, provider-down, "issuing provider".';
+      record("skip", reason);
+      ctx.skip(reason);
+      return;
     }
 
     record("evidence", "the deployed account screen renders a provider-down state");
   });
 });
-
-/**
- * Mark the running test skipped.
- *
- * A test that cannot prove its claim must not report a pass, and it must not
- * report a failure either — a missing feature is not a broken one. Vitest's
- * `ctx.skip()` is the honest outcome, and the reason has already been written
- * to the evidence file so the scoreboard can print it.
- */
-function ctxSkip(): never {
-  // eslint-disable-next-line @typescript-eslint/only-throw-error
-  throw Object.assign(new Error("skipped"), { __vitest_skip__: true });
-}

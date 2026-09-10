@@ -325,8 +325,16 @@ export async function applyCardTransaction(
     // what Lithic itself claims. Disagreement is surfaced, never reconciled by
     // preferring one side — guessing in the webhook handler is worse than a
     // break someone looks at.
+    //
+    // Suppressed once the authorisation is closed, and that is not a fudge: the
+    // adapter models `max(A − C, 0)` and nothing else, while closure also comes
+    // from `is_final`, an explicit close, a full reversal and the expiry clock.
+    // After a close the two answers are MEANT to differ, so a flag there would
+    // be noise rather than a signal, and a break nobody can action is worse
+    // than no break at all.
     providerDisagrees:
-      derived.providerView.holdMatchesEvents === false ||
-      derived.providerView.eventDerivedHoldCents !== settled.holdCents,
+      !recorded.state.closed &&
+      (derived.providerView.holdMatchesEvents === false ||
+        derived.providerView.eventDerivedHoldCents !== settled.holdCents),
   };
 }
