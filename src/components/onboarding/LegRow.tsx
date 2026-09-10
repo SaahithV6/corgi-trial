@@ -82,8 +82,10 @@ export function LegRow({ leg }: { readonly leg: LegView }) {
         {leg.citation === null ? (
           <span className="text-muted">
             {leg.evidence === "live"
-              ? "none — and the two reasons for that are different, so the label is not. A third party answered this leg; what it had was no record to point at. An absence, said plainly, rather than a citation-shaped sentence with nothing behind it."
-              : "none. This leg cites nothing, because there is nothing to cite — which is what a leg nobody outside this system answered looks like when it is not dressed up."}
+              ? "none — and the reasons for that differ, so the label must not be flattened. A third party answered this leg; what it had was no record to point at. An absence, said plainly, rather than a citation-shaped sentence with nothing behind it."
+              : leg.evidence === "manual"
+                ? "none, and correctly so. A person decided this leg; the reason they wrote IS the evidence, and it is directly below. Manufacturing a registry-style citation for a human judgement would be the exact dressing-up this screen refuses everywhere else."
+                : "none. This leg cites nothing, because there is nothing to cite — which is what a leg nobody outside this system answered looks like when it is not dressed up."}
           </span>
         ) : (
           <span className="break-words text-text">{leg.citation}</span>

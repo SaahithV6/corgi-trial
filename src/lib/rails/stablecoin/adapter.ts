@@ -59,7 +59,10 @@ import {
   type GasFacts,
   type PayoutOutcome,
   type PayoutRefusal,
+  type ProviderHealth,
   type ReceiptFacts,
+  type StablecoinPayoutInstruction,
+  type StablecoinPayoutProvider,
   type UsdcPayoutRequest,
 } from "./types";
 
@@ -422,4 +425,56 @@ export async function sendUsdcPayout(
 /** Narrowing helper for callers that only want to act on success. */
 export function confirmedOrNull(outcome: PayoutOutcome): ConfirmedPayout | null {
   return outcome.kind === "confirmed" ? outcome : null;
+}
+
+// ---------------------------------------------------------------------------
+// This path, behind the shared provider interface
+// ---------------------------------------------------------------------------
+
+/**
+ * The direct-to-chain path as a `StablecoinPayoutProvider`.
+ *
+ * Everything above this line predates the interface and is unchanged by it.
+ * This is a wrapper and nothing more: it closes over the credential this rail
+ * needs — 32 bytes of secp256k1 — so that callers can hand it an instruction
+ * that says nothing about signing keys, and hand the identical instruction to
+ * Circle instead. See ../stablecoin/circle-registry.ts for the selection.
+ */
+export function directStablecoinProvider(
+  rpc: BaseRpc,
+  privateKey: Uint8Array,
+  options: PayoutOptions = {},
+): StablecoinPayoutProvider {
+  return {
+    id: USDC_PROVIDER,
+    label: "Base Sepolia, signed here",
+
+    async health(): Promise<ProviderHealth> {
+      const started = Date.now();
+      const report = (liveness: ProviderHealth["liveness"], detail: string): ProviderHealth => ({
+        provider: USDC_PROVIDER,
+        label: "Base Sepolia, signed here",
+        liveness,
+        detail,
+        ms: Date.now() - started,
+      });
+      try {
+        const address = addressFromPrivateKey(privateKey);
+        const [chain, wei] = await Promise.all([rpc.chainId(), rpc.getBalance(address)]);
+        // Holding USDC is not the capability; MOVING it is. A wallet with
+        // tokens and no gas cannot send a cent, and reporting live there
+        // claims something we cannot do — the mistake DECISIONS 011 is about.
+        if (wei === 0n) {
+          return report("unauthorised", `${address} on chain ${chain} holds 0 wei of gas; a transfer cannot be paid for`);
+        }
+        return report("live", `${address} on chain ${chain}, ${wei} wei of gas`);
+      } catch (error) {
+        return report("unreachable", error instanceof Error ? error.message : String(error));
+      }
+    },
+
+    send(instruction: StablecoinPayoutInstruction): Promise<PayoutOutcome> {
+      return sendUsdcPayout(rpc, { ...instruction, privateKey }, options);
+    },
+  };
 }

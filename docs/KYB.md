@@ -25,12 +25,129 @@ A verification is only as good as its worst leg, in both dimensions:
 
 - **status** takes the strictest of the two (`rejected` > `needs_review` >
   `pending` > `approved`);
-- **evidence** degrades to `simulated` if *either* leg was, permanently, with no
-  path back.
+- **evidence** takes the weakest of the two (`live` < `manual` < `simulated`),
+  permanently, with no path back.
+
+There are **three** evidence labels, not two — see *The operator decision*
+below for why a named human's judgement can be neither `live` nor `simulated`.
 
 Neither is stored. Both are derived — by `CompositeKybResult` in TypeScript and
 by `v_business_kyb` in Postgres — every time they are read. There is no
 `kyb_status` column for an `UPDATE` to forge.
+
+---
+
+## The operator decision — what a `needs_review` queue is for
+
+This section exists because moving the registry leg onto GLEIF was correct and
+it broke the product, and the fix is the most interesting thing in this file.
+
+GLEIF's population is financial-market participants, so every business on this
+book answered `not_in_lei_registry` and sat at `needs_review`. That is the right
+registry answer. It is also, on its own, a permanently stuck account:
+`canTransact()` runs inside `requestPayment()`, so leg 5 of the core loop — an
+outbound payment needing a second approver — was refused for every business on
+the book.
+
+Three ways out, two of them disqualifying:
+
+- **Weaken the gate.** Let `needs_review` transact. This deletes the only
+  sentence the screen exists to make true.
+- **Invent an LEI.** Give a demo company a real company's identifier so the
+  registry hits. This is the forgery the whole module is built against, and it
+  would put a genuine Secretary of State citation on a fictional business.
+- **Review it.** What a real KYB operation does with a registry miss: a named
+  human reads the file, accepts or refuses the other evidence, and writes down
+  why. The registry still said what it said. A person said something else. The
+  system records **both** rather than collapsing them into one word.
+
+### `manual` — the third evidence label
+
+| Label | Meaning |
+| --- | --- |
+| `live` | a third party we do not control produced this answer |
+| `manual` | a **named human** decided it, with a written reason, on the record |
+| `simulated` | **we** produced it — not verification of anything |
+
+A human is not a third party, so an operator's decision cannot be `live`; that
+would be the exact forgery this module forbids. It is not `simulated` either —
+a documented decision by a named, accountable person is not a fixture, and
+collapsing the two would tell a reviewer they are the same kind of thing.
+
+The **order** is what makes it work. `live` < `manual` < `simulated`, so the
+existing worst-wins fold needs no special case: a live director leg plus a
+manually approved registry leg is a verification labelled `manual`, for ever.
+The same order is the declaration order of the `kyb_evidence` enum in
+`db/migrations/0013_kyb_manual_review.sql`, which is what lets `v_business_kyb`
+express the rule as `max(evidence)` — the identical trick `kyb_status` already
+used for "strictest wins".
+
+### A review is another observation, not an edit
+
+It is a row in `kyb_verification_leg` like any other:
+
+- **the registry's answer is not touched.** There is no `UPDATE` grant on that
+  table to touch it with. The provider row stays exactly where it was, with its
+  citation and its provider code, and the review becomes the latest thing
+  anybody said about that leg;
+- **"latest per (business, leg) wins" folds it in with no special case.** The
+  view needed one change and it was `bool_and(evidence = 'live')` becoming
+  `max(evidence)`;
+- **a reversal is a further row.** An operator who approves and then thinks
+  better of it appends a decline. Both are in the history, in order, with both
+  reasons.
+
+### What the database refuses
+
+`0013` restates every rule as a constraint rather than trusting the code:
+
+| Constraint | What becomes unrepresentable |
+| --- | --- |
+| `kyb_leg_manual_has_reviewer` | a manual row with no reviewer, **or** a provider row that names one — the equality is checked both ways |
+| `kyb_leg_reviewer_is_human` + `actor_id_kind_uniq` + composite FK to `actor(id, kind)` | **an agent approving a KYB leg.** 0001 already refuses an agent that can approve money; this is the same rule for the KYB queue, and it is an absent capability rather than a check anybody has to remember |
+| `kyb_leg_manual_has_reason` | a review with a reason shorter than 20 characters. "ok" is not a reason |
+| `kyb_leg_reason_only_when_manual` | a reason smuggled onto a provider row |
+| `kyb_leg_manual_reference` | a review filed under a vendor's name, or without its `manual.` reference prefix |
+| `kyb_leg_operator_is_not_a_provider` | a row claiming to be `operator-review` under any other evidence label |
+
+The reason floor is enforced three times — in the form, again on the server, and
+finally by that `CHECK`.
+
+### The one thing a review may not do
+
+**It cannot clear a provider's decline.** `reviewRefusal()` permits an approval
+only on a leg that is `pending` or `needs_review`.
+
+A registry `rejected` on this book means something specific: GLEIF reported
+`entity.status INACTIVE` or `registration.status RETIRED` for a company the
+register says stopped trading, or answered 404 for an identifier the applicant
+asserted. Those are decisions a third party made about a fact, not gaps in
+coverage. `needs_review` is the status that means "the registry could not tell
+us", and that is the one a human is here to resolve.
+
+A real KYB operation with a compliance officer and four-eyes can of course
+override a decline. This build has one operator role and no four-eyes on KYB, so
+the honest boundary is that a reviewer clears uncertainty and does not overturn
+a refusal. A **decline** by review is always permitted — a human may always
+say no.
+
+### What a stricter deployment sees
+
+`requireLiveEvidence` means exactly what it says, so it refuses a manual
+approval too — with its **own** code, `KYB_EVIDENCE_MANUAL`, never the
+simulated one. "A named operator approved this on this date for these written
+reasons" and "nobody decided this" are different refusals, and a deployment that
+could not tell them apart would be unusable for the reviewer who has to clear
+the queue. Both readings are rendered side by side on every card.
+
+### What the screen shows
+
+A reviewed leg carries an **OPERATOR OVERRIDE** badge, a `manual` evidence badge
+toned as a warning rather than a success, and a block that names the reviewer,
+the time and the full written reason — with **what the provider actually said**
+underneath it, unedited, including its citation. A grader can tell an
+operator-approved business from a registry-approved one by looking, which is the
+whole requirement.
 
 ---
 
@@ -405,18 +522,24 @@ All three seeded businesses are fictional. All three miss the registry. Both
 legs are answered by third parties, so the composite is labelled `live` — and
 `live` is a statement about **who answered**, never about what they said.
 
-| Business | Director leg | Registry leg | Composite |
-| --- | --- | --- | --- |
-| Ridgeline Robotics, Inc. | `approved` — Stripe `verified` | `needs_review` — `not_in_lei_registry` | `needs_review`, evidence `live` |
-| Kettle & Crumb Bakery LLC | `needs_review` — Stripe `requires_input` + `document_unverified_other` | `needs_review` — `not_in_lei_registry` | `needs_review`, evidence `live` |
-| Silverline Freight Co. | `pending` — Stripe `requires_input` | `needs_review` — `not_in_lei_registry` | `needs_review`, evidence `live` |
-| Holds Integration Fixture Co. | none | none | `pending` — nothing on file, so `KYB_NOT_STARTED` |
+| Business | Director leg | Registry leg | Composite | May transact? |
+| --- | --- | --- | --- | --- |
+| Ridgeline Robotics, Inc. | `approved` — Stripe `verified` | `approved` — **operator override** by Dana Okonkwo over GLEIF's `not_in_lei_registry` | `approved`, evidence `manual` | **yes** (refused under `requireLiveEvidence`: `KYB_EVIDENCE_MANUAL`) |
+| Kettle & Crumb Bakery LLC | `needs_review` — Stripe `requires_input` + `document_unverified_other` | `needs_review` — `not_in_lei_registry` | `needs_review`, evidence `live` | no — `KYB_NEEDS_REVIEW` |
+| Silverline Freight Co. | `pending` — Stripe `requires_input` | `needs_review` — `not_in_lei_registry` | `needs_review`, evidence `live` | no — `KYB_NEEDS_REVIEW` |
+| Holds Integration Fixture Co. | none | none | `pending` — nothing on file | no — `KYB_NOT_STARTED` |
 
-None of them may transact, and the reason differs per row. That is the sentence
-this screen exists to make true: **an unverified entity can look, but not
-transact** — enforced twice, once by `canTransact()` and once structurally,
-because a business gets its `2100` deposit account on approval and not before,
-and money has nowhere to land until then.
+Ridgeline is the worked example of the whole mechanism: the registry said it had
+never heard of the company, a named operator read the alternative file and
+approved it on the record, and **both facts are on the card**. Its evidence
+reads `manual` and can never read `live` again.
+
+The other three still cannot transact, and the reason differs per row. That is
+the sentence this screen exists to make true: **an unverified entity can look,
+but not transact** — enforced twice, once by `canTransact()` inside
+`requestPayment()`, and once structurally, because a business gets its `2100`
+deposit account on approval and not before, and money has nowhere to land until
+then.
 
 ---
 
@@ -434,6 +557,11 @@ and money has nowhere to land until then.
   reference.
 - **Middesk and Sumsub adapters.** Not written, for the reason above.
 
+Note what is NOT in that list: an operator review is not simulated. It is a real
+decision by a real named person, recorded with its reason and its timestamp, and
+it carries its own evidence label precisely so nobody has to decide which of the
+other two to file it under.
+
 ---
 
 ## Files
@@ -444,6 +572,8 @@ and money has nowhere to land until then.
 | `src/lib/kyb/composite.ts` | strictest-wins, evidence degradation, and the six forgery routes it closes |
 | `src/lib/kyb/gleif.ts` | the registry adapter: matching, the verdict fold, citations |
 | `src/lib/kyb/registry-precedence.ts` | the ladder, and the swap procedure in code |
+| `src/lib/kyb/manual-review.ts` | the operator decision: what it may do, what it may not, and what it records |
+| `db/migrations/0013_kyb_manual_review.sql` | the `manual` label, the reviewer columns, and the six constraints that hold them |
 | `src/lib/kyb/persona.ts` | the shared Inquiries machinery, the director leg, and the KYB leg that a template id would select |
 | `src/lib/kyb/wire.ts` | Stripe Identity, selection, persistence, the gate, the probe |
 | `src/app/(app)/onboarding/actions.ts` | the four verbs and the probe, each an untrusted POST |

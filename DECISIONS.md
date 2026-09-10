@@ -1386,7 +1386,7 @@ hash and the signer are simultaneously right. `tx.test.ts` also re-encodes this
 very transaction from fields read back with `eth_getTransactionByHash` and
 asserts the hash the network has.
 
-`/api/health` now reports **6 of 7 live**; `business_registry` alone is
+`/api/health` previously reported **6 of 7 live** at that reading; `business_registry` alone was
 simulated.
 
 ---

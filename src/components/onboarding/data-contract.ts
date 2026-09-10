@@ -159,7 +159,7 @@ export type ReviewView = {
 };
 
 /** Where a verdict came from. See `src/components/onboarding/verdict.ts`. */
-export type VerdictOrigin = "third-party" | "simulated" | "mixed" | "none";
+export type VerdictOrigin = "third-party" | "operator" | "simulated" | "mixed" | "none";
 
 /** One leg, as an attribution for the derived status. */
 export type VerdictSourceView = {

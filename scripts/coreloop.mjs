@@ -758,14 +758,18 @@ const today = new Date().toISOString().slice(0, 10);
  * catch.
  */
 const candidates = await sql`
-  SELECT dep.business_id AS business_id,
-         b.legal_name    AS legal_name,
-         dep.id          AS deposit_account,
-         memo.id         AS memo_account,
-         b.ein           AS ein
+  SELECT dep.business_id       AS business_id,
+         b.legal_name          AS legal_name,
+         dep.id                AS deposit_account,
+         memo.id               AS memo_account,
+         b.ein                 AS ein,
+         k.legs_on_file        AS legs_on_file,
+         k.kyb_status::text    AS kyb_status,
+         k.kyb_evidence::text  AS kyb_evidence
     FROM account dep
-    JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
-    JOIN business b   ON b.id = dep.business_id
+    JOIN account memo    ON memo.business_id = dep.business_id AND memo.code = '9100'
+    JOIN business b      ON b.id = dep.business_id
+    JOIN v_business_kyb k ON k.business_id = dep.business_id
    WHERE dep.code = '2100' AND dep.closed_at IS NULL
    ORDER BY b.legal_name`;
 
@@ -807,7 +811,15 @@ const GATE_RANK = {
 };
 const rankOf = (answer) => (answer.allowed ? -1 : (GATE_RANK[answer.code] ?? 9));
 
-const ranked = [...gateAnswers].sort((a, b) => rankOf(a) - rankOf(b));
+// Allowed first; then the business with real KYB legs on file, because a
+// fixture with nothing on file is never the right subject for a loop whose
+// first leg is a KYB check; then the refusal closest to an allowance.
+const ranked = [...gateAnswers].sort(
+  (a, b) =>
+    rankOf(a) - rankOf(b) ||
+    Number(b.legs_on_file ?? 0) - Number(a.legs_on_file ?? 0) ||
+    a.legal_name.localeCompare(b.legal_name),
+);
 const subject = ranked[0];
 const foil = gateAnswers.find((c) => !c.allowed && c.business_id !== subject?.business_id);
 
@@ -854,7 +866,10 @@ for (const answer of gateAnswers) {
       : foil !== undefined && answer.business_id === foil.business_id
         ? "  <- leg 1's foil"
         : "";
-  console.log(`    ${mark} ${String(answer.code).padEnd(22)} ${answer.legal_name}${role}`);
+  console.log(
+    `    ${mark} ${String(answer.code).padEnd(22)} ${String(answer.legal_name).padEnd(32)}` +
+      ` ${answer.kyb_status}/${answer.kyb_evidence}, ${answer.legs_on_file} leg(s)${role}`,
+  );
 }
 if (!subject.allowed) {
   console.log("");
@@ -1080,7 +1095,8 @@ if (want(2)) {
       `POST /funding  ${usd(amount)} to ${DEPOSIT}  reference ${reference}`,
       `result        ${sent.state.code}`,
       ...positionLines("figures", before, after),
-      `hold          ${hold.id}  kind=${hold.kind}  releases ${hold.available_at ?? "(no release time)"}`,
+      `hold          ${hold.id}  kind=${hold.kind}  releases ` +
+        `${hold.available_at instanceof Date ? hold.available_at.toISOString() : (hold.available_at ?? "(no release time)")}`,
       `the ledger is up ${usd(amount)} and available has not moved a cent: the identical amount is`,
       `withheld by an uncleared-credit hold until the availability policy releases it.`,
     );
@@ -1367,7 +1383,7 @@ if (want(4)) {
       `on demand, so the clearing above arrived ${Math.round((settled.value.received_at - landed.value.first_seen_at) / 1000)}s after its authorisation rather than two days.`,
       `What is proven is the part that matters and the part a clock cannot fake — a settlement for a`,
       `DIFFERENT amount, matched to its authorisation and released once. The value-date axis is`,
-      `exercised by leg 6.`,
+      `what leg 6 exercises.`,
     );
   });
 }
@@ -1636,17 +1652,51 @@ if (want(6)) {
       t.skip("leg 4 produced no settlement, so there is nothing to reverse");
     }
 
-    /* Is there a deployed control that reverses a settlement at all? */
+    /*
+     * Is there a deployed control that reverses a settlement AT ALL?
+     *
+     * Asked of every console screen rather than assumed of one: a leg that
+     * skips is making a claim about the whole deployment, so the whole
+     * deployment is the thing measured. A form counts if the action it posts to
+     * is named like a correction, or if it carries a field named like one.
+     */
+    const SCREENS = [
+      CONSOLE_PATH,
+      "/payments",
+      "/approvals",
+      "/statements",
+      "/reconciliation",
+      "/standing-orders",
+      "/onboarding",
+      "/funding",
+    ];
+    const looksLikeReversal = (f) =>
+      /revers|void|correct|rebook|unwind/i.test(ACTION_NAMES.get(f.actionId) ?? "") ||
+      Object.keys(controlMap(f)).some((k) => /revers|void|correct|rebook|unwind/i.test(k));
+
+    let reversal;
+    let reversalPath = CONSOLE_PATH;
+    const surveyed = [];
+    for (const screen of SCREENS) {
+      let body;
+      try {
+        body = await getPage(screen);
+      } catch (thrown) {
+        surveyed.push(`${screen}: not reachable (${thrown.message})`);
+        continue;
+      }
+      const screenForms = parseForms(body);
+      surveyed.push(`${screen}: ${screenForms.length} form(s)`);
+      const found = screenForms.find(looksLikeReversal);
+      if (found !== undefined) {
+        reversal = found;
+        reversalPath = screen;
+        break;
+      }
+    }
+
     const page = await getPage(CONSOLE_PATH);
     const forms = parseForms(page);
-    const reversal = forms.find((f) => {
-      const map = controlMap(f);
-      const named = ACTION_NAMES.get(f.actionId) ?? "";
-      return (
-        /revers|void|correct|refund|rebook|return/i.test(named) ||
-        Object.keys(map).some((k) => /revers|void|correct|rebook/i.test(k))
-      );
-    });
 
     /* Has the deployed pipeline ever produced a card correction? */
     const [corrected] = await sql`
@@ -1654,22 +1704,38 @@ if (want(6)) {
         FROM journal_entry e
        WHERE e.rail = 'card' AND e.reverses_entry_id IS NOT NULL`;
 
+    const kinds = [...new Set(forms.map((f) => nameOf(f.actionId)))];
+    const shapes = [
+      ...new Set(
+        forms.map((f) =>
+          Object.keys(controlMap(f))
+            .filter((k) => !k.startsWith("$"))
+            .join("+"),
+        ),
+      ),
+    ].filter((x) => x !== "");
+
     if (reversal === undefined) {
       t.skip(
-        `no control on the deployed console reverses a settlement. The four forms ${CONSOLE_PATH} ` +
-          `renders are issue-card, authorise, clearing and drain, and none of them corrects a booked ` +
-          `card entry; the card-correction path (src/lib/holds/, ` +
-          `src/lib/webhooks/consumers/lithic-card.ts) is being written now and reverseAndRebook() has ` +
-          `no caller on the webhook path yet — ${corrected.n} card entries on this whole book carry a ` +
-          `reverses_entry_id. Settlement ${carried.transactionToken} at value date ` +
-          `${carried.settlementValueDate} (entry ${carried.settlementEntryId}) is the row this leg ` +
-          `would reverse. Driving it any other way — a direct reverseAndRebook(), a hand-written row ` +
-          `— would prove the library, not the deployment, so this leg reports what is missing instead.`,
+        `no control on the deployed console reverses a settlement. What ${CONSOLE_PATH} actually ` +
+          `renders, read from the page just now, is ${kinds.length} distinct server action(s) — ` +
+          `${kinds.join(", ")} — carrying the fields ${shapes.join(" | ")}; none of them corrects a ` +
+          `booked card entry. Every other console screen was surveyed for one too and none has it ` +
+          `(${surveyed.join("; ")}). The ` +
+          `correction MACHINERY is not in question: ${corrected.n} card entries on this book already ` +
+          `carry a reverses_entry_id, and the statement screen renders both readings at ` +
+          `${baseUrl}/statements?account=${DEPOSIT}&day=${carried.settlementValueDate}. What is ` +
+          `missing is a way to REACH it from the deployment, which is the half being written now ` +
+          `(src/lib/holds/, src/lib/webhooks/consumers/lithic-card.ts). Settlement ` +
+          `${carried.transactionToken} at value date ${carried.settlementValueDate} (entry ` +
+          `${carried.settlementEntryId}) is the row this leg would reverse. Reversing it any other ` +
+          `way — calling reverseAndRebook() from here, writing the row by hand — would prove the ` +
+          `library rather than the deployment, so this leg reports what is missing instead.`,
       );
     }
 
     const before = await facts(BIZ);
-    const sent = await submitForm(CONSOLE_PATH, reversal, { businessId: BIZ }, {});
+    const sent = await submitForm(reversalPath, reversal, { businessId: BIZ }, {});
     t.check(sent.status === 200, `the reversal POST answered ${sent.status}`);
     t.check(sent.state !== null, "the reversal action returned no state");
     t.check(sent.state.status !== "refused", `the reversal was refused: ${sent.state.code}`);
@@ -1702,7 +1768,7 @@ if (want(6)) {
     );
 
     t.note(
-      `action        ${nameOf(reversal.actionId)}`,
+      `action        ${nameOf(reversal.actionId)}   POST ${reversalPath}`,
       `reversed      entry ${carried.settlementEntryId} at value date ${carried.settlementValueDate}`,
       `reversal      entry ${landed.value.id}  seq ${landed.value.booking_seq}` +
         `  group ${landed.value.correction_group_id}`,

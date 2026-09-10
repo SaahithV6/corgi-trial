@@ -56,7 +56,7 @@
 import "server-only";
 import { postEntry } from "@/lib/ledger/post";
 import { sql, type Sql } from "@/lib/ledger/db";
-import { USDC_PROVIDER, formatUsdc, payoutIdempotencyKey, type ConfirmedPayout } from "./types";
+import { formatUsdc, payoutIdempotencyKey, type ConfirmedPayout } from "./types";
 import { blockValueDate, payoutAllocation } from "./allocation";
 
 export { blockValueDate, payoutAllocation, type PayoutAllocation } from "./allocation";
@@ -178,7 +178,10 @@ export async function postUsdcPayout(
       description:
         `USDC payout ${formatUsdc(units)} to ${outcome.to}` +
         `${input.reference === undefined ? "" : ` (${input.reference})`}` +
-        ` — ${USDC_PROVIDER} block ${outcome.receipt.blockNumber}, gas ${outcome.receipt.gasCostWei} wei`,
+        // `outcome.provider`, not the constant: two providers move USDC over
+        // this rail now and the entry has to say which one did it. A reader
+        // must never have to guess which rail moved the money.
+        ` — ${outcome.provider} block ${outcome.receipt.blockNumber}, gas ${outcome.receipt.gasCostWei} wei`,
       idempotencyKey,
       actorId: input.actorId,
       lines: lines.map(({ accountId, amountCents, memo: lineMemo }) => ({

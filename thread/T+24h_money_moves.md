@@ -28,7 +28,8 @@ INTEGRATIONS
 
 Start with /api/health. Every label on it was earned by a live authenticated
 call, and the evidence string beside each slot names the call. If anything below
-disagrees with that page, believe the page. It reports 6 live of 7.
+disagrees with that page, believe the page. It read 6 live of 7 at that reading,
+when this was sent; the business registry leg went live on GLEIF later that day.
 
   LIVE       card_issuing       Lithic sandbox      GET /v1/cards -> 200
   LIVE       card_webhooks      Lithic              GET /v1/event_subscriptions -> 200, and its
@@ -311,7 +312,7 @@ Applied to the draft above, in order of how much each one cut.
     Y". One deliberate exception survives: "Not 'does not', cannot" — it is a
     precise distinction about database privileges, not a flourish.
 11. **Concrete nouns and real numbers over adjectives.** Every claim carries a
-    figure, an endpoint or a timestamp: 6 of 7 live, and every count in this mail,
+    figure, an endpoint or a timestamp: 6 of 7 live at that reading, and every count here,
     hold -400, 16:13:21, 390000000000 wei, 14 of 14.
 12. **One specific thing only the author could write.** The one-line fix that
     was written and reverted, and the eleven parked cards.

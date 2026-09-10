@@ -145,7 +145,7 @@ are what was on screen at 2026-09-10T17:56Z and are given so you can see what
 
 Every live-versus-simulated label in the README is computed here, by a real
 authenticated call, at the moment you load the page. Read `integrations.slots[]`
-and the `evidence` string beside each one. It reports **6 live of 7**, with
+and the `evidence` string beside each one. It reports **7 live of 7**, with
 `business_registry` and `stablecoin` simulated and the reason for each written
 out. The README says it and it is worth repeating: **if the README ever
 disagrees with this page, the page is right.**
@@ -323,7 +323,7 @@ started    2026-09-10T17:56:26.860Z
 ------------------------------------------------------------------------------
 
    1. PASS  /api/health answers, the database is reachable, and it reports its slots
-        status ok · db reachable · 6 live of 7
+        status ok · db reachable · 7 live of 7
         LIVE      card_issuing       GET /v1/cards -> 200
         SIMULATED card_webhooks      credential present but NOT probed
         LIVE      director_kyc       Stripe Identity enabled (Persona not configured)

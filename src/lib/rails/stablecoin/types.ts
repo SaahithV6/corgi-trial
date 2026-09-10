@@ -26,8 +26,28 @@
 
 import type { Money } from "../types";
 
-/** The slug persisted on every ledger row this adapter produces. */
+/** The slug persisted on every ledger row the direct-to-chain path produces. */
 export const USDC_PROVIDER = "base.usdc";
+
+/**
+ * The slug for the Circle-mediated path. See ./circle-provider.ts.
+ *
+ * Two providers now move USDC over the same rail, and the ledger entry has to
+ * say which one did it — a reader must never have to guess which rail moved
+ * the money. `postUsdcPayout` writes `outcome.provider` into the entry
+ * description for exactly that reason.
+ */
+export const CIRCLE_PROVIDER = "circle.w3s";
+
+/**
+ * Every provider that can move USDC on this rail.
+ *
+ * This union is the whole "a rail is an adapter, not a schema" claim in one
+ * line: adding Circle widened a provider slug and added an outcome for a
+ * failure only a mediated provider can have. It did not add a table, a column,
+ * a second `postUsdcPayout`, or a second idempotency key format.
+ */
+export type StablecoinProviderId = typeof USDC_PROVIDER | typeof CIRCLE_PROVIDER;
 
 /** USDC is 6 decimals on every chain Circle issues it on. */
 export const USDC_DECIMALS = 6;
@@ -72,22 +92,37 @@ export function splitUsdcUnits(units: bigint): { readonly cents: bigint; readonl
 // The instruction
 // ---------------------------------------------------------------------------
 
-export interface UsdcPayoutRequest {
+/**
+ * What to move, and where — with nothing in it about HOW.
+ *
+ * This is the half of the old `UsdcPayoutRequest` that is true of every
+ * provider. The direct path needs a secp256k1 key; Circle needs an API key, a
+ * wallet id and an entity secret. Neither credential appears here, because a
+ * caller instructing a payout should not have to know which rail is wired —
+ * that is the "adapter, not a schema" claim, and it only holds if the
+ * instruction is provider-free. Credentials are closed over by the provider
+ * factory instead. See ./circle-registry.ts.
+ */
+export interface StablecoinPayoutInstruction {
   /** ERC-20 contract. Base Sepolia USDC on this deployment. */
   readonly tokenAddress: string;
-  /** The wallet the money leaves. Must match the signing key, and is checked. */
+  /** The wallet the money leaves. Checked against the provider's own idea of it. */
   readonly fromAddress: string;
   readonly toAddress: string;
   /** Minor units. 0.50 USDC is 500000n. */
   readonly amountUnits: bigint;
   /** EIP-155 chain id, read from configuration and re-checked against the node. */
   readonly chainId: bigint;
-  /** 32 bytes of secp256k1 key material. Held only for the duration of a call. */
-  readonly privateKey: Uint8Array;
   /** How many blocks must sit on top of the receipt before we believe it. */
   readonly confirmations?: number;
   /** Wall-clock ceiling on waiting for a receipt, milliseconds. */
   readonly receiptTimeoutMs?: number;
+}
+
+/** The direct-to-chain instruction: the shared fields, plus the signing key. */
+export interface UsdcPayoutRequest extends StablecoinPayoutInstruction {
+  /** 32 bytes of secp256k1 key material. Held only for the duration of a call. */
+  readonly privateKey: Uint8Array;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +148,22 @@ export type PayoutRefusal =
   /** `eth_estimateGas` reverted. The transfer would fail and burn the gas. */
   | "estimate_reverted"
   /** The node refused the raw transaction. Signed, never accepted. */
-  | "broadcast_rejected";
+  | "broadcast_rejected"
+  /**
+   * The provider has no credential. Reported, never worked around.
+   *
+   * A mediated provider can be absent in a way the direct path cannot: the key
+   * is simply not set. This is the outcome then — NOT a silent fall back to
+   * the direct path, which would move money over a rail the caller did not
+   * choose and label it in the ledger as one it did not pick.
+   */
+  | "provider_not_configured"
+  /**
+   * The provider took the instruction and then refused it: a Circle transfer
+   * that ends FAILED, CANCELLED or DENIED without ever producing a hash.
+   * Nothing reached a chain, so there is nothing to find and nothing to post.
+   */
+  | "provider_declined";
 
 export interface GasFacts {
   readonly gasLimit: bigint;
@@ -135,7 +185,8 @@ export interface ReceiptFacts {
 }
 
 interface OutcomeBase {
-  readonly provider: typeof USDC_PROVIDER;
+  /** Which rail moved it. Written into the ledger entry description. */
+  readonly provider: StablecoinProviderId;
   /** Always 'live': this adapter has no simulator and never fabricates one. */
   readonly evidence: "live";
   readonly amount: Money;
@@ -177,6 +228,28 @@ export type PayoutOutcome =
     })
   /** Broadcast accepted, then the node stopped knowing about it. */
   | (OutcomeBase & { readonly kind: "dropped"; readonly txHash: string })
+  /**
+   * ── THE OUTCOME A SECOND PROVIDER MADE NECESSARY ─────────────────────────
+   *
+   * The provider named a transaction, that transaction is on chain, and it
+   * does NOT carry the ERC-20 `Transfer` we instructed — wrong token, wrong
+   * recipient, wrong amount, or no transfer at all.
+   *
+   * The direct path cannot reach this state: it builds the calldata itself, so
+   * `status: 0x1` on a transaction it signed IS the transfer. A mediated
+   * provider builds the calldata for us and then tells us a hash, and the only
+   * thing that makes "Circle says it sent your money" into "our money moved"
+   * is reading the log off the chain ourselves. Reporting `confirmed` on the
+   * provider's word would be booking their ledger as ours.
+   *
+   * Nothing may post. The hash survives, because it is the only handle anyone
+   * has on whatever DID happen.
+   */
+  | (OutcomeBase & {
+      readonly kind: "unverified";
+      readonly txHash: string;
+      readonly detail: string;
+    })
   /** Nothing was broadcast. `txHash` is null because no bytes were ever signed onto the wire. */
   | (OutcomeBase & {
       readonly kind: "refused";
@@ -202,4 +275,49 @@ export function isConfirmed(outcome: PayoutOutcome): outcome is ConfirmedPayout 
  */
 export function payoutIdempotencyKey(txHash: string): string {
   return `usdc:payout:${txHash}`;
+}
+
+// ---------------------------------------------------------------------------
+// The interface two providers implement
+// ---------------------------------------------------------------------------
+
+/**
+ * Liveness, in the vocabulary DECISIONS 011 fixed on.
+ *
+ * Deliberately the same four words `src/lib/integrations/probe.ts` uses, so a
+ * reader who has seen one surface has seen both. `live` is earned by a round
+ * trip and by nothing else; a present API key is not evidence of anything.
+ */
+export type ProviderLiveness = "live" | "unauthorised" | "unreachable" | "not_configured";
+
+export interface ProviderHealth {
+  readonly provider: StablecoinProviderId;
+  /** What a human should see. Never a slug on its own. */
+  readonly label: string;
+  readonly liveness: ProviderLiveness;
+  /** Why. Always populated, including on `live`. */
+  readonly detail: string;
+  readonly ms: number;
+}
+
+/**
+ * THE INTERFACE. Two implementations, one ledger posting.
+ *
+ * `send` returns a `PayoutOutcome`, which means a provider cannot report a
+ * payout as done in any way except the one `postUsdcPayout` accepts — a
+ * `confirmed` outcome carrying a transaction hash read back off the chain.
+ * Circle's `INITIATED` has no representation here at all, which is the point:
+ * an acknowledgement is not a value this interface can return.
+ *
+ * The instruction carries no credential (see `StablecoinPayoutInstruction`);
+ * each factory closes over its own. That is what makes the two swappable.
+ */
+export interface StablecoinPayoutProvider {
+  readonly id: StablecoinProviderId;
+  /** Human-readable, for the health surface and for operator output. */
+  readonly label: string;
+  /** The cheapest honest answer to "could this rail move money right now?". */
+  health(): Promise<ProviderHealth>;
+  /** Never throws for anything a chain or a provider can legitimately do. */
+  send(instruction: StablecoinPayoutInstruction): Promise<PayoutOutcome>;
 }

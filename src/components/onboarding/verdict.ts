@@ -16,9 +16,18 @@
  *            a leg sitting at a weaker status did not cause this verdict and
  *            must not be listed as if it had.
  *   origin   `third-party` when every source leg is live evidence,
- *            `simulated` when every source leg is ours,
- *            `mixed` when both kinds concur on the same verdict,
- *            `none` when there is nothing on file to attribute.
+ *            `operator`   when every source leg is a named human's decision,
+ *            `simulated`  when every source leg is ours,
+ *            `mixed`      when several kinds concur on the same verdict,
+ *            `none`       when there is nothing on file to attribute.
+ *
+ * `operator` IS ITS OWN ORIGIN AND NOT A SHADE OF `simulated`. This screen's
+ * first draft had only three kinds, so a business a named compliance operator
+ * had approved on the record was attributed to "us" and described as SIMULATED
+ * — which is both wrong and the more damaging direction to be wrong in, because
+ * it tells a reviewer that a documented human decision and a fixture are the
+ * same kind of thing. They are not, and the whole point of the `manual`
+ * evidence label is that the difference is visible.
  *
  * Pure, and shared: `src/lib/kyb/wire.ts` calls it for live rows and
  * `fixtures.ts` for demo rows, so a fixture cannot describe itself in flattering
@@ -38,17 +47,19 @@ import type { LegView, VerdictOrigin, VerdictSourceView, VerdictView } from "./d
  */
 export const VERDICT_ORIGIN_LABEL: Record<VerdictOrigin, string> = {
   "third-party": "third-party verdict",
+  operator: "OPERATOR verdict — a person",
   simulated: "SIMULATED verdict",
-  mixed: "third-party + simulated",
+  mixed: "more than one kind of source",
   none: "nothing on file",
 };
 
 export function verdictOriginOf(sources: readonly VerdictSourceView[]): VerdictOrigin {
   if (sources.length === 0) return "none";
-  const live = sources.filter((s) => s.evidence === "live").length;
-  if (live === sources.length) return "third-party";
-  if (live === 0) return "simulated";
-  return "mixed";
+  const kinds = new Set(sources.map((s) => s.evidence));
+  if (kinds.size > 1) return "mixed";
+  if (kinds.has("live")) return "third-party";
+  if (kinds.has("manual")) return "operator";
+  return "simulated";
 }
 
 /**
@@ -74,10 +85,13 @@ function headlineFor(status: KybStatus, origin: VerdictOrigin, sources: readonly
       ? `Approved because ${quoted} said so — a third party we do not control, over an authenticated round trip.`
       : `${status} because ${quoted} said so. Not our verdict: a third party we do not control produced it and the code above is theirs.`;
   }
+  if (origin === "operator") {
+    return `${status} because a NAMED PERSON decided so on review — ${quoted} — not because a third party said it. The provider's own answer is still on file underneath, unedited, with the reviewer's written reason beside it. The evidence label is \`manual\`, which is weaker than a registry confirming the entity and stronger than nobody having looked.`;
+  }
   if (origin === "simulated") {
     return `${status} because ${quoted} said so — and that is US. This verdict is SIMULATED: no third party was asked, and it is admissible as a demonstration and as nothing else.`;
   }
-  return `${status} from two sources at the same strictness: ${quoted}. One of them is a third party and one of them is us — the per-leg rows below say which, and the composite is labelled simulated either way.`;
+  return `${status} from more than one source at the same strictness: ${quoted}. They are not the same kind of evidence — the per-leg rows below say which is a third party's answer, which is a person's decision, and which is ours — and the composite takes the weakest label of them all.`;
 }
 
 /** One leg, reduced to what the attribution needs. */

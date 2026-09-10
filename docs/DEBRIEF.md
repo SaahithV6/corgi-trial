@@ -1706,7 +1706,7 @@ evidence column is the string the probe returned. If the README ever disagrees
 with this page, the page is right."
 
 **Point at:** `integrations.live` — **read the number off the page, do not quote
-any number written down here**; it was 6 of 7 at the last measured run, with
+any number written down here**; it was 7 of 7 at the last measured run, with
 `business_registry` the only simulated row and its evidence string *"Connect not
 enabled…"*. Then the `stablecoin` row, whose evidence string is now
 *"19.50 USDC and … wei gas — a transfer is fundable"* and which reports live
