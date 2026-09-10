@@ -56,6 +56,10 @@
     ".next",
     "research",
     "plan",
-    "thread"
+    "thread",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "src/test/**",
+    "**/__tests__/**"
   ]
 }
