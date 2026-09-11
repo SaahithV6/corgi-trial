@@ -30,6 +30,7 @@ import {
   parseConsoleView,
   type ConsoleView as ConsoleViewState,
 } from "@/components/accounts/console-state";
+import { CardControlsPanel } from "@/components/accounts/CardControlsPanel";
 import { fixtureConsole, holdOpenForLoadingState } from "@/components/accounts/fixtures";
 import { loadConsole } from "@/components/accounts/live-source";
 
@@ -110,7 +111,8 @@ export default async function AccountsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const view = parseConsoleView(await searchParams);
+  const resolvedSearchParams = await searchParams;
+  const view = parseConsoleView(resolvedSearchParams);
   const live = isLiveConsole(view);
 
   return (
@@ -143,6 +145,19 @@ export default async function AccountsPage({
       </Suspense>
 
       <DemoAccountDirectory />
+
+      {/*
+        Card controls, decided inside Lithic's Authorization Stream Access
+        timeout. Measured, not quoted: the hard deadline is 6000ms and Lithic
+        DECLINES when it expires — a stalling responder produced
+        `DECLINED / UNKNOWN_HOST_TIMEOUT` with `CUSTOMER_ASA_TIMEOUT` after
+        6.19s, against a 0.334s baseline with no responder enrolled.
+
+        The panel reads Lithic's enrollment endpoint live, so it states on its
+        face whether the provider is actually calling us rather than implying
+        it.
+      */}
+      <CardControlsPanel searchParams={resolvedSearchParams} businessId={view.businessId} />
     </div>
   );
 }

@@ -113,6 +113,23 @@ export const ASA_REQUEST_STATUSES = [
 export type AsaRequestStatus = (typeof ASA_REQUEST_STATUSES)[number];
 
 /**
+ * The statuses that consume a spending limit.
+ *
+ * A BALANCE_INQUIRY moves nothing. A `*_CREDIT_AUTHORIZATION` is money coming
+ * back. Both are approved without judgement by `decide()`, and — this is the
+ * half that is easy to forget — both must also be EXCLUDED from the velocity
+ * sum, or a $40 refund would eat $40 of the card's daily limit. So this
+ * constant is exported and used in two places: `isPurchase()` in `./decide.ts`
+ * and the `request_status` filter in the velocity query in `./store.ts`. One
+ * constant rather than two lists, because the day they disagree is the day a
+ * refund starts declining a purchase.
+ */
+export const PURCHASE_STATUSES: readonly AsaRequestStatus[] = [
+  "AUTHORIZATION",
+  "FINANCIAL_AUTHORIZATION",
+];
+
+/**
  * The three facts about a card the ASA payload carries and the decision may
  * want. `state` is Lithic's opinion of the card, which is NOT our control
  * switch: a card can be OPEN at Lithic and frozen here, and this system's

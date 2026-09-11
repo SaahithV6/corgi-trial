@@ -31,6 +31,8 @@
  * negative pot would only ever be a bug in this file.
  */
 
+import { formatUsd } from "@/lib/format/money";
+
 /* -------------------------------------------------------------------------- */
 /* Vocabulary                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -84,13 +86,16 @@ export type MoveDecision =
 /* The decision                                                               */
 /* -------------------------------------------------------------------------- */
 
-function usd(cents: bigint): string {
-  const negative = cents < 0n;
-  const magnitude = negative ? -cents : cents;
-  const whole = (magnitude / 100n).toString();
-  const fraction = (magnitude % 100n).toString().padStart(2, "0");
-  return `${negative ? "-" : ""}$${whole}.${fraction}`;
-}
+/**
+ * The refusal sentences quote money, so they go through the one formatter.
+ *
+ * `format/money.ts` is a pure module — no `server-only`, no I/O — so importing
+ * it here keeps this file unit-testable without credentials while making it
+ * impossible for a refusal to render a figure differently from the table
+ * beside it. There is no `/ 100` and no `toFixed` on this path: `formatUsd`
+ * does integer division and remainder on `bigint`.
+ */
+const usd = (cents: bigint): string => formatUsd(cents);
 
 /**
  * May this move be posted?
