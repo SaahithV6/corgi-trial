@@ -115,6 +115,69 @@ export class LithicApiError extends Error {
 }
 
 /**
+ * A 2xx whose body is NOT the JSON object the caller asked for.
+ *
+ * ── WHY THIS CLASS EXISTS ───────────────────────────────────────────────────
+ *
+ * The transport used to answer a non-JSON 200 with the raw body text, cast to
+ * `T`. A Cloudflare interstitial, a proxy error page, an empty body — any of
+ * them came back as a `Transaction`, and `normalizeTransaction` then read it as
+ * `holdCents: 0, hasOutstandingHold: false`. A garbage payload read as **"the
+ * hold is fully released"**, which frees a customer's available balance on no
+ * evidence at all. The failure was shaped exactly like the success it was
+ * mistaken for: a valid shape, legal numbers, and zero is a legal number here.
+ *
+ * So: a non-JSON response is never a success. Parse first, classify second, and
+ * if the body is not the shape the caller expects, that is a named refusal and
+ * never a value.
+ *
+ * It extends `LithicApiError` deliberately. Every existing call site catches
+ * that class (`getTransactionWhenVisible` branches on `.status === 404`), so a
+ * malformed body arrives as a refusal those sites already understand, carrying
+ * the HTTP status it came with, rather than as a new escape route.
+ */
+export class LithicMalformedResponseError extends LithicApiError {
+  /** Stable refusal code. Match on this, not on the message. */
+  readonly code = 'lithic_malformed_response';
+  /** A short, log-safe look at what actually came back. */
+  readonly bodyPreview: string;
+
+  constructor(status: number, rawBody: string | null, detail: string) {
+    super(status, rawBody);
+    this.name = 'LithicMalformedResponseError';
+    this.bodyPreview = bodyPreview(rawBody);
+    this.message = `Lithic answered HTTP ${status} with ${detail} (${this.bodyPreview})`;
+  }
+}
+
+/**
+ * The request never produced a response, or its body could not be read.
+ *
+ * Before this existed, a timeout escaped `lithicRequest` as a bare
+ * `DOMException: AbortError` and a DNS failure as a raw `TypeError` — neither a
+ * `LithicApiError`, neither carrying a status, and `err.isRateLimited`
+ * `undefined` on both. Lithic was the only client in the tree with no named
+ * transport error, so its transport failures landed in whatever generic handler
+ * was furthest up the stack.
+ *
+ * `status` is 0, the same convention `circle-client.ts` uses: it means *we do
+ * not know what the provider did*, which is a different fact from "the provider
+ * said no" and is kept different.
+ */
+export class LithicTransportError extends LithicApiError {
+  readonly code = 'lithic_transport_error';
+  /** True when the call was cut short by our own timeout or the caller's signal. */
+  readonly aborted: boolean;
+
+  constructor(detail: string, cause: unknown, aborted: boolean) {
+    super(0, cause);
+    this.name = 'LithicTransportError';
+    this.aborted = aborted;
+    this.message = detail;
+  }
+}
+
+/**
  * Resolved at call time, never at import time. Throws rather than sending an
  * empty Authorization header, which the sandbox answers with an opaque 401.
  */
@@ -159,12 +222,42 @@ function buildQuery(query: Record<string, string | number | undefined> | undefin
   return encoded.length > 0 ? `?${encoded}` : '';
 }
 
-function safeJsonParse(text: string): unknown {
+/** A short, log-safe look at a body that was not what we asked for. */
+function bodyPreview(text: string | null): string {
+  if (text === null) return '<unreadable>';
+  const collapsed = text.replace(/\s+/gu, ' ').trim();
+  if (collapsed === '') return '<empty>';
+  return collapsed.length > 120 ? `${collapsed.slice(0, 120)}…` : collapsed;
+}
+
+/**
+ * Parse a body as a JSON OBJECT, or say it is not one. Never throws.
+ *
+ * `null` means "this is not a Lithic response" — an HTML interstitial, a
+ * truncated payload, an empty body, or a bare JSON scalar such as `"ok"` or
+ * `0`. Every Lithic 2xx in this adapter's surface is an object (a `Card`, a
+ * `Transaction`, a `{data, has_more}` page), so a scalar is as wrong as HTML
+ * and is rejected the same way.
+ *
+ * It returns rather than throws for the reason the sibling
+ * `stablecoin/client.ts` gives: the absence of a parseable body is an OUTCOME
+ * the caller must name, not an exception from a different class escaping a
+ * function whose whole contract is that its failures are `LithicApiError`s.
+ * `JSON.parse` sitting outside a `try` is precisely how a proxy's HTML 200
+ * turns a named refusal into an unhandled 500.
+ */
+function parseJsonObject(text: string): { readonly value: unknown } | null {
+  if (text.trim() === '') return null;
+  let parsed: unknown;
   try {
-    return JSON.parse(text) as unknown;
+    parsed = JSON.parse(text) as unknown;
   } catch {
-    return text;
+    // Not a swallow: `null` IS the return value, and both call sites below turn
+    // it into a named refusal that carries the raw bytes for audit.
+    return null;
   }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  return { value: parsed };
 }
 
 const sleep = (ms: number): Promise<void> =>
@@ -205,16 +298,56 @@ async function lithicRequest<T>(spec: RequestSpec, options: LithicRequestOptions
       if (spec.body !== undefined) init.body = JSON.stringify(spec.body);
       try {
         return await doFetch(url, init);
+      } catch (error) {
+        // A timeout, a DNS failure, a reset connection. Named here so it is a
+        // `LithicApiError` like every other failure out of this function,
+        // instead of a bare `AbortError`/`TypeError` that no call site catches.
+        const aborted = controller.signal.aborted;
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new LithicTransportError(
+          `${spec.method} ${spec.path} did not reach Lithic: ${aborted ? `aborted after ${timeoutMs}ms (or by the caller's signal): ` : ''}${reason}`,
+          error,
+          aborted,
+        );
       } finally {
         clearTimeout(timer);
         options.signal?.removeEventListener('abort', onAbort);
       }
     });
 
-    const text = await response.text();
-    const parsed: unknown = text.length > 0 ? safeJsonParse(text) : undefined;
+    // READ THE BYTES ONCE, THEN CLASSIFY. The order matters.
+    //
+    // `response.ok` is checked AFTER the parse, not before, because the body is
+    // needed either way: a 4xx carries Lithic's own sentence, and a 2xx has to
+    // prove it is JSON before it may be called a `T`.
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw new LithicTransportError(
+        `${spec.method} ${spec.path}: HTTP ${response.status} body could not be read: ${error instanceof Error ? error.message : String(error)}`,
+        error,
+        false,
+      );
+    }
+    const parsed = parseJsonObject(text);
 
-    if (response.ok) return parsed as T;
+    if (response.ok) {
+      // 204 is the one legitimate empty success. Lithic does not send one on
+      // any path this adapter calls, but if it ever does, an empty body is the
+      // documented answer rather than a malformed one.
+      if (response.status === 204 && text.trim() === '') return undefined as T;
+      if (parsed === null) {
+        // THE DEFECT THIS CLASS EXISTS FOR. Previously: `return parsed as T`,
+        // handing the caller an HTML string dressed as a `Transaction`.
+        throw new LithicMalformedResponseError(
+          response.status,
+          text,
+          text.trim() === '' ? 'an empty body where a JSON object was required' : 'a body that is not a JSON object',
+        );
+      }
+      return parsed.value as T;
+    }
 
     const retryAfterHeader = response.headers.get('retry-after');
     const retryAfterSeconds = retryAfterHeader === null ? undefined : Number(retryAfterHeader);
@@ -230,7 +363,12 @@ async function lithicRequest<T>(spec: RequestSpec, options: LithicRequestOptions
       continue;
     }
 
-    throw new LithicApiError(response.status, parsed ?? text, retryAfterSeconds);
+    // The error body stays as Lithic sent it: the parsed object where there was
+    // one, the raw text otherwise. A non-2xx that carries a body is real — see
+    // `docs/RESILIENCE.md` §0, where Base Sepolia answers HTTP 403 with a
+    // well-formed error body — so the body is never discarded on the strength
+    // of the status alone.
+    throw new LithicApiError(response.status, parsed === null ? text : parsed.value, retryAfterSeconds);
   }
 }
 
@@ -706,17 +844,79 @@ export async function listEventSubscriptionAttempts(
  * Normalisation — the whole point of this adapter
  * ──────────────────────────────────────────────────────────────────────────── */
 
-/** Absolute magnitude, defensive against a missing or non-numeric field. */
-function absCents(value: number | null | undefined): Cents {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+/**
+ * Raised when a payload cannot be read as a Lithic transaction at all.
+ *
+ * Separate from `LithicApiError` because it is not about a request: it is about
+ * a VALUE, and `normalizeTransaction` is called on webhook payloads that never
+ * went through this client's transport.
+ */
+export class LithicNormalizationError extends Error {
+  readonly code = 'lithic_unnormalizable_transaction';
+  /** The offending value, untouched, for audit. */
+  readonly raw: unknown;
+
+  constructor(message: string, raw: unknown) {
+    super(message);
+    this.name = 'LithicNormalizationError';
+    this.raw = raw;
+  }
+}
+
+/** What a value is, for an error message, without printing a whole HTML page. */
+function describeValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return `string ${bodyPreview(value)}`;
+  if (typeof value === 'object') return Array.isArray(value) ? 'an array' : 'an object';
+  return `${typeof value} ${String(value)}`;
+}
+
+/**
+ * Absolute magnitude of an amount the provider ACTUALLY STATED.
+ *
+ * ── ZERO MEANS ONE THING ────────────────────────────────────────────────────
+ *
+ * This used to be `if (typeof value !== 'number' || !Number.isFinite(value))
+ * return 0`, and that `return 0` was the second half of the interstitial bug.
+ * A real zero is legal and common on this rail — an over-capture leaves
+ * `amounts.hold.amount` at exactly 0, and a FINANCIAL_AUTHORIZATION never holds
+ * anything — so a zero manufactured from a missing or unparseable field was
+ * indistinguishable from a zero the provider meant. Downstream,
+ * `hasOutstandingHold` is `holdCents > 0`, so both zeros read as "no money is
+ * held".
+ *
+ * A field that is present but not a finite number is now a refusal, and a field
+ * that is ABSENT is reported through `amountsStated` rather than being silently
+ * given the value 0. See `absCentsOrAbsent`.
+ */
+function absCents(value: unknown, field: string): Cents {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new LithicNormalizationError(
+      `${field} is present but is not a finite number (${describeValue(value)}); ` +
+        `refusing to read that as 0, because 0 is a legal amount on this rail and ` +
+        `a fabricated 0 hold reads as "the hold is fully released"`,
+      value,
+    );
+  }
   return Math.abs(Math.trunc(value));
+}
+
+/**
+ * An amount that may be legitimately absent.
+ *
+ * `null` means ABSENT — never 0. The caller decides what an absent amount means
+ * and records that it was absent; it never invents a number.
+ */
+function absCentsOrAbsent(value: unknown, field: string): Cents | null {
+  if (value === undefined || value === null) return null;
+  return absCents(value, field);
 }
 
 /** The best available amount for one event, as a positive magnitude. */
 function eventAmountCents(event: TransactionEvent): Cents {
   const settlement = event.amounts?.settlement?.amount;
-  if (typeof settlement === 'number' && Number.isFinite(settlement)) return absCents(settlement);
-  return absCents(event.amount);
+  if (typeof settlement === 'number' && Number.isFinite(settlement)) return absCents(settlement, 'event.amounts.settlement.amount');
+  return absCents(event.amount, 'event.amount');
 }
 
 function normalizeEvent(event: TransactionEvent): NormalizedTransactionEvent {
@@ -810,8 +1010,21 @@ function deriveHoldFromEvents(events: ReadonlyArray<TransactionEvent>): Cents {
  */
 export function normalizeTransaction(txn: Transaction): NormalizedTransaction {
   const events = txn.events ?? [];
-  const holdCents = absCents(txn.amounts?.hold?.amount);
-  const settledCents = absCents(txn.amounts?.settlement?.amount);
+  // ABSENT and ZERO are asked separately, then collapsed deliberately.
+  //
+  // Post-`LithicMalformedResponseError` a garbage body can no longer arrive
+  // here at all, so an absent `amounts.hold` now means what it says: this
+  // transaction has no hold — a settled purchase, for instance. That is a real
+  // zero and collapsing it is correct.
+  //
+  // What must never come back is the OTHER zero: a present-but-unreadable
+  // amount. `absCents` throws on that rather than returning 0, because
+  // `hasOutstandingHold` is `holdCents > 0` and a fabricated 0 would read as
+  // "the hold is fully released" — which frees a customer's available balance
+  // on the strength of a field nobody could parse.
+  const holdCents = absCentsOrAbsent(txn.amounts?.hold?.amount, 'amounts.hold.amount') ?? 0;
+  const settledCents =
+    absCentsOrAbsent(txn.amounts?.settlement?.amount, 'amounts.settlement.amount') ?? 0;
   const eventDerivedHoldCents = deriveHoldFromEvents(events);
 
   return {

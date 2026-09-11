@@ -25,11 +25,59 @@ export class RpcError extends Error {
   readonly method: string;
   /** The provider's own error object, untouched, for audit. */
   readonly raw: unknown;
-  constructor(message: string, method: string, raw: unknown) {
+  /** The JSON-RPC error code (-32601, -32000, …) when the node sent one. */
+  readonly rpcCode: number | null;
+  /** The HTTP status the node answered with, when there was a response at all. */
+  readonly httpStatus: number | null;
+  constructor(
+    message: string,
+    method: string,
+    raw: unknown,
+    meta: { rpcCode?: number | null; httpStatus?: number | null } = {},
+  ) {
     super(message);
     this.method = method;
     this.raw = raw;
+    this.rpcCode = meta.rpcCode ?? null;
+    this.httpStatus = meta.httpStatus ?? null;
   }
+}
+
+/** The shape of a JSON-RPC envelope, as far as we are willing to trust it. */
+interface RpcEnvelope {
+  result?: unknown;
+  error?: { code?: unknown; message?: unknown };
+}
+
+/**
+ * Parse a response body as a JSON-RPC envelope, or return `null`.
+ *
+ * `null` means "this is not JSON-RPC" — a proxy's HTML error page, a truncated
+ * payload, an empty body. It never throws: a body that will not parse is an
+ * outcome to be named by the caller, not an exception from a different class
+ * (a bare `SyntaxError` from `response.json()`) escaping a function whose
+ * whole contract is that its failures are `RpcError`s.
+ */
+function parseRpcEnvelope(text: string | null): RpcEnvelope | null {
+  if (text === null || text.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Not a swallow: the absence of an envelope IS the return value, and every
+    // caller below turns it into a named RpcError carrying the raw bytes.
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  return parsed as RpcEnvelope;
+}
+
+/** A short, log-safe look at a body that was not JSON-RPC. */
+function bodyPreview(text: string | null): string {
+  if (text === null) return "<unreadable>";
+  const collapsed = text.replace(/\s+/gu, " ").trim();
+  if (collapsed === "") return "<empty>";
+  return collapsed.length > 120 ? `${collapsed.slice(0, 120)}…` : collapsed;
 }
 
 /** `transfer(address,uint256)` — 0xa9059cbb. Derived, never pasted. */
@@ -108,13 +156,64 @@ export class BaseRpc {
     } finally {
       clearTimeout(timer);
     }
+    // Read the bytes ONCE, then classify. The order matters and is measured.
+    //
+    // A node does not owe us a 2xx to have something to say. Against real Base
+    // Sepolia (2026-09-11): an unsupported method answers **HTTP 403** with
+    // `{"error":{"code":-32601,"message":"rpc method is unsupported"}}`, and a
+    // malformed request answers **HTTP 400** with `{"code":-32700,"message":
+    // "parse error"}`. Checking `response.ok` first collapsed both to the
+    // string `"eth_x: HTTP 403"` and threw the node's own sentence away.
+    //
+    // That is not cosmetic. `sendUsdcPayout` recovers an already-broadcast
+    // transaction by matching /already known/ against exactly this message
+    // (see adapter.ts, step 10). A node that reports "already known" behind a
+    // non-2xx — which the measurement above proves is a thing nodes do — used
+    // to come back as `broadcast_rejected`, telling the customer their payout
+    // failed while their transaction sat in the mempool, and inviting a human
+    // to send it a second time. Parse first, classify second.
+    const text = await response.text().catch(() => null);
+    const body = parseRpcEnvelope(text);
+
+    if (body?.error !== undefined && body.error !== null) {
+      const nodeMessage =
+        typeof body.error.message === "string" && body.error.message !== ""
+          ? body.error.message
+          : JSON.stringify(body.error);
+      const rpcCode = typeof body.error.code === "number" ? body.error.code : null;
+      const codePart = rpcCode === null ? "" : ` (code ${rpcCode})`;
+      // The HTTP status is audit detail, appended; the node's own sentence
+      // stays at the front where both a human and a substring match find it.
+      const statusPart = response.ok ? "" : ` [HTTP ${response.status}]`;
+      throw new RpcError(`${method}: ${nodeMessage}${codePart}${statusPart}`, method, body.error, {
+        rpcCode,
+        httpStatus: response.status,
+      });
+    }
+
     if (!response.ok) {
-      throw new RpcError(`${method}: HTTP ${response.status}`, method, await response.text().catch(() => null));
+      throw new RpcError(
+        `${method}: HTTP ${response.status} with no JSON-RPC error (${bodyPreview(text)})`,
+        method,
+        text,
+        { httpStatus: response.status },
+      );
     }
-    const body = (await response.json()) as { result?: unknown; error?: { message?: string } };
-    if (body.error) {
-      throw new RpcError(`${method}: ${body.error.message ?? JSON.stringify(body.error)}`, method, body.error);
+
+    if (body === null) {
+      // A 200 carrying something that is not a JSON-RPC envelope: a proxy's
+      // HTML error page, a truncated payload, an empty body. Previously this
+      // escaped as a bare SyntaxError from `response.json()` — a different
+      // error class than every caller catches, so a named refusal became an
+      // unhandled 500.
+      throw new RpcError(
+        `${method}: HTTP ${response.status} body is not a JSON-RPC envelope (${bodyPreview(text)})`,
+        method,
+        text,
+        { httpStatus: response.status },
+      );
     }
+
     return body.result;
   }
 
@@ -262,7 +361,26 @@ export class BaseRpc {
         topics: [ERC20_TRANSFER_TOPIC, addressTopic(args.from), addressTopic(args.to)],
       },
     ])) as readonly Record<string, unknown>[] | null;
-    if (!Array.isArray(logs)) return [];
+    // An EMPTY array is an answer: "no such transfer in this range." A
+    // NON-array is not an answer at all, and the two must never collapse.
+    //
+    // `findExistingTransfer` (adapter.ts) is the crash-window duplicate-payment
+    // guard: it asks this question to find out whether a payout we may have
+    // already broadcast is on chain. Returning `[]` for a node that answered
+    // `null`, an object, or a string told that guard "this payout has never
+    // been sent" — on no evidence — and the adapter went on to broadcast. A
+    // malformed `eth_getLogs` was a licence to pay twice.
+    //
+    // Refusing here costs us a failed payout attempt. Guessing cost the
+    // customer a second payment. Fail closed.
+    if (!Array.isArray(logs)) {
+      throw new RpcError(
+        `eth_getLogs did not return an array (got ${logs === null ? "null" : typeof logs}); ` +
+          `refusing to read that as "no transfer found"`,
+        "eth_getLogs",
+        logs,
+      );
+    }
     return logs.map((log) => ({
       txHash: String(log["transactionHash"]).toLowerCase(),
       blockNumber: quantity(log["blockNumber"], "log.blockNumber"),

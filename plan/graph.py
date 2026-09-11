@@ -1770,6 +1770,159 @@ N("J5g", "the customer principal is not yet a business-scoped actor", "scope", 0
        "customer's own signer is authentication-adjacent, and authentication is "
        "deliberately out of scope: the trial asks for demo credentials for two "
        "roles and the credential IS the switch")
+# ---------------------------------------------------------------------------
+# J6 — "go ahead and find other issues and do all that these things take way
+# too long." Saahith, ~11:55. Four sweeps fanned out in parallel over ground
+# nobody had touched: security, concurrency, money arithmetic, provider failure.
+# ---------------------------------------------------------------------------
+N("J6a", "the gate never ran `build`", "process", 0, [], "claude",
+  ["scripts/precommit.sh"], "done",
+  risk="found by an agent, not by me: pnpm typecheck exits 0 on errors next "
+       "build still catches, and one hit exactly that — typecheck clean, build "
+       "red on a missing export in a file it had just written. so EVERY gate "
+       "before 12:01 could go green on a tree that could not be deployed, which "
+       "made the gate a claim about the TESTS rather than about the BUILD. four "
+       "steps now, a minute slower, and a green result means the thing can ship")
+N("J6b", "operator server actions trust the middleware's pathname", "correctness",
+  50, [], "agent", ["lib/authz", "middleware", "app/(app)/*/actions.ts"],
+  status="active",
+  risk="a hole in the boundary shipped 90 minutes ago, found by the security "
+       "sweep and admitted by authz's own file. a Next server action POSTs to "
+       "THE PAGE THE BROWSER IS ON, so an operator action invoked from a "
+       "/client/* path carries a /client/* pathname, clears the pathname gate, "
+       "and the LAYOUT GUARD NEVER RUNS because an action that renders no page "
+       "reaches no layout. the middleware checks WHERE YOU ARE, not WHAT YOU "
+       "ARE CALLING — the 31-instance defect, in the fix for the 31-instance "
+       "defect. exploit UNVERIFIED: it needs a valid action id and a live "
+       "mutation, which the auditor correctly declined to attempt")
+N("J6c", "readRoleSafely() failed OPEN", "correctness", 0, [], "agent",
+  ["components/app-shell"], "done",
+  risk="its catch defaulted to STAFF. that was safe while role only decided "
+       "whether a BUTTON worked; it inverts the moment role decides WHOSE MONEY "
+       "THE PAGE SHOWS, because a thrown cookie parse would hand an unknown "
+       "visitor the operator console. now defaults to customer and logs the "
+       "throw. a default that was correct under the old meaning of a value, "
+       "left unexamined when the meaning changed")
+N("J6d", "API and MCP surfaces: no IDOR, no oracle, no injection", "security", 0,
+  [], "agent", ["lib/api", "lib/mcp", "docs/SECURITY.md"], "done",
+  risk="the clean result is worth recording because it says what was actually "
+       "EXAMINED. every route and tool passes the grant's businessId into the "
+       "gateway and none reads an id from query, body or tool arg; strict "
+       "schemas with additionalProperties:false refuse business_id as unknown; "
+       "cross-tenant and NONEXISTENT ids return byte-identical refusals so "
+       "there is no enumeration oracle; all SQL is parameterised tagged "
+       "template with no sql.unsafe anywhere; constant-time token compare with "
+       "no early break; last-four only, provider card tokens dropped in the "
+       "projection")
+N("J6e", "a non-JSON 200 normalises to 'the hold is fully released'", "money-wrong",
+  50, [], "agent", ["lib/rails/lithic", "lib/rails/wire"], status="active",
+  risk="HIGHEST SEVERITY FOUND TODAY, on the rail the brief calls the heart of "
+       "the track. lithic/client.ts:162 does `catch { return text }` then `if "
+       "(response.ok) return parsed as T`, so a non-JSON 200 comes back as a "
+       "Transaction. normalizeTransaction's absCents() returns 0 for anything "
+       "non-numeric, so a CLOUDFLARE INTERSTITIAL normalises to holdCents 0, "
+       "hasOutstandingHold false — garbage reads as a released hold, and a "
+       "released hold frees a customer's available balance. nothing downstream "
+       "can tell: the shape is valid, the numbers are zero, and zero is legal. "
+       "the 31-instance pattern in its worst position — the FAILURE IS SHAPED "
+       "EXACTLY LIKE THE SUCCESS. same pattern at wire/client.ts:225 on the "
+       "IRREVOCABLE rail")
+N("J6f", "the customer was told a live payout had failed", "money-wrong", 0, [],
+  "agent", ["lib/rails/stablecoin"], "done",
+  risk="two fixed in one file, both a failure classified as a success. (1) "
+       "response.ok was checked BEFORE parsing, discarding the node's own "
+       "message — and sendUsdcPayout recovers an already-broadcast tx by "
+       "matching /already known/ against exactly that message. measured: nodes "
+       "DO report already-known behind a non-2xx, Base Sepolia returns 403 with "
+       "a well-formed JSON-RPC body. so the customer read broadcast_rejected "
+       "while the transaction was live in the mempool, inviting a human to send "
+       "it twice. (2) transferLogs returned [] on a malformed response, and [] "
+       "means 'no such transfer' to the crash-window duplicate-payment guard — "
+       "A MALFORMED RESPONSE WAS A LICENCE TO PAY TWICE")
+N("J6g", "Plaid answers 400, not 401, for a bad credential", "reference", 0, [],
+  "agent", ["docs/RESILIENCE.md"], "done",
+  risk="measured against the real sandbox, and it inverts the obvious "
+       "classifier: any '401 or 403 means credential problem' rule gets Plaid "
+       "BACKWARDS. the Plaid client survives only because it keys on Plaid's "
+       "own error_code rather than the status. recorded so nobody writes the "
+       "obvious rule later")
+N("J6h", "the database does not know the corridor list: ('JPY',2) delivers 100x",
+  "money-wrong", 35, [], "agent", ["db/migrations", "lib/fx"], "todo",
+  risk="LATENT, not live — CORRIDORS only produces USD->MXN at exponent 2, so "
+       "nothing reaches it today. but buy_currency and buy_exponent are "
+       "INDEPENDENT CHECKs, buy_minor is GENERATED from whatever pair is "
+       "stored, and the JPY=>0 pairing exists only in a TypeScript array. any "
+       "writer that skips requireCorridor stores ('JPY',2) and delivers a "
+       "hundred times the correct yen. measured: jpy_exp0=154180 vs "
+       "jpy_exp2=15418000. fix is a composite CHECK so the pairing is a fact "
+       "about the schema rather than about one array. also: pow10's guard "
+       "admits 0..18, its comment says 0..6, the CHECK says 0..6 — three ranges "
+       "for one quantity")
+N("J6i", "MY BRIEFS WERE WRONG TWICE AND THE AGENT CAUGHT BOTH", "process", 0, [],
+  "claude", ["docs"], "done",
+  risk="(1) I cited docs/DESIGN.md all day and it DOES NOT EXIST — section 12 "
+       "is at research/ledger/DESIGN.md, and an agent lost time finding it. (2) "
+       "I briefed 'daily accrual with dust allocated by largest-remainder'. "
+       "wrong, and the repo is right: largest-remainder needs a source amount "
+       "to distribute and daily interest has none, because the month's total is "
+       "not known until the month has happened. daily interest is 12.2; the "
+       "MONTHLY FEE accrued daily is 12.3. the agent asserted the invariant the "
+       "SPEC states rather than the one I assumed, and said plainly that doing "
+       "otherwise would have MANUFACTURED A FAILURE. that is the discipline "
+       "this whole project turns on, applied to me")
+N("J6j", "no named refusal for an unsupported currency or exponent", "product", 20,
+  [], "agent", ["lib/fx"], "todo",
+  risk="requireCorridor throws a bare Error; FX_REFUSAL_CODES has eight members "
+       "and none covers it, so it collapses into a generic INVALID_FORM or "
+       "UNQUOTABLE depending on entry point. answering the brief's question "
+       "directly: it IS refused, but not with a named code, so the customer "
+       "cannot be told which of the two things went wrong")
+N("J6k", "ASA daily limit IS raceable, and closing it costs the card rail",
+  "money-wrong", 60, [], "agent", ["lib/cards"], "todo",
+  risk="DEMONSTRATED: two concurrent auths, $2.00 over a $100.00 limit, both "
+       "legs reading spend=6000. deliberately NOT closed, and the argument is "
+       "why: route.ts:213 sends the approval TO LITHIC BEFORE THE ROW IS "
+       "WRITTEN, so a trigger at the table would lose the record without "
+       "stopping the money, and the next velocity sum would then UNDER-count. "
+       "the lock has to move ahead of the read into the application "
+       "transaction: +2 round trips, roughly +150-300ms EXTRAPOLATED from a "
+       "measured 153ms RTT against 0.088ms server-side, on a path with a "
+       "6000ms provider ceiling where a timeout IS a declined card. that trade "
+       "is a real judgement and was not made unproven at the buzzer")
+N("J6l", "releasePayment() checks availability NOT AT ALL", "money-wrong", 40, [],
+  "agent", ["lib/approvals"], "todo",
+  risk="not a race — an absent check. the availableCents comparison lives at "
+       "REQUEST time in tool-initiate-payment.ts:379, and nothing re-reads it "
+       "between a human approving and the money leaving. v_overdrawn_accounts "
+       "is detection after the fact. single-threaded execution already breaks "
+       "this, so concurrency is not what to fix")
+N("J6m", "two races REFUSED TO BE RACES, and that is the finding", "correctness",
+  0, [], "agent", ["lib/cards", "lib/approvals"], "done",
+  risk="maker-checker cannot be raced AT ALL: requested_by cannot move because "
+       "corgi_app holds INSERT/SELECT only under payment_instruction_no_update_"
+       "delete, so the column is immutable BY PRIVILEGE rather than by a check "
+       "somebody remembers to run. both concurrent self-approvals died "
+       "independently with 42501, and two concurrent approvals from one actor "
+       "hit 23505 on pie_one_decision_per_actor. double capture likewise: "
+       "lock_card_authorization() is a real row-exclusive lock and the second "
+       "caller BLOCKED 1573ms. the one path that posts without it — releaseOne "
+       "on an uncleared credit — has no card_authorization to lock and "
+       "serialises on the hold_closure primary key instead. a different "
+       "mechanism, not a missing one")
+N("J6n", "the removal race is real and the violating row was NOT committed",
+  "correctness", 35, [], "agent", ["db/migrations", "lib/team"], "todo",
+  risk="assert_team_maker_checker() enforces membership off "
+       "v_team_member_current and TAKES NO LOCK. removal is an APPEND of a "
+       "team_member_version; the approval path is an unlocked SELECT; two "
+       "appends never conflict, so the approval did not block for a "
+       "millisecond. effective_from defaults to transaction start, so a removal "
+       "that began first is the version v_member_approval_without_right "
+       "selects — a view whose own comment reads MUST BE EMPTY. the agent "
+       "demonstrated the ABSENCE OF SERIALISATION and deliberately did not "
+       "commit the violating row, because that would have put a permanent red "
+       "on an append-only book — the exact mistake the fifth red already cost "
+       "us today. nowhere near the card hot path, so the 6000ms ceiling does "
+       "not constrain the fix")
 N("J2f", "deploy and re-run every scoreboard against one sha",
   "release", 20, ["J2a", "J2b", "J2c", "J2d", "J2e"], "claude", [], status="done",
   risk="the honesty tools check documents against the DEPLOYMENT and never checked "

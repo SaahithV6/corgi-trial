@@ -302,4 +302,29 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
     'v_pot_guard_disarmed',
     'the 0057 negative-pot guard is present and armed for ordinary writes',
   ],
+  // 0059's, and the first invariant on this list that ranges over a
+  // DOCUMENT rather than over money.
+  //
+  // The brief's item 7 — "a closed day's statement is reproducible
+  // forever, corrections included, identical every time" — had no gated
+  // view before this one. The design supports it (append-only
+  // `statement`, a correction is a new version, and the content hash's
+  // preimage is exactly (format, account, period, watermark)) and nothing
+  // executed it.
+  //
+  // It does NOT recompute the hash: that has one definition, in
+  // `src/lib/statements/render.ts`, and a second in SQL would be the
+  // defect 0022 exists to have ended. It re-derives the RECTANGLE the
+  // hash is taken over — opening balance, line count, closing balance,
+  // from the journal at each statement's own stored watermark — because a
+  // moved rectangle is a moved preimage, and then nothing can reproduce.
+  // The bytes half lives with the renderer, in
+  // `src/lib/statements/statements.integration.test.ts`.
+  //
+  // Mirrored here in the same pass that added it to `scripts/dbcheck.mjs`;
+  // the two lists are asserted equal by this module's own test.
+  [
+    'v_statement_content_drift',
+    'a published statement still re-derives, figure for figure, from the book at the watermark it pinned',
+  ],
 ] as const;

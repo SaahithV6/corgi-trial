@@ -261,6 +261,14 @@ const ALLOWED: readonly (readonly [module: string, file: string, refs: number])[
   // balance, and routing it through a reader would mean asserting the absence
   // of writes using the code path under test.
   ["statements", "src/lib/statements/statements.integration.test.ts", 1],
+  // 0059's reproducibility test, added 12:1x on the last day. It re-derives a
+  // closed day's statement FROM THE JOURNAL and asserts the derivation is
+  // byte-identical to what was published — twice, at different times, with a
+  // real correction inside the period. Reaching the journal directly is the
+  // whole point of it: a reproducibility check that read through the same
+  // named reader the publisher used would be asserting that one function
+  // agrees with itself, which is not the claim gauntlet item 7 makes.
+  ["statements", "src/lib/statements/reproducibility.integration.test.ts", 7],
   ["webhooks", "src/lib/webhooks/consumers/lithic-card.test.ts", 2],
 
   // ---- the live-fire attack suite --------------------------------------

@@ -389,3 +389,142 @@ As published   $22,011.05  booking watermark 508   HASH REPRODUCED
 Difference        +$50.00  accounted for by 6 later acts
 As corrected   $22,061.05  booking watermark 1825
 ```
+
+---
+
+## Reproducibility, as an invariant rather than a design argument
+
+*Added with migration 0059.*
+
+Everything above describes a system that *can* reproduce a closed day's
+statement. Until 0059 nothing **checked** that it still did. There was no
+`v_statement_*` among the gated invariant views at all, and the whole of the
+brief's item 7 —
+
+> A closed day's statement is reproducible forever, corrections included,
+> **identical every time.**
+
+— rested on the design argument in `render.ts` and a fixture suite that built
+its own day. This build keeps a catalogue of what happens to design arguments
+nobody executes: 0012's view was unsatisfiable, 0026's excluded the bug it was
+written for, 0028's could see 55% of its table, and each of the three shipped
+with a paragraph explaining why it was fine.
+
+The claim is now carried by **two halves that check different things**, because
+neither is sufficient alone.
+
+### Half one — the rows have not moved. `v_statement_content_drift`
+
+Gated in `scripts/dbcheck.mjs` and mirrored in `src/lib/chaos/invariants.ts`,
+so it runs on every `pnpm db:check` and appears on the `/chaos` board.
+
+A published statement is a pure function of `(format, account, period,
+watermark)` **only if the rows those inputs select are still exactly the rows
+they selected on the day it was issued.** So for every row of `statement` —
+all 62, the whole table, joined on a foreign key that cannot drop one — the
+view re-derives three of the stored figures straight from `journal_line` at
+that row's own watermark:
+
+| stored | re-derived from |
+| --- | --- |
+| `opening_balance_cents` | `SUM` over `value_date < period_start`, at `booking_seq <= watermark` |
+| `line_count` | `COUNT` over `value_date` inside the period, same watermark |
+| `closing_balance_cents` | opening + `SUM` of those same lines |
+
+These are the **same two rectangles `readAccountPeriod()` draws**, including
+its deliberate asymmetry where the line query asserts `e.book = 'financial'`
+and the opening query does not. The view reproduces that asymmetry rather than
+tidying it: a guard drawing a *different* rectangle from the renderer is not
+checking the renderer, it is disagreeing with it.
+
+A fourth arm asks the question the first three cannot: two `statement` rows
+sharing all four inputs and **disagreeing on `content_hash`** — a function that
+is not a function. Its population on this book is zero groups today, because
+every version pair sits at a different watermark (Ridgeline's four 2026-07-24
+versions are at 485 / 487 / 498 / 502). That is stated in the migration rather
+than discovered later, because a zero-population arm is
+`v_standing_order_double_fire`'s defect *if it is the whole guard* — and it is
+not: the three arms above it range over all 62.
+
+**What it deliberately does not do is recompute the hash.** The canonical
+rendering has exactly one definition and it is `src/lib/statements/render.ts`.
+A second one in SQL — the netstring preimage, the field order, the
+`STATEMENT_FORMAT` prefix — would live where no renderer change would ever
+update it, and the two would agree until the day they silently did not. That is
+the defect 0022 exists to have ended.
+
+`dbcheck --prove` makes **both** shapes fire, each in a transaction that is
+rolled back, and the two probes are built differently on purpose. The
+disagreeing-hash arm is *first* in the `CASE`, so a probe that changed a figure
+*and* the digest would trip that arm and never reach the re-derivation — it
+would "prove" the wrong thing. So the figure probe reuses the **identical**
+digest to keep the first arm quiet (`0 -> 1`, only the forged row fires), and
+the hash probe changes **only** the digest (`0 -> 2`, because the arm is a
+window over the whole group and reports every document in it — there is no way
+to tell from outside which of the two is the forgery, and a guard that named
+one would be guessing).
+
+### Half two — the bytes are the same. `reproducibility.integration.test.ts`
+
+`src/lib/statements/statements.integration.test.ts` proves the *mechanism* on a
+day it builds: a synthetic 1980s day, closed inside a rolled-back transaction,
+with the book mutated underneath a published v1. That is the right way to prove
+a mechanism and it is not the claim the brief makes. "Forever" is a claim about
+rows written weeks ago by code that has changed since.
+
+So `src/lib/statements/reproducibility.integration.test.ts` takes **every
+statement this book has actually issued**, re-derives it through
+`renderStatement()`, and compares four things in this order:
+
+1. **figures** — opening, closing, line count, watermark, against the row;
+2. **ordering** — the `(value_date, booking_seq, ordinal)` sequence, as a list
+   and not a count;
+3. **the preimage** — `canonicalStatement()`, the netstring bytes themselves.
+   This is the load-bearing one: two renders agreeing on a digest from
+   different bytes is a sha256 collision, and it is the *other* direction this
+   file is hunting;
+4. **the hash** — `statementHash()` against the stored `content_hash`, with
+   `statement.format` checked first, because a document under a different
+   format version is a different artefact and must not be compared at all.
+
+And it does it **twice, at two different instants**, through two separate round
+trips — because "identical every time" is a claim about repetition and one
+render cannot make it.
+
+It **writes nothing.** No transaction, no rollback, no teardown, because every
+call is a `SELECT`. A reproducibility suite that had to publish something in
+order to check reproducibility would add a permanent row to an append-only book
+on every run; that is how this book acquired 62 statements and 101 book days.
+
+### Measured, on this book
+
+```
+  re-deriving 62 published statement(s); 59 of them contain at least one
+  correction line (188 lines in all)
+
+  correction group e397837a…: 3 entries at booking seqs 3915,3916,3917,
+  net -7340 cents on account a0c41a37-… (Ridgeline Robotics, Inc.)
+
+  2026-09-08 statement at watermark 3917: 87 line(s),
+  closing 5101467 cents,
+  hash a1d2f13fab28811e2508150952d07226a71c6ff90cfb927d47845870b2521db8
+```
+
+**Corrections included** is half the clause and it is asserted, not reported:
+the suite fails if *no* published statement carries a correction line, because
+a green tick over 62 quiet periods would say nothing about the half that was
+asked for. 59 of the 62 do.
+
+The named case has its own test. The Ridgeline **2026-09-08** correction —
+group `e397837a…`, booking seqs **3915 / 3916 / 3917**, a wrong settlement, its
+reversal and the re-book — is asserted to be *on* the rendered document (all
+three seqs present, a `reversal` line present, a `rebook` line present), and
+then the whole document is re-rendered and asserted byte-identical. The
+corrected position and reproducibility are proved on the same day, in the same
+test, which is the only way the clause means anything.
+
+The last test in the file asks the database the same question the renderer just
+answered: `v_statement_content_drift` is empty and `v_statement_rederived`
+holds exactly as many rows as the suite compared. If those two ever disagree,
+one of them is wrong — and the disagreement is the finding. That is why both
+exist.

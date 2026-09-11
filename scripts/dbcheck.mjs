@@ -637,6 +637,28 @@ const INVARIANT_VIEWS = [
   // says so if the refusal ever stopped happening, and THIS one says so if
   // the refusal was switched off rather than defeated.
   ["v_pot_guard_disarmed", "the 0057 negative-pot guard is present and armed for ordinary writes"],
+  // 0059's, and the first invariant on this list that ranges over a
+  // DOCUMENT rather than over money.
+  //
+  // The brief's item 7 is "a closed day's statement is reproducible
+  // forever, corrections included, identical every time", and until this
+  // file there was no `v_statement_*` among the gated views at all. The
+  // design supports the claim — append-only `statement`, a correction is
+  // a new version, and the content hash's preimage is exactly (format,
+  // account, period, watermark) — and nothing checked it. This build's
+  // catalogue of what happens to unexecuted design arguments runs to
+  // three shipped views that could not fail.
+  //
+  // It does NOT recompute the hash. That has one definition, in
+  // `src/lib/statements/render.ts`, and a second one in SQL would be
+  // 0022's defect. It re-derives the RECTANGLE the hash is taken over —
+  // opening, line count, closing, from the journal at each statement's
+  // own stored watermark — because if the rectangle moved then the
+  // preimage moved and no re-render can reproduce, whatever it returns.
+  // The bytes half is proved where the renderer lives; see
+  // `src/lib/statements/statements.integration.test.ts`.
+  ["v_statement_content_drift",
+    "a published statement still re-derives, figure for figure, from the book at the watermark it pinned"],
 ];
 
 // ---------------------------------------------------------------------
@@ -1929,6 +1951,22 @@ const REACH = [
        JOIN pg_namespace ns ON ns.oid = c.relnamespace
       WHERE ns.nspname = 'public' AND c.relname = 'journal_line'
         AND NOT t.tgisinternal`],
+  // 0059's. The population is EVERY ROW OF `statement` and the fraction
+  // is printed as 1/1 deliberately: the census joins `statement` to
+  // `account` on a foreign key, so it cannot drop a row, and 0059's
+  // closing block refuses to commit if `v_statement_rederived` ever
+  // reaches fewer rows than `statement` holds.
+  //
+  // The second line is the one worth reading. "Corrections included" is
+  // half the brief's clause, and a guard green over 62 quiet periods
+  // would say nothing about it. So the correction coverage is counted
+  // here rather than assumed — how many published statements carry a
+  // reversal, a re-book or a correction group inside their own period,
+  // at their own watermark.
+  ["v_statement_content_drift",
+    "every published statement, ALL of them — statement.account_id is a foreign key, so the census join drops nothing",
+    `SELECT count(*)::int AS n FROM v_statement_rederived`,
+    `SELECT count(*)::int AS n FROM statement`],
 ];
 
 // ---- the driver, and why it no longer walks REACH ---------------------
@@ -2847,6 +2885,98 @@ if (process.argv.includes("--prove")) {
         "and this proof is the only thing that can tell the two designs apart.",
       async run(tx) {
         await tx.unsafe(`DROP TRIGGER journal_line_pot_not_negative ON journal_line`);
+        return undefined;
+      },
+    },
+    // ---- 0059's, and BOTH proofs are written against the view's SQL
+    // body rather than its one-line summary. Two proofs were written off
+    // summaries in this session and both were wrong, so the arms are
+    // quoted here in the order the CASE evaluates them:
+    //
+    //   1  hashes_disagree_at_this_watermark
+    //   2  content_hash IS NULL OR octet_length(content_hash) <> 32
+    //   3  rederived_opening_cents   <> published_opening_cents
+    //   4  rederived_line_count      <> published_line_count
+    //   5  rederived_opening + rederived_movement <> published_closing
+    //
+    // Arm 1 is FIRST in the CASE, which is what makes the two proofs
+    // below have to be built differently: any probe that appends a row at
+    // an existing (format, account, period, watermark) with a DIFFERENT
+    // digest trips arm 1 and never reaches arms 3–5, so a single probe
+    // changing both a figure and the hash would "prove" arm 4 while
+    // actually exercising arm 1. That is exactly the mistake a proof
+    // written off the summary makes.
+    //
+    // Both probes INSERT into `statement`, as `corgi_app`, and both roll
+    // back. `statement` is INSERT-only to this role — there is no UPDATE
+    // to reach for — so a foreign INSERT is the only shape available, and
+    // a rolled-back one leaves no residue.
+    {
+      view: "v_statement_content_drift",
+      label: "v_statement_content_drift(a FIGURE that no longer re-derives)",
+      how: "a published statement claiming one more line than its own rectangle holds",
+      as: "app",
+      note:
+        "ARM 4. The appended row carries the SAME content_hash as the statement it is modelled " +
+        "on, deliberately: an identical digest keeps `min <> max` false over the window, so arm " +
+        "1 stays quiet and the CASE falls through to the re-derivation. Only the new row fires — " +
+        "the original still re-derives — which is why the delta is +1 and not +2. This is the " +
+        "guard's real content: the figure was published, the rectangle was re-drawn from " +
+        "`journal_line` at the row's own watermark, and they disagree.",
+      async run(tx) {
+        const s = await one(tx, `
+          SELECT id, account_id, period_start, period_end, version, booking_watermark,
+                 opening_balance_cents, closing_balance_cents, line_count,
+                 encode(content_hash, 'hex') AS h, generated_by, format
+            FROM statement ORDER BY generated_at DESC, id LIMIT 1`);
+        if (!s) return "this book has published no statement to model the proof on";
+        await tx.unsafe(`
+          INSERT INTO statement (account_id, period_start, period_end, version,
+                                 booking_watermark, opening_balance_cents,
+                                 closing_balance_cents, line_count, content_hash,
+                                 generated_by, format)
+          VALUES ('${s.account_id}'::uuid, '${s.period_start.toISOString().slice(0, 10)}'::date,
+                  '${s.period_end.toISOString().slice(0, 10)}'::date, ${s.version + 9001},
+                  ${s.booking_watermark}, ${s.opening_balance_cents},
+                  ${s.closing_balance_cents}, ${s.line_count + 1},
+                  decode('${s.h}', 'hex'), '${s.generated_by}'::uuid, '${s.format}')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_statement_content_drift",
+      label: "v_statement_content_drift(the same inputs, TWO documents)",
+      how: "a second document at an existing (format, account, period, watermark) with a different digest",
+      as: "app",
+      expect: 2,
+      note:
+        "ARM 1, and the delta is +2 BY DESIGN — read it as the assertion it is. The arm is a " +
+        "window over the whole (format, account, period, watermark) group, not a self-join " +
+        "picking a pair, so a group that stops being a function reports EVERY document in it; " +
+        "there is no way to tell from the outside which of the two is the forgery, and a guard " +
+        "that named one would be guessing. Every figure on the appended row re-derives perfectly " +
+        "— arms 3, 4 and 5 would all pass it — and it is still a violation, because 'identical " +
+        "every time' is a claim about the FUNCTION and this group is no longer one. Population " +
+        "on this book today: zero groups, since every version pair sits at a different " +
+        "watermark; that is precisely why the arm is proved here rather than trusted.",
+      async run(tx) {
+        const s = await one(tx, `
+          SELECT account_id, period_start, period_end, version, booking_watermark,
+                 opening_balance_cents, closing_balance_cents, line_count,
+                 generated_by, format
+            FROM statement ORDER BY generated_at DESC, id LIMIT 1`);
+        if (!s) return "this book has published no statement to model the proof on";
+        await tx.unsafe(`
+          INSERT INTO statement (account_id, period_start, period_end, version,
+                                 booking_watermark, opening_balance_cents,
+                                 closing_balance_cents, line_count, content_hash,
+                                 generated_by, format)
+          VALUES ('${s.account_id}'::uuid, '${s.period_start.toISOString().slice(0, 10)}'::date,
+                  '${s.period_end.toISOString().slice(0, 10)}'::date, ${s.version + 9002},
+                  ${s.booking_watermark}, ${s.opening_balance_cents},
+                  ${s.closing_balance_cents}, ${s.line_count},
+                  sha256('dbcheck --prove: not the published document'::bytea),
+                  '${s.generated_by}'::uuid, '${s.format}')`);
         return undefined;
       },
     },

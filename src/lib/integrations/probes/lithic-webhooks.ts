@@ -375,7 +375,16 @@ export async function probeLithicWebhooks(
       return {
         liveness: 'unreachable',
         detail:
-          status === null
+          // 0 IS NOT A STATUS. `LithicTransportError` uses it to mean WE DO NOT
+          // KNOW WHAT THE PROVIDER DID — DNS failure, reset connection, our own
+          // timeout — which is a different fact from "Lithic said no" and is
+          // deliberately kept different. It arrived here when that error class
+          // was introduced: `statusOf()` began returning 0 where it used to
+          // return null, so this branch stopped printing the cause and started
+          // printing `-> 0`, a number that looks like a status and answers
+          // nothing. A probe whose evidence cannot say WHY it failed is the
+          // shape this repository has spent two days removing.
+          status === null || status === 0
             ? `${SUBS_CALL} failed: ${messageOf(error)}`
             : `${SUBS_CALL} -> ${status}`,
         ms: Date.now() - started,

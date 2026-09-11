@@ -300,3 +300,92 @@ is squarely a scheduled-job defect: the route's own `catch` comment argues that
 a silent 500 would look like a healthy book, and this was the exact inverse — an
 alarm that cried wolf nightly on a job that was fine. It now returns
 `200 {"completion":{…,"withheldCents":"0"},"expiry":{…,"releasedCents":"0"}}`.
+
+---
+
+## 7. Tenant-isolation audit of the API and MCP surfaces (attack pass)
+
+> Scope. This section records an adversarial pass over every `/api/v1`
+> endpoint, every MCP tool, and every customer server action, looking for the
+> six failure classes in the brief: IDOR, enumeration oracles, injection,
+> excess privilege, token-scope escape, and secret leakage. It was done by
+> reading each path against the house standard — a SQL predicate carrying BOTH
+> `id` and `business_id`, never a read-then-compare — and by read-only probes
+> against the deployed origin. **No hole was found in `src/lib/api/**` or
+> `src/lib/mcp/**`.** The items below are the residual risks worth naming; the
+> two that are not already self-documented are outside this change's write
+> scope and are reported for routing, not fixed here.
+
+### 7.1 What holds (verified)
+
+- **Scope comes only from the token.** Every `/api/v1` route and every MCP tool
+  passes `ctx.grant.businessId` / `ctx.grant.actorId` into the gateway; none
+  reads a business/account/actor id from the query, body, or a tool argument.
+  `FORBIDDEN_QUERY_PARAMETERS` (http.ts) and the strict tool schemas
+  (mcp/validate.ts, `additionalProperties:false`) refuse `business_id` etc. as
+  unknown params rather than silently honouring them.
+- **The gateway is the one boundary.** Every read in `mcp/gateway.ts` joins to
+  `account` and filters `a.business_id = $businessId`; house accounts
+  (`business_id IS NULL`, e.g. `1110`) are not addressable. `snapshot()` and
+  `getPaymentRoute` re-check the resolved account's `business_id` against the
+  grant even though the lookup was already scoped — belt-and-braces, not a
+  read-then-compare that a later edit could drop.
+- **No oracle.** A cross-tenant account code, payment id, quote ref, pot id or
+  card id returns the SAME refusal as a nonexistent one (404 `ACCOUNT_NOT_FOUND`
+  / `NO_SUCH_INSTRUCTION`, or the `NOT_YOURS` sentence). Bad/unknown/revoked
+  tokens are byte-identical (`UNKNOWN_TOKEN`, "token is not recognised").
+  Confirmed on prod: bogus bearer → 401 `UNKNOWN_TOKEN`.
+- **No injection.** Every query is tagged-template `sql``` (parameterised);
+  no `sql.unsafe`, no string interpolation into SQL, a URL, or a header
+  anywhere in the two trees. The cursor is versioned base64url JSON, validated
+  `^[0-9]{1,20}$` before `BigInt`, and a tampered cursor is refused rather than
+  paged from the top.
+- **Privilege.** No `UPDATE`/`DELETE`/`INSERT`/`TRUNCATE` SQL in either tree;
+  writes go through `@/lib/approvals`' `requestPayment` (append-only,
+  `corgi_app` INSERT). The only raw `journal_line`/`account` read outside
+  `src/lib/ledger/` is the recon-breaks EXISTS predicate in `mcp/gateway.ts`,
+  which is the documented, ratchet-allowlisted exception.
+- **Token / write controls.** `findGrant` is constant-time (`timingSafeEqual`,
+  no early break); auth fails closed with zero grants; `ABOVE_TOKEN_CEILING`
+  and the `WRITE_LIMIT_PER_MINUTE` write budget are enforced in both `handle.ts`
+  and `server.ts`; the actor must resolve to `kind='agent', can_approve=false`
+  with a matching `business_id`.
+- **Secrets.** `initiate_payment` / `POST /api/v1/payments` never accept a full
+  account number (last-4 only); `redactArguments` masks account_number/iban/pan
+  and drops token/secret/ssn keys before the audit line; card provider tokens
+  are dropped in the gateway projection; the Plaid `access_token` wrapper
+  (`toJSON()`→`[redacted]`) is used at its only two call sites in
+  `rails/plaid/item-store.ts`.
+
+### 7.2 Residual risks (reported, not fixed — outside write scope)
+
+1. **[medium] Operator server actions rely on middleware pathname, not their
+   own role check.** `src/middleware.ts` authorises on the request `pathname`.
+   A Next.js server action POSTs to the *page the browser is on*, so an operator
+   action invoked from a `/client/*` (customer-surface) path would clear the
+   middleware role gate, and `layout.tsx`'s guard does not run for an action
+   that renders no page (the file says so itself). The boundary therefore also
+   depends on operator action IDs not being reachable from customer bundles.
+   *Exploit (unverified — needs a valid operator action id):* as `role=customer`,
+   `POST /client/pots` with an operator action's `Next-Action` header and body.
+   *Fix:* have each operator server action re-derive `authorize(role, …)` from
+   the cookie itself (defence in depth), or route operator actions through an
+   operator-only endpoint. `src/middleware.ts`, `src/lib/authz/**` — not owned.
+   I could not confirm exploitability within the window (would require a live
+   mutation against another tenant).
+
+2. **[low] Per-process rate limiter.** `mcp/ratelimit.ts` self-documents that
+   buckets are per-lambda, so N warm instances permit N× the configured rate;
+   `clientKey` trusts `x-real-ip`/`x-forwarded-for` (best-effort, not a
+   boundary). Both are honest, pre-existing limitations. The real controls are
+   the token, tenant scope, and the approval queue. Fix if it matters: a shared
+   counter (Redis / bounded Postgres window).
+
+### 7.3 What I could NOT test
+
+- Live cross-tenant **mutation** (would require a valid token for another
+  business and would write rows to the append-only ledger). All mutation
+  reasoning is by code path, not by executing a write against a peer tenant.
+- The §7.2.1 server-action vector end to end (needs an operator action id and a
+  live POST; not attempted against production).
+- Multi-instance rate-limit behaviour on the live deployment.
