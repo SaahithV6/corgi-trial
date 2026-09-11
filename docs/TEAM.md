@@ -1093,10 +1093,16 @@ migration.
 
 ```
 GUARD REACH
-  reach v_member_approval_without_right    — 186 'approved' events, ALL of them
-  reach v_team_terms_by_unauthorised_author — 422 member-version rows, ALL of them
-  reach v_approved_auth_for_dead_member     —  26 approved decisions, ALL of them
+  reach v_member_approval_without_right     — 194 'approved' events, ALL of them
+  reach v_team_terms_by_unauthorised_author — 520 member-version rows, ALL of them
+  reach v_approved_auth_for_dead_member     —  28 approved decisions, ALL of them
 ```
+
+Every count in this section is a live reading and the book is being written to
+by other work while this is read — the exposure figures above were taken at
+12:30Z on 2026-09-11, the reach figures at 12:55Z. **The ratio is the claim,
+not the integer**: all three read *N* of *N*, and the day one of them prints
+`ranges over N of M` again, a join went back to `INNER`.
 
 and `dbcheck` prints the whole population per verdict under **THE TEAM
 CENSUS**, from the views' own `is_violation` column rather than from a
@@ -1104,17 +1110,17 @@ hand-typed list beside it — 0040's `v_hold_closure_census` argument, applied t
 people instead of closures:
 
 ```
-v_member_approval_without_right — 186 approval(s), every one classified
-    out  corgi_staff_break_glass           153  approval(s) — corgi_staff
-    out  member_with_the_right              33  approval(s) — member
+v_member_approval_without_right — 194 approval(s), every one classified
+    out  corgi_staff_break_glass           155  approval(s) — corgi_staff
+    out  member_with_the_right              39  approval(s) — member
 
-v_team_terms_by_unauthorised_author — 422 member-version row(s), every one classified
-    out  corgi_staff_break_glass           419  member-version row(s) — corgi_staff
-    out  active_admin_of_this_business       3  member-version row(s) — member
+v_team_terms_by_unauthorised_author — 520 member-version row(s), every one classified
+    out  corgi_staff_break_glass           515  member-version row(s) — corgi_staff
+    out  active_admin_of_this_business       5  member-version row(s) — member
 
-v_approved_auth_for_dead_member — 26 approved decision(s), every one classified
+v_approved_auth_for_dead_member — 28 approved decision(s), every one classified
+    out  judged_under_active_terms          13  approved decision(s) — version_pinned
     out  card_belongs_to_nobody             12  approved decision(s) — card_unheld
-    out  judged_under_active_terms          11  approved decision(s) — version_pinned
     out  card_not_in_this_book               3  approved decision(s) — card_unknown
 ```
 
