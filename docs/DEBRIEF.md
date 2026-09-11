@@ -26,8 +26,8 @@ Rules for the room, in order of how much they help:
 | --- | --- | --- |
 | 0–8 | **§1**, all five, out loud | These are the only things that must be recallable with no page in front of you. Everything in §2 and §3 is derivable from them. |
 | 8–14 | **§4**, the framing sentence of each | The section that is rehearsal, not reference. Whichever weakness they find, you want to have said it first. |
-| 14–19 | **§5**, the findings | Get 5.1, 5.2 and 5.4 into the first fifteen minutes of the debrief. |
-| 19–22 | **§6**, the five guards | One table, one sentence. It is the only claim in here that generalises past this repo, so it is the one to be able to defend under push-back. |
+| 14–19 | **§5**, the findings | Get 5.1, 5.2, 5.4 and 5.6 into the first fifteen minutes of the debrief. |
+| 19–22 | **§6**, the nine guards | One table, one sentence. It is the only claim in here that generalises past this repo, so it is the one to be able to defend under push-back — and two of the nine are claims I made myself, in writing, about code that did not honour them. |
 | 22–27 | **§7**, the click path | Walk it once in a browser while reading, so the numbers are familiar rather than surprising. |
 | 27–30 | **§3.1, §3.5, §3.6** | The three questions most likely to be asked first and hardest. |
 
@@ -35,10 +35,20 @@ Rules for the room, in order of how much they help:
 path money takes; open it when they point at something. The appendix at the
 bottom is the same thing as a one-line lookup table.
 
-**Before the room:** run `node scripts/livefire.mjs` and `pnpm db:check` against
-the final commit, load `/api/health`, and use those numbers rather than any
-figure written down here — everything quoted in this document was true when it
-was measured and some of it moves every time a webhook lands.
+**Before the room:** run `node scripts/livefire.mjs`, `node scripts/coreloop.mjs`
+and `pnpm db:check` against the final commit, load `/api/health`, and use those
+numbers rather than any figure written down here — everything quoted in this
+document was true when it was measured and some of it moves every time a webhook
+lands. `node scripts/reconcile-usdc.mjs` takes ten seconds and is the one that
+most usefully answers a question you cannot anticipate.
+
+**The one structural thing that changed since the first draft of this document:**
+§2 now runs to twenty-five entries because nine features landed in the last few
+hours — the core loop as one command, provider-driven card corrections, standing
+orders, Plaid funding, a live KYB registry with an operator review, pots, payee
+confirmation, card controls inside the provider's timeout, and a second
+stablecoin provider. Two of them **falsified claims this build had already made
+in writing**, which is why §6 is now nine guards rather than five.
 
 ---
 
@@ -538,8 +548,17 @@ adapter rather than copying it, so it cannot drift from the thing it simulates.
 `PaymentRail`: `IncreaseAchRail` and `AchSimRail`. Lithic is *not* one of them —
 it is a function-style client plus the pure `normalizeTransaction()`, because a
 card's economics are a hold that mutates over an event set and there is no
-`initiateCredit` in that. USDC has no adapter (research draft only) and
-`internal` is a `RailKind` with nothing behind it. What holds the interface
+`initiateCredit` in that. USDC does not implement it either — it has its own
+two-implementation interface, `StablecoinPayoutProvider` (§2.24), because a
+payout that is named by a hash before it is broadcast is not the same shape as an
+ACH transfer that is named by the provider afterwards. `internal` is a `RailKind`
+with nothing behind it **at the rail layer** and it is no longer empty in the
+ledger: a pot move posts `rail = 'internal'` and touches no adapter at all
+(§2.21), which is the honest reading of "a rail is an adapter, not a schema".
+Note also that two different types in this repo are called `PaymentRail` — the
+adapter interface here, and a string union of rail names in
+`src/lib/approvals/types.ts` — so ask which one they mean before answering. What
+holds the interface
 honest for the rails that do not implement it is `rails/types.test.ts`, which
 carries `const _cardRail: PaymentRail = {…}` and a USDC equivalent as
 **compile-time** stubs whose only job is to stop compiling if someone widens the
@@ -597,12 +616,16 @@ and returns one of five verdicts: `live`, `unauthorised`, `unreachable`,
 `delivery-health.ts` answers a *different* question — how long since this
 provider last delivered anything — from `webhook_inbox.received_at`.
 
-**Know the number before you quote it.** Everything now says **6 live of 7** —
-README, DEMO, the T+24h email and the endpoint — with `business_registry` the
-only simulated slot. The number has moved in both directions during this build
-and each move was earned: `card_webhooks` went *down* to `unprobed` when the
-fallback bug was fixed, then back up when it got a real probe; `stablecoin`
-became live only when a payout confirmed on chain. Load `/api/health` on the day
+**Know the number before you quote it.** The endpoint now reads **7 of 7 live**:
+`card_issuing`, `card_webhooks`, `director_kyc`, `business_registry`,
+`open_banking`, `ach_rail`, `stablecoin`. The number has moved in both directions
+during this build and each move was earned: `card_webhooks` went *down* to
+`unprobed` when the fallback bug was fixed, then back up when it got a real
+probe; `stablecoin` became live only when a payout confirmed on chain;
+`business_registry` became live when the registry leg stopped being a simulator
+and started reading GLEIF (§2.14) — and that last one needs its qualifier said in
+the same breath, because GLEIF is a **substitution** for the three KYB vendors
+the brief names, all of which are gated. Load `/api/health` on the day
 and read its number, and if they notice a document disagreeing, that *is* the
 answer: one fewer claimed integration is a better score on integration reality,
 not a worse one, because the rubric grades honest labelling and the brief calls
@@ -634,13 +657,28 @@ published two contradicting verdicts for the same slot and the fix was to stop
 having two (`DECISIONS.md` 021,
 `src/app/api/health/consistency.test.ts`).
 
-**One caveat to own before they find it:** `fromStatus()` in `probe.ts` maps a
-non-auth 4xx to `live`, on the reasoning that being told the request was wrong
-proves the credential was accepted. That is the one place a non-2xx earns LIVE.
-It is deliberate — it is what makes the parameterless `POST /v1/accounts` Stripe
-probe work at all, since a Connect-enabled account answers with a
-parameter-validation 400 — but it is a rule worth stating rather than being
-caught by.
+**One caveat to own before they find it, and it got sharper today:**
+`fromStatus()` in `probe.ts` maps a non-auth 4xx to `live`, on the reasoning that
+being told the request was wrong proves the credential was accepted. That is the
+one place a non-2xx earns LIVE, and it is deliberate — it is what makes the
+parameterless `POST /v1/accounts` Stripe probe work at all, since a
+Connect-enabled account answers with a parameter-validation 400.
+
+**The reasoning does not hold for the whole range, and that is measurable.** A
+**404** earns `live` under the same branch, and a 404 is the answer a provider
+gives when nobody looked at your credential: measured just now against the live
+sandbox, `GET /v1/not_a_real_endpoint` at Lithic answers **404 with the API key**
+and **404 with no Authorization header at all**. So a mistyped path, or a
+provider retiring an endpoint, would be reported as a live integration by a probe
+that proved nothing — no active lie today, because every probe path is real and
+`card_issuing` answers 200, but a latent one of exactly the shape §6 is about. A
+**429** earns `live` too, and today `open_banking`'s evidence string is literally
+`POST /institutions/get -> 429`: Plaid rate-limits per client, so the credential
+*was* recognised and the verdict is defensible — but the slot's real work is not
+fundable while it is throttled, which is the distinction §5.3's rule was written
+to make. Week two is three lines: 404 and 429 get their own verdicts
+(`unproven` / `throttled`), both labelled SIMULATED, neither collapsed into
+`live`.
 
 **Questioned — and this is the one to want:** *"`some`? So one live slot out of
 two is enough to raise an alarm about the other."* The line is
@@ -680,58 +718,110 @@ evidence, so an alarm that any of them can disarm is not an alarm.
 `src/test/livefire/attack-07-provider-outage.test.ts` asserts both shapes rather
 than only the live one, because both Lithic slots read `live` today so the live
 escalation assertion would pass under `every` too and would say nothing about the
-regression. See §6 — this is the fourth of five guards to fail this exact way.
+regression. See §6 — this is the fourth of the nine guards to fail this exact
+way, and the `fromStatus()` caveat above is the ninth.
 
-### 2.14 KYB — `src/lib/kyb/*`, `db/migrations/0005_kyb.sql`
+### 2.14 KYB — `src/lib/kyb/*`, `db/migrations/0005_kyb.sql`, `0013_kyb_manual_review.sql`
 
-A composite of two legs: director KYC (live, on Stripe Identity) and business
-registry (simulated). The composite degrades its own evidence label to
-`simulated` when either leg was.
+**This section was true this morning and is not any more.** The registry leg was
+a labelled simulator; it now reads a real registry, and making it honest broke
+the product before it fixed it. Both halves get told.
 
-**Questioned:** *"Why is the registry leg simulated?"*
-**Answer:** every KYB option on the brief's own menu is gated. Persona KYB and
-Sumsub want a sales conversation; Middesk and Stripe Connect require completing
-"Verify your business" first. Measured rather than read off a support page:
-`POST /v1/accounts` returns 400 *"You can only create new accounts if you've
-signed up for Connect"*. I stopped there rather than invent a company to get past
-a form. The simulator sits behind the same interface as the real leg, is typed
-`KybLegProvider<'simulated'>` so it cannot claim otherwise, and prefixes every
-reason string with `simulated:` so a screenshot of the evidence pack cannot be
-mistaken for a provider's own words.
+A composite of two legs: **director KYC** (live — Stripe Identity, which is on
+the brief's own KYC menu) and **business registry** (live — GLEIF, which is
+not). Four real endpoints against `api.gleif.org`, no credential, no mock in the
+production path: `GET /api/v1/lei-records/{lei}`, `GET /api/v1/autocompletions`,
+`GET /api/v1/lei-records?filter[entity.legalName]=…&filter[…country]=US`, and a
+best-effort `GET /api/v1/registration-authorities/{code}` whose failure never
+changes a verdict. Two candidate generators run concurrently and **neither
+decides** — every candidate is re-matched in our own code — and if *both*
+generators fail, `searchByName` throws rather than reporting a clean miss.
 
-**The mechanism worth showing if they push:** `CompositeKybResult` has no
-`evidence` field — it has a private `#legs` and an `evidence` *getter* that folds
-`degradeEvidence()` over the legs. Six forgery routes are closed and each is
-asserted by `composite.test.ts`: private `#legs` makes the class nominally typed
-so no object literal satisfies it; the constructor is private so it cannot be
-subclassed; `Object.freeze(this)` blocks `defineProperty`;
-`Object.freeze(prototype)` blocks a getter swap; `rehydrate()` takes legs rather
-than a stored label, because a stored `kyb_status` is a cache and if the row
-disagrees with the legs the legs win; and the type-level `DegradeEvidence<A,B>`
-returns `'live'` only when both are. The same rule is restated a fourth time in
-Postgres: `v_business_kyb` derives evidence with `bool_and(evidence = 'live')`,
-and a CHECK refuses a leg row claiming `live` while carrying a simulator's mark.
-The counter-intuitive branch to defend is `failedLeg()`: a provider that does not
-answer is labelled **simulated**, not live — we wrote that row, and labelling it
-live would claim a third party said something when no third party said anything.
+**Say the substitution out loud, first, in the same sentence as the word live.**
+The brief names Persona KYB, Middesk and Sumsub. All three are gated behind a
+sales conversation or a "verify your business" form, which was measured rather
+than read off a support page. GLEIF is a real third party answering real
+questions about real entities, and it is **not one of the three**: it is the
+bottom of a precedence ladder every named vendor outranks, and two environment
+variables move the leg the hour one becomes available. The slot label in
+`/api/health` still reads `provider: "Stripe Connect (gated) — simulated"` from
+`env.schema.ts` while its status reads `live` — under-claiming, safe direction,
+and a contradiction on the page you will be showing, so name it before they read
+it.
 
-**Say this before they grep for it.** Nothing outside `src/lib/kyb/` imports the
-module — it is fully unwired, there is no onboarding route, and
-`kybHealthReport()` has no non-test callers. `src/lib/kyb/README.md` §4 shows a
-line `kyb: kybHealthReport(env),` as being in `/api/health`'s response body and
-it is not. That is a documentation overclaim of exactly the class this build
-docks itself a point for, and it should be corrected or struck rather than
-defended. Related: `PERSONA_INQUIRY_TEMPLATE_ID` and `KYB_FORCE_SIMULATED` are in
-neither `env.schema.ts` nor `.env`, so in this deployment the director leg could
-not select Persona even with a key. And if the module *were* wired to
-`/api/health` unchanged it would reintroduce the 021 two-opinions bug, because
-`selectRegistryLeg` marks the Stripe leg live on key presence alone while
-`probe.ts` proves that same credential cannot do the job.
+**Making it honest broke the core loop.** GLEIF's population is
+financial-market participants, so every fictional business on this book answers
+`not_in_lei_registry` → `needs_review`, and `canTransact()` (`kyb/types.ts:508`)
+runs inside `requestPayment()`. Leg 5 of the core loop — an outbound payment
+needing a second approver — was refused for every business on the book. Three
+ways out, two disqualifying: weaken the gate (deletes the only sentence the
+screen exists to make true), invent an LEI (put a real company's identifier on a
+fictional business — the exact forgery this module is built against), or **review
+it**, which is what a real KYB operation does with a registry miss.
+
+**A review is another observation, not an edit.** It is an INSERT into
+`kyb_verification_leg` like any other row; `corgi_app` holds `SELECT, INSERT` and
+the grants are **restated** in 0013 because a table-level grant silently covers
+new columns. The provider's row is never touched. The derived state is a view
+(`v_business_kyb`) with no stored copy for an UPDATE to forge.
+
+**The third evidence label, and the order that makes it free.** `live | manual |
+simulated` is a **weakness** order, ascending — `EVIDENCE_WEAKNESS = { live: 0,
+manual: 1, simulated: 2 }` — so `live` is strongest and the existing worst-wins
+fold needed no special case. A human is not a third party, so an operator's
+decision cannot be `live`; a named, accountable person with a written reason is
+not a fixture either, so it cannot be `simulated`. The same order is the
+declaration order of the `kyb_evidence` enum (`ALTER TYPE … ADD VALUE 'manual'
+BEFORE 'simulated'`), which is what lets the view say `max(evidence)` — the
+identical trick `kyb_status` already used for "strictest wins".
+
+**The constraints that make the wrong thing unrepresentable.** `docs/KYB.md`
+prints six; the migration adds **nine**, and the one the table omits is the one
+that makes the headline constraint sound. In order: `actor_id_kind_uniq` (the
+UNIQUE that gives the composite FK a target); `kyb_leg_reviewer_fk`, the
+composite FK `(decided_by_actor_id, decided_by_kind) → actor(id, kind)`;
+`kyb_leg_manual_has_reviewer`, an **equality** so a manual row must name a
+reviewer *and* a provider row must not; `kyb_leg_reviewer_kind_matches`;
+`kyb_leg_reviewer_is_human`; `kyb_leg_manual_has_reason` (≥ 20 characters — no
+rubber stamps); `kyb_leg_reason_only_when_manual`; `kyb_leg_manual_reference`
+(`provider = 'operator-review'` and a `manual.` prefix); and
+`kyb_leg_operator_is_not_a_provider`.
+
+**The mechanism to point at if they push on "an agent cannot approve a KYB
+leg".** The FK is declared without `MATCH FULL`, so Postgres uses `MATCH SIMPLE`,
+under which a composite FK is satisfied whenever **any** referencing column is
+NULL. A row carrying an agent's uuid with a NULL kind would sail through the FK
+untouched. `kyb_leg_reviewer_kind_matches` (id ⇒ kind not null) is what closes
+that, and `kyb_leg_reviewer_is_human` then pins the kind to `human`. The trio is
+sound; the doc's six-row table drops exactly the constraint that makes it sound,
+and that is the answer to give rather than the table.
+
+**One rule is application code, not schema, and say which.** *A review may never
+clear a provider's decline* is `reviewRefusal()`
+(`kyb/manual-review.ts:191`), returning `REVIEW_CANNOT_CLEAR_A_DECLINE`, called
+twice — once by the screen to grey the control, once on the server before the
+insert. There is no constraint for it and there cannot easily be one: the table
+is append-only and a CHECK cannot see prior rows, so it would need a trigger.
+Everything else in the list above is restated in SQL; this one is not.
+
+**Own these three.** `DEFAULT_TRANSACT_POLICY` is `requireLiveEvidence: false`,
+so the deployed gate lets a `manual`-evidence business transact — deliberate,
+documented, and it means the one business that can move money on this book does
+so on a human's say-so. The reviewer's identity comes from the role cookie, which
+is demo-grade and labelled as such, so "Dana Okonkwo approved Ridgeline" is an
+attribution anyone with the console can produce; the *agent cannot review* half
+is a real absent capability, the *which human* half is not. And the environment
+still drifts: `.env` has `KYB_FORCE_SIMULATED` unset (so GLEIF is live),
+`.env.example` still ships `KYB_FORCE_SIMULATED=business_registry`, and
+`docs/KYB.md` carries a stale section saying the flag currently suppresses the
+leg.
 
 ### 2.15 The USDC rail — `src/lib/rails/stablecoin/*`, `scripts/payout-usdc.mjs`, `docs/STABLECOIN.md`
 
-Ten modules and 42 tests behind one real payout: `0xb47c5a36…86a1`, receipt
-`0x1`, block 46,651,201, 0.500000 USDC, 44,843 gas. `adapter.ts` is
+Seventeen modules behind **two** real payouts on two different providers. This
+one is the direct rail, signed on our own machine: `0xb47c5a36…86a1`, receipt
+`0x1`, block 46,651,201, 0.500000 USDC, 44,843 gas. The Circle one is §2.24, and
+a document quoting "42 tests" or "one payout" predates it. `adapter.ts` is
 refuse / sign / broadcast / wait / state-an-outcome; `ledger.ts` is the posting,
 through `postEntry()` and nothing else; `allocation.ts` holds the two pure
 decisions (minor units → balanced cents, block timestamp → value date) and is
@@ -822,6 +912,496 @@ Two entries, each carrying the burden of proof: the scanner itself (its pattern
 list contains the prefixes it hunts, so it matches itself) and `env.test.ts`,
 whose `sk_live_abc123` is a deliberate **negative** fixture proving the
 environment layer refuses live keys at boot. Deleting it would delete the proof.
+
+### 2.17 The core loop, as one command — `scripts/coreloop.mjs` (2,189 lines)
+
+The brief publishes the core loop as seven arrows. This is those seven arrows as
+seven legs, run against the **deployed URL**, in one command:
+`node scripts/coreloop.mjs`. `LEGS` at line 693 is the list, in the brief's own
+order — KYB gate, fund from a linked bank, issue a card, authorise $50.00 and
+settle $73.40, an outbound payment needing a second approver, survive a reversed
+settlement, reconcile the scheme file.
+
+**The property that makes it evidence rather than a demo: it imports nothing
+from `src/`.** Lines 92–97 are the whole import list — four `node:` builtins and
+`postgres`. It cannot accidentally test the code it is checking, because it does
+not have it. What it drives is HTML: `parseForms()` (line 319) scrapes the
+deployment's own forms, including the React server-action fields
+(`$ACTION_ID_<hex>` for an unbound action, `$ACTION_<n>:0` carrying `{"id":…}`
+for a bound one), and `submitForm()` replays them verbatim as
+`multipart/form-data` — **the identical request a browser with JavaScript
+disabled makes.** There is no `Next-Action` header anywhere in the file and no
+hard-coded action id; if a form is renamed, the run fails rather than passing
+against a stale constant. The action's *return value* is read back out of the
+re-rendered page's bound-args field, so a leg reads the deployment's literal
+result object rather than prose.
+
+**Be precise about the scoreboard, because there are two of them.** The last
+full run is recorded in `docs/CORE-LOOP.md` §5: `CL-MTW5GIX5`,
+2026-09-10T23:19:44Z, **7 PASS, 0 FAIL, 0 SKIP**, invariants **14/14**, 91 HTTP
+calls to the deployed origin and 3 to the Lithic sandbox, 56 seconds, exit 0.
+That is the *core loop* over seven legs. `scripts/livefire.mjs` is a different
+script over eight attacks and its last run was **7 PASS, 0 FAIL, 1 SKIP**
+(§4.1). Do not let the two be conflated in the room — and say that the
+core-loop scoreboard exists in the repo as the document's prose, not as a
+checked-in transcript. Re-run it before the debrief and quote that run.
+
+**The 14 invariants are not its own.** Lines 2107–2123 shell out to
+`scripts/dbcheck.mjs` and require exactly `passed === 14 && failed === 0`: six
+refusals (UPDATE/DELETE/TRUNCATE on `journal_entry` and `journal_line` as
+`corgi_app`), four grant-surface checks, every entry balances, the trial balance
+nets to zero, no stored balance column, no clock drift. Volunteer the limit in
+the same breath: the hold-drift views are **not** among those 14 — they are
+checked by the live-fire suite — and `dbcheck` is only meaningful if
+`APP_DATABASE_URL` really is the `corgi_app` role, which the script states at
+lines 15–19 and does not enforce.
+
+**Two legs claim less than their titles.** Leg 4 cannot do "days later" — the
+comment at line 1454 says so: Lithic clears on demand, so the clearing arrived
+seconds after its authorisation, and the *value-date* half of the brief's
+sentence is proven by leg 6 instead. Leg 7's title says "a planted break" and
+the leg plants nothing: `/reconciliation` renders no write control, the break is
+seeded, and the leg's own evidence says it "did not plant it and does not claim
+to have". Both of those are in the file, in English, above the assertions.
+
+**Questioned:** *"A runner that skips is a runner that passes."* `verdict()`
+(line 740) has no branch that turns "nothing checked" into a pass, a skip alone
+makes the exit code 1, and leg 6's only skip conditions are structural (no card
+token, no `LITHIC_API_KEY`) rather than assertions. Leg 6 *was* a skip when the
+script was first written and went green about ten minutes later when the card
+correction path deployed — the honest version of that sentence is that the
+assertions were not touched between the two runs and there is **no transcript in
+the repo that proves it**, so say it as a claim about the design rather than as
+evidence.
+
+### 2.18 Card corrections — `src/lib/holds/corrections.ts`, `rail_event_semantics`
+
+The brief's sentence is *"when a merchant reverses a settlement … the customer's
+balance and their statement must both show the corrected position for the day it
+happened."* Two things had to be true: the ledger can reverse a past entry at its
+original value date (`reverseAndRebook()` in `post.ts`, true since the ledger was
+written) and **a provider event actually reaches it**. Until this landed, the
+second was false: `reverseAndRebook`'s only non-test callers were two demo
+modules, and a `RETURN_REVERSAL` arriving from Lithic was posted as an ordinary
+`force_post` at its **own** value date, so the day it corrected kept its wrong
+figure for ever.
+
+**Say what is corrected, exactly, because the obvious sentence is wrong.** It is
+a **refund that is taken back**, not a settlement that is reversed:
+`/simulate/return` then `/simulate/return_reversal`, on the card's own
+transaction, producing a genuine signed Lithic delivery. A debit clearing
+**cannot** be reversed in that sandbox, and the three ways to try are in the
+code as a comment at `coreloop.mjs:1733` because each fails differently:
+`return_reversal` on a cleared debit answers 400 *"Return reversal is not
+supported for debit transactions"*; `void` appends an `AUTHORIZATION_REVERSAL`
+and never touches `settled_amount`; and `clearing` with a **negative** amount
+ignores the sign and adds a second capture — the dangerous one, because it looks
+like it worked.
+
+**The routing is a row, not an `if`.** `correctionEventIds()`
+(`src/lib/holds/apply.ts:319`) selects the steps whose `rail_event_semantics`
+row says `value_date_anchor = 'original'`; `valueDateAnchor()`
+(`rails/semantics.ts:340`) is the whole decision, `semantics === "correction" ?
+"original" : "event"`. There is no `stepType === 'RETURN_REVERSAL'` test in
+`corrections.ts` — the four appearances of that string in the file are comments.
+An **unclassified** step parks the whole payload rather than defaulting to
+either behaviour, and `semantics.ts:208` *throws* if a `correction` row's
+`value_date_source` is anything but `original.value_date`, so the two columns
+cannot disagree.
+
+**The two halves of the correction, and the idempotency.**
+`chooseCorrectionTarget()` (line 134) is a pure function of the event set with
+four branches and **parks rather than guesses** when two same-magnitude
+candidates exist. A full correction (`net === 0n`) reverses with no re-book; a
+partial reverses and re-books, and the re-book carries `valueDate:
+entry.valueDate` under the comment *"THE ORIGINAL'S DATE. Not today's, and not
+the correction's."* Both keys are derived, not generated —
+`reversal:<original entry id>` and `card:correction:<provider event id>` — so a
+redelivered webhook re-derives the same key and `journal_entry.idempotency_key`
+being UNIQUE makes the second posting a no-op decided by Postgres.
+
+**Own this before they grep it.** Two hard-coded switches survive and neither
+decides correction-versus-new-event: `canonicalKind()` in `lithic-events.ts`
+maps a step to a `card_event_kind` (both `RETURN_REVERSAL` and
+`CORRECTION_DEBIT` land on `force_post`), and `directionOf()` in
+`corrections.ts` reads the kind. The consequence is that the table's own
+`canonical_kind` column is **decorative** — nothing reads it for behaviour, the
+table says `refund_reversal` where the code stores `force_post`, and
+`semantics.test.ts` pins that divergence as `kindMatches: false` rather than
+hiding it. And `rail_event_semantics` is the one table the seed upserts
+(`ON CONFLICT DO UPDATE`), which is defensible for reference data and does mean
+a re-seed can rewrite a classification silently.
+
+### 2.19 Standing orders — `src/lib/standing/*`, `db/migrations/0012_standing_orders.sql`
+
+**The unit is the occurrence, not the order.** A mandate is a rule; the thing
+that can fire twice is one dated instance of it, so that is the row:
+`standing_order_occurrence (standing_order_id, scheduled_date)`. Exactly-once is
+four constraints in a chain, and the answer to "how do you know it fires once"
+is to name all four rather than the first: `UNIQUE (standing_order_id,
+scheduled_date)` (0012:285), `UNIQUE (idempotency_key)` (0012:286),
+`standing_order_outcome` keyed `occurrence_id PRIMARY KEY` (0012:344) — one
+decision per occurrence — and `payment_instruction.idempotency_key` UNIQUE
+(0001:647).
+
+**The idempotency key is computed by Postgres, and the reason is a one-line
+double payment.** 0012:270 is a `GENERATED ALWAYS … STORED` column:
+
+    'standing:' || standing_order_id::text || ':'
+      || lpad(EXTRACT(YEAR  FROM scheduled_date)::int::text, 4, '0') || '-'
+      || lpad(EXTRACT(MONTH FROM scheduled_date)::int::text, 2, '0') || '-'
+      || lpad(EXTRACT(DAY   FROM scheduled_date)::int::text, 2, '0')
+
+Not `to_char`, and not `scheduled_date::text`: **textual date rendering in
+Postgres is only `STABLE`, because it reads `DateStyle`.** A key whose value
+depends on a session setting is a key that changes when a connection pool hands
+you a different session — and two different keys for one occurrence is a second
+payment. `EXTRACT` + `lpad` is IMMUTABLE, which is not merely asserted: Postgres
+**refuses to create a generated column** whose expression is not immutable, so
+the property is enforced by the DDL that carries it. The application never
+computes the key at all — `claimOccurrence()` reads it back with `RETURNING`
+(store.ts:464) and hands it to `requestPayment()`.
+
+**Concurrency is proved, and be exact about what was proved.**
+`standing.integration.test.ts:179` fires two overlapping `runStandingOrders()`
+calls under `Promise.all` — one Node process, two real pooled connections, two
+genuine server-side transactions — and asserts one instruction, one occurrence,
+one outcome, one "raised fresh" and one "replayed". The mechanism is a
+`SELECT … FOR UPDATE` through `lock_standing_order()` plus `ON CONFLICT DO
+NOTHING` at three levels; not an advisory lock, and not application logic. Three
+non-application attacks sit beside it: a hand-written duplicate INSERT
+(`duplicate key`), an INSERT for a date the generator would not produce
+(refused by `assert_standing_order_occurrence()`), and UPDATE/DELETE (refused).
+
+**The policy is refuse-and-close, and it is checked against available.**
+`types.ts:182` — if `availableCents >= amountCents` fund, else refuse with the
+shortfall. No partial, no carry-forward, no retry queue: a decided occurrence
+leaves the queue because `listDue()` returns only dates with no occurrence and
+occurrences with no outcome. All four figures are persisted on the outcome row,
+which is what makes the refusal explainable months later. The recorded refusal
+is the one to quote, because it is the case that a ledger-balance check would
+have got wrong: amount **$20,871.93**, ledger **$21,081.93 — covers it**,
+available **$20,771.93 — does not**, shortfall **$100.00**, code
+`INSUFFICIENT_AVAILABLE_FUNDS`. Say what made the gap: **$310.00 of card
+authorisations**, with uncleared credits at $0.00 on that row. "Uncleared
+absorbed it" is the funding story (§2.20), not this one.
+
+**Own the guard that cannot fail.** `v_standing_order_double_fire` (0012:667)
+joins `payment_instruction` to the outcome **on the idempotency key** and reports
+`count(DISTINCT pi.id) > 1`. That column is UNIQUE, so the count can never
+exceed one: the view is tautologically empty and detects nothing. The failure
+worth detecting — two instructions for one occurrence under *different* keys,
+i.e. the key was computed somewhere it should not have been — is exactly what it
+cannot see. It is guard number eight in §6, and it was found while writing this
+document.
+
+### 2.20 Funding from a linked external bank — `src/lib/rails/plaid/*`, `/funding`
+
+Leg two of the core loop, live against `sandbox.plaid.com` over raw `fetch` with
+no SDK: `/link/token/create`, `/sandbox/public_token/create`,
+`/item/public_token/exchange`, `/accounts/get`, `/auth/get`, `/item/get`,
+`/sandbox/item/reset_login`. **State the limit in the same sentence as the
+claim:** the Link *browser UI* is never driven — the link token is minted for
+real and then not used, and the flow continues through Plaid's own sandbox
+public-token endpoint. That is written three times in the code, not only in the
+docs.
+
+**The number that makes the point.** A $5,000 deposit moved the ledger and did
+not move available:
+
+    ledger        $23,584.93 -> $28,584.93
+    card holds       $310.00 ->    $310.00
+    uncleared      $2,503.00 ->  $7,503.00
+    available     $20,771.93 -> $20,771.93
+
+because the same transaction that posts the financial entry opens an
+`uncleared_credit` hold for the same amount, and `availableBalance()` subtracts
+it. The integration test asserts those as **deltas**, not absolutes, so it keeps
+working on a book that other people are writing to.
+
+**The availability policy is data, effective-dated, and cited by the hold.**
+`funds_availability_policy` is keyed `(rail, counterparty_class,
+effective_from)` and carries `banking_days_hold` and `release_local_time`; the
+row is chosen by the credit's **value date**, not by today
+(`effective_from <= valueDate ORDER BY effective_from DESC LIMIT 1`), and its
+`policy_id` is stored on the hold — which is what makes a hold opened in March
+still explainable in December after the policy changed. A missing row is
+`NO_AVAILABILITY_POLICY` and nothing is booked; there is no default of zero.
+
+**Banking days are computed, not looked up.** `availability.ts:177` derives the
+eleven Federal Reserve holidays from their rules rather than from a table, and
+it carries the Fed's Saturday rule — a holiday falling on a Saturday is **not**
+observed on the Friday for banking purposes — which the test pins with
+2026-07-03. The 09:00 ET conversion is `Intl.DateTimeFormat` on
+`America/New_York` with a two-pass offset correction, tested on both sides of
+the March DST boundary (`09:00 → 13:00Z` in September, `14:00Z` in January).
+
+**And now the part that must be volunteered before it is found: there are three
+definitions of "available" in this repo and they disagree.** See §4.8. This
+section's numbers come from the funding screen's definition; the standing-order
+refusal above comes from another.
+
+### 2.21 Pots — `src/lib/pots/*`, `db/migrations/0015_pots.sql`, `/pots`
+
+Stretch-ladder item four: *sub-accounts or pots, with instant internal transfers
+that are pure ledger moves*. It is the cheapest possible proof that the ledger is
+a ledger and not a balance table with extra steps, because an internal transfer
+touches no rail at all — if a pot can only be built by adding a column beside the
+balance, the balance was never derived.
+
+**A pot is a node in the account tree.** `pot_open()` creates an account coded
+`'2100.' || pot_id` (0015:199) whose parent is the business's own `2100` leaf.
+The separator is `'.'` and not `'/'` deliberately: `chart.ts` reserves `'/'` for
+the *display* form of a per-business leaf and `parsePerBusinessCode()` splits on
+it, so a pot code must never parse as one of those. There is **no balance column
+on `pot` or anywhere else**, and `corgi_app` holds `SELECT` on `pot` and nothing
+more — the pot is opened through a `SECURITY DEFINER` function, so there is no
+capability by which the application could write half of one.
+
+**Available falls, with zero changes to `src/lib/ledger` — and say the mechanism
+precisely, because the short version invites the wrong inference.** The transfer
+is two lines: a **debit of the bare `2100` leaf** and a credit of the pot leaf.
+`availableBalance()` (`balances.ts:127`) selects the deposit account by **exact
+equality**, `code = '2100' AND business_id = $1` — no `LIKE`, no recursion — so
+the debited leaf falls by the full amount and the credited pot leaf is invisible
+to it. Available drops because the main leaf was debited; exact equality is what
+stops the money being added straight back. `grep -i pot src/lib/ledger/**`
+returns only the substring inside "idem**pot**encyKey". Every other consumer —
+`listDepositAccounts`, holds, statements, the home summary, `v_available_balance`,
+`v_overdrawn_accounts` — matches `'2100'` the same way, which is why a pot is
+earmarked money everywhere at once without any of them learning a new concept.
+
+**The invariant this feature falsified, which is the part worth volunteering.**
+0001 says of `v_deposit_control_drift`: *"Written as a subtree walk rather than
+'sum the 2100 children' so that adding a sub-account level later cannot silently
+break it."* Half true. The view has two sides. The **subtree** side is a
+`WITH RECURSIVE` walk over `account.parent_id` and picked the pot up with no
+change, exactly as advertised. The **reported** side was
+`SUM(v_ledger_balance) WHERE code = '2100'` — a flat code filter, which did not
+recurse and did not see the pot. One pot and one $500.00 transfer, inside a
+transaction that was rolled back, produced **subtree 13,577,077 vs reported
+13,527,077** — a drift of exactly the 50,000 cents in the pot, reported by an
+invariant that was supposed to be immune to this. The fix (0015:420,
+`CREATE OR REPLACE` so 0008's grant survives) generalises the reported side to
+`code = '2100' OR the account is in the deposit tree` — a **strict superset** of
+the old row set, so it still catches a deposit leaf reparented *out* of the tree,
+and with no pots on the book the two predicates select identically. The pots
+integration test re-runs the **original** predicate verbatim and asserts it would
+have drifted by exactly the pot balances, then asserts the new view is empty.
+That is the negative test §6 asks for, built out of the guard's own exclusion
+clause.
+
+### 2.22 Payee confirmation — `src/lib/payees/*`, `db/migrations/0016_payees.sql`
+
+Stretch-ladder item six. **Start with what the US does not have**: there is no
+Confirmation of Payee for US ACH. Nacha has no name-inquiry message; the nearest
+thing is a zero-dollar prenotification the receiving bank may answer days later
+with a C01/C02/C03, or not at all. Nothing in this credential set can ask a US
+bank what name sits on a stranger's account. So the design rule is **block on
+arithmetic, warn on judgement**, and the arithmetic is the ABA check digit.
+
+**The check digit was swept, and the sweep is the interesting half.** `aba.ts`
+carries the weight vector `3,7,1,3,7,1,3,7,1`; the sweep runs over a fixed-seed
+corpus of 500 checksum-valid numbers:
+
+    single wrong digit        40,500 cases (500 x 9 positions x 9 digits)  100.00% caught
+    adjacent transposition     3,656 cases (distinct-digit pairs)           89.03% caught
+    transposition 3 apart      2,665 cases                                   0% caught
+    transposition 6 apart      1,354 cases                                   0% caught
+
+and the two failures are structural, not statistical. **Adjacent misses are
+exactly the pairs differing by 5**: adjacent weight differences cycle −4, +6, −2,
+each sharing a factor 2 with 10, so the shift vanishes iff the digits differ by 5
+mod 10 — `{0↔5, 1↔6, 2↔7, 3↔8, 4↔9}` and nothing else. **Three and six apart are
+caught 0% of the time** because the weight vector has period 3, so those
+positions carry equal weights and the swap shifts the weighted sum by zero. A
+check digit that catches every single-digit error and *none* of an entire
+transposition class is a much more useful thing to be able to say than a
+percentage.
+
+**Two numbers, and know which is which.** 89.03% is this 500-number corpus;
+`aba.ts`'s own comment says 88.9%, which is the population value (10 of 90
+ordered distinct pairs miss). Both are right about different things and neither
+says so, and the test asserts only a band (`0.1 < missRate < 0.125`), so the
+89.03% in `docs/PAYEES.md` is not regression-guarded. "Exhaustive" means
+exhaustive over the error space of that corpus, not over all valid routing
+numbers.
+
+**Why the screen offers no correction.** For an invalid number the weighted sum
+is `S ≢ 0 (mod 10)`; changing position `i` shifts it by `w_i·(v − d_i)`, and
+every weight (1, 3, 7) is a unit mod 10, so there is **exactly one** repairing
+digit at every one of the nine positions. Nine repairs, always, for every invalid
+routing number — so a suggestion list is nine equally likely guesses dressed as
+help. `verify.ts:160` computes them and then filters substitutions out, keeping
+only the transposition hint, whose text says to confirm against the payee's own
+paperwork rather than taking a suggestion from us.
+
+**The block is arithmetic, and it is enforced in four places.**
+`assertBlockIsArithmetic()` (`verify.ts:546`) **throws** if any finding other
+than `ROUTING_CHECKSUM_FAILED` carries severity `block`; the `payee` table has
+`CHECK (routing_number IS NULL OR aba_checksum_ok(routing_number))`; the
+verification table has `CHECK ((outcome = 'blocked') = (checksum_ok IS FALSE))`;
+and the blocked UI branch has no continue control at all — absent, not disabled.
+Severity has three values, not two (`block | warn | note`), and the payment gate
+adds the fifth refusal: a `warned` payee whose warning has no
+`payee_acknowledgement` row is refused as `PAYEE_WARNING_UNACKNOWLEDGED`, which
+is a refusal to let an override be *implicit* rather than a block on judgement.
+
+**And the provider does not do this for us — measured.** Increase's
+`/routing_numbers` is live and answers a checksum-invalid `101050002` with
+**200 and `data: []`** — the identical answer it gives for a real-but-unlisted
+bank and for `000000000`. It validates *shape* (a 400 for eight digits, a 400 for
+letters) and not arithmetic, so it cannot tell a failed checksum from an unknown
+bank. That is the whole reason the local check digit is not redundant.
+
+### 2.23 Card controls inside the provider's authorisation timeout — `src/lib/cards/*`, `src/app/api/webhooks/lithic-auth/route.ts`, `db/migrations/0014_card_controls.sql`
+
+Stretch-ladder item two, and the only item on that ladder that *has* to be
+real-time: everything else can be a job that runs later. Lithic calls us and
+**waits**; the response body is the side effect.
+
+**The deadline was measured, not read.** Enrol an ASA responder pointing at a
+URL that stalls for twenty seconds, fire one `POST /v1/simulate/authorize`, and
+time it: baseline with no responder **0.334 s → APPROVED**; with the stalling
+responder **6.527 s → DECLINED, `UNKNOWN_HOST_TIMEOUT`, detailed result
+`CUSTOMER_ASA_TIMEOUT`**. So the provider waits ≈6.19 s, consistent with the
+documented 6000 ms, and — the part worth saying — **Lithic fails closed**. A
+responder that goes quiet declines the cardholder; it does not wave the
+transaction through. `PROVIDER_TIMEOUT_MS = 6_000` and
+`PROVIDER_RECOMMENDED_MS = 3_000` are pinned in `budget.ts` with that
+measurement above them.
+
+**Our own budget is the one that actually fires, and the two must not be
+confused.** `CONTROL_READ_BUDGET_MS = 600` (`budget.ts:69`) wraps the single
+control query in `withDeadline`; when it expires, `store.ts` returns
+`{ status: "unavailable" }` as a **value, not an exception**, and rule 1 of
+`decide()` turns that into a decline. That is a tenth of the provider's deadline
+and it is deliberate: we would rather answer "no" in 600 ms than be timed out at
+6 s, because a timeout declines anyway *and* loses the record.
+
+**Three decisions taken by Lithic's own traffic against the deployed endpoint,
+read back out of `card_auth_decision`** (all `source = 'provider'`, 2026-09-11):
+
+    00:42:24.687Z  decline  control_store_unavailable  601,521 us  $25.00 mcc 5812
+                   result_code VELOCITY_EXCEEDED
+                   inputs.detail "DeadlineExceededError: control read exceeded
+                                  its 600 ms budget", fail_mode "closed"
+    00:43:31.584Z  approve  card_not_under_control      14,297 us  $15.00 mcc 5812
+                   fail_mode "open" — this card token is not in our book
+    00:44:10.461Z  decline  mcc_blocked                147,419 us  $50.00 mcc 5542
+                   result_code UNAUTHORIZED_MERCHANT, control version 1
+
+and the provider's own record of the third one, which is the one to open in the
+room: transaction `b1bd8d71-554a-46fc-b80a-fe90044868a8`, **status DECLINED,
+result UNAUTHORIZED_MERCHANT**, 5000, network VISA, merchant `CORGI FUEL PUMP
+LIVE`, mcc 5542, created 2026-09-11T00:44:10Z. Our row and Lithic's row agree to
+the second. The enrolment is checkable in one call:
+`GET /v1/responder_endpoints?type=AUTH_STREAM_ACCESS` answers
+`{"enrolled": true, "url": "https://corgi-trial-psi.vercel.app/api/webhooks/lithic-auth"}`.
+
+**The two fail modes point in opposite directions, on purpose.** Rule 1
+(`control_store_unavailable`) fails **closed** — we hold controls for this card
+and cannot read them, so we decline rather than guess. Rule 2
+(`card_not_under_control`) fails **open** — this token is not in our book at all,
+we hold no opinion, and Lithic's own card limits still apply. `RULE_ORDER`
+(`decide.ts:102`) is a separate constant from the display order precisely so that
+reordering a screen cannot change what a card may buy, and `decide()` is pure: no
+I/O, no clock, no `sql` handle in scope.
+
+**Own the two holes before they are found.** First, the wire code for rule 1 is
+`VELOCITY_EXCEEDED`, the same code as the three limit rules — an outage looks
+like a velocity breach to the acquirer. Second, and worse: the argument for
+failing closed is partly *"every fail-closed decline leaves a row, so the
+customer can be found and made whole"* — but rule 1 fires **because the database
+is gone**, so the append fails too, and `appendDecision` swallows it, retries once
+through `after()`, logs `asa.decision_lost` and returns the verdict to Lithic
+regardless. In the one case where fail-closed matters most, the evidence is a log
+line, not a row. The cold-start row above exists only because that particular
+outage was a slow read rather than an unreachable database.
+
+### 2.24 A second stablecoin provider, behind the same interface — `src/lib/rails/stablecoin/circle-*.ts`
+
+`StablecoinPayoutProvider` (`types.ts:341`) is four members: `id`, `label`,
+`health()`, `send()`. Two implementations satisfy it — `directStablecoinProvider`
+(`base.usdc`, the hand-rolled signer) and `circleStablecoinProvider`
+(`circle.w3s`) — plus `unconfiguredCircleProvider()`, which satisfies the same
+interface and **reports `not_configured` rather than throwing**, because a
+provider that explodes on a missing key is a provider you cannot ask a health
+question. Selection is `STABLECOIN_PROVIDER`, read explicitly
+(`circle-registry.ts:126`) and never inferred from which credentials happen to be
+present: asking for Circle without Circle configured yields the refusing provider
+rather than a silent fall-back to the other rail.
+
+**The second payout, on chain:** tx
+`0x251858a3d3daf45aa2a8e2bc970351580b33bfe97a7f18e951b207fb91d476fa`, block
+**46,657,187** at 2026-09-10T23:24:22Z, receipt status `0x1`, 0.100000 USDC, Base
+Sepolia (chain id 84532), Circle transaction
+`a384de2e-ff91-5bc8-8c05-7f13112ba22b`, journal entry
+`9ad9fac3-b0e5-4d87-a5b0-55027ede22d5` — DR 2100/Ridgeline 10¢, CR 1140 10¢.
+Say the sentence that makes it worth more than a second demo: **the receipt was
+read off Base Sepolia by us, not reported by Circle**, and the ERC-20 `Transfer`
+log in that block was re-matched against our own amount and recipient.
+
+**Why the wait stops at `CONFIRMED`.** Circle's own state ladder ran
+`INITIATED` (no hash) → at ~10 s `CONFIRMED` with the hash → **and at 181 s it
+was still `CONFIRMED`, not `COMPLETE`**. `COMPLETE` is Circle's only "success"
+terminal state, so a consumer that waits for it is waiting for a provider's
+opinion about a fact the chain settled at ~10 s. The loop's stop condition is the
+**hash** (`circle-provider.ts:256`: `while (transaction.txHash === null && !isTerminal(...))`),
+and from there the chain is the authority.
+
+**The type gate, stated precisely.** `postUsdcPayout(input, conn)` takes an input
+object whose `outcome` field is typed `ConfirmedPayout` — `Extract<PayoutOutcome,
+{ kind: "confirmed" }>`. Circle's `INITIATED/QUEUED/SENT` map to `acknowledged`,
+whose `txHash` is typed `null`, so handing an acknowledgement to the posting
+function fails to compile twice over: the discriminant is wrong and the fields
+are missing. Be exact about the limit when they push: it is a **discriminated
+union, not a branded type**, and `postUsdcPayout` performs no runtime check on
+`outcome.kind` — an `as ConfirmedPayout` cast would post. And the gate is on that
+function, not on the journal: `scripts/book-usdc-funding.mjs` posts a USDC entry
+through `postEntry()` directly. The honest claim is *"nothing routed through
+`postUsdcPayout` can post an unconfirmed transfer"*, not *"no USDC entry can
+exist without a receipt"*.
+
+**Own the gap:** Circle has no operator entry point. `scripts/payout-usdc.mjs` is
+the direct rail only; nothing outside the package and its tests drives
+`circleStablecoinProvider`, `stablecoinProviderHealth()` is not wired into
+`/api/health`, and `.env.example` documents no `CIRCLE_*` variable. The transfer
+happened; the *path to repeat it* is a library call, not a command.
+
+### 2.25 Reconciling 1140 against the chain — `scripts/reconcile-usdc.mjs`
+
+`1140 USDC omnibus wallet — Base Sepolia` is **one account** (`chart.ts:148`,
+materialised by the seed, not by a migration) and USDC now sits in **two**
+wallets: the treasury wallet we sign for, and the Circle developer-controlled
+wallet. The script used to read a single address out of the environment, so it
+compared one wallet against an omnibus account covering two and reported **90
+cents of drift against a ledger that was exactly right**. The arithmetic is
+worth having in your head because a panel will make you do it: treasury 1,850¢ +
+Circle 90¢ = **1,940¢**, which is exactly what 1140 says; read the treasury alone
+and you get 1,850¢ against 1,940¢, and the missing 90¢ is not drift, it is a
+venue you did not look at.
+
+It now enumerates the wallets at runtime — env for the treasury, a live
+`GET /v1/w3s/wallets` for Circle — and, crucially, **refuses to reconcile
+against a subset**: a venue it knows about but cannot read sets `incomplete`, and
+the final verdict is `ledgerCents === chainCents && !incomplete`, exit 1
+otherwise. Today's run, live:
+
+    direct (treasury)   1850 cents  (18.5 USDC)  0xd3629d73…2918
+    circle 9a3524c0       90 cents  (0.9 USDC)   0xeaa8ce10…1e1c
+    ledger 1140         1940 cents
+    on chain, total     1940 cents  (19.4 USDC, 2 wallet(s))
+    difference             0 cents
+    RECONCILES — the books agree with the chain          exit 0
+
+**Volunteer the hole in the fix**, because it is the same shape as the bug:
+`incomplete` can only be set *inside* the branch guarded by `if (CIRCLE_API_KEY)`.
+With that key unset the script reconciles the treasury alone, reports
+"1 wallet(s)", and prints the original wrong answer as drift. A 200 with an
+unexpected body, or a page-limited wallet list, is silent for the same reason.
+The guard covers *unreachable Circle* and not *unconfigured Circle*, and the
+second is the likelier of the two on a fresh machine.
 
 ---
 
@@ -1221,6 +1801,103 @@ is a true high-water mark, every row below it is immutable, and the content hash
 over the canonical rendering is a pure function of (format, account, period,
 watermark).
 
+### 3.12 "I just funded $5,000. When can I spend it?"
+
+The honest answer has two halves and the second one is a bug, so lead with the
+policy and then say the bug before they find it.
+
+**The policy.** The credit posts to the ledger immediately and an
+`uncleared_credit` hold for the same amount opens in the same transaction, so
+ledger moves and available does not. The hold cites a row of
+`funds_availability_policy` chosen by the credit's **value date** — ACH from the
+customer's own verified account is one banking day, released at 09:00 ET — and
+the instant is computed with a DST-correct conversion, not an offset. Banking
+days are computed from the eleven Federal Reserve holiday rules, including the
+Fed's Saturday rule.
+
+**The bug.** There are two release predicates. `v_available_balance` releases on
+the clock: `now() >= available_at`, nothing running. `availableBalance()` — the
+function `/accounts`, the holds path and every standing order actually call —
+releases only when a `hold_closure` row exists. The function that writes that
+row, `releaseAvailableCredits()`, **has no caller anywhere in the repository**.
+So on the SQL view the money appears at 09:00 ET and on the screen it never
+does. §4.8 is the full map, including the dated prediction: ten uncleared holds
+on this book mature at 2026-09-11T13:00Z, and at that instant
+`v_hold_release_drift` goes non-empty — an invariant nothing currently queries.
+
+### 3.13 "Your card controls run inside someone else's timeout. What happens when your database is gone?"
+
+"We decline, in 600 ms, and I can show you the row." `CONTROL_READ_BUDGET_MS` is
+600 — one tenth of Lithic's measured 6000 ms — and the control read is wrapped in
+a deadline that returns a **value**, not an exception, so the unavailable store
+is an input to `decide()` rather than an error path around it. Rule 1 of
+`RULE_ORDER` turns it into a decline. The live row reads `decision_latency_us
+601521`, `rule control_store_unavailable`, `inputs.detail "DeadlineExceededError:
+control read exceeded its 600 ms budget"`, `fail_mode "closed"`.
+
+Then volunteer the two things wrong with it. The wire code is
+`VELOCITY_EXCEEDED`, the same code the three limit rules use, so on the acquirer's
+side an outage is indistinguishable from a customer hitting a limit. And the
+audit argument eats itself: the case for failing closed is partly "every decline
+leaves a row", but rule 1 fires *because the database is unreachable*, so the
+append fails too — it retries once through `after()` and then logs
+`asa.decision_lost`. The row above exists only because that outage was a slow
+read rather than a dead database. Contrast rule 2, which fails **open** on
+purpose: a card token we have never seen is not a card whose controls failed, and
+Lithic's own limits still apply.
+
+### 3.14 "Why is the standing order's idempotency key computed in the database?"
+
+Because the alternative is a double payment with no bug in it. The key is a
+`GENERATED ALWAYS … STORED` column built from `EXTRACT` and `lpad` over
+`scheduled_date`. `to_char` and `date::text` are only **`STABLE`** in Postgres —
+they read `DateStyle` — so a key rendered through them changes when a pooled
+connection hands you a session with a different setting, and two keys for one
+occurrence is a second payment. `EXTRACT` + `lpad` is IMMUTABLE, and this is not
+a claim: Postgres refuses to create a generated column whose expression is not
+immutable, so the property is carried by the DDL rather than by a comment. The
+application never computes the key at all — it reads it back with `RETURNING`.
+
+The follow-up to expect is *"so what stops the app passing its own key?"* — the
+trigger `assert_standing_order_outcome()`, which refuses any `raised` outcome
+whose instruction key differs from the occurrence's, along with account, rail,
+amount, currency and `value_date = scheduled_date`.
+
+### 3.15 "You added a level to the account tree. What did it break?"
+
+"One invariant, and it was the one whose comment said it could not be broken."
+The pot is an account coded `2100.<uuid>` parented to the business's `2100` leaf.
+`v_deposit_control_drift` compares a `WITH RECURSIVE` subtree walk against a
+"reported" figure, and its own header says it was written as a subtree walk *so
+that adding a sub-account level later cannot silently break it*. The subtree half
+was exactly as advertised. The **reported** half was a flat `code = '2100'`
+filter, which did not recurse and did not see the pot: one pot, one $500 transfer
+inside a rolled-back transaction, and the view reported subtree 13,577,077
+against reported 13,527,077 — drift of exactly the 50,000 cents in the pot.
+
+The fix generalises the reported side to `code = '2100' OR the account is in the
+deposit tree`, a strict superset of the old row set, and the pots integration
+test re-runs the **original** predicate verbatim to assert it *would* have
+drifted. That is the §6 rule applied rather than quoted: the negative test is
+built out of the guard's own exclusion clause.
+
+### 3.16 "Circle told you CONFIRMED, not COMPLETE. Why did you post?"
+
+Because `COMPLETE` is Circle's opinion about a fact Base Sepolia had already
+settled. Measured on the live transfer: `INITIATED` with no hash at t+0,
+`CONFIRMED` with the hash at about ten seconds, and **still `CONFIRMED` at 181
+seconds**. The wait loop's stop condition is the appearance of the **transaction
+hash**, not a provider status, and from there the authority is the chain: read
+the receipt, assert `status: 0x1`, re-check the block is canonical, and re-match
+the ERC-20 `Transfer` log against our own amount and recipient. Only that
+produces a `ConfirmedPayout`, and only a `ConfirmedPayout` can reach the posting
+function.
+
+Say the limit in the same breath: it is a discriminated union, not a branded
+type, so a cast would defeat it; and the gate is on `postUsdcPayout`, not on the
+journal — `scripts/book-usdc-funding.mjs` posts a USDC entry through `postEntry()`
+directly, which is how the opening balance was booked.
+
 ---
 
 ## 4. Where we are weak, and how to say it
@@ -1238,7 +1915,12 @@ receiver are the parts most candidates get wrong, and they are right here. What
 is absent is the wiring."* Two caveats to state with it. That score was taken at
 16:45, before the drain, the consumers, the statements screen and delivery
 freshness landed — Iteration 1 at the bottom of the same file measures the
-delta. And the evaluator disclosed its own damage: it ran the suite against the
+delta — and it is now materially out of date in our favour, because "the wiring"
+is most of what landed afterwards: the core loop runs end to end against the
+deployed URL, the KYB gate is live and reachable, funding, standing orders, pots,
+payee confirmation and card controls all have screens and provider traffic. Do
+not quote 62 as a current number; quote it as the number that named what to build
+next, and then say what got built. And the evaluator disclosed its own damage: it ran the suite against the
 production database, so much of the ~50-row approvals queue visible in the demo
 is evaluation residue, and it probably consumed the Lithic rate-limit budget that
 made attack 8 fail on that run.
@@ -1287,7 +1969,7 @@ top-level status** — a reader of `webhookHealth` saw the outage and a monitor
 watching `status` did not. It is `some` now, for a reason that has since been
 re-derived from measurement rather than from that history (§2.13), and the test
 asserts both gate shapes rather than only the one in use. That is guard four of
-the five in §6.
+the nine in §6.
 
 What already held through the dark window: the trial balance does not move, the
 swallowed event has zero inbox rows, nothing is invented; on recovery a doubled
@@ -1306,29 +1988,37 @@ quote that run, not this paragraph.
 describe delivery freshness as missing. Both are stale in the under-claiming
 direction; say it before they read it.
 
-### 4.3 The simulated slot, and the one that stopped being simulated
+### 4.3 The slot that stopped being simulated, and the word that has to go with it
 
-**`business_registry`.** Say: "Every KYB option on the brief's own menu is gated,
-and I measured that rather than reading it off a support page." Persona KYB and
-Sumsub want a sales conversation; Middesk and Stripe Connect require business
-verification first; `POST /v1/accounts` returns 400 *"You can only create new
-accounts if you've signed up for Connect"*. The registry runs behind the same
-interface as a labelled simulator and the composite degrades its own evidence
-string. **Week two:** it is not on the list — the honest position is that this
-slot cannot be made live inside a trial, and the fix is a Middesk or Persona KYB
-sales conversation, not code.
+**`business_registry` is live, and the qualifier is not optional.** Say:
+"Every KYB vendor on the brief's own menu is gated — Persona KYB and Sumsub want
+a sales conversation, Middesk and Stripe Connect want business verification
+first, and `POST /v1/accounts` answers 400 *'You can only create new accounts if
+you've signed up for Connect'*. So the registry leg reads **GLEIF**, which is a
+real third party answering real questions about real entities and is **not one of
+the three vendors the brief names.** It is a substitution, it sits at the bottom
+of a precedence ladder every named vendor outranks, and two environment variables
+move it the hour one is available." That sentence is worth more in the room than
+the label, because the label alone is the thing the trial fails people for.
 
-**`stablecoin` — this is the one that moved, and the framing changes with it.**
+Two consequences to volunteer with it. Making the leg honest **broke the core
+loop** — every fictional business answers `not_in_lei_registry`, falls to
+`needs_review`, and `canTransact()` refuses it — which is why the operator review
+in §2.14 exists at all. And the deployed gate runs
+`requireLiveEvidence: false`, so the one business that can move money on this
+book does so on a named human's recorded judgement rather than on a vendor's
+answer.
+
+**`stablecoin` — the one that moved first, and the framing changed with it.**
 For most of the build the honest sentence was "we hold twenty dollars of USDC and
 zero wei of gas, so the rail can read the chain and cannot move a cent", after a
-probe that called `balanceOf`, got a 200 and reported LIVE. Gas landed, and the
-payout confirmed: `0xb47c5a36…86a1`, receipt `0x1`, block 46,651,201, 0.500000
-USDC. The probe reads the token balance, the gas balance and the gas price
-together and claims live only if a transfer is fundable, so the slot is live
-because a transfer *can* be paid for and a transfer *was*. **Say:** "That slot
-was simulated four hours ago and the reason it is not any more is a transaction
-you can open in a block explorer." Its three honest gaps are §4.7 and they get
-volunteered with it.
+probe that called `balanceOf`, got a 200 and reported LIVE. Gas landed, and there
+are now **two** confirmed payouts through **two** providers behind one interface:
+`0xb47c5a36…86a1` (block 46,651,201, our own signer) and `0x251858a3…76fa`
+(block 46,657,187, Circle). The probe reads the token balance, the gas balance
+and the gas price together and claims live only if a transfer is fundable. **Say:**
+"That slot was simulated this morning and the reason it is not any more is two
+transactions you can open in a block explorer."
 
 ### 4.4 Three stale memo holds, and the invariant that cannot see them
 
@@ -1394,12 +2084,14 @@ and a paid plan.
   than either answer. Either way, the scanner now reads **every tracked file**,
   not just the staged diff, because the original only read the diff and by
   construction never re-examines an already-committed file.
-- **The KYB module is unwired and its README overclaims.** Nothing outside
-  `src/lib/kyb/` imports it and `kybHealthReport()` has no callers, so the
-  composite, the six closed forgery routes and the four-layer honest-labelling
-  argument are all real and none of them is reachable from a running request.
-  Week two: an onboarding route, plus wiring `kybHealthReport` in a way that does
-  not create a second opinion about liveness (see §2.14).
+- **The KYB module used to be unwired, and this bullet is kept because the shape
+  of the correction matters.** It said nothing outside `src/lib/kyb/` imported the
+  module, so the composite and its closed forgery routes were real and
+  unreachable. That is no longer true: there is an onboarding route, the gate runs
+  inside `requestPayment()`, and core-loop leg 1 presses it against the deployed
+  URL and reads the refusal code back. What remains is narrower —
+  `kybHealthReport()` still has no non-test caller, and wiring it naively would
+  reintroduce the 021 two-opinions bug (§2.14).
 - **Migration `0004` does not exist, and `scripts/migrate.mjs` has no gap
   detection.** It reads the directory, sorts, and applies what is there, so the
   absence is silent. A grader who lists `db/migrations/` will ask. The honest
@@ -1438,16 +2130,18 @@ and a paid plan.
   limit is instances × limit. It is written down in `src/lib/mcp/ratelimit.ts`. It
   is not the control that stops an attacker — the token, the tenant scope and the
   approval queue are.
-- **Several documents are stale in the under-claiming direction.** README says
-  "24 entries" (there are 33) and that there is no statement renderer; CUT-LIST
-  §3.4 and `src/test/livefire/README.md` §4 say the same, and CUT-LIST §2.5 says
-  delivery freshness is missing. `src/test/livefire/attack-07-provider-outage.test.ts`'s
-  own header records that it read 5 of 7 slots live, which was true at that
-  commit and is 6 now. All of those landed or moved after the docs were
-  written. Say it before they do — under-claiming is the safe direction, but only
-  if you are the one who points at it, and the mechanical version is
-  `node scripts/audit-claims.mjs`, which checks the counts against the live
-  endpoint and passes today.
+- **Several documents are stale in the under-claiming direction, and the list is
+  now long enough to have its own section — §4.10, re-checked at 01:25Z.** The
+  ones that are still open live there. Two examples of the drift running the
+  *other* way, which is the reassuring half: README's decision-log count and the
+  cut list's "pots are cut" row were both stale this evening and were corrected
+  by their owners within the hour, and
+  `src/test/livefire/attack-07-provider-outage.test.ts`'s header still records
+  "`/api/health` reports 6 of 7 slots live", which was true at that commit and is
+  7 now. Say it before they do —
+  under-claiming is the safe direction, but only if you are the one who points at
+  it, and the mechanical version, `node scripts/audit-claims.mjs`, covers the one
+  claim that can fail the trial and none of the rest.
 - **No authentication.** Cut on day one, never built, and `docs/DEMO.md` says so
   in its first section rather than presenting a role switch as a login.
 
@@ -1486,15 +2180,141 @@ rejected as a zero-amount line — but the accumulated figure is real on mainnet
 The actual `gasCostWei` is carried on the outcome and written into the entry
 description, so nothing is lost, only unposted.
 
-**3. Account 1140 does not reconcile to the wallet.** The ledger says 1140 is
-−$0.50; the chain says the wallet holds 19.50 USDC. The difference is exactly the
-opening 20 USDC, which arrived from the Circle faucet and never entered the
-books. Booking it needs an equity-contribution account the chart does not have —
-3000 is a non-postable rollup and 3100 is retained earnings — and inventing one
-under time pressure against money rows is the wrong trade, the same call as the
-three stale memo holds in §4.4. **The gap is the un-booked opening balance and
-nothing else**, which is a stronger sentence than "it does not reconcile" and is
-the one to say.
+**3. Account 1140 does not reconcile to the wallet — CLOSED, and the way it
+closed is the interesting part.** This used to read: the ledger says 1140 is
+−$0.50, the chain says 19.50 USDC, and the difference is exactly the opening 20
+USDC that arrived from the Circle faucet and never entered the books. It is
+booked now, against a new `3200 Contributed capital — testnet funding`
+(`scripts/book-usdc-funding.mjs`, key `usdc:opening-funding:circle-faucet`),
+because an un-booked opening balance is a hole in the books rather than a
+labelling problem. Today's live run of `node scripts/reconcile-usdc.mjs` is
+**`RECONCILES`, exit 0**, 1,940 cents of ledger against 1,940 cents on chain
+across **two** wallets.
+
+And what it took to get there is §2.25: with the money in two wallets and 1140
+being one omnibus account, the reconciler's old habit of reading a single address
+reported 90 cents of drift against a ledger that was exactly right. A
+reconciliation is at its most confident precisely when a new venue has just been
+added, which is the last moment it should be — that is guard seven in §6.
+
+### 4.8 Three definitions of "available", and they disagree by $30,662.10
+
+**Say it first, in one sentence:** "Available is derived everywhere — there is no
+stored balance — but *derived* is not the same as *agreed*, and this repo
+currently derives it three ways from three different questions. That is the
+weakest thing in the area you grade hardest, and here is the map."
+
+| Where | What it means | Predicate |
+| --- | --- | --- |
+| `availableBalance()` — `src/lib/ledger/balances.ts:120`, used by `/accounts`, holds, standing orders, live fire | ledger − card holds − uncleared, over **every** line on the `2100` leaf | a hold counts as released only when a `hold_closure` row exists and is not reversed |
+| `readBalanceCents()` — `src/app/(app)/funding/live-source.ts:137`, used by `/funding` and its receipt | the same four figures **as at a snapshot**: `value_date <= today AND booking_seq <= watermark` | same closure rule |
+| `v_available_balance` — `db/migrations/0001_ledger.sql:1089` | the SQL view, built on `v_hold_state.is_released` | an uncleared credit is released **on the clock**: `now() >= available_at` |
+
+The first two differ by **$30,662.10** on the seeded business, because the book
+carries $37,212.00 of debits value-dated tomorrow and standing-order credits
+dated 2027, and only one of the two applies a value-date predicate. That number
+is not a discovery a reviewer makes — it is written in
+`funding/live-source.ts:97` by the worker who found it, with the reason the
+funding screen refuses to print both: *"a headline balance and a receipt on the
+same page that disagree by $30,662.10 about the same account, at the same
+instant, is a screen that has taught the reader its numbers cannot be trusted."*
+
+**The third one is the sharper problem, and it is not cosmetic.** The view
+releases an uncleared credit when the clock passes `available_at`; the function
+releases it only when somebody writes a `hold_closure` row. The function that
+would write that row, `releaseAvailableCredits()` (`plaid/adapter.ts:912`), has
+**no caller anywhere in the repository** — not a route, not a cron, not a test.
+`vercel.json` registers two crons and neither is it. So the honest answer to
+"when does my $5,000 become spendable" is:
+
+- on `v_available_balance`, at 09:00 ET the next banking day, with nothing
+  running — which is the design as written; and
+- on `/accounts` and inside a standing order's funds check, **never**, because
+  no code path closes that hold.
+
+And there is a third consequence worth saying before it is found:
+`v_hold_release_drift` (0011:151) exists to assert "a released hold withholds
+nothing". Because `is_released` goes true on the clock while the memo leaf still
+carries the withheld amount, that invariant goes **non-empty the moment the hold
+matures** — and nothing queries it. It is not in `dbcheck`'s 14, it is in no
+test, it is on no route.
+
+**Week two, in order:** wire `releaseAvailableCredits()` to the existing daily
+drain (one import and one call — the function is written, tested and idempotent
+by `hold_closure`'s own uniqueness), then collapse the first two definitions by
+giving `availableBalance()` the snapshot predicate and letting the funding screen
+delete its local copy. Do not do it in the other order: unifying the readers
+while the sweep is unwired would make both screens agree on a number that is
+wrong in the same direction.
+
+### 4.9 Card controls: what the live decline proves, and what it does not
+
+**Say:** "Three ASA decisions were taken by Lithic's own traffic against the
+deployed endpoint, and one of them is a real decline. Everything else about this
+feature is proven at a smaller radius than that, and here is the line."
+
+**Proven with the provider in the loop**, `card_auth_decision` rows carrying
+`source = 'provider'` (2026-09-11, and the enrolment is one call away:
+`GET /v1/responder_endpoints?type=AUTH_STREAM_ACCESS` → `{"enrolled": true, …}`):
+a fail-closed decline at 601.5 ms when the control read blew its 600 ms budget;
+three warm approvals at 14.3–15.1 ms under the fail-**open** rule for a card this
+book does not hold; and the one to open in the room — `$50.00` at mcc 5542,
+rule `mcc_blocked`, **147.4 ms**, our `UNAUTHORIZED_MERCHANT`, matched by Lithic's
+own transaction `b1bd8d71-…`, status **DECLINED / UNAUTHORIZED_MERCHANT**,
+network VISA, created 2026-09-11T00:44:10Z.
+
+**Not proven at that radius, and do not let the sentence blur.** The *approve
+under configured controls* branch has been driven against a live database in the
+integration suite, not over HTTP by the provider — the warm approvals above are
+rule 2, which approves precisely because the card is not under our control. The
+limit rules (per-transaction, daily, monthly) are integration-tested with
+`source = 'harness'` rows and a hard-coded latency. And `docs/CARD-CONTROLS.md`
+§8 still reads as a to-do list for enrolment and says "Lithic is not currently
+calling this system" — that document is stale in the under-claiming direction and
+the database contradicts it; say so before they quote it back.
+
+**Three more to volunteer.** The fail-closed decline cannot reliably leave the
+row its own justification depends on (§3.13). A voided authorisation keeps its
+daily-limit slot until the book window rolls — known, written down, not fixed. And
+the ASA HMAC secret is fetched from Lithic at runtime with a ten-minute TTL, so a
+cold instance during a Lithic **control-plane** outage cannot verify a signature
+and refuses every authorisation — an availability dependency sitting in the auth
+path, which is defensible and is not obvious.
+
+### 4.10 The documents that are behind the system, named before they are read
+
+Under-claiming is the safe direction, and it is only safe if you are the one
+pointing at it. Everything below landed after the document that describes it, and
+`node scripts/audit-claims.mjs` does **not** catch any of it — that script checks
+the live/simulated count against the endpoint, which is exactly the class of drift
+it was built for and exactly not this one.
+
+**Checked at 2026-09-11T01:25Z, while three other documents were being rewritten
+by the people who own them — so re-run this read on the morning rather than
+trusting the table.** What it looked like at that instant:
+
+| Document | What it still says | What is true |
+| --- | --- | --- |
+| `docs/CARD-CONTROLS.md` §7–§8 | ASA "is not deployed", "Lithic is not currently calling this system" | enrolled, deployed, seven provider-sourced decisions in `card_auth_decision`, one of them a real decline |
+| `docs/STABLECOIN.md` §2 | booking the opening balance "needs an equity-contribution account the chart does not have" | `3200 Contributed capital — testnet funding` exists and the balance is booked; the reconciler exits 0 |
+| `docs/KYB.md` | `KYB_FORCE_SIMULATED` currently suppresses the registry leg | unset in `.env`; **still set in `.env.example`**, so a fresh clone suppresses a working live integration |
+| `src/lib/env.schema.ts` | `business_registry` provider label: "Stripe Connect (gated) — simulated" | the slot probes GLEIF and reads live — a live slot whose own label says "simulated", on the page you will be demoing |
+| `src/lib/rails/types.test.ts` header | "three compile-time stubs" | two |
+| `docs/EVALUATION.md` | 62/100, "what is absent is the wiring" | a fair verdict at 16:45 and not a current one (see the opener of this section) |
+
+Two that were stale when this section was drafted and were fixed by their owners
+within the hour — `README.md`'s "the stablecoin slot is simulated, no transaction
+hash exists" and `docs/CUT-LIST.md`'s "pots are cut" — which is the pattern
+working rather than an exception to it. Note that the cut list's replacement text
+now says *"the subtree walk stayed recursive, which is what made adding the level
+cheap"*: true of one half of `v_deposit_control_drift` and the reason the other
+half went unexamined, so if they read that line, §3.15 is the answer.
+
+The general version, which is the one they will actually take away: **this repo's
+documents are written per feature by whoever built it, and no feature updates
+another feature's document.** The mechanical check covers the one claim that can
+fail the trial; everything else is convention, and convention drifted within
+hours every time.
 
 ---
 
@@ -1631,36 +2451,180 @@ gas and the wallet that 1140 does not reconcile to. The payout is the strongest
 single artefact in the build and the three gaps are the reason it is worth
 believing.
 
+### 5.5 Lithic's card simulate surface is seven endpoints, and a debit clearing cannot be reversed at all
+
+The brief's correction test says *a merchant reverses Tuesday's settlement on
+Thursday*. On this provider you cannot do that directly, and finding out took
+enumerating the surface with an empty body — an endpoint that exists answers
+**400 "Missing required parameter(s)"**, one that does not answers **404**:
+
+    exists (7)   authorize   authorization_advice   clearing   void   return
+                 return_reversal   credit_authorization_advice
+    404   (12)   credit_authorization  force_post  financial_authorization
+                 correction  correction_debit  correction_credit
+                 clearing_reversal  reversal  settlement  chargeback
+                 dispute  expire_authorization
+
+Then, against a transaction that had authorised $50.00 and cleared $73.40, the
+three ways to reverse that clearing each fail differently:
+
+    return_reversal   400  "Return reversal is not supported for debit transactions"
+    void              201  appends AUTHORIZATION_REVERSAL; settled_amount unchanged
+    clearing -7340    201  the sign is IGNORED; a second capture, settled 7340 -> 14680
+
+**The third one is the finding.** It looks like it worked. A consumer that
+trusted it would double the settlement and call it a correction. So the
+correction path is driven where the provider actually supports it — a `return`
+taken back by a `return_reversal` — and the code says so above the assertions
+rather than in a document. Two caveats to give yourself: the enumeration is
+recorded as a table rather than as a script, so re-derive it if it matters; and
+the `void` row disagrees with an earlier measurement in
+`src/lib/rails/lithic/README.md` (200, no event appended, no effect), which is
+resolved in prose and not by a captured response. Say "these two measurements
+disagree and here is which I would re-run" rather than picking one.
+
+### 5.6 The ASA deadline is 6000 ms, the provider declines on expiry, and the deadline that actually fires is ours
+
+Measured by stalling on purpose: enrol an ASA responder at a URL that sleeps for
+twenty seconds, fire one simulated authorisation, and time it against a
+no-responder baseline. **0.334 s → APPROVED** with no responder; **6.527 s →
+DECLINED, `UNKNOWN_HOST_TIMEOUT`, `CUSTOMER_ASA_TIMEOUT`** with the stall. Two
+facts fall out and both matter: the provider waits about **6.19 s**, consistent
+with its documented 6000 ms, and **it fails closed** — a responder that goes
+quiet declines the cardholder rather than waving the transaction through. That is
+the opposite of the assumption most people make about a real-time decision hook,
+and it changes the design: since silence declines anyway, there is nothing to be
+gained by being slow, and everything to be gained by answering "no" early with a
+record.
+
+Which is why the deadline that actually fires is **600 ms, ours** — a tenth of
+the provider's. It is a value returned from the store, not an exception thrown
+past the decision, so "the control store did not answer" is an *input* to a pure
+`decide()` rather than a hole in the control flow. The live row proves it fired:
+601.5 ms, `control_store_unavailable`, `fail_mode "closed"`. Anyone quoting
+"601 ms" as a provider timeout has conflated two numbers that are an order of
+magnitude apart.
+
+### 5.7 The ABA check digit catches every single-digit typo and cannot see a third of the transpositions
+
+Swept over a fixed-seed corpus of 500 valid routing numbers:
+
+    single wrong digit          40,500 cases   100.00% caught
+    adjacent transposition       3,656 cases    89.03% caught
+    transposition 3 apart        2,665 cases     0% caught
+    transposition 6 apart        1,354 cases     0% caught
+
+and the two failures are **structural, not statistical**, which is the whole
+finding. The adjacent misses are exactly the digit pairs differing by **5** —
+adjacent weight differences cycle −4, +6, −2, each sharing a factor of 2 with 10,
+so the shift vanishes precisely when the digits differ by 5 mod 10. Three and six
+apart are caught *never*, because the weight vector `3,7,1` repeats every three
+digits, so those positions carry equal weights and the swap moves the weighted
+sum by zero.
+
+The design consequence is the second half. For an **invalid** number, every
+weight is a unit mod 10, so there is exactly one repairing digit at each of the
+nine positions: **nine repairs, always.** A "did you mean" list would be nine
+equally likely guesses wearing the costume of help, so the screen offers none and
+says to check the payee's own paperwork. And the provider will not do this for
+you: Increase's `/routing_numbers` answers a checksum-invalid number with **200
+and an empty list** — the same answer it gives for a real but unlisted bank. It
+validates shape, not arithmetic.
+
+### 5.8 Circle says CONFIRMED for a long time before it says COMPLETE
+
+    t+0s      INITIATED   no txHash          the acknowledgement
+    t+~10s    CONFIRMED   0x251858a3…        the money has moved
+    t+181s    CONFIRMED   0x251858a3…        still not COMPLETE
+
+`COMPLETE` is Circle's only success-terminal state, so a consumer that waits for
+it waits minutes for a provider's opinion about a fact the chain settled in
+seconds — and a poll timeout tuned to "Circle reaches a terminal state in
+seconds" would have returned empty-handed on a transfer that had already
+succeeded. The stop condition is therefore the **transaction hash**, after which
+the chain is the authority: receipt `0x1`, block re-checked as canonical, and the
+ERC-20 `Transfer` log re-matched against our own amount and recipient. The
+provider is a broadcaster, not a witness. (The 180 s poll timeout in the code
+still carries the comment that this measurement contradicts — it is a fair thing
+for them to spot.)
+
 ---
 
-## 6. Five guards, one failure shape
+## 6. Nine guards, one failure shape
 
 If they take one thing away that is not about this repo, make it this. It is also
 the one claim in here they can push back on, so it is worth having the
 counter-argument ready.
 
-    guard              the exclusion             what it let through
-    ---------------------------------------------------------------------------
-    v_hold_drift       WHERE NOT is_released     a wrong closure row
-    secret scanner     plain grep                1,206 lines after a NUL byte
-    escalation gate    slots.every(live)         any outage, once a slot was
-                                                 honestly unprobed
-    doc auditor        "N of 7" only             it read past "4/7 live", its
-                                                 own log's shorthand
-    secret scanner v2  0x + 64 hex shape         would have fired on 24 curve
-                                                 constants, and a rule that noisy
-                                                 gets switched off
+    guard                         the exclusion                what it let through
+    ----------------------------------------------------------------------------------
+    1 v_hold_drift                WHERE NOT is_released        a wrong closure row
+    2 secret scanner              plain grep                   1,206 lines after a NUL
+                                                               byte
+    3 escalation gate             slots.every(live)            any outage, once a slot
+                                                               was honestly unprobed
+    4 doc auditor                 "N of 7" only                it read past "4/7 live",
+                                                               its own log's shorthand
+    5 secret scanner v2           0x + 64 hex shape            would have fired on 24
+                                                               curve constants, and a
+                                                               rule that noisy gets
+                                                               switched off
+    6 v_deposit_control_drift     reported side was a flat     a pot: subtree 13,577,077
+                                  code = '2100' filter         vs reported 13,527,077
+    7 reconcile-usdc              one address from env         a second wallet: 90 cents
+                                                               of "drift" against a
+                                                               ledger that was right
+    8 v_standing_order_double_    joins on a UNIQUE column     everything; the count it
+      fire                                                     tests cannot exceed 1
+    9 probe fromStatus()          any non-auth 4xx is `live`   a 404 — which Lithic
+                                                               answers with no
+                                                               credential at all
 
 **Every one of those exclusions is shaped exactly like the failure the guard
 exists to catch, and every one reported healthy while blind.** `v_hold_drift`
 excludes released holds and the bug *is* a spurious release (§4.4). The scanner
 skipped what looked binary, and a credential hiding past a NUL byte is precisely
-what it would miss (`DECISIONS.md` 023). The gate required *every* slot live, and
-an outage is what makes a slot not live (§2.13, §4.2). The auditor understood one
-spelling of the claim it guards, and the drifted document was written in the
-other spelling — its own iteration log's (`scripts/audit-claims.mjs`). The shape
-rule matched 64 hex characters, and this repo's honest constants are 64 hex
-characters (§2.16).
+what it would miss. The gate required *every* slot live, and an outage is what
+makes a slot not live (§2.13, §4.2). The auditor understood one spelling of the
+claim it guards, and the drifted document was written in the other spelling — its
+own iteration log's. The shape rule matched 64 hex characters, and this repo's
+honest constants are 64 hex characters (§2.16).
+
+**And the four new ones, which are worse, because two of them are claims I made
+myself.**
+
+**Six.** `v_deposit_control_drift` carries a comment in its own migration saying
+it was *"written as a subtree walk rather than 'sum the 2100 children' so that
+adding a sub-account level later cannot silently break it"*, and `docs/CUT-LIST.md`
+repeats it as a reason pots were safe to defer. Half true. The subtree side
+recursed and saw the pot. The **reported** side was a flat `code = '2100'` filter
+— the exact thing the comment promised it was not — and one pot with $500 in it
+made the invariant report drift of exactly $500 (§3.15). The claim and the blind
+spot were written into the same view, eight lines apart.
+
+**Seven.** `scripts/reconcile-usdc.mjs` read one address out of the environment
+and compared it against `1140`, an **omnibus** account. The moment a second
+wallet existed it reported 90 cents of drift against a ledger that was exactly
+right — and a reconciliation is at its most confident precisely when a new venue
+has just been added, which is the last moment it should be. It enumerates wallets
+at runtime now and **fails rather than reconciling against a subset**; and the fix
+still carries a hole of the same shape, because `incomplete` can only be set
+inside the branch that runs when `CIRCLE_API_KEY` is present (§2.25).
+
+**Eight.** `v_standing_order_double_fire` joins `payment_instruction` to the
+occurrence **on the idempotency key** and reports more than one instruction per
+key. That column is UNIQUE. The count can never exceed one, so the view is
+tautologically empty and detects nothing — and the failure worth detecting, two
+instructions raised for one occurrence under *different* keys, is the one case it
+cannot see. A test asserts it returns zero rows and presents that as evidence.
+
+**Nine.** `fromStatus()` in the liveness probe treats any non-401/403 4xx as
+`live`, reasoning that being told the request was wrong proves the credential was
+accepted. Measured against the live sandbox while writing this document:
+`GET /v1/not_a_real_endpoint` at Lithic answers **404 with the key and 404 with
+no Authorization header at all**. A mistyped path or a retired endpoint would
+therefore read as a live integration — the same failure as 011, wearing the
+costume of the fix for 011 (§2.13).
 
 **The one-line lesson: a guard must be tested against the thing it guards
 against, not merely run.** Running it proves it does not crash. Only the failure
@@ -1670,25 +2634,42 @@ case proves it can see.
 test'."* It is more specific than that, and the extra specificity is what makes
 it actionable: the negative test has to be constructed out of **the guard's own
 exclusion clause** — the `WHERE NOT`, the `every`, the regex's one spelling, the
-implicit "text files only". That clause is the line nobody reads twice, because
-it is the part that was added to stop the guard being annoying. Whoever narrowed
-it was solving a real false-positive problem, which is why the narrowing always
-looks reasonable and why the fifth one here (the 24-constant rule) is a guard
-that would have been switched off rather than one that was wrong.
+flat `= '2100'`, the single address, the `else` that means success. That clause
+is the line nobody reads twice, because it is the part that was added to stop the
+guard being annoying or to keep it cheap. Whoever narrowed it was solving a real
+problem, which is why the narrowing always looks reasonable. The strong form of
+the push-back is better still and worth conceding: *a guard whose exclusion you
+cannot state in one sentence is not a guard you have understood* — and by that
+standard three of the nine above were never understood by the person who wrote
+them, and that person was me.
 
-**The honest part, and say it.** Four of these were found one at a time, each by
+**There is one worked example of doing it right, and it is the one to show.** The
+pots integration test re-runs the **original, broken** `v_deposit_control_drift`
+predicate verbatim and asserts that it *would* have drifted by exactly the pot
+balances, then asserts the new view is empty. That is the rule applied rather
+than quoted: the negative test is built out of the clause that failed.
+
+**The honest part, and say it.** The first four were found one at a time, each by
 accident, by something else failing — an evaluator's clean scan, a README worker
 refusing a claim it could not justify, a live-fire run, a stale checkpoint email.
-Only the fifth was found by going looking on purpose, after the pattern had
-already been written down. The general rule came *after* the fourth instance, not
-before the first, and claiming otherwise would be exactly the kind of tidying-up
-this document exists to avoid. `DECISIONS.md` 033.
+The fifth was the first found by going looking, after the pattern had been written
+down. Six and seven were **found by building the next feature**, not by auditing:
+pots broke the view, and Circle broke the reconciler. Eight and nine were found
+by running the rule on purpose over code that had not been read for it, which is
+the first time in this build that the pattern was used as a tool rather than
+recorded as a habit — and it took four minutes and two `curl`s to find the ninth.
+The general rule came *after* the fourth instance, not before the first, and
+claiming otherwise would be exactly the kind of tidying-up this document exists to
+avoid.
 
-**And the audit is not finished.** `v_hold_drift`'s blind spot is still open and
-is in the cut list with its reason (§4.4). The same read has not been done over
-the other four invariant views. The table above is what the audit found in the
-guards that were looked at — not a clean bill of health for the ones that were
-not.
+**And the audit is still not finished.** Eight and nine are **open** — neither is
+fixed, both are written down here and in `DECISIONS.md` with their week-two lines.
+`v_hold_drift`'s blind spot is open too (§4.4), and `v_hold_release_drift` has a
+different disease: it is correct and **nothing queries it**, so it will go
+non-empty at 09:00 ET today without anyone hearing (§4.8). Seven invariant views
+returned zero rows when this was written; that is a measurement, not a clean bill
+of health for the guards nobody has read adversarially yet. `DECISIONS.md` 033 and
+045.
 
 ---
 
@@ -1706,11 +2687,15 @@ evidence column is the string the probe returned. If the README ever disagrees
 with this page, the page is right."
 
 **Point at:** `integrations.live` — **read the number off the page, do not quote
-any number written down here**; it was 7 of 7 at the last measured run, with
-`business_registry` the only simulated row and its evidence string *"Connect not
-enabled…"*. Then the `stablecoin` row, whose evidence string is now
-*"19.50 USDC and … wei gas — a transfer is fundable"* and which reports live
-because a transfer can be paid for and one was. Then `webhookHealth`, which is a
+any number written down here**; every slot read live at the last measurement.
+Then the `business_registry` row, and volunteer its qualifier rather than waiting
+to be asked: its evidence string is *"GET api.gleif.org /v1/lei-records/{lei} ->
+200 (Apple Inc.); GLEIF is a substitution for Middesk / Persona KYB / Sumsub KYB,
+all gated"*, and its **provider** field still says "Stripe Connect (gated) —
+simulated", which is stale in the safe direction and is on the screen. Then the
+`stablecoin` row, whose evidence string is *"18.50 USDC and … wei gas — a
+transfer is fundable"* and which reports live because a transfer can be paid for
+and two were. Then `webhookHealth`, which is a
 *different* question with a deliberately disjoint vocabulary
 (`fresh | stale | quiet | never | unknown`) so a provider can be live and stale at
 once with no contradiction to resolve.
@@ -1866,13 +2851,42 @@ has a window where money has moved under a name we do not yet know." If there is
 time, `--check` reads the chain and sends nothing, and §3.10 is the three crash
 points. Volunteer §4.7's three gaps here rather than at the end.
 
+### If they give you a fourth command, make it one of these
+
+```bash
+node scripts/coreloop.mjs            # the brief's seven arrows, against the URL
+node scripts/reconcile-usdc.mjs      # two wallets, one omnibus account, exit 0
+```
+
+**Say, for the first:** "Seven legs, in the brief's own order, against the
+deployed origin. It imports nothing from the application — it scrapes the
+deployment's own forms and replays the server-action fields as
+`multipart/form-data`, which is the request a browser with JavaScript disabled
+makes. A skip alone makes the exit code 1."
+
+**Say, for the second:** "This is the one that was wrong until a few hours ago.
+`1140` is one omnibus account and the USDC now sits in two wallets, so reading a
+single address reported ninety cents of drift against a ledger that was exactly
+right. It enumerates the wallets at runtime now and refuses to reconcile against
+a subset — and the fix still has a hole of the same shape, which is §6."
+
+**And if the card controls come up, the row to read out is in the database, not
+in a document:** `$50.00` at mcc 5542, rule `mcc_blocked`, **147.4 ms**, our
+`UNAUTHORIZED_MERCHANT` — and Lithic's own transaction
+`b1bd8d71-554a-46fc-b80a-fe90044868a8`, status **DECLINED /
+UNAUTHORIZED_MERCHANT**, created 2026-09-11T00:44:10Z. Our record and theirs
+agree to the second, which is the only version of this claim worth making.
+
 ### 10:00 — hand over
 
 **Closing sentence:** "The last full live-fire run against production was seven
 pass, zero fail, one skip — and a skip is not a pass, so it prints the sentence
-naming exactly what could not be proven, and that one is deliberate. The decision
-log is 33 entries, append-only, and the entries where I was wrong are still in it
-above the entries that correct them. Point at anything."
+naming exactly what could not be proven, and that one is deliberate. The core
+loop is a separate seven-leg run against this URL and its last scoreboard was
+seven pass, zero fail, **zero** skip. The decision log is 46 entries,
+append-only, and the entries where I was wrong are still in it above the entries
+that correct them — including two where the thing I was wrong about was a claim
+about my own invariants. Point at anything."
 
 **Before the debrief, re-run it** — `node scripts/livefire.mjs` — and use that
 run's scoreboard rather than the recorded one, and run
@@ -1939,3 +2953,19 @@ with a tampered-signature negative control.
 | The commit gate, and the shape rule that was replaced | `scripts/precommit.sh`, `.secretscanignore` |
 | Every document checked against the live endpoint | `scripts/audit-claims.mjs` |
 | Every decision, in order, including the reversed ones | `DECISIONS.md` |
+| The brief's seven arrows as seven legs against the deployed URL | `scripts/coreloop.mjs` |
+| A correction at the original value date, routed by a table row | `src/lib/holds/corrections.ts`, `src/lib/rails/semantics.ts` |
+| The occurrence, and the key Postgres computes with `EXTRACT`/`lpad` | `db/migrations/0012_standing_orders.sql` |
+| Refuse-and-close, checked against available, all four figures kept | `src/lib/standing/types.ts`, `fire.ts` |
+| Plaid link/item/auth, and the uncleared-credit hold | `src/lib/rails/plaid/adapter.ts` |
+| Banking days, the Fed's Saturday rule, 09:00 ET across DST | `src/lib/rails/plaid/availability.ts` |
+| GLEIF, and the four endpoints that decide nothing on their own | `src/lib/kyb/gleif.ts` |
+| Nine constraints, the composite FK, and why MATCH SIMPLE matters | `db/migrations/0013_kyb_manual_review.sql` |
+| A review may never clear a decline — in code, not in SQL | `src/lib/kyb/manual-review.ts` |
+| A pot is a node in the account tree, and the view that broke | `db/migrations/0015_pots.sql` |
+| The ABA sweep, the ±5 misses, and the nine repairs | `src/lib/payees/aba.ts`, `aba.test.ts` |
+| Block on arithmetic, warn on judgement — and the throw that enforces it | `src/lib/payees/verify.ts` |
+| 600 ms of ours inside 6000 ms of theirs, and a pure `decide()` | `src/lib/cards/budget.ts`, `decide.ts` |
+| The responder Lithic actually calls | `src/app/api/webhooks/lithic-auth/route.ts` |
+| Two providers, one interface, and the refusing unconfigured one | `src/lib/rails/stablecoin/circle-provider.ts`, `circle-registry.ts` |
+| Wallets enumerated at runtime; failing beats reconciling a subset | `scripts/reconcile-usdc.mjs` |

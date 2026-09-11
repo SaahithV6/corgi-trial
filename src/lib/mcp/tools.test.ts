@@ -20,13 +20,24 @@ function propertyNames(schema: unknown, found: string[] = []): string[] {
 }
 
 describe("the registry", () => {
-  it("is exactly three read tools and one write tool", () => {
-    expect(TOOLS).toHaveLength(4);
+  it("is seven read tools and exactly one write tool", () => {
+    // The count of READ tools is allowed to grow as the product does — each
+    // one answers a question the surface could not answer before. The count of
+    // WRITE tools is the number this test exists to pin: it was one when the
+    // surface had three readers and it is one now that it has seven, and a
+    // second entry in this list is a design change that belongs in
+    // docs/AGENT-LIMITS.md before it belongs in a diff.
+    expect(TOOLS).toHaveLength(8);
     expect(READ_TOOLS.map((t) => t.name)).toEqual([
       "get_balance",
+      "list_pots",
       "list_transactions",
+      "list_payees",
+      "list_standing_orders",
+      "list_card_controls",
       "list_recon_breaks",
     ]);
+    expect(WRITE_TOOLS).toHaveLength(1);
     expect(WRITE_TOOLS.map((t) => t.name)).toEqual(["initiate_payment"]);
   });
 
@@ -55,6 +66,19 @@ describe("the registry", () => {
       "unfreeze",
       "issue_card",
       "set_threshold",
+      // Added with the pots, payees, standing-order and card-control readers:
+      // every one of these is a plausible-sounding sibling of a tool that now
+      // exists, which is exactly when a banned list earns its keep.
+      "acknowledge",
+      "override",
+      "create_standing",
+      "fire",
+      "set_control",
+      "set_limit",
+      "block_mcc",
+      "unblock",
+      "move_to_pot",
+      "add_payee",
     ];
     for (const tool of TOOLS) {
       for (const word of banned) {

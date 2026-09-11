@@ -101,6 +101,43 @@ const drift = await sql`
 if (String(drift[0].n) === "0") ok("denormalised clocks match their entry", "zero drift");
 else bad("denormalised clocks match their entry", `${drift[0].n} rows drifted`);
 
+// ---- 7. THE INVARIANT VIEWS ------------------------------------------
+//
+// Added late, and the reason is worth writing down. Migration 0001 says of
+// these views: "Every one of these MUST return zero rows in CI. They are
+// TESTS." They were not in CI. This script proves REFUSALS — it attempts a
+// forbidden UPDATE and asserts the database says no — and everyone, including
+// me, read "dbcheck 14/14" as covering the drift views too. It never touched
+// them.
+//
+// That mattered on a clock. Every uncleared-credit hold in this book matures
+// at 2026-09-11T13:00Z. At that instant `v_hold_state.is_released` flips true
+// while the memo balance is still non-zero, which is precisely what
+// `v_hold_release_drift` exists to catch — and nothing would have looked.
+//
+// A view that is asserted to be empty and never queried is a comment.
+const INVARIANT_VIEWS = [
+  ["v_entry_unbalanced", "every entry sums to zero, per currency"],
+  ["v_line_denorm_drift", "denormalised clocks match their entry"],
+  ["v_hold_drift", "the memo book equals the fold over card events"],
+  ["v_hold_release_drift", "a released hold withholds nothing"],
+  ["v_book_not_zero", "the whole book nets to zero, per entity and book"],
+  ["v_deposit_control_drift", "the deposits subtree equals what we report"],
+];
+
+console.log("\nINVARIANT VIEWS — each MUST return zero rows\n");
+for (const [view, claim] of INVARIANT_VIEWS) {
+  try {
+    const rows = await sql.unsafe(`SELECT count(*)::int AS n FROM ${view}`);
+    const n = rows[0]?.n ?? 0;
+    if (n === 0) ok(`${view} is empty`, claim);
+    else bad(`${view} is empty`, `${n} row(s) — ${claim}`);
+  } catch (e) {
+    // A view this role cannot read is not a pass. Say which, and fail.
+    bad(`${view} is empty`, `could not be read: ${String(e.message).split("\n")[0].slice(0, 70)}`);
+  }
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed\n`);
 await sql.end();
 process.exit(fail ? 1 : 0);

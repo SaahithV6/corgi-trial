@@ -72,13 +72,43 @@ async function timed(
   }
 }
 
-/** Map an HTTP status onto liveness. 401/403 is the placeholder-key signal. */
+/**
+ * Map an HTTP status onto liveness.
+ *
+ * FIFTH BUG IN THIS FUNCTION'S FAMILY, and the widest. It used to read
+ *
+ *     if (status >= 400 && status < 500) return "live";
+ *
+ * on the reasoning that a non-auth 4xx proves the credential was accepted well
+ * enough to be told the request was wrong. That is true of 400 and 422 — the
+ * request reached the application and was judged on its content — and it is
+ * false of everything else in the range, in ways that were live in production:
+ *
+ *   429  Rate limited. The credential was never evaluated. `open_banking` was
+ *        reporting LIVE with the evidence string `POST /institutions/get -> 429`,
+ *        which is a sentence that refutes itself.
+ *   404  The path does not exist. Measured at Lithic: `/v1/not_a_real_endpoint`
+ *        answers 404 WITH a valid key and 404 with NO Authorization header at
+ *        all. So a typo in a URL read as a live integration.
+ *   408  A timeout wearing a 4xx.
+ *
+ * "A simulated integration presented as live is the fastest way to fail the
+ * entire trial", and a probe that infers liveness from a status the server
+ * returns to strangers is how that happens by accident rather than by intent.
+ *
+ * So the range is now enumerated rather than bracketed. A status this function
+ * has not been taught about is `unreachable` — the verdict that claims least.
+ */
 function fromStatus(status: number): Liveness {
   if (status >= 200 && status < 300) return "live";
   if (status === 401 || status === 403) return "unauthorised";
-  // A 4xx that is not an auth failure still proves the credential was accepted
-  // well enough to be told the request was wrong, which is what we are testing.
-  if (status >= 400 && status < 500) return "live";
+  // The request was authenticated, reached the application, and was rejected on
+  // its CONTENT. That is the only 4xx shape that evidences a working credential.
+  if (status === 400 || status === 409 || status === 422) return "live";
+  // Rate limiting, a missing path, a timeout: the credential was never judged.
+  // Not evidence of anything, in either direction.
+  if (status === 404 || status === 408 || status === 429) return "unreachable";
+  if (status >= 400 && status < 500) return "unreachable";
   return "unreachable";
 }
 

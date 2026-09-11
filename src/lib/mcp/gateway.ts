@@ -46,6 +46,10 @@ import "server-only";
  */
 
 import { getPayment, requestPayment } from "@/lib/approvals";
+import { destinationSchema, type PaymentDestination, type PayoutRail } from "@/lib/approvals/types";
+import { listCardsWithControls, listDecisions } from "@/lib/cards/store";
+import { loadPayeeBook } from "@/lib/payees/store";
+import { listPots as listPotsOfBusiness, readIdentity as readPotIdentity } from "@/lib/pots/store";
 import {
   balanceAsBelieved,
   bookingWatermarkAt,
@@ -58,7 +62,20 @@ import { ToolError } from "./types";
 import type {
   AccountRef,
   BalanceSnapshot,
+  CardControlFilter,
+  CardControlPage,
+  CardControlRow,
+  CardDecisionRow,
   Gateway,
+  PayeeFilter,
+  PayeeFindingRow,
+  PayeeRow,
+  PotBalanceRow,
+  PotsSnapshot,
+  StandingOccurrenceRow,
+  StandingOrderFilter,
+  StandingOrderPage,
+  StandingOrderRow,
   QueuePaymentInput,
   QueuedPayment,
   ReconBreakPage,
@@ -80,6 +97,57 @@ import type {
 const END_OF_TIME = "9999-12-31";
 
 const BOOK_TZ = "America/New_York";
+
+/**
+ * The most occurrences one call will read across every mandate on the page.
+ *
+ * A mandate that has fired daily for a year has 365 of them, and a page of 25
+ * such mandates is 9,125 rows to answer "when does my rent go out". The tool
+ * shows a handful per mandate; this is the ceiling on what the database is
+ * asked for, ordered newest first so the handful is the useful end.
+ */
+const STANDING_OCCURRENCE_CEILING = 500;
+
+/** How deep a decline filter will scan. See the call site. */
+const DECISION_SCAN_CEILING = 300;
+
+/**
+ * `standing_order.counterparty` as a destination, or null.
+ *
+ * The column is jsonb, which means its shape is not enforced by the database,
+ * which means the boundary that reads it is the boundary that checks it. A row
+ * that does not parse becomes null rather than an exception: the mandate's
+ * schedule and its refusal history are still worth returning.
+ */
+function parseDestination(raw: unknown): PaymentDestination | null {
+  const parsed = destinationSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * `payee_verification.detail.findings` as a list, defensively.
+ *
+ * Same argument as `parseDestination`, and the same one the payee screen
+ * makes about the same column: these are RENDERED, never used to decide
+ * anything. The decision columns beside them — outcome, name match, checksum —
+ * are the decision, and a findings blob of an unexpected shape shows as no
+ * findings rather than costing the caller the row.
+ */
+function findingsOf(detail: unknown): readonly PayeeFindingRow[] {
+  if (typeof detail !== "object" || detail === null) return [];
+  const raw = (detail as { findings?: unknown }).findings;
+  if (!Array.isArray(raw)) return [];
+
+  const out: PayeeFindingRow[] = [];
+  for (const item of raw.slice(0, 25)) {
+    if (typeof item !== "object" || item === null) continue;
+    const { code, severity, title, detail: text } = item as Record<string, unknown>;
+    if (typeof code !== "string" || typeof title !== "string" || typeof text !== "string") continue;
+    if (severity !== "block" && severity !== "warn" && severity !== "note") continue;
+    out.push({ code, severity, title, detail: text });
+  }
+  return out;
+}
 
 export interface GatewayOptions {
   /** Override the connection. Tests and scripts pass one; the route does not. */
@@ -348,6 +416,319 @@ export function liveGateway(options: GatewayOptions = {}): Gateway {
       });
 
       return { rows: mapped, unattributableOpenBreaks: unattributed?.count ?? 0 };
+    },
+
+    async listPots(businessId: string): Promise<PotsSnapshot> {
+      // Three reads, all scoped, none of them a second opinion about a number
+      // this repo already computes. `listPots` and `readIdentity` are the pots
+      // module's own queries over `v_pot_balance`, `v_pot_identity` and
+      // `v_pot_subtree`; the chart code and the recursive walk live there.
+      const [pots, identity] = await Promise.all([
+        listPotsOfBusiness(businessId, conn),
+        readPotIdentity(businessId, conn),
+      ]);
+
+      // No pots and no identity row is a legitimate state — a business that has
+      // never opened one. The main balance is then the whole subtree, and
+      // saying so keeps the identity check meaningful instead of reporting a
+      // difference against zero.
+      if (identity === null) {
+        return { pots: [], mainCents: 0n, potsCents: 0n, totalCents: 0n, subtreeCents: 0n };
+      }
+
+      // Summed here as well as read from `v_pot_identity`, deliberately: this
+      // is the total of the rows the caller is about to be shown, and the
+      // identity figure is the database's. They agree, and the tool reports
+      // both totals against the subtree walk so a disagreement would be
+      // visible rather than averaged away.
+      const potsCents = pots.reduce((acc, pot) => acc + pot.balanceCents, 0n);
+
+      return {
+        pots: pots.map(
+          (pot): PotBalanceRow => ({
+            potId: pot.potId,
+            name: pot.name,
+            purpose: pot.purpose,
+            accountCode: pot.accountCode,
+            openedAt: pot.openedAt.toISOString(),
+            balanceCents: pot.balanceCents,
+          }),
+        ),
+        mainCents: identity.mainCents,
+        potsCents,
+        totalCents: identity.totalCents,
+        subtreeCents: identity.subtreeCents,
+      };
+    },
+
+    async listPayees(businessId: string, filter: PayeeFilter): Promise<readonly PayeeRow[]> {
+      // `loadPayeeBook` is the payees module's own read of `v_payee_book`, and
+      // it already takes the business id — the tenant predicate is in the view
+      // query rather than applied here afterwards. The filtering below is over
+      // derived labels (`outcome`, `freshness`) that the view computes, so it
+      // is a projection of the same rows and not a second definition of them.
+      const entries = await loadPayeeBook({ businessId }, conn);
+
+      const needle = filter.holderNameContains?.toLowerCase() ?? null;
+
+      const matched = entries.filter((entry) => {
+        if (!filter.includeArchived && entry.archived) return false;
+        if (filter.rail !== null && entry.rail !== filter.rail) return false;
+        if (filter.outcome !== null && entry.outcome !== filter.outcome) return false;
+        if (filter.freshness !== null && entry.freshness !== filter.freshness) return false;
+        if (needle !== null) {
+          const haystack = `${entry.holderName} ${entry.displayName}`.toLowerCase();
+          if (!haystack.includes(needle)) return false;
+        }
+        return true;
+      });
+
+      return matched.slice(0, filter.limit).map(
+        (entry): PayeeRow => ({
+          payeeId: entry.payeeId,
+          displayName: entry.displayName,
+          holderName: entry.holderName,
+          rail: entry.rail,
+          routingNumber: entry.routingNumber,
+          accountNumberLast4: entry.accountNumberLast4,
+          accountType: entry.accountType,
+          createdAt: entry.createdAt,
+          createdByName: entry.createdByName,
+          archived: entry.archived,
+          archivedAt: entry.archivedAt,
+          checkedAt: entry.checkedAt,
+          checkedByName: entry.checkedByName,
+          outcome: entry.outcome,
+          freshness: entry.freshness,
+          checkedDaysAgo: entry.checkedDaysAgo,
+          checksumOk: entry.checksumOk,
+          prefixAssigned: entry.prefixAssigned,
+          directory: entry.directory,
+          directoryProvider: entry.directoryProvider,
+          institutionName: entry.institutionName,
+          nameMatch: entry.nameMatch,
+          nameMatchScore: entry.nameMatchScore,
+          nameSource: entry.nameSource,
+          counterpartyName: entry.counterpartyName,
+          evidence: entry.evidence,
+          findings: findingsOf(entry.detail),
+          acknowledged: entry.acknowledged,
+          acknowledgedAt: entry.acknowledgedAt,
+          acknowledgedByName: entry.acknowledgedByName,
+          acknowledgementReason: entry.acknowledgementReason,
+          hasConflictingTwin: entry.hasConflictingTwin,
+        }),
+      );
+    },
+
+    async listStandingOrders(
+      businessId: string,
+      filter: StandingOrderFilter,
+    ): Promise<StandingOrderPage> {
+      // `v_standing_order_schedule` carries `business_id` because a mandate
+      // points at an account, and an account belongs to a business. The
+      // standing-orders module's own `listStandingOrders()` is platform-wide —
+      // it feeds an operator screen — so it is not reused here; the predicate
+      // is pushed into the WHERE clause instead, for the same two reasons as
+      // the recon read above: it is the faster plan, and there is no moment at
+      // which this process holds another business's mandate in memory.
+      const orders = await conn<
+        {
+          id: string;
+          reference: string;
+          account_name: string;
+          rail: PayoutRail;
+          amount_cents: bigint;
+          currency: string;
+          counterparty: unknown;
+          cadence: string;
+          day_of_month: number | null;
+          day_of_week: number | null;
+          start_date: string;
+          end_date: string | null;
+          created_at: Date;
+          created_by_name: string;
+          cancelled: boolean;
+          cancelled_at: Date | null;
+          cancellation_reason: string | null;
+          next_due_date: string | null;
+        }[]
+      >`
+        SELECT s.id, s.reference, s.account_name,
+               s.rail::text AS rail, s.amount_cents, s.currency, s.counterparty,
+               s.cadence::text AS cadence, s.day_of_month, s.day_of_week,
+               s.start_date::text AS start_date, s.end_date::text AS end_date,
+               s.created_at, s.created_by_name,
+               s.cancelled, s.cancelled_at, s.cancellation_reason,
+               n.next_due_date::text AS next_due_date
+          FROM v_standing_order_schedule s
+          LEFT JOIN v_standing_order_next n ON n.standing_order_id = s.id
+         WHERE s.business_id = ${businessId}::uuid
+           AND (${filter.includeCancelled} OR NOT s.cancelled)
+         ORDER BY s.cancelled, s.created_at DESC
+         LIMIT ${filter.limit}`;
+
+      const ids = orders.map((o) => o.id);
+
+      // One query for the occurrences of every mandate on the page rather than
+      // one per mandate. `v_standing_order_history` carries its own
+      // `business_id`, and BOTH predicates are applied: the id list narrows,
+      // the business id is the boundary. A list of ids assembled from a scoped
+      // query is already safe, but a boundary that depends on an earlier query
+      // having been correct is not a boundary.
+      const occurrences =
+        ids.length === 0
+          ? []
+          : await conn<
+              {
+                occurrence_id: string;
+                standing_order_id: string;
+                scheduled_date: string;
+                idempotency_key: string;
+                claimed_at: Date;
+                disposition: "raised" | "refused" | null;
+                instruction_id: string | null;
+                refusal_code: string | null;
+                refusal_reason: string | null;
+                observed_ledger_cents: bigint | null;
+                observed_holds_cents: bigint | null;
+                observed_uncleared_cents: bigint | null;
+                observed_available_cents: bigint | null;
+                shortfall_cents: bigint | null;
+                decided_at: Date | null;
+              }[]
+            >`
+              SELECT h.occurrence_id, h.standing_order_id,
+                     h.scheduled_date::text AS scheduled_date,
+                     h.idempotency_key, h.claimed_at,
+                     h.disposition::text AS disposition, h.instruction_id,
+                     h.refusal_code, h.refusal_reason,
+                     h.observed_ledger_cents, h.observed_holds_cents,
+                     h.observed_uncleared_cents, h.observed_available_cents,
+                     h.shortfall_cents, h.decided_at
+                FROM v_standing_order_history h
+               WHERE h.business_id = ${businessId}::uuid
+                 AND h.standing_order_id = ANY(${ids}::uuid[])
+               ORDER BY h.scheduled_date DESC, h.claimed_at DESC
+               LIMIT ${STANDING_OCCURRENCE_CEILING}`;
+
+      return {
+        orders: orders.map(
+          (row): StandingOrderRow => ({
+            id: row.id,
+            reference: row.reference,
+            accountName: row.account_name,
+            rail: row.rail,
+            amountCents: row.amount_cents,
+            currency: row.currency.trim(),
+            // jsonb is a column whose shape the database does not enforce, so
+            // the boundary that reads it is the boundary that checks it —
+            // `standing/store.ts` takes the same position on the same column.
+            // A malformed destination renders as null rather than throwing:
+            // one historical row of an unexpected shape must not take out the
+            // answer to "when does my rent go out".
+            destination: parseDestination(row.counterparty),
+            cadence: row.cadence,
+            dayOfMonth: row.day_of_month,
+            dayOfWeek: row.day_of_week,
+            startDate: row.start_date,
+            endDate: row.end_date,
+            nextDueDate: row.next_due_date,
+            cancelled: row.cancelled,
+            cancelledAt: row.cancelled_at?.toISOString() ?? null,
+            cancellationReason: row.cancellation_reason,
+            createdAt: row.created_at.toISOString(),
+            createdByName: row.created_by_name,
+          }),
+        ),
+        occurrences: occurrences.map(
+          (row): StandingOccurrenceRow => ({
+            occurrenceId: row.occurrence_id,
+            standingOrderId: row.standing_order_id,
+            scheduledDate: row.scheduled_date,
+            idempotencyKey: row.idempotency_key,
+            claimedAt: row.claimed_at.toISOString(),
+            disposition: row.disposition,
+            instructionId: row.instruction_id,
+            refusalCode: row.refusal_code,
+            refusalReason: row.refusal_reason,
+            observedLedgerCents: row.observed_ledger_cents,
+            observedHoldsCents: row.observed_holds_cents,
+            observedUnclearedCents: row.observed_uncleared_cents,
+            observedAvailableCents: row.observed_available_cents,
+            shortfallCents: row.shortfall_cents,
+            decidedAt: row.decided_at?.toISOString() ?? null,
+          }),
+        ),
+      };
+    },
+
+    async listCardControls(
+      businessId: string,
+      filter: CardControlFilter,
+    ): Promise<CardControlPage> {
+      // Both of these are the cards module's own scoped reads. Reusing them
+      // matters more here than anywhere else on this surface: the day/month
+      // spend figure is the single most arguable number in the card-controls
+      // feature (approved-decision sum, provider lane only, purchases only,
+      // book-time windows), and a second copy of that query in this file would
+      // eventually disagree with the panel a person is looking at while the
+      // agent is talking to them.
+      const [cards, decisions] = await Promise.all([
+        listCardsWithControls(businessId, filter.limit),
+        filter.decisionLimit === 0
+          ? Promise.resolve([])
+          : listDecisions({
+              businessId,
+              // Over-fetch when filtering to declines, so asking for the last
+              // 20 declines does not silently return three because the other
+              // seventeen of the last twenty decisions were approvals.
+              limit: filter.declinesOnly
+                ? Math.min(filter.decisionLimit * 5, DECISION_SCAN_CEILING)
+                : filter.decisionLimit,
+            }),
+      ]);
+
+      const kept = (filter.declinesOnly
+        ? decisions.filter((d) => d.outcome === "decline")
+        : decisions
+      ).slice(0, filter.decisionLimit);
+
+      return {
+        cards: cards.map(
+          (card): CardControlRow => ({
+            cardId: card.cardId,
+            lastFour: card.lastFour,
+            nickname: card.nickname,
+            createdAt: card.createdAt,
+            controls: card.controls,
+            spendDayCents: card.spend.dayCents,
+            spendMonthCents: card.spend.monthCents,
+          }),
+        ),
+        // `providerCardToken` and `providerAuthToken` are dropped here, on the
+        // way out of the database and before anything else in this process can
+        // see them. See `CardDecisionRow`.
+        decisions: kept.map(
+          (d): CardDecisionRow => ({
+            decidedAt: d.decidedAt,
+            cardId: d.cardId,
+            lastFour: d.lastFour,
+            nickname: d.nickname,
+            amountCents: d.amountCents,
+            mcc: d.mcc,
+            merchantDescriptor: d.merchantDescriptor,
+            requestStatus: d.requestStatus,
+            outcome: d.outcome,
+            resultCode: d.resultCode,
+            rule: d.rule,
+            reason: d.reason,
+            controlVersion: d.controlVersion,
+            decisionLatencyUs: d.decisionLatencyUs,
+            source: d.source,
+          }),
+        ),
+      };
     },
 
     async queuePayment(input: QueuePaymentInput): Promise<QueuedPayment> {

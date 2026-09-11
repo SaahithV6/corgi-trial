@@ -434,6 +434,7 @@ W10 W14 E04 E06 E07 E09 E10 E11 E12 E13 K04
 X06 X07 X08 X09 X10 X11
 Y01 Y02 Y03 Y04 Y06 Y07 Y08
 LF07 Z01 Z02 Z03 Z04 Z05 Z06 Z07 Z11 Z12 Z13 Z14 Z15 Z16 Z17 Z18 Z19 Z20 Z21
+Z22 Z23 Z24 Z25 Z26 Z27 Z28 Z29 Z30 Z31 Z32
 """.split()
 
 # Discovered after the deploy went live.
@@ -546,6 +547,62 @@ def _iter7():
       "discovered", 45, [], "claude", ["lib/ledger"], "done",
       risk="an autonomous agent read a balance $60 higher than the customer's")
 _iter7()
+
+# --- FINISHING THE APPLICATION. Everything below is measured, not planned. ---
+def _finish():
+    # Landed since iteration 7.
+    N("Z22", "Core loop runner: 7 legs, 0 skips, against the deployed URL",
+      "finish", 150, [], "agent", ["ops/coreloop"], "done",
+      risk="seven separate claims is not the same as one demonstrated sequence")
+    N("Z23", "Real card settlement corrected at its ORIGINAL value date, provider-driven",
+      "finish", 140, [], "agent", ["lib/holds"], "done",
+      risk="reverseAndRebook had two callers and both were demo harnesses")
+    N("Z24", "Standing orders: fires once and only once, written insufficient-funds policy",
+      "finish", 160, [], "agent", ["lib/standing"], "done", risk="gauntlet item 8, cut at T+2h")
+    N("Z25", "Plaid funding: link -> item -> fund, availability delayed by policy",
+      "finish", 150, [], "agent", ["lib/rails/plaid"], "done", risk="core loop leg 2 did not exist")
+    N("Z26", "KYB live on GLEIF + manual review; registry miss is a queue, not a wall",
+      "finish", 170, [], "agent", ["lib/kyb"], "done",
+      risk="KYB/KYC is one of only two slots marked MUST BE LIVE")
+    N("Z27", "Circle: a second stablecoin provider behind the same interface, live",
+      "finish", 150, [], "agent", ["lib/rails/stablecoin"], "done",
+      risk="'a rail is an adapter' was a sentence; now it is two providers")
+    N("Z28", "Pots: available falls, zero ledger changes, and it falsified an invariant",
+      "finish", 130, [], "agent", ["lib/pots"], "done",
+      risk="v_deposit_control_drift was NOT immune to a new account level")
+    N("Z29", "Payee confirmation: checksum blocks, name warns, override costs something",
+      "finish", 140, [], "agent", ["lib/payees"], "done",
+      risk="every invalid routing number has exactly nine single-digit repairs")
+    N("Z30", "Card controls decided inside Lithic's 6000ms ASA deadline",
+      "finish", 160, [], "agent", ["lib/cards"], "done",
+      risk="the only ladder item that HAS to be real-time")
+    N("Z31", "A real provider-driven DECLINE: mcc_blocked, 147ms, on file",
+      "discovered", 40, ["Z30"], "claude", ["ops/asa"], "done",
+      risk="fail-closed fired on a cold start at 601ms and declined rather than guessed")
+    N("Z32", "Reconciliation taught to count every wallet its control account covers",
+      "discovered", 30, [], "claude", ["ops/recon"], "done",
+      risk="it reported drift against a ledger that was exactly right")
+
+    # --- WHAT IS LEFT ---
+    N("F01", "Decision log + debrief current with everything since iteration 7",
+      "finish", 90, [], "agent", ["docs/debrief"],
+      risk="'code you cannot explain line by line' is an automatic fail")
+    N("F02", "MCP tools for the new surfaces (pots, payees, standing orders)",
+      "finish", 80, [], "agent", ["lib/mcp"],
+      risk="the agent surface should reach the features built after it")
+    N("F03", "README + CUT-LIST final: every screen, every slot, week-two order",
+      "finish", 60, [], "agent", ["docs/readme"],
+      risk="the README is where honest labelling is graded")
+    N("F04", "FX quote the customer accepts before the USDC payout",
+      "stretch", 110, [], "agent", ["lib/rails/stablecoin"],
+      risk="first item on the stretch ladder and the only unbuilt one that is cheap")
+    N("F05", "Five-minute video walking the money path", "submission", 60, [], "human", ["submission"],
+      risk="a scored requirement no amount of code substitutes for; still 0% started")
+    N("F06", "Evidence pack: Lithic + Increase + Circle delivery logs",
+      "submission", 40, [], "human", ["submission"])
+    N("F07", "Final submission email: four things, both roles, links",
+      "submission", 20, ["F05","F06"], "human", ["submission"])
+_finish()
 
 def apply_status():
     idx = {n["id"]: n for n in NODES}

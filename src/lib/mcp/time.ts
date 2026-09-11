@@ -44,10 +44,23 @@ export function isIsoDate(value: string): boolean {
  * timing" and "someone lost a file".
  */
 export function daysBetween(from: string, to: string): number {
+  return Math.max(0, signedDaysBetween(from, to));
+}
+
+/**
+ * The same count, allowed to be negative.
+ *
+ * `daysBetween` clamps because it measures an AGE, and a break cannot be minus
+ * three days old. A due date is the other kind of question: a standing order
+ * whose next occurrence was due on the 8th and has not been claimed is -2, and
+ * clamping that to 0 would report an overdue mandate as due today — which is
+ * the one answer that makes an agent say nothing is wrong.
+ */
+export function signedDaysBetween(from: string, to: string): number {
   const a = Date.parse(`${from}T00:00:00Z`);
   const b = Date.parse(`${to}T00:00:00Z`);
   if (Number.isNaN(a) || Number.isNaN(b)) return 0;
-  return Math.max(0, Math.round((b - a) / 86_400_000));
+  return Math.round((b - a) / 86_400_000);
 }
 
 /** `2026-09-10` plus n days, in book-date space. */

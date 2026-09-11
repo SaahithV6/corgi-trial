@@ -24,7 +24,14 @@ import type {
   AccountRef,
   ApprovalPolicyRef,
   BalanceSnapshot,
+  CardControlFilter,
+  CardControlPage,
   Gateway,
+  PayeeFilter,
+  PayeeRow,
+  PotsSnapshot,
+  StandingOrderFilter,
+  StandingOrderPage,
   QueuePaymentInput,
   QueuedPayment,
   ReconBreakPage,
@@ -52,6 +59,10 @@ export interface FakeState {
   balances: Map<string, BalanceSnapshot>;
   transactions: Map<string, TransactionRow[]>;
   breaks: Map<string, ReconBreakRow[]>;
+  pots: Map<string, PotsSnapshot>;
+  payees: Map<string, PayeeRow[]>;
+  standing: Map<string, StandingOrderPage>;
+  cards: Map<string, CardControlPage>;
   policies: ApprovalPolicyRef[];
   queued: QueuePaymentInput[];
   /** Keyed by idempotency key, so a replay returns the original. */
@@ -156,6 +167,16 @@ export function defaultState(): FakeState {
     ]),
     transactions: new Map(),
     breaks: new Map(),
+    pots: new Map([[BUSINESS_A, defaultPots()], [BUSINESS_B, emptyPots()]]),
+    payees: new Map([[BUSINESS_A, defaultPayees()], [BUSINESS_B, []]]),
+    standing: new Map([
+      [BUSINESS_A, defaultStanding()],
+      [BUSINESS_B, { orders: [], occurrences: [] }],
+    ]),
+    cards: new Map([
+      [BUSINESS_A, defaultCards()],
+      [BUSINESS_B, { cards: [], decisions: [] }],
+    ]),
     policies: [
       {
         policyId: "9315dd14-5e7f-5703-b37a-236a2531b968",
@@ -189,6 +210,326 @@ export function defaultState(): FakeState {
     instructions: new Map(),
     watermark: 5n,
     unattributableBreaks: 0,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Fixtures for the four tools added after the first cut                      */
+/* -------------------------------------------------------------------------- */
+
+export function emptyPots(): PotsSnapshot {
+  return { pots: [], mainCents: 0n, potsCents: 0n, totalCents: 0n, subtreeCents: 0n };
+}
+
+/**
+ * Two pots on business A, and the identity that ties them to the deposit
+ * subtree. The figures are chosen so main != total: a fixture where the pot
+ * total is zero would let a bug that ignores pots pass every assertion.
+ */
+export function defaultPots(): PotsSnapshot {
+  return {
+    pots: [
+      {
+        potId: "9a1f5f2e-0000-4000-8000-000000000001",
+        name: "Payroll — October",
+        purpose: "Wages and employer taxes for the October run",
+        accountCode: "2100.9a1f5f2e-0000-4000-8000-000000000001",
+        openedAt: "2026-09-01T14:00:00.000Z",
+        balanceCents: 12_000_00n,
+      },
+      {
+        potId: "9a1f5f2e-0000-4000-8000-000000000002",
+        name: "Sales tax",
+        purpose: null,
+        accountCode: "2100.9a1f5f2e-0000-4000-8000-000000000002",
+        openedAt: "2026-08-20T09:30:00.000Z",
+        balanceCents: 3_000_00n,
+      },
+    ],
+    mainCents: 10_000_00n,
+    potsCents: 15_000_00n,
+    totalCents: 25_000_00n,
+    subtreeCents: 25_000_00n,
+  };
+}
+
+export function defaultPayees(): PayeeRow[] {
+  return [
+    {
+      payeeId: "7c2f0d31-0000-4000-8000-000000000001",
+      displayName: "Machining subcontractor",
+      holderName: "Northwind Components LLC",
+      rail: "ach",
+      routingNumber: "021000021",
+      accountNumberLast4: "6789",
+      accountType: "checking",
+      createdAt: "2026-08-14T11:00:00.000Z",
+      createdByName: "Alex Whitfield",
+      archived: false,
+      archivedAt: null,
+      checkedAt: "2026-09-09T11:00:00.000Z",
+      checkedByName: "Alex Whitfield",
+      outcome: "verified",
+      freshness: "fresh",
+      checkedDaysAgo: 1,
+      checksumOk: true,
+      prefixAssigned: true,
+      directory: "found",
+      directoryProvider: "increase",
+      institutionName: "JPMORGAN CHASE BANK, NA",
+      nameMatch: "match",
+      nameMatchScore: 100,
+      nameSource: "linked_account_holder",
+      counterpartyName: "Northwind Components LLC",
+      evidence: "live",
+      findings: [],
+      acknowledged: false,
+      acknowledgedAt: null,
+      acknowledgedByName: null,
+      acknowledgementReason: null,
+      hasConflictingTwin: false,
+    },
+    {
+      payeeId: "7c2f0d31-0000-4000-8000-000000000002",
+      displayName: "Coolant supplier",
+      holderName: "Pierce Fluids Co",
+      rail: "ach",
+      routingNumber: "011401533",
+      accountNumberLast4: "4410",
+      accountType: "checking",
+      createdAt: "2026-07-02T15:00:00.000Z",
+      createdByName: "Alex Whitfield",
+      archived: false,
+      archivedAt: null,
+      checkedAt: "2026-06-01T15:00:00.000Z",
+      checkedByName: "Alex Whitfield",
+      outcome: "warned",
+      freshness: "stale",
+      checkedDaysAgo: 101,
+      checksumOk: true,
+      prefixAssigned: true,
+      directory: "not_listed",
+      directoryProvider: "increase",
+      institutionName: null,
+      nameMatch: "close_match",
+      nameMatchScore: 88,
+      nameSource: "payer_asserted",
+      counterpartyName: null,
+      evidence: "simulated",
+      findings: [
+        {
+          code: "NAME_CLOSE_MATCH",
+          severity: "warn",
+          title: "The name is close but not identical",
+          detail:
+            "Pierce Fluids Co against Pierce Fluid Company. A human has to say whether this is the same business.",
+        },
+      ],
+      acknowledged: false,
+      acknowledgedAt: null,
+      acknowledgedByName: null,
+      acknowledgementReason: null,
+      hasConflictingTwin: true,
+    },
+    {
+      payeeId: "7c2f0d31-0000-4000-8000-000000000003",
+      displayName: "Retired supplier",
+      holderName: "Oldcastle Bearings",
+      rail: "wire",
+      routingNumber: null,
+      accountNumberLast4: "0013",
+      accountType: null,
+      createdAt: "2026-02-11T10:00:00.000Z",
+      createdByName: "Alex Whitfield",
+      archived: true,
+      archivedAt: "2026-06-30T10:00:00.000Z",
+      checkedAt: "2026-02-11T10:05:00.000Z",
+      checkedByName: "Alex Whitfield",
+      outcome: "verified",
+      freshness: "stale",
+      checkedDaysAgo: 211,
+      checksumOk: true,
+      prefixAssigned: true,
+      directory: "found",
+      directoryProvider: "increase",
+      institutionName: "FIRST REPUBLIC",
+      nameMatch: "match",
+      nameMatchScore: 100,
+      nameSource: "payer_asserted",
+      counterpartyName: null,
+      evidence: "simulated",
+      findings: [],
+      acknowledged: false,
+      acknowledgedAt: null,
+      acknowledgedByName: null,
+      acknowledgementReason: null,
+      hasConflictingTwin: false,
+    },
+  ];
+}
+
+export function defaultStanding(): StandingOrderPage {
+  const rentId = "4d8a9b10-0000-4000-8000-000000000001";
+  const cancelledId = "4d8a9b10-0000-4000-8000-000000000002";
+  return {
+    orders: [
+      {
+        id: rentId,
+        reference: "Rent — Unit 4, Ridgeline Works",
+        accountName: "Ridgeline Robotics, Inc. — business current account",
+        rail: "ach",
+        amountCents: 4_000_00n,
+        currency: "USD",
+        destination: {
+          type: "ach",
+          holderName: "Ridgeline Works Property LLC",
+          routingNumber: "021000021",
+          accountNumberLast4: "8812",
+          accountType: "checking",
+        },
+        cadence: "monthly",
+        dayOfMonth: 1,
+        dayOfWeek: null,
+        startDate: "2026-03-01",
+        endDate: null,
+        nextDueDate: "2026-10-01",
+        cancelled: false,
+        cancelledAt: null,
+        cancellationReason: null,
+        createdAt: "2026-02-20T16:00:00.000Z",
+        createdByName: "Alex Whitfield",
+      },
+      {
+        id: cancelledId,
+        reference: "Month-end calendar probe",
+        accountName: "Ridgeline Robotics, Inc. — business current account",
+        rail: "internal",
+        amountCents: 1_00n,
+        currency: "USD",
+        destination: null,
+        cadence: "monthly",
+        dayOfMonth: 31,
+        dayOfWeek: null,
+        startDate: "2026-01-31",
+        endDate: null,
+        nextDueDate: null,
+        cancelled: true,
+        cancelledAt: "2026-08-01T12:00:00.000Z",
+        cancellationReason: "The probe proved the short-month rule; it is not a real payment.",
+        createdAt: "2026-01-20T12:00:00.000Z",
+        createdByName: "Alex Whitfield",
+      },
+    ],
+    occurrences: [
+      {
+        occurrenceId: "5e0c1122-0000-4000-8000-000000000002",
+        standingOrderId: rentId,
+        scheduledDate: "2026-09-01",
+        idempotencyKey: `standing:${rentId}:2026-09-01`,
+        claimedAt: "2026-09-01T09:00:00.000Z",
+        disposition: "refused",
+        instructionId: null,
+        refusalCode: "INSUFFICIENT_AVAILABLE_FUNDS",
+        refusalReason:
+          "Refused: the ledger balance covers this payment but the available balance does not.",
+        observedLedgerCents: 4_500_00n,
+        observedHoldsCents: 362_60n,
+        observedUnclearedCents: 300_00n,
+        observedAvailableCents: 3_837_40n,
+        shortfallCents: 162_60n,
+        decidedAt: "2026-09-01T09:00:01.000Z",
+      },
+      {
+        occurrenceId: "5e0c1122-0000-4000-8000-000000000001",
+        standingOrderId: rentId,
+        scheduledDate: "2026-08-01",
+        idempotencyKey: `standing:${rentId}:2026-08-01`,
+        claimedAt: "2026-08-01T09:00:00.000Z",
+        disposition: "raised",
+        instructionId: "22222222-0000-4000-8000-000000000001",
+        refusalCode: null,
+        refusalReason: null,
+        observedLedgerCents: 18_000_00n,
+        observedHoldsCents: 0n,
+        observedUnclearedCents: 0n,
+        observedAvailableCents: 18_000_00n,
+        shortfallCents: null,
+        decidedAt: "2026-08-01T09:00:01.000Z",
+      },
+    ],
+  };
+}
+
+export function defaultCards(): CardControlPage {
+  const cardId = "6f3b7c44-0000-4000-8000-000000000001";
+  return {
+    cards: [
+      {
+        cardId,
+        lastFour: "2971",
+        nickname: "Workshop card — Dani",
+        createdAt: "2026-05-04T13:00:00.000Z",
+        controls: {
+          cardId,
+          controlVersionId: "8a2d5e66-0000-4000-8000-000000000003",
+          version: 3,
+          effectiveFrom: "2026-09-08T17:20:00.000Z",
+          cardState: "active",
+          perTxnLimitCents: 500_00n,
+          dailyLimitCents: 1_000_00n,
+          monthlyLimitCents: null,
+          blockedMccs: ["5542"],
+          note: "Fuel blocked after the pump over-capture; per-transaction $500.",
+        },
+        spendDayCents: 73_40n,
+        spendMonthCents: 1_284_10n,
+      },
+      {
+        cardId: "6f3b7c44-0000-4000-8000-000000000002",
+        lastFour: "5559",
+        nickname: "Ops card — unconfigured",
+        createdAt: "2026-09-09T08:00:00.000Z",
+        controls: null,
+        spendDayCents: 0n,
+        spendMonthCents: 0n,
+      },
+    ],
+    decisions: [
+      {
+        decidedAt: "2026-09-10T14:02:11.000Z",
+        cardId,
+        lastFour: "2971",
+        nickname: "Workshop card — Dani",
+        amountCents: 50_00n,
+        mcc: "5542",
+        merchantDescriptor: "SHELL 4471 PORTLAND OR",
+        requestStatus: "AUTHORIZATION",
+        outcome: "decline",
+        resultCode: "UNAUTHORIZED_MERCHANT",
+        rule: "mcc_blocked",
+        reason: "This card does not allow automated fuel dispensers.",
+        controlVersion: 3,
+        decisionLatencyUs: 41_200,
+        source: "provider",
+      },
+      {
+        decidedAt: "2026-09-10T11:15:02.000Z",
+        cardId,
+        lastFour: "2971",
+        nickname: "Workshop card — Dani",
+        amountCents: 73_40n,
+        mcc: "5251",
+        merchantDescriptor: "HARBOUR HARDWARE",
+        requestStatus: "AUTHORIZATION",
+        outcome: "approve",
+        resultCode: "APPROVED",
+        rule: "within_controls",
+        reason: "Within this card's controls.",
+        controlVersion: 3,
+        decisionLatencyUs: 38_900,
+        source: "provider",
+      },
+    ],
   };
 }
 
@@ -257,6 +598,51 @@ export function fakeGateway(state: FakeState = defaultState()): {
         rows: matched.slice(0, filter.limit),
         unattributableOpenBreaks: state.unattributableBreaks,
       };
+    },
+
+    async listPots(businessId): Promise<PotsSnapshot> {
+      return state.pots.get(businessId) ?? emptyPots();
+    },
+
+    async listPayees(businessId, filter: PayeeFilter): Promise<readonly PayeeRow[]> {
+      const all = state.payees.get(businessId) ?? [];
+      const needle = filter.holderNameContains?.toLowerCase() ?? null;
+      return all
+        .filter((row) => {
+          if (!filter.includeArchived && row.archived) return false;
+          if (filter.rail !== null && row.rail !== filter.rail) return false;
+          if (filter.outcome !== null && row.outcome !== filter.outcome) return false;
+          if (filter.freshness !== null && row.freshness !== filter.freshness) return false;
+          if (needle !== null) {
+            const haystack = `${row.holderName} ${row.displayName}`.toLowerCase();
+            if (!haystack.includes(needle)) return false;
+          }
+          return true;
+        })
+        .slice(0, filter.limit);
+    },
+
+    async listStandingOrders(
+      businessId,
+      filter: StandingOrderFilter,
+    ): Promise<StandingOrderPage> {
+      const page = state.standing.get(businessId) ?? { orders: [], occurrences: [] };
+      const orders = page.orders
+        .filter((o) => filter.includeCancelled || !o.cancelled)
+        .slice(0, filter.limit);
+      const ids = new Set(orders.map((o) => o.id));
+      return {
+        orders,
+        occurrences: page.occurrences.filter((o) => ids.has(o.standingOrderId)),
+      };
+    },
+
+    async listCardControls(businessId, filter: CardControlFilter): Promise<CardControlPage> {
+      const page = state.cards.get(businessId) ?? { cards: [], decisions: [] };
+      const decisions = (
+        filter.declinesOnly ? page.decisions.filter((d) => d.outcome === "decline") : page.decisions
+      ).slice(0, filter.decisionLimit);
+      return { cards: page.cards.slice(0, filter.limit), decisions };
     },
 
     async queuePayment(input: QueuePaymentInput): Promise<QueuedPayment> {

@@ -168,7 +168,7 @@ describe("initialize", () => {
 });
 
 describe("tools/list", () => {
-  it("lists four tools with schemas and annotations", async () => {
+  it("lists eight tools with schemas and annotations", async () => {
     const h = harness();
     const body = (await (
       await h.post({ jsonrpc: "2.0", id: 2, method: "tools/list" })
@@ -176,7 +176,11 @@ describe("tools/list", () => {
     const tools = resultOf(body)["tools"] as Record<string, unknown>[];
     expect(tools.map((t) => t["name"])).toEqual([
       "get_balance",
+      "list_pots",
       "list_transactions",
+      "list_payees",
+      "list_standing_orders",
+      "list_card_controls",
       "list_recon_breaks",
       "initiate_payment",
     ]);

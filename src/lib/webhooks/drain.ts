@@ -1,6 +1,7 @@
 import "server-only";
 
 import { sql } from "@/lib/ledger/db";
+import { releaseAvailableCredits } from "@/lib/rails/plaid/adapter";
 import { logger } from "@/lib/log";
 
 import {
@@ -101,6 +102,10 @@ export interface DrainResult extends DispatchSummary {
   consumers: string[];
   missingConsumers: string[];
   durationMs: number;
+  /** Uncleared credits that matured and were released by this run. */
+  creditsReleased: number;
+  /** Non-null if the sweep failed. The drain still succeeds; this is reported. */
+  creditSweepError: string | null;
 }
 
 export async function drain(opts: { maxBatches?: number } = {}): Promise<DrainResult> {
@@ -126,11 +131,43 @@ export async function drain(opts: { maxBatches?: number } = {}): Promise<DrainRe
     logger: log,
   });
 
+  // Release uncleared credits that have matured.
+  //
+  // `releaseAvailableCredits()` was written, tested, and CALLED BY NOTHING. A
+  // funds-availability policy that nobody sweeps is a promise the system makes
+  // and never keeps: `v_hold_state.is_released` flips true the moment
+  // `now() >= available_at`, while the memo book still withholds the money —
+  // which is exactly the shape `v_hold_release_drift` exists to report. Every
+  // uncleared hold in this book matures at the same instant, so the drift
+  // would have arrived all at once and in silence.
+  //
+  // It belongs on the drain rather than a new cron because the drain already
+  // has the two properties this needs: it runs on a schedule AND on every
+  // webhook nudge, and it is safe to run at any time. The sweep is idempotent
+  // by construction — the release entry's key is derived from the hold id and
+  // its immutable `available_at`, so a second sweep posts nothing.
+  //
+  // A failure here must NOT fail the drain. Releasing a credit and processing a
+  // webhook are independent jobs that happen to share a trigger, and a sweep
+  // that can block webhook processing is a worse bug than a late release.
+  let creditsReleased = 0;
+  let creditSweepError: string | null = null;
+  try {
+    const released = await releaseAvailableCredits({});
+    creditsReleased = released.released;
+    if (creditsReleased > 0) log.info("drain.credits_released", { count: creditsReleased });
+  } catch (thrown) {
+    creditSweepError = thrown instanceof Error ? thrown.message : String(thrown);
+    log.warn("drain.credit_sweep_failed", { error: creditSweepError });
+  }
+
   const result: DrainResult = {
     ...summary,
     consumers: names,
     missingConsumers: missing,
     durationMs: Date.now() - started,
+    creditsReleased,
+    creditSweepError,
   };
   log.info("drain.complete", result as unknown as Record<string, unknown>);
   return result;

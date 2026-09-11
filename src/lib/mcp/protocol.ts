@@ -41,14 +41,43 @@ Your token is scoped to exactly one business. Every tool answers only about
 that business's money; there is no parameter that widens the scope, and no
 account belonging to anyone else is addressable.
 
-Three tools read: get_balance, list_transactions, list_recon_breaks.
+Seven tools read and one writes.
 
-One tool writes, and it does not move money: initiate_payment queues a request
+  get_balance           ledger and available balance on the main account
+  list_pots             money earmarked in pots, and the total of both
+  list_transactions     journal postings, on both time axes
+  list_payees           saved destinations and how well each is verified
+  list_standing_orders  mandates, next due dates, and refused occurrences
+  list_card_controls    card limits and blocks, and authorisation decisions
+  list_recon_breaks     where our books and the network disagree
+
+The one tool that writes does not move money: initiate_payment queues a request
 in a human approval queue. When it succeeds, NOTHING HAS BEEN PAID. Say so
 plainly to whoever you are relaying to — "queued for approval", never "sent",
 "paid" or "initiated". You cannot approve, release, submit or cancel a payment
 through this surface; those operations are not exposed to any agent. See
 docs/AGENT-LIMITS.md for the full list and the reasoning.
+
+Neither can you change anything you read. There is no tool to move money
+between pots, to add or re-check a payee, to acknowledge a payee warning, to
+create or fire a standing order, or to change a card control — and a card
+control is the one most worth naming, because changing one IS a real-time
+authorisation decision made in advance and no approval queue would ever see it.
+When somebody asks for one of these, say that it needs a person and where in
+the product they do it. Do not offer a workaround.
+
+Balances have two shapes. get_balance answers about the main deposit account.
+Money a customer has earmarked in a pot is in a different account and is NOT in
+that figure, so "how much is available to spend" is get_balance and "how much
+money do we have" is list_pots. Quoting the first as if it were the second
+understates a customer's money, which is the one arithmetic error here that
+looks like honesty.
+
+A payment that never happened is not in the journal. If someone asks why a
+scheduled payment did not arrive, list_standing_orders has the occurrence with
+its refusal code; if someone asks why a card was declined, list_card_controls
+has the decision with the rule that fired. Neither is answerable from
+list_transactions, and "I see no record of it" is the wrong answer to both.
 
 Two dates, always. value_date is when money moved in business terms;
 booking_date is when this system learned of it. They differ on every correction

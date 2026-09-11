@@ -1,17 +1,37 @@
 # The MCP surface
 
 `POST /api/mcp` is a Model Context Protocol server over Streamable HTTP. It
-speaks `initialize`, `tools/list` and `tools/call`, and it exposes four tools:
+speaks `initialize`, `tools/list` and `tools/call`, and it exposes eight tools —
+seven that read and one that writes:
 
 | Tool | Writes? | What it answers |
 | --- | --- | --- |
-| `get_balance` | no | Ledger balance and available balance, difference itemised into card-authorisation holds and uncleared credits, with an optional bitemporal as-of |
+| `get_balance` | no | Ledger balance and available balance on the main deposit account, difference itemised into card-authorisation holds and uncleared credits, with an optional bitemporal as-of |
+| `list_pots` | no | Money earmarked in pots, the main balance beside it, and the identity check that proves the set is complete |
 | `list_transactions` | no | Journal postings with `value_date` and `booking_date` as separate, separately filterable columns |
+| `list_payees` | no | The payee book: each saved destination's verification outcome, freshness, name-match result and findings |
+| `list_standing_orders` | no | Mandates, their next due date, and their occurrences — including refused ones, with the code and the four figures the funding decision was made against |
+| `list_card_controls` | no | Card limits, blocks and state, plus the real-time authorisation decisions with the rule that fired |
 | `list_recon_breaks` | no | Open reconciliation breaks with category, reason code, age and severity |
 | `initiate_payment` | **queues a request** | Writes one `payment_instruction` into the human approval queue. Moves no money, and cannot approve or release what it wrote |
 
-The list of operations deliberately absent, with the failure mode for each, is
-[AGENT-LIMITS.md](./AGENT-LIMITS.md).
+Four of those readers were added after the first cut of this surface, when
+pots, the payee book, standing orders and card controls shipped. Each one was
+added for the same reason, and it is not "the feature exists": without it the
+agent was **confidently wrong** rather than merely unhelpful.
+
+| Without it, the agent would say | Because |
+| --- | --- |
+| "you have $23,713.13" when the business has $38,713.13 | `get_balance` reads chart code `2100`; a pot is a separate account beneath it |
+| "I've drafted a payment to the account on the invoice" | nothing let it check that destination against the book first |
+| "I see no record of that payment" | a scheduled payment that was refused is an occurrence row, not a journal row |
+| "the bank declined your card" | a declined authorisation never reaches the ledger; the decision log is the only record |
+
+**The number of tools that write is still one.** That is the shape of this
+surface: reads grew, writes did not, and the argument for refusing the obvious
+new writes — a standing-order mandate, a payee, a card control, an
+acknowledgement — is in [AGENT-LIMITS.md](./AGENT-LIMITS.md) §10-§13 alongside
+everything else deliberately absent.
 
 ---
 
@@ -185,16 +205,26 @@ having next to the calls that followed.
 
 ## 2. `tools/list`
 
-Four tools. Full schemas elided here for length; the annotations are the part
+Eight tools. Full schemas elided here for length; the annotations are the part
 worth reading, because they are what a client uses to decide whether to run a
 tool without asking its human.
 
 ```
-get_balance        {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
-list_transactions  {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
-list_recon_breaks  {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
-initiate_payment   {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+get_balance           {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+list_pots             {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+list_transactions     {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+list_payees           {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+list_standing_orders  {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+list_card_controls    {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+list_recon_breaks     {"readOnlyHint": true,  "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+initiate_payment      {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
 ```
+
+`openWorldHint: false` on every one of them is a claim worth checking rather
+than taking: no tool here reaches a third party. `list_card_controls` returns
+Lithic's authorisation decisions, but it reads them from `card_auth_decision`,
+our own table, written when the decision was made. Nothing on this surface calls
+a provider, so nothing on it can be slow or wrong because a provider is.
 
 `initiate_payment` is `readOnlyHint: false` because it writes a row, and
 `destructiveHint: false` because nothing is overwritten, nothing is spent, and
@@ -792,6 +822,409 @@ Points worth making about that log:
   `payment_instruction` and its `requested` event record the agent's actor id,
   the amount, the destination, the value date and the content hash, on tables
   `corgi_app` holds no `UPDATE` or `DELETE` on.
+
+# A second transcript — the four readers added on day two
+
+Captured the same way as the transcript above: `next start` on port 3117, the
+production build, against the live Neon branch, with the published demo token.
+Captured 2026-09-11 at 01:17 UTC. Request and response bodies are verbatim,
+trimmed only where the omission is marked, and every id is a real id you can
+look up in the database. The same honest note applies: other workers were
+writing to this branch while it was captured, so the figures are a snapshot of
+that minute rather than fixtures.
+
+## 11. `list_pots` — the money `get_balance` cannot see
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "tools/call",
+  "params": { "name": "list_pots", "arguments": {} }
+}
+```
+
+**HTTP 200**
+
+```json
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Ridgeline Robotics, Inc. holds $38,713.13 in total: $23,713.13 in the main balance (of which $5,799.13 is available to spend after holds and uncleared credits) and $15,000.00 earmarked across 2 pot(s) — Payroll — October $12,000.00, Sales tax $3,000.00. Pot money is not part of the main available balance. main + pots reconciles exactly with a recursive walk of the deposit subtree."
+    }
+  ],
+  "structuredContent": {
+    "business": { "id": "e274546d-6bdd-5266-b0fb-cc839a7811f9", "legal_name": "Ridgeline Robotics, Inc." },
+    "as_of_book_date": "2026-09-10",
+    "main_account": {
+      "code": "2100",
+      "name": "Ridgeline Robotics, Inc. — business current account",
+      "ledger_balance": { "cents": "2371313", "display": "$23,713.13" },
+      "available_balance": { "cents": "579913", "display": "$5,799.13" },
+      "card_authorisation_holds": { "cents": "41100", "display": "$411.00" },
+      "uncleared_credits": { "cents": "1750300", "display": "$17,503.00" }
+    },
+    "pots": [
+      {
+        "pot_id": "a94a4e92-19af-4004-8fc9-d3b77f23df0c",
+        "name": "Payroll — October",
+        "purpose": "Wages and payroll taxes for the October run, ring-fenced on the 1st",
+        "account_code": "2100.a94a4e92-19af-4004-8fc9-d3b77f23df0c",
+        "opened_at": "2026-09-10T23:51:53.143Z",
+        "balance": { "cents": "1200000", "display": "$12,000.00" },
+        "share_percent": 30
+      },
+      {
+        "pot_id": "ef7dd5c5-9479-4be8-9675-6ec3490ccca7",
+        "name": "Sales tax",
+        "purpose": "State sales tax collected this quarter, held until the filing date",
+        "account_code": "2100.ef7dd5c5-9479-4be8-9675-6ec3490ccca7",
+        "opened_at": "2026-09-10T23:51:54.748Z",
+        "balance": { "cents": "300000", "display": "$3,000.00" },
+        "share_percent": 7
+      }
+    ],
+    "totals": {
+      "pot_count": 2,
+      "pots_total": { "cents": "1500000", "display": "$15,000.00" },
+      "main_plus_pots": { "cents": "3871313", "display": "$38,713.13" },
+      "deposit_subtree": { "cents": "3871313", "display": "$38,713.13" },
+      "identity_holds": true,
+      "identity_difference": { "cents": "0", "display": "$0.00" }
+    },
+    "truncated": false,
+    "note": "A pot is a separate account beneath the customer's 2100 deposit leaf, and money in one is NOT part of the main available balance that get_balance reports. …"
+  }
+}
+```
+
+Three figures matter here and they are three different questions.
+`$5,799.13` is what can be spent right now. `$23,713.13` is what the books say
+about the main account. `$38,713.13` is how much money this business has. A
+surface with only `get_balance` could answer the first two and would answer the
+third with the second.
+
+`deposit_subtree` is the same total reached the other way — `v_pot_subtree`
+walks `account.parent_id` from the deposit leaf and never reads the `pot` table
+— so `identity_holds` is a property the tool SHOWS rather than claims. If the
+two ever disagreed the summary would say so in capitals instead of quoting one
+of them.
+
+`share_percent` is integer division on `bigint` cents. There is no float
+anywhere on this path, including in the decoration.
+
+## 12. `list_payees` — a destination nobody has ever checked
+
+Filtering to the freshness label that should stop a draft:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 21,
+  "method": "tools/call",
+  "params": { "name": "list_payees", "arguments": { "freshness": "never", "limit": 2 } }
+}
+```
+
+**HTTP 200** (first of two shown)
+
+```json
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "2 payee(s) on Ridgeline Robotics, Inc.'s book. 2 would pass the payee gate today; 0 would not (blocked, archived, or warned without a human acknowledgement). 2 have a verification that is stale or has never run. 0 share a holder name with another payee carrying different bank details, which is what a changed-bank-details fraud and an innocent duplicate both look like. This surface can read the book and cannot change it, re-check it, or acknowledge a warning."
+    }
+  ],
+  "structuredContent": {
+    "payees": [
+      {
+        "payee_id": "b5d1862a-52cd-448d-a8a8-9fdca9559c4a",
+        "display_name": "Never checked",
+        "holder_name": "Nobody Ltd",
+        "rail": "ach",
+        "routing_number": "011401533",
+        "account_number_last4": "1111",
+        "account_type": "checking",
+        "created_at": "2026-09-11T00:11:55.192Z",
+        "created_by": "Alex Whitfield",
+        "archived": false,
+        "archived_at": null,
+        "verification": {
+          "outcome": null,
+          "freshness": "never",
+          "checked_at": null,
+          "checked_days_ago": null,
+          "checked_by": null,
+          "evidence": null,
+          "routing_checksum_ok": null,
+          "routing_prefix_assigned": null,
+          "directory": null,
+          "directory_provider": null,
+          "institution_name": null,
+          "name_match": null,
+          "name_match_score": null,
+          "name_source": null,
+          "counterparty_name": null,
+          "findings": []
+        },
+        "acknowledgement": { "acknowledged": false, "acknowledged_by": null, "acknowledged_at": null, "reason": null },
+        "has_conflicting_twin": false,
+        "payable": true
+      }
+    ]
+  }
+}
+```
+
+Note the uncomfortable pair: `freshness: "never"` and `payable: true`. Both are
+correct. The payee gate blocks on arithmetic and warns on judgement; a payee
+nobody has checked has no finding to warn about, so a payment to it is not
+refused. `payable` is documented as derived from the columns beside it and NOT
+as the gate — `gatePaymentOnPayee()` re-decides inside the transaction that
+writes the instruction — and this row is exactly why that distinction is in the
+schema text. An agent that reads `payable: true` and stops reading has learned
+less than one that reads the line above it.
+
+A verified payee on the same book carries the other half of the story:
+
+```json
+"verification": {
+  "outcome": "verified",
+  "freshness": "fresh",
+  "checked_days_ago": 0,
+  "evidence": "live",
+  "directory": "not_listed",
+  "directory_provider": "increase.routing_numbers",
+  "name_match": "unavailable",
+  "name_source": "payer_asserted",
+  "findings": [
+    {
+      "code": "NAME_NOT_VERIFIABLE",
+      "severity": "note",
+      "title": "No bank has confirmed the name on this account",
+      "detail": "US ACH has no Confirmation of Payee network: there is no message that asks a receiving bank what name is on an account, and no provider in this system can obtain one for a third party's account. The name below is the one your own team typed. It has been checked for internal consistency and for nothing else."
+    }
+  ]
+}
+```
+
+`name_source: "payer_asserted"` is the field that keeps an agent honest. A
+`verified` outcome with a payer-asserted name means our own side typed the name
+and our own side agreed with it. The tool returns the label rather than
+flattening it into "verified", because "the bank confirmed the account holder"
+and "we compared two strings we wrote" are different sentences and only one of
+them is true here.
+
+## 13. `list_standing_orders` — the payment that did not happen
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 22,
+  "method": "tools/call",
+  "params": {
+    "name": "list_standing_orders",
+    "arguments": { "refused_only": true, "occurrences_per_order": 1 }
+  }
+}
+```
+
+**HTTP 200**
+
+```json
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "1 standing order(s) for Ridgeline Robotics, Inc.. 1 recent occurrence(s) shown, 1 of them refused. A refused occurrence was attempted and closed with a reason; it is not carried forward and the next date is unaffected. Nothing here can be created, amended, cancelled or fired through this surface."
+    }
+  ],
+  "structuredContent": {
+    "mandates": [
+      {
+        "standing_order_id": "3e06bbf8-39ca-4c52-8742-7a32117a2fc5",
+        "reference": "Quarterly equipment settlement — Northgate Finance",
+        "account_name": "Ridgeline Robotics, Inc. — business current account",
+        "rail": "ach",
+        "amount": { "cents": "2087193", "display": "$20,871.93" },
+        "currency": "USD",
+        "cadence": "daily",
+        "schedule": "every day",
+        "start_date": "2026-09-10",
+        "end_date": "2026-09-10",
+        "next_due_date": null,
+        "days_until_next": null,
+        "destination": {
+          "type": "ach",
+          "holder_name": "Northgate Equipment Finance",
+          "routing_number": "011401533",
+          "account_number_last4": "9012",
+          "account_type": "checking"
+        },
+        "destination_summary": "Northgate Equipment Finance · ACH 011401533 ••9012 (checking)",
+        "cancelled": false,
+        "created_by": "Priya Raman",
+        "occurrence_counts": { "raised": 0, "refused": 1, "undecided": 0 },
+        "recent_occurrences": [
+          {
+            "occurrence_id": "f7c3a4c7-d00b-4223-b1e0-574cc3b4a2fb",
+            "scheduled_date": "2026-09-10",
+            "idempotency_key": "standing:3e06bbf8-39ca-4c52-8742-7a32117a2fc5:2026-09-10",
+            "disposition": "refused",
+            "instruction_id": null,
+            "refusal_code": "INSUFFICIENT_AVAILABLE_FUNDS",
+            "refusal_reason": "Refused: the ledger balance covers this payment but the available balance does not. The difference is money already committed to card authorisations or to credits that have not cleared, and neither is spendable. This occurrence is closed; the next one is unaffected.",
+            "shortfall": { "cents": "10000", "display": "$100.00" },
+            "observed": {
+              "ledger_balance": { "cents": "2108193", "display": "$21,081.93" },
+              "card_authorisation_holds": { "cents": "31000", "display": "$310.00" },
+              "uncleared_credits": { "cents": "0", "display": "$0.00" },
+              "available_balance": { "cents": "2077193", "display": "$20,771.93" }
+            },
+            "decided_at": "2026-09-10T22:36:27.096Z",
+            "claimed_at": "2026-09-10T22:36:26.947Z"
+          }
+        ]
+      }
+    ],
+    "policy": {
+      "on_insufficient_funds": "The occurrence is refused and closed, with the reason and the four observed figures on the row. No partial payment, no carry-forward, no queue that fires whenever the money arrives. The next occurrence is unaffected and fires on its own date.",
+      "insufficient_funds_code": "INSUFFICIENT_AVAILABLE_FUNDS",
+      "stale_after_days": 5,
+      "catch_up_window_days": 45
+    },
+    "counts": { "mandates": 1, "active": 1, "cancelled": 0, "occurrences_shown": 1, "refused_shown": 1 }
+  }
+}
+```
+
+This is the live-fire question — "what happens on the day the balance cannot
+cover it" — answered from a row rather than from a policy document. The ledger
+held $21,081.93 and the payment was $20,871.93, so a system that checked the
+LEDGER would have paid it; available was $20,771.93 because $310.00 sat in open
+card authorisations, and the shortfall is exactly $100.00. All five figures are
+on the occurrence, so the refusal can be explained in a year without
+re-deriving a balance that has moved since.
+
+`idempotency_key` is generated by Postgres and unique on `payment_instruction`.
+It is the exactly-once mechanism, and it is returned rather than described:
+a second run of the same date cannot raise a second payment because that string
+is already taken.
+
+## 14. `list_card_controls` — why the pump declined
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 23,
+  "method": "tools/call",
+  "params": {
+    "name": "list_card_controls",
+    "arguments": { "declines_only": true, "limit": 1, "decision_limit": 1 }
+  }
+}
+```
+
+**HTTP 200**
+
+```json
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "1 card(s) for Ridgeline Robotics, Inc.: 0 frozen, 1 with no controls set. ••6707 no controls, $50.00 approved today. 1 recent authorisation decision(s), 1 declined; the most recent decline was $50.00 at CORGI FUEL PUMP LIVE on 2026-09-11T00:44:10.461Z, rule mcc_blocked, network result UNAUTHORIZED_MERCHANT — Merchant category 5542 is blocked on this card (control version 1).. Controls can be read here and not changed: that is a real-time authorisation decision and it is not on this surface."
+    }
+  ],
+  "structuredContent": {
+    "cards": [
+      {
+        "card_id": "095c941b-9ed2-4362-a885-c0402815109c",
+        "last_four": "6707",
+        "nickname": "corgi core loop CL-MTW8PY2K",
+        "created_at": "2026-09-11T00:51:19.588Z",
+        "controls": null,
+        "spend_today": { "cents": "5000", "display": "$50.00" },
+        "spend_this_month": { "cents": "5000", "display": "$50.00" },
+        "headroom_today": null
+      }
+    ],
+    "recent_decisions": [
+      {
+        "decided_at": "2026-09-11T00:44:10.461Z",
+        "card_id": "42c947d7-687f-466e-8c7b-bd29fce8bd14",
+        "last_four": "2971",
+        "nickname": "corgi core loop CL-MTW7HJG9",
+        "amount": { "cents": "5000", "display": "$50.00" },
+        "mcc": "5542",
+        "merchant_category": "5542 · Automated fuel dispenser",
+        "merchant": "CORGI FUEL PUMP LIVE",
+        "request_status": "AUTHORIZATION",
+        "outcome": "decline",
+        "result_code": "UNAUTHORIZED_MERCHANT",
+        "rule": "mcc_blocked",
+        "reason": "Merchant category 5542 is blocked on this card (control version 1).",
+        "control_version": 1,
+        "decision_latency_ms": 147,
+        "source": "provider"
+      }
+    ],
+    "counts": { "cards": 1, "frozen": 0, "without_controls": 1, "decisions": 1, "declines": 1 },
+    "truncated": true,
+    "note": "Controls are the real-time authorisation decision made in advance: the values here are what the network is told, inside the provider's timeout, with no human on the path. …"
+  }
+}
+```
+
+A real decline, made by this system inside Lithic's ASA window in 147ms, on a
+real sandbox authorisation at a fuel pump. It is not in the ledger and never
+will be — no money moved — so this decision log is the only place the answer to
+"why was my card declined" exists.
+
+Two details worth pointing at. `controls: null` on the card in the page is not
+"no limits": it is a card nobody has set a policy on, and the decision log
+shows the rule `no_controls_configured` approving spend on exactly such cards.
+Conflating the two would have an agent tell a customer their card is
+unrestricted when the truth is that nobody has restricted it yet.
+
+And `provider_card_token` appears nowhere in that payload. It is on the row this
+is projected from; it is dropped in the gateway, before anything downstream
+could log or return it. It is the handle that addresses a card at Lithic, and an
+agent that never holds one cannot be talked into using it.
+
+## 15. An unknown argument, refused rather than ignored
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 24,
+  "method": "tools/call",
+  "params": { "name": "list_pots", "arguments": { "pot_id": "x" } }
+}
+```
+
+**HTTP 200**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 24,
+  "error": {
+    "code": -32602,
+    "message": "invalid arguments: (root) — Unrecognized key: \"pot_id\"",
+    "data": { "problems": [ { "field": "(root)", "problem": "Unrecognized key: \"pot_id\"" } ] }
+  }
+}
+```
+
+Every schema on this surface is strict, including the four newer ones. A model
+that invents `pot_id`, `card_id` or `business_id` is told plainly that no such
+parameter exists rather than being served its own tenant's data and left
+believing the parameter worked — because the next call it writes with that
+belief is the dangerous one. `tools.test.ts` asserts the refusal over every
+registered schema and over every name in `FORBIDDEN_PARAMETER_NAMES`, so a
+future tool cannot quietly accept one.
 
 ## Rate limits
 

@@ -91,14 +91,26 @@ d("the MCP surface, against the live database", () => {
     // deliberately allowed to be one with no accounts yet — that is the
     // sharper scoping test, because a token scoped to B must then find that
     // A's account does not exist rather than finding it and being refused.
+    // A DEPOSIT LEAF IS NOT ENOUGH — the business must also be able to
+    // transact. `requestPayment()` runs the KYB gate before it writes an
+    // instruction, so a business whose verification is still pending refuses
+    // the write path with KYB_PENDING and every assertion below it fails for a
+    // reason that has nothing to do with the agent surface. Two integration
+    // fixtures added since this file was written (holds, pots) sort ahead of
+    // the seeded customer alphabetically and are both `pending`, which is what
+    // made "the first business with a 2100 leaf" the wrong query.
     const [withAccounts] = await sql<{ id: string }[]>`
       SELECT b.id
         FROM business b
-        JOIN account a ON a.business_id = b.id AND a.code = '2100'
+        JOIN account a       ON a.business_id = b.id AND a.code = '2100'
+        JOIN v_business_kyb k ON k.business_id = b.id
+       WHERE k.kyb_status = 'approved'
        ORDER BY b.legal_name
        LIMIT 1`;
     if (withAccounts === undefined) {
-      throw new Error("seed first: node scripts/seed.mjs (need a business with a 2100 leaf)");
+      throw new Error(
+        "seed first: node scripts/seed.mjs (need a KYB-approved business with a 2100 leaf)",
+      );
     }
     businessA = withAccounts.id;
 
@@ -200,8 +212,27 @@ d("the MCP surface, against the live database", () => {
       expect(typeof row["value_date"]).toBe("string");
       expect(typeof row["booking_date"]).toBe("string");
       expect(typeof row["booking_seq"]).toBe("string");
-      // Nothing can be learned before it happened.
-      expect(String(row["booking_date"]) >= String(row["value_date"])).toBe(true);
+      expect(String(row["value_date"])).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(String(row["booking_date"])).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+
+    // THE TWO COLUMNS ARE INDEPENDENT, IN BOTH DIRECTIONS, and this assertion
+    // used to say otherwise: it required booking_date >= value_date, on the
+    // reasoning that nothing can be learned before it happened. That is true
+    // of a settlement and false of a credit. An inbound ACH accepted today
+    // with a value date of tomorrow books now and values then — the funding
+    // path raises exactly that row, and a forward-dated settlement in the
+    // live-fire script values in 2027. Both are correct, and a surface that
+    // refused to return them would be hiding the money that is on its way.
+    //
+    // What the tool must never do is COLLAPSE the two into one column, so what
+    // is asserted is that they are separately present and separately filtered.
+    const future = await call("list_transactions", {
+      value_date_from: "2026-09-11",
+      limit: 5,
+    });
+    for (const row of structured(future)["transactions"] as Record<string, unknown>[]) {
+      expect(String(row["value_date"]) >= "2026-09-11").toBe(true);
     }
   });
 
@@ -218,6 +249,101 @@ d("the MCP surface, against the live database", () => {
         row["category"],
       );
       expect(typeof row["age_days"]).toBe("number");
+    }
+  });
+
+  it("runs list_pots against the pot views and proves the identity on real rows", async () => {
+    const data = structured(await call("list_pots", {}));
+    const totals = data["totals"] as Record<string, Record<string, string>>;
+
+    // main + Σ pots against a recursive walk of the deposit subtree. This is
+    // the one assertion here that could fail for a reason worth knowing about.
+    expect(totals["identity_holds"]).toBe(true);
+    expect(totals["identity_difference"]?.["cents"]).toBe("0");
+
+    const main = BigInt(
+      String((data["main_account"] as Record<string, Record<string, string>>)["ledger_balance"]?.["cents"]),
+    );
+    const pots = BigInt(String(totals["pots_total"]?.["cents"]));
+    expect(BigInt(String(totals["main_plus_pots"]?.["cents"]))).toBe(main + pots);
+
+    for (const pot of data["pots"] as Record<string, unknown>[]) {
+      // A pot's account code is the main leaf plus its own id, which is what
+      // makes it invisible to every `code = '2100'` query in the codebase.
+      expect(String(pot["account_code"])).toMatch(/^2100\./);
+      expect(typeof (pot["balance"] as Record<string, unknown>)["cents"]).toBe("string");
+    }
+  });
+
+  it("runs list_payees against the payee book view", async () => {
+    const data = structured(await call("list_payees", { limit: 25 }));
+    const rows = data["payees"] as Record<string, Record<string, unknown>>[];
+    expect(Array.isArray(rows)).toBe(true);
+
+    for (const row of rows) {
+      expect(["fresh", "ageing", "stale", "never"]).toContain(
+        row["verification"]?.["freshness"],
+      );
+      const last4 = row["account_number_last4"];
+      if (last4 !== null) expect(String(last4)).toMatch(/^\d{4}$/);
+      // Archived payees are excluded unless asked for.
+      expect(row["archived"]).toBe(false);
+    }
+  });
+
+  it("runs list_standing_orders and returns refusals as rows", async () => {
+    const data = structured(await call("list_standing_orders", { occurrences_per_order: 5 }));
+    const mandates = data["mandates"] as Record<string, unknown>[];
+
+    for (const mandate of mandates) {
+      expect(typeof mandate["reference"]).toBe("string");
+      for (const occurrence of mandate["recent_occurrences"] as Record<string, unknown>[]) {
+        expect([null, "raised", "refused"]).toContain(occurrence["disposition"]);
+        // The generated key, straight off the row. This is the exactly-once
+        // mechanism, and it is a column rather than something we compute.
+        expect(String(occurrence["idempotency_key"])).toMatch(
+          /^standing:[0-9a-f-]{36}:\d{4}-\d{2}-\d{2}$/,
+        );
+        if (occurrence["disposition"] === "refused") {
+          expect(typeof occurrence["refusal_code"]).toBe("string");
+        }
+      }
+    }
+
+    expect((data["policy"] as Record<string, unknown>)["stale_after_days"]).toBe(5);
+  });
+
+  it("runs list_card_controls and never returns a provider token", async () => {
+    const data = structured(await call("list_card_controls", { decision_limit: 10 }));
+
+    for (const card of data["cards"] as Record<string, unknown>[]) {
+      const controls = card["controls"] as Record<string, unknown> | null;
+      if (controls !== null) {
+        expect(["active", "frozen"]).toContain(controls["card_state"]);
+        for (const blocked of controls["blocked_mccs"] as Record<string, unknown>[]) {
+          expect(String(blocked["mcc"])).toMatch(/^\d{4}$/);
+        }
+      }
+    }
+
+    // The handles that address a card at Lithic are dropped in the gateway,
+    // before anything downstream could log or return them.
+    const rendered = JSON.stringify(data);
+    expect(rendered).not.toContain("provider_card_token");
+    expect(rendered).not.toContain("provider_auth_token");
+    expect(rendered).not.toMatch(/"card_[A-Za-z0-9]{12,}"/);
+  });
+
+  it("keeps two tenants apart on the four newer readers as well", async () => {
+    // Same argument as the balance test: scope comes from the token, so the
+    // same call under B's token cannot reach A's rows. Asserted per tool
+    // because each one is a different query.
+    for (const tool of ["list_pots", "list_payees", "list_standing_orders", "list_card_controls"]) {
+      const body = await call(tool, {}, TOKEN_B);
+      const result = body["result"] as Record<string, unknown>;
+      const data = result["structuredContent"] as Record<string, unknown>;
+      if (result["isError"] === true) continue;
+      expect((data["business"] as Record<string, unknown>)["id"]).toBe(businessB);
     }
   });
 
