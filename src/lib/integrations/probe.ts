@@ -373,7 +373,16 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
 
     const ERC20_TRANSFER_GAS = 65_000n;
     const needed = ERC20_TRANSFER_GAS * price;
-    const usdcHuman = (Number(usdc) / 1e6).toFixed(2);
+    // Integer division, not `Number(usdc) / 1e6`.
+    //
+    // "Money is never a float" is a non-negotiable and this line was the only
+    // place in the repo that broke it. It is "only a display string", which is
+    // exactly the excuse that puts a float next to money — and USDC has six
+    // decimals, so above 2^53 minor units the double stops being exact. The
+    // value here is small today. The rule is not about today.
+    const usdcWhole = usdc / 1_000_000n;
+    const usdcCents = (usdc % 1_000_000n) / 10_000n;
+    const usdcHuman = `${usdcWhole}.${usdcCents.toString().padStart(2, "0")}`;
 
     if (usdc === 0n) {
       return { liveness: "unauthorised", detail: "no USDC to send — top up at faucet.circle.com", ms };

@@ -602,6 +602,53 @@ define(AF, "AF2", '"A simulated integration presented as live."', async (r) => {
       : `slots claiming live with no call evidence: ${bare.map((s) => s.slot).join(", ")}`,
   );
 
+  /* ---- Is the truth itself stable? ------------------------------------- */
+  //
+  // audit-claims.mjs diffs documents against ONE reading of /api/health. If
+  // that reading is unstable, its verdict is unstable with it — and the first
+  // version of this check learned that the hard way: comparing the banner
+  // reading against audit-claims' own reading catches the flap only when the
+  // two land on different sides of it. When both readings happen to catch the
+  // same transient, the documents get blamed for being right.
+  //
+  // So the endpoint is sampled directly, several times, and the question asked
+  // is "did any slot change its mind", not "did two readings differ".
+  const samples = [state.health];
+  for (let i = 0; i < 2; i += 1) {
+    const again = await http(`${state.baseUrl}/api/health`);
+    if (again.ok && again.status === 200) {
+      try { samples.push(JSON.parse(again.body)); } catch { /* a sample we cannot parse is not a sample */ }
+    }
+  }
+  const unstable = new Set();
+  for (const slot of slots) {
+    const verdicts = new Set(samples.map((s) => (s.integrations?.slots ?? []).find((x) => x.slot === slot.slot)?.status));
+    if (verdicts.size > 1) unstable.add(`${slot.slot} (${[...verdicts].join(" then ")})`);
+  }
+  // A flap is a HARD failure of this rule, not a reason to shrug.
+  //
+  // "Honest labelling" is a reproducibility requirement: a slot that reads
+  // live on one request and simulated on the next is presenting a simulated
+  // integration as live some of the time, which is the automatic fail, and
+  // presenting a live one as simulated the rest of the time, which throws away
+  // credit that was earned. Either way the label is not something a grader can
+  // rely on, and the bug is in the probe, not in the documents.
+  //
+  // When it fires, the delegation is deliberately skipped: diffing documents
+  // against an unstable truth would blame a correct document for a transient.
+  r.assert(
+    unstable.size === 0,
+    unstable.size === 0
+      ? `the live/simulated verdict is reproducible: ${samples.length} readings seconds apart agree on every slot`
+      : `/api/health changed its mind about ${[...unstable].join(", ")} across ${samples.length} readings taken seconds apart. ` +
+        `A label that is not reproducible is not honest labelling — at some of those moments the endpoint was ` +
+        `presenting that slot as live and at others as simulated. Fix the probe's transient before trusting either answer.`,
+  );
+  if (unstable.size > 0) {
+    r.note("scripts/audit-claims.mjs was NOT run: diffing documents against an unstable truth would blame a correct document for a transient");
+    return;
+  }
+
   // DELEGATED: audit-claims.mjs already diffs every tracked .md against this
   // endpoint. Reimplementing it here would be two guards drifting apart.
   const res = spawnSync(process.execPath, [resolve(ROOT, "scripts/audit-claims.mjs"), `--url=${state.baseUrl}`], {
@@ -617,20 +664,17 @@ define(AF, "AF2", '"A simulated integration presented as live."', async (r) => {
     r.note(`  ${line.trim()}`);
   }
 
-  // audit-claims re-reads /api/health for its own truth. If that second
-  // reading disagrees with the one in this run's banner, the truth the
-  // documents were diffed against was UNSTABLE, and a contradiction cannot be
-  // told apart from a transient probe failure. Reporting FAIL there would send
-  // someone to edit a correct document; reporting PASS would hide a real
-  // contradiction. Neither is honest, so it is UNKNOWN with the reading.
+  // audit-claims re-reads /api/health for its own truth. Even after the
+  // stability sampling above, that fourth reading can land on a transient, and
+  // a document must not be blamed for one. So the two truths are compared once
+  // more, and a disagreement is UNKNOWN rather than a verdict either way.
   const theirTruth = stdout.match(/^truth:\s*(\d+)\s+of\s+(\d+)/m);
   const ourLive = state.health.integrations?.live;
   if (theirTruth !== null && Number(theirTruth[1]) !== ourLive) {
     r.unknown(
-      `/api/health reported ${ourLive} live at the start of this run and ${theirTruth[1]} live ` +
-        `seconds later, inside audit-claims.mjs. A slot is flapping, so a document that disagrees ` +
-        `with the endpoint may be correct and the endpoint transiently wrong. Re-run before ` +
-        `editing any document. audit-claims.mjs exited ${res.status}.`,
+      `/api/health reported ${ourLive} live across ${samples.length} stable readings and ${theirTruth[1]} live ` +
+        `inside audit-claims.mjs seconds later. The truth moved under the audit, so a document that disagrees ` +
+        `with it may be correct. Re-run before editing any document. audit-claims.mjs exited ${res.status}.`,
     );
     return;
   }

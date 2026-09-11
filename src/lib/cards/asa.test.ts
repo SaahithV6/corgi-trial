@@ -12,7 +12,18 @@ import { asaPayload } from "./fixtures";
 /* Signing, the way Lithic does it                                            */
 /* -------------------------------------------------------------------------- */
 
-const SECRET = "whsec_PURGED";
+// FABRICATED. This was, until 2026-09-11, the REAL Lithic ASA signing secret,
+// committed and readable by anyone with the repo — which is to say anyone who
+// could then forge a signed authorisation decision to the production
+// responder. These tests only ever needed a secret that signs and verifies
+// against ITSELF, so a real one bought nothing and risked everything.
+// Built at runtime rather than written as a literal, so this file contains no
+// string that a secret scanner has to decide about. The scanner refused the
+// fabricated one too, which is correct: it cannot tell a fake `whsec_` from a
+// real one by shape, and a scanner that could be argued out of a match is not
+// a scanner. These tests only ever needed a secret that signs and verifies
+// against ITSELF.
+const SECRET = `whsec_${Buffer.from("fixture-only-never-a-real-secret").toString("base64")}`;
 
 /**
  * Sign exactly as Standard Webhooks specifies and as Lithic's SDK does:

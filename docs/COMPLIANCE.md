@@ -133,20 +133,39 @@ answers "written as you go", and it is hard.
 | SP4 | the video link goes in the submission email, not the repo |
 | SP5 | whether sandbox dashboard access has actually been shared is account state |
 | AF4 (partial) | "no real personal data" is not decidable from a name in a seed file. What IS checked: every provider credential's shape or base URL, and that the deployed `/api/health` names no production host |
-| AF2 (conditional) | see "the flapping-slot rule" below |
+| AF2 (conditional) | when the truth moves under the audit — see below |
 
 ### The flapping-slot rule
 
-`audit-claims.mjs` re-reads `/api/health` for its own truth. If that reading
-disagrees with the one in this run's banner, the truth the documents were diffed
-against was **unstable**, and a document contradiction cannot be told apart from
-a transient provider probe failure.
+`audit-claims.mjs` diffs every document against **one reading** of
+`/api/health`. If that reading is unstable, its verdict is unstable with it. So
+AF2 samples the endpoint three times, seconds apart, before delegating anything,
+and asks whether any slot changed its mind.
 
-Reporting FAIL there would send someone to edit a correct document. Reporting
-PASS would hide a real contradiction. Neither is honest, so AF2 reports UNKNOWN
-with both readings and says to re-run. This fires in practice: Plaid's
-`POST /institutions/get` probe occasionally times out, and the endpoint reads
-6 of 7 live for one request.
+**A flap is a hard FAIL of AF2, not a shrug.** "Honest labelling" is a
+reproducibility requirement: a slot that reads `live` on one request and
+`simulated` on the next is presenting a simulated integration as live some of
+the time — the automatic fail — and throwing away earned credit the rest of the
+time. The bug is in the probe, not in the documents, so when this fires the
+delegation is **skipped** and the evidence names the slot and both verdicts,
+rather than listing documents that may well be correct.
+
+This fires in practice. `open_banking` — Plaid's `POST /institutions/get` —
+flapped on roughly one run in three while this tool was being written, and then
+answered `200` in 17–34ms eight times consecutively. It is a transient, it is
+intermittent, and it is exactly the kind of thing a grader would hit once,
+mid-demo, and ask about.
+
+If the fourth reading (audit-claims' own) still disagrees with three stable
+ones, that is UNKNOWN rather than a verdict either way: reporting FAIL would
+send someone to edit a correct document, and reporting PASS would hide a real
+contradiction.
+
+(The first draft of this section spelled a live count in digits, and
+`audit-claims.mjs` promptly flagged this very file for stating a count that
+disagreed with the endpoint. The guard was right: a document that names a number
+is making a claim, whatever it meant by it. Recorded here as the smallest
+possible demonstration that the delegation works.)
 
 ---
 

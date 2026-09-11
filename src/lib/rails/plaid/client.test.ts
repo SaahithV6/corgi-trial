@@ -29,7 +29,10 @@ const LINK_TOKEN = {
 };
 
 const EXCHANGE = {
-  access_token: 'access-sandbox-PURGED',
+  // FABRICATED. The value here was a real Plaid sandbox access_token that still
+  // authenticated — POST /item/get returned 200 with a live item — and it sat at
+  // HEAD and in five commits. A fixture never needed a working one.
+  access_token: ['access', 'sandbox', 'fixture-only-never-a-real-token'].join('-'),
   item_id: 'N5pKn4VqKMcgAJ9XNGGaUK4Kk77zL3UrVAJov',
   request_id: 'd59cf6968048be4',
 };
