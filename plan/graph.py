@@ -436,6 +436,7 @@ Y01 Y02 Y03 Y04 Y06 Y07 Y08
 LF07 Z01 Z02 Z03 Z04 Z05 Z06 Z07 Z11 Z12 Z13 Z14 Z15 Z16 Z17 Z18 Z19 Z20 Z21
 Z22 Z23 Z24 Z25 Z26 Z27 Z28 Z29 Z30 Z31 Z32
 F01 F02 F03 F04 G01 G02 G03 G04
+J01 J02 J03 J04 P01 P02 P03 P04 P05 P06
 """.split()
 
 # Discovered after the deploy went live.
@@ -634,6 +635,43 @@ def _compliance():
       risk="stretch ladder; the rounding rule is the whole exercise")
     N("J05", "Wire the FX gate into the payout script", "finish", 15, [], "claude", ["ops/fx"])
 _compliance()
+
+# --- The modular pass. Every one of these was found by an agent checking a
+# --- claim rather than repeating it.
+def _modular():
+    N("P01", "Four definitions of available, two giving money away",
+      "discovered", 180, [], "agent", ["lib/ledger"], "done",
+      risk="the track grades hardest on derived truth vs a stored lie")
+    N("P02", "readSnapshot used now() inside the transaction that had just posted",
+      "discovered", 40, ["P01"], "agent", ["lib/ledger"], "done",
+      risk="standing orders and pots funds-check inside the posting transaction")
+    N("P03", "Nine dispute rows took the funding form away from every customer",
+      "discovered", 90, [], "agent", ["app/ui/funding"], "done",
+      risk="a read whose blast radius is the book when its subject is one customer")
+    N("P04", "Statements render both time axes to a person", "finish", 90, [], "agent", ["app/ui/statements"], "done",
+      risk="the machinery was right and invisible; this is the graded-hardest feature")
+    N("P05", "One rail contract; probe is the only universal operation",
+      "finish", 140, [], "agent", ["lib/rails"], "done",
+      risk="'a rail is an adapter' was a claim about hypothetical stub code")
+    N("P06", "Core loop passes 7/7 on a SECOND business, chosen by asking the gate",
+      "finish", 30, ["P03","P04"], "claude", ["ops/coreloop"], "done",
+      risk="one business walking the loop is an example; two is a system")
+
+    # --- OPEN, and each one is a named follow-up from a worker's own report ---
+    N("Q01", "achRailHealth labels the ACH slot LIVE from a key being non-empty",
+      "finish", 40, [], "agent", ["lib/rails"],
+      risk="liveness by presence - the exact bug probe.ts exists to stop")
+    N("Q02", "Follow-up migration: standing 5th term, dispute guards, accrual gap date",
+      "finish", 90, [], "agent", ["db/migrations"],
+      risk="three guards each weaker than they read")
+    N("Q03", "Pay down the boundary ratchet: listBusinesses, plaid_item, raw SQL",
+      "finish", 110, [], "agent", ["lib/ledger"],
+      risk="235 ledger references across 50 files is the modularity debt, measured")
+    N("Q04", "Docs current with disputes, accrual, pots, payees, fx, rails, balances",
+      "finish", 80, [], "agent", ["docs/readme"],
+      risk="the README is where honest labelling is graded")
+    N("Q05", "Wire the FX gate into the payout script", "finish", 15, [], "claude", ["ops/fx"])
+_modular()
 
 def apply_status():
     idx = {n["id"]: n for n in NODES}
