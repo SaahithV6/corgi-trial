@@ -893,3 +893,71 @@ N("W2N", "A forged webhook leaves no row: refusals are invisible",
   risk="webhook_inbox holds only ACCEPTED deliveries, so any trail built on "
        "it reads complete while every rejected signature is absent. exactly "
        "the shape this build has found twenty times")
+
+# ---------------------------------------------------------------------------
+# G — THE DOMAIN GAUNTLET, as ten nodes, pasted verbatim by Saahith at 00:55.
+#
+# This block exists because the previous v1-scope block (W2*) was organised
+# around what was BUILT, and the gauntlet is organised around what is PROVEN.
+# They are not the same list and the difference is where a submission is lost:
+# every item below has to be demonstrable on the deployed URL with real ids,
+# not present in the tree.
+#
+# Status here is deliberately NOT inherited from the W2 block. Each is marked
+# from a real run — live fire, the core loop, or dbcheck — and GV re-earns all
+# ten in one pass so the claim has a single timestamped source.
+# ---------------------------------------------------------------------------
+N("G01", "Ledger vs available: derived from events, never a second stored number",
+  "gauntlet", 0, [], "claude", ["proof"], "done",
+  risk="ledger_availability() is the single definition; five terms; "
+       "v_balance_definition_drift in dbcheck. FOUR definitions disagreed by "
+       "$30,662.10 before 0022, and MCP held a fifth reading $17,035.50 high")
+N("G02", "Auth lifecycle: the hold releases exactly once, however strangely it arrives",
+  "gauntlet", 0, [], "claude", ["proof"], "done",
+  risk="proven not asserted: 6,257,911 orderings, byte-identical HoldState. "
+       "the fuzzer then found the $0 card-on-file defect 0011 and 049 both "
+       "argued about one line over")
+N("G03", "Settlement is not authorisation: different amount, days later, force post",
+  "gauntlet", 0, [], "claude", ["proof"], "done",
+  risk="over-capture measured NOT terminal on real Lithic calls: the "
+       "incremental after an over-capture is APPROVED and the hold reopens")
+N("G04", "Out-of-order: settlement before its auth. park, match, never double-count",
+  "gauntlet", 0, [], "claude", ["test/livefire"], "done",
+  risk="attack 4 PASS: clearing-first and in-order land IDENTICALLY")
+N("G05", "Returns and recalls: the corrected position appears on the day it happened",
+  "gauntlet", 0, [], "claude", ["proof"], "done",
+  risk="real Increase return on a real $6,000 instruction, posted at "
+       "return.created_at with the settlement left standing")
+N("G06", "Bitemporality: Tuesday corrected on Thursday, and what we believed Wednesday",
+  "gauntlet", 0, [], "claude", ["test/livefire"], "done",
+  risk="attack 3 PASS, and /transactions makes it draggable: same day, two "
+       "asKnownAt values, +$50.00 apart")
+N("G07", "Statements: a closed day reproducible forever, corrections included",
+  "gauntlet", 0, [], "claude", ["proof"], "done",
+  risk="byte-identical over HTTP twice at 18,865 bytes, same sha256, and now "
+       "a PDF with no new dependency")
+N("G08", "Standing orders: once and only once across restarts and retries",
+  "gauntlet", 0, [], "claude", ["proof"], "done",
+  risk="GENERATED ALWAYS key on a UNIQUE column. the guard that claimed to "
+       "prove it was unsatisfiable until 0023")
+N("G09", "Scheme reconciliation: three break kinds, aging, and we plant one",
+  "gauntlet", 0, [], "claude", ["test/livefire"], "done",
+  risk="attack 6 PASS. /breaks now also EXPLAINS a break, and named a real "
+       "detection gap: v_recon_pair matches the anchor, $100 invisible")
+N("G10", "Maker-checker: the initiator can never approve, and neither can the agent",
+  "gauntlet", 0, [], "claude", ["test/livefire"], "done",
+  risk="attack 5 PASS, refused by the DATABASE (SQLSTATE 42501). the agent "
+       "surface queues like everyone else")
+N("GV", "Re-earn all ten on the DEPLOYED url in one pass, with real ids",
+  "gauntlet", 60, ["G01","G02","G03","G04","G05","G06","G07","G08","G09","G10"],
+  "agent", ["docs/gauntlet"], "doing",
+  risk="ten items proven at ten different times is not a system. one run, one "
+       "timestamp, one commit sha, or the claim rots between them")
+N("GW", "CUT-LIST.md is stale: it still says wires and the public API are cut",
+  "submission", 50, [], "agent", ["docs/cutlist"], "doing",
+  risk="honest labelling is GRADED. a cut list that understates what shipped "
+       "is as wrong as one that overstates it, and this one is both")
+N("GX", "Video script, shot by shot, against the deployed URL",
+  "submission", 45, ["GV"], "agent", ["video"], "doing",
+  risk="Saahith records it; a script naming a screen that does not exist "
+       "wastes the take. every shot must name a URL and a real figure")

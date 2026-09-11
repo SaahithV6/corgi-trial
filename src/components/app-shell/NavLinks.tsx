@@ -18,7 +18,7 @@ import { FOCUS_RING } from "../ui/primitives";
  * could not originate one, and the loop never closed in the product. /payments
  * closes it, so the disabled-text branch is gone rather than kept empty.
  */
-const LIVE = [
+export const LIVE = [
   // First, because a business exists before its account does — and because the
   // gate this screen demonstrates runs before any of the others can move money.
   { href: "/onboarding", label: "Onboarding" },
@@ -43,6 +43,12 @@ const LIVE = [
   // Last, and named for what it is. The screen itself opens with "WE ARE DOING
   // THIS, NOT THE PROVIDER" and every control sentence has us as the subject,
   // so a cropped screenshot still cannot read as evidence of a real outage.
+  { href: "/transactions", label: "Transactions" },
+  // The only screen that re-renders the book at a point in the past. It was
+  // shipped and linked from NOWHERE until the front-door completeness test
+  // caught it, and then it sat in SCREENS while still missing from here —
+  // because that test guards the front door and nothing guarded the nav.
+  { href: "/economics", label: "Unit economics" },
   { href: "/team", label: "Team" },
   { href: "/audit", label: "Audit trail" },
   { href: "/events", label: "Outbound events" },

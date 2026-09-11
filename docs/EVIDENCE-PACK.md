@@ -1,392 +1,749 @@
-# Evidence pack — twenty minutes, in order
+# Evidence pack
 
-The brief asks for evidence of the **live** integrations: read-only sandbox
-dashboard access, or screenshots including the webhook delivery log. This is the
-list, with the exact frame that counts as evidence for each, and the in-repo
-proof to fall back on when a dashboard cannot be shared.
+The submission asks for "evidence of the live integrations: read-only sandbox
+dashboard access, or screenshots including the webhook delivery log."
 
-Every identifier below was read from the provider's own API on
-**2026-09-10T18:2xZ**, not copied from notes.
+**A screenshot is the weaker artefact.** It has to be trusted: the cropping, the
+environment selector, the person holding the camera. It cannot be re-run, it
+proves nothing about what happened to the delivery *after* the provider sent it,
+and it ages the moment it is taken.
 
-**Before you start.** Do not capture an unmasked API key or webhook secret in any
-frame. Provider dashboards mask secrets by default — leave them masked. Crop or
-blur anything beginning `sk_`, `whsec_`, `secret_` or `access-sandbox-`. Two dead
-sandbox credentials already sit in this repo's git history (DECISIONS 023); do
-not add live ones to a screenshot.
+The stronger evidence was already in our own database before anyone thought
+about screenshots. Every provider delivery that reached this system was
+**signature-verified over the exact bytes received before it was persisted**,
+carries **the provider's own event id**, and can be **joined to the exact journal
+entries it produced**. That is a query. A grader can re-run a query.
+
+So this pack is in two halves, and they are deliberately unequal:
+
+| | What it is | Size |
+| --- | --- | --- |
+| **The runnable** | `node scripts/evidence.mjs` — 22 claims, each with the query or the call that proves it printed beside it | the whole of §1–§3 below |
+| **The shot list** | the *minimum* set of dashboard frames only a logged-in human can take | **3 screenshots**, §5 |
+
+Three screenshots, not fifteen, because the other twelve would have been
+pictures of things the runnable already proves better.
 
 ---
 
-## What is live, and what is not
+## 1. The runnable
 
-Four slots are live. **`/api/health` is the authority** — if this file ever
-disagrees with that endpoint, the endpoint is right.
+```bash
+set -a; . ./.env; set +a
+node scripts/evidence.mjs
+```
 
-| Slot | Provider | Verdict | Dashboard evidence exists? |
-| --- | --- | --- | --- |
-| `card_issuing` | Lithic sandbox | **live** | yes — §1 |
-| `ach_rail` | Increase sandbox | **live** | yes — §2 |
-| `open_banking` | Plaid sandbox | **live** | yes — §3 |
-| `director_kyc` | Stripe Identity (test mode) | **live** | yes — §4 |
-| `card_webhooks` | Lithic | **live** | `GET /v1/event_subscriptions -> 200` and its `/attempts` log; the deliveries themselves are §1 |
-| `business_registry` | Stripe Connect | simulated (`unauthorised`) | **no — see §6** |
-| `stablecoin` | USDC on Base Sepolia | simulated (`unauthorised`) | **no — see §6** |
+```
+node scripts/evidence.mjs [--base-url URL] [--no-fire] [--only 1,2,5]
 
-Read `/api/health` first and screenshot it. It is the one frame that makes every
-other frame checkable, and it is computed at load time rather than written down.
+  1  provider deliveries, by state, with the newest provider event id
+  2  the negative control: a forged body is refused, a replay is one row
+  3  one real payment: instruction -> two approvals -> provider -> ledger
+  4  one card transaction: authorisation, hold, clearing, release
+  5  the USDC payout: transaction hash, block number, ledger entry
+  6  the Fedwire transfer and its IMAD
+```
+
+It exits `0` only when every claim is proven, `1` otherwise, and it takes about
+50 seconds. `--no-fire` makes it entirely read-only (no HTTP to production).
+
+### The four rules it obeys
+
+1. **Every figure comes from a query or a call that ran, and the query is
+   printed beside it.** No number in the output was typed by a human. A claim it
+   cannot prove prints `NOT PROVEN` and names what is missing.
+2. **It never prints a secret.** Provider event ids, transfer ids, transaction
+   hashes, card tokens and IMADs are public-in-context and are printed in full.
+   API keys, signing secrets, database passwords, full PANs and full account
+   numbers go through `mask()` — the Increase wire's `account_number` reaches the
+   terminal as `••0000`. Two live credentials have been in this repo's git
+   history (DECISIONS 023); the whole precommit gate exists because of it.
+3. **It reads as the application's restricted role.** It connects on
+   `APP_DATABASE_URL` (`corgi_app`) — the role that cannot `UPDATE` or `DELETE` a
+   money row. The reader can be sure it did not tidy anything on the way past.
+4. **The live probes are safe to re-run.** They are a replay of a delivery
+   already in the inbox and three forgeries refused before a byte is stored. They
+   move no money.
+
+### The header, from the run pasted throughout this document
+
+```
+============================================================================================
+CORGI WORK TRIAL — TRACK 3 — REPRODUCIBLE EVIDENCE
+============================================================================================
+  generated at     2026-09-11T08:45:00.891Z
+  deployed URL     https://corgi-trial-psi.vercel.app
+  deployed commit  2f863c8f52f16a7c13059f172c31617e45e9c264   [/api/health -> commit.sha]
+  local commit     2f863c8f52f16a7c13059f172c31617e45e9c264   [.git/HEAD]
+  commits agree    yes
+  database         ep-curly-tooth-ayhug2be-pooler.c-5.us-east-2.aws.neon.tech as role 'corgi_app' (postgres 18.6)
+  db url from      APP_DATABASE_URL
+  live HTTP probes ENABLED
+```
+
+The deployed commit is read **from the running deployment**, not from a note. If
+the deployment is ever not this checkout, the header says so on its third line.
+
+---
+
+## 2. What the runnable proves — the 22 claims
+
+```
+  PROVEN      all 1206 stored deliveries carry signature_verified_at
+  PROVEN      one delivery, one row — enforced by UNIQUE (provider, provider_event_id)
+  PROVEN      every delivery Lithic logged as sent is a row in our inbox, matched by the id we returned to Lithic
+  PROVEN      refusals are recorded with reason codes, including signature_mismatch WITH a signature present
+  PROVEN      no unsigned body was accepted by any endpoint
+  PROVEN      a signed delivery sent more than once produced exactly one inbox row
+  PROVEN      a replay of a 550s-old signed delivery is refused as timestamp_outside_window
+  PROVEN      content the signature does not cover is refused 401 signature_mismatch and is not ingested
+  PROVEN      the refusal this run just caused is readable back out of the database
+  PROVEN      no released instruction was approved by its own initiator
+  PROVEN      2 approvals, each recorded against the instruction's current content hash
+  PROVEN      the provider's own record names our instruction id
+  PROVEN      1 journal entry, summing to zero
+  PROVEN      every event in this authorisation arrived on a signature-verified delivery
+  PROVEN      $50.00 authorised, $73.40 cleared, hold left at $0.00
+  PROVEN      every event token Lithic holds for this transaction is one we hold too
+  PROVEN      the most recent real authorisations DECLINE — the sandbox account's daily cap is exhausted
+  PROVEN      USDC transfer confirmed on Base Sepolia in block 46666112, and the ledger already said so
+  PROVEN      the chain's Transfer recipient is the destination on the accepted quote
+  PROVEN      the stablecoin leg is booked as a double entry in USD cents like any other rail
+  PROVEN      Fedwire issued IMAD 20260911wgpcflcf474978 for sandbox_wire_transfer_z64990197n7mvli7cdqs
+  PROVEN      5 inbound wire credits carry the network's IMAD in the ledger itself
+
+  22 proven, 0 not proven, 22 claims checked.
+```
+
+---
+
+## 3. The output that matters, with the queries that produced it
+
+Everything below is verbatim from the run at **2026-09-11T08:45Z**, commit
+`2f863c8`. Queries are abbreviated here only where the script prints them in
+full; run it and you get the rest.
+
+### 3.1 Deliveries received, by provider and state
+
+```
+  provider  received  sig_verified  consumed  parked  dead_lettered  pending  first_seen                last_seen
+  --------  --------  ------------  --------  ------  -------------  -------  ------------------------  ------------------------
+  increase  235       235           52        16      167            0        2026-09-10T19:01:04.455Z  2026-09-11T06:20:31.859Z
+  lithic    958       958           871       54      33             0        2026-09-10T16:22:11.829Z  2026-09-11T08:36:37.196Z
+  plaid     3         3             3         0       0              0        2026-09-10T21:58:19.587Z  2026-09-10T22:47:23.312Z
+  stripe    10        10            10        0       0              0        2026-09-10T18:50:58.138Z  2026-09-11T06:41:14.829Z
+
+  totals: 1206 received · 1206 signature-verified · 936 consumed · 70 parked · 200 dead-lettered
+```
+
+`received` here is not what a dashboard counts. A dashboard counts what the
+provider **sent**. This counts what we **received and authenticated** — the route
+reads `req.text()` once, verifies over those bytes, and only then parses, so an
+unverified body is never persisted and `sig_verified = received` is a tautology
+that would break the moment it stopped being one.
+
+**The newest provider event id we hold, per provider:**
+
+```
+  provider  provider_event_id                                                        event_type                     state   received_at
+  --------  -----------------------------------------------------------------------  -----------------------------  ------  ------------------------
+  increase  sandbox_event_001m27hzwwhvab7yf0hp79v25ec                                inbound_wire_transfer.created  parked  2026-09-11T06:20:31.859Z
+  lithic    msg_3JAtegKxBEJdcb7FfPeEYB5pedL                                          card_transaction.updated       done    2026-09-11T08:36:37.196Z
+  plaid     sha256:5be1e1a02415468824be1bbcb90c3ba2d3465b26c05c56d64d04382c18370d73  ITEM.ERROR                     done    2026-09-10T22:47:23.312Z
+  stripe    evt_negctl_1789108873                                                    ping.refusal_negative_control  done    2026-09-11T06:41:14.829Z
+```
+
+Plaid's `provider_event_id` is a `sha256:` of the body rather than an id, because
+**Plaid ships no event id of any kind**. The dedupe key is the SHA-256 of the
+exact body — which is the value Plaid itself signed in `request_body_sha256`, so
+it is stable across their 24 hours of retries. The cost is stated plainly in
+`inbox.ts` rather than hidden: two genuinely distinct webhooks with byte-identical
+bodies collapse to one row. That is acceptable **only** because every Plaid
+webhook is a "something changed, come and read it" notification whose consumer
+re-fetches from the API. It would not be acceptable for a money event carrying an
+amount, and the comment says so.
+
+**The 200 dead letters and 70 parked rows are not hidden**, they are §1d of the
+run, in the system's own words:
+
+```
+  provider  state   rows  reason
+  --------  ------  ----  -------------------------------------------------------------------------------------------------
+  increase  dead    64    dead-lettered after 8 failed attempts: no consumer registered for provider 'increase'
+  lithic    parked  8     card 732415b1-d257-4c62-ba75-ab3061b52f6b is not registered to a customer
+  lithic    dead    8     card 49a4c0e8-3c65-40c8-a916-23cdc5d2c3f7 is not registered to a customer
+  increase  dead    6     Increase wire sandbox_wire_transfer_j21s5dtdns6eb3xqs3sx carries Idempotency-Key 'corgi-itest-17…
+```
+
+Three honest readings, all of them worth more than a clean number:
+
+- **`no consumer registered for provider 'increase'`** is a real gap that was
+  real for part of the trial. Those deliveries were *verified and durably
+  stored*; nothing was lost, and nothing was invented either. The consumer
+  exists now; those rows are the archaeology.
+- **`card … is not registered to a customer`** is the system refusing to guess
+  whose money to move for a card created directly in the Lithic sandbox. The
+  delivery is kept, verified, and replayable the moment the card is claimed.
+- **`carries Idempotency-Key 'corgi-itest-…', which names no payment_instruction
+  on this book. NOTHING WAS POSTED.`** A wire with no approval behind it is an
+  incident for a person, not a row for a consumer.
+
+### 3.2 The provider's own delivery log, reconciled against our inbox
+
+This is the section that replaces the delivery-log screenshot, and it is
+strictly stronger than one. Lithic's attempts endpoint records what was **sent**,
+the HTTP status **we answered**, and — because our 202 carries a body — **the
+inbox id we minted**. The provider is holding a pointer into our database, and
+the script dereferences it.
+
+```
+  call:  GET https://sandbox.lithic.com/v1/event_subscriptions/ep_3J8yb9xommtOdKee1FzpUA4GBrW/attempts?page_size=25
+  created                   status   http  event_token                      destination                                             inbox_id_in_our_reply
+  ------------------------  -------  ----  -------------------------------  ------------------------------------------------------  ------------------------------------
+  2026-09-11T08:36:37.100Z  SUCCESS  202   msg_3JAtegKxBEJdcb7FfPeEYB5pedL  https://corgi-trial-psi.vercel.app/api/webhooks/lithic  fbd96d36-aa02-4efd-97a2-627ecf7f8945
+  2026-09-11T08:35:33.280Z  SUCCESS  202   msg_3JAtWf2gw1R95OeHubTiAFzTDcF  https://corgi-trial-psi.vercel.app/api/webhooks/lithic  5f3d8ce3-92de-4698-b163-d60cb4150a92
+  2026-09-11T08:34:39.760Z  SUCCESS  202   msg_3JAtPvz41aq680FSlfJrpheEzfj  https://corgi-trial-psi.vercel.app/api/webhooks/lithic  a4bdd3c6-d758-43f6-a35f-9fecab16d699
+  ...
+  25 attempts on this page; every one names the deployed origin as its destination.
+
+  event_token                      lithic_says  inbox_id                              row_exists  our_event_id_matches  state
+  -------------------------------  -----------  ------------------------------------  ----------  --------------------  -----
+  msg_3JAtegKxBEJdcb7FfPeEYB5pedL  SUCCESS 202  fbd96d36-aa02-4efd-97a2-627ecf7f8945  yes         yes                   done
+  msg_3JAtWf2gw1R95OeHubTiAFzTDcF  SUCCESS 202  5f3d8ce3-92de-4698-b163-d60cb4150a92  yes         yes                   done
+  ...
+  PROVEN      every delivery Lithic logged as sent is a row in our inbox, matched by the id we returned to Lithic
+              25 attempts reconciled, 0 non-SUCCESS attempts on this page
+```
+
+**202, not 200, is the correct answer here**: the route stops at *verified and
+persisted* and hands off to the drain. 200 is reserved for the replay of an
+event already in the inbox, which is a different fact and deserves a different
+code.
+
+### 3.3 The negative control
+
+`1206 signature-verified deliveries` is worth nothing on its own — a system that
+accepts everything and stamps it `verified` prints exactly that line. The claim
+only means something if a delivery that *should* fail does.
+
+**Refusals on record** (`webhook_refusal`, added in migration 0038; the body is
+never stored, only its length and its sha256, so a forged payload cannot use our
+own refusal log as storage):
+
+```
+  provider  endpoint                reason_code               refusals  folded_rows  any_signature_present  bodies_varied
+  --------  ----------------------  ------------------------  --------  -----------  ---------------------  -------------
+  lithic    /api/webhooks/lithic    signature_mismatch        24        12           true                   true
+  lithic    /api/webhooks/lithic    signature_absent          13        10           false                  true
+  increase  /api/webhooks/increase  signature_absent          11        8            false                  true
+  plaid     /api/webhooks/plaid     signature_absent          11        8            false                  true
+  lithic    /api/webhooks/lithic    timestamp_outside_window  8         4            true                   true
+  shopify   /api/webhooks/shopify   unknown_provider          6         6            true                   false
+  stripe    /api/webhooks/stripe    signature_absent          5         5            false                  false
+```
+
+`refusals` exceeds `folded_rows` because a burst of identical refusals in one
+minute is folded into a single row with a counter, rather than being allowed to
+become a write amplifier an attacker controls. `bodies_varied` records whether
+the folded attempts differed from each other, so the fold cannot hide a probe
+sweeping payloads.
+
+**Unsigned POST to every endpoint, fired live at production during the run:**
+
+```
+  endpoint                status  code                             message
+  ----------------------  ------  -------------------------------  --------------------------------------------------------
+  /api/webhooks/lithic    401     WEBHOOK_SIGNATURE_INVALID        signature verification failed; the payload was not inges
+  /api/webhooks/increase  401     WEBHOOK_SIGNATURE_INVALID        signature verification failed; the payload was not inges
+  /api/webhooks/plaid     401     WEBHOOK_SIGNATURE_INVALID        signature verification failed; the payload was not inges
+  /api/webhooks/stripe    401     WEBHOOK_SIGNATURE_INVALID        signature verification failed; the payload was not inges
+  /api/webhooks/persona   503     WEBHOOK_PROVIDER_NOT_CONFIGURED  webhooks for 'persona' are not configured on this deploy
+  /api/webhooks/shopify   404     UNKNOWN_PROVIDER                 no webhook endpoint for 'shopify'
+```
+
+The 503 is the point of that row: Persona has no secret on this deployment, so
+the route **refuses to accept what it cannot authenticate** rather than storing
+it optimistically.
+
+**Twice is one, from rows that were already there.** The chaos driver re-sends a
+genuinely signed delivery; every copy is its own `chaos_delivery` row, and all of
+them point at one `webhook_inbox` row:
+
+```
+  run_id                                webhook_id                                 copies_sent  inbox_rows  outcomes
+  ------------------------------------  -----------------------------------------  -----------  ----------  ----------------
+  472a5959-aa54-4c8c-a91d-8d7de8c66ae0  chaos_472a5959aa544c8ca91d8d7de8c66ae0_00  3            1           accepted, replay
+  472a5959-aa54-4c8c-a91d-8d7de8c66ae0  chaos_472a5959aa544c8ca91d8d7de8c66ae0_01  3            1           accepted, replay
+  a2163b5c-36d5-4d05-a0ab-65b81285a551  chaos_a2163b5c36d54d05a0ab65b81285a551_00  3            1           accepted, replay
+```
+
+and the dedupe is not a code path at all — it is
+`UNIQUE (provider, provider_event_id)` plus `ON CONFLICT DO NOTHING`, with
+`0` providers holding a duplicate event id across 1,206 rows.
+
+**The live replay, with its expectation computed rather than hoped for.**
+Standard Webhooks signs the timestamp as well as the body, and this system
+applies a ±300s window. So the *correct* answer depends on how old the stored
+delivery is, and the script says which branch it is taking before it fires:
+
+```
+  this delivery was signed 550s ago; the replay window is +/-300s, so the correct answer is 401 timestamp_outside_window.
+  probe         http  status                     recorded_reason           rows_before  rows_after
+  ------------  ----  -------------------------  ------------------------  -----------  ----------
+  exact replay  401   WEBHOOK_SIGNATURE_INVALID  timestamp_outside_window  1            1
+  PROVEN      a replay of a 550s-old signed delivery is refused as timestamp_outside_window
+```
+
+When the inbox has fresh traffic the same probe asserts the other branch — `200
+replay`, `rows_after == rows_before == 1`. Both are the system behaving, and a
+probe that only passed when the traffic happened to be fresh would be a flaky
+claim. A flaky claim in an evidence pack is worse than no claim.
+
+**And the forgery that the whole positive claim rests on.** Three requests, each
+carrying the genuine signature Lithic produced, each presenting a *current*
+timestamp so that the replay window cannot be what refuses them — leaving the
+signature comparison as the only check standing, which makes the recorded reason
+code attributable rather than ambiguous:
+
+```
+  forgery                                 body_bytes  http  code                       accepted
+  --------------------------------------  ----------  ----  -------------------------  --------
+  A  body unchanged, clock moved forward  2166        401   WEBHOOK_SIGNATURE_INVALID  no
+  B  one space before the closing brace   2167        401   WEBHOOK_SIGNATURE_INVALID  no
+  C  "amount":1 -> 2                      2166        401   WEBHOOK_SIGNATURE_INVALID  no
+
+  reason_code               refusals  signature_present  signature_shape  body_varied  last_seen_at
+  ------------------------  --------  -----------------  ---------------  -----------  ------------------------
+  signature_mismatch        3         true               swh:v1x2         true         2026-09-11T08:45:24.595Z
+
+  PROVEN      content the signature does not cover is refused 401 signature_mismatch and is not ingested
+```
+
+- **A** proves the timestamp is inside the signed content: a genuine old
+  signature cannot be slid forward onto a fresh clock.
+- **B** is **JSON-identical** — one space before the closing brace. It proves the
+  signature is over **bytes**, not over meaning, which is the property that makes
+  "verify before you parse" the only safe ordering.
+- **C** is what an attacker would actually want.
+
+None was ingested. The refusal is then read back out of `webhook_refusal` in the
+same run, so the 401 is a durable fact with a reason code rather than a line in a
+log that rotates.
+
+### 3.4 One real payment, end to end
+
+The join between our book and the provider's is not an amount or a name — it is
+the `Idempotency-Key` we send on origination, which is literally
+`payment:<the instruction id>`. The provider hands it back, so the two records
+name each other.
+
+```
+3b. The instruction — d72d1972-653d-45ce-98da-baca8def22c9
+  id                                    business                  rail  amount  beneficiary               beneficiary_acct  content_sha256
+  ------------------------------------  ------------------------  ----  ------  ------------------------  ----------------  -----------------
+  d72d1972-653d-45ce-98da-baca8def22c9  Ridgeline Robotics, Inc.  wire  $42.00  Northwind Industrial LLC  ••0000            d020088d8bd6fcf1…
+
+3c. Its approvals — two distinct humans, neither of them the initiator
+  kind       actor          actor_kind  email                        occurred_at               approved_content_sha256  entry_id
+  ---------  -------------  ----------  ---------------------------  ------------------------  -----------------------  ------------------------------------
+  requested  Priya Raman    human       priya.raman@corgi.example    2026-09-11T04:45:27.617Z  -                        -
+  approved   Dana Okonkwo   human       dana.okonkwo@corgi.example   2026-09-11T04:45:28.961Z  d020088d8bd6fcf1…        -
+  approved   Miles Ferrara  human       miles.ferrara@corgi.example  2026-09-11T04:45:30.519Z  d020088d8bd6fcf1…        -
+  released   Miles Ferrara  human       miles.ferrara@corgi.example  2026-09-11T04:45:30.716Z  -                        95215cf4-cd9c-4437-bfbe-f94cfc01e94b
+
+3d. What the provider says it did
+  provider_transfer_id                        status    amount  routing_number  account_number  imad                    submitted_at          transaction_id
+  ------------------------------------------  --------  ------  --------------  --------------  ----------------------  --------------------  ----------------------------------------
+  sandbox_wire_transfer_z64990197n7mvli7cdqs  complete  $42.00  021000021       ••0000          20260911wgpcflcf474978  2026-09-11T04:46:03Z  sandbox_transaction_6ga3oovichtasqpoq1ey
+
+  idempotency_key at the provider: payment:d72d1972-653d-45ce-98da-baca8def22c9
+  our instruction id:              d72d1972-653d-45ce-98da-baca8def22c9
+
+3e. Every journal entry the payment produced
+  entry_id                              ordinal  account                                                   amount   currency
+  ------------------------------------  -------  --------------------------------------------------------  -------  --------
+  95215cf4-cd9c-4437-bfbe-f94cfc01e94b  0        2100 Ridgeline Robotics, Inc. — business current account  $42.00   USD
+  95215cf4-cd9c-4437-bfbe-f94cfc01e94b  1        1110 Cash — FBO settlement account at sponsor bank        -$42.00  USD
+```
+
+Two details a reader should not have to be told to notice:
+
+- **The approval carries the content hash.** `approved_content_sha256` equals the
+  instruction's current `content_hash`. Change the instruction and the hash
+  changes, and an approval recorded against the old hash stops counting. An
+  approval of "instruction 7" is worth much less than an approval of "instruction
+  7 as it read at this byte".
+- **`initiator_self_approved` is `false` across every released instruction the
+  script checks**, read back out of the data rather than asserted by the code
+  that wrote it. The stronger guard is in the database — live fire attack 5
+  proves self-approval is refused with SQLSTATE 42501 — but this is the reading
+  that covers *all* the history at once rather than one contrived attempt.
+
+### 3.5 One card transaction — and an honest label on it
+
+**The Lithic sandbox account's daily spend cap is exhausted, so every
+authorisation simulated today declines.** The card slot is live; the spend
+allowance is not. The transaction below is therefore **historical** — a real
+authorisation Lithic approved on 2026-09-10 — and the run proves the decline is a
+genuine current limit rather than a flattering choice of old row:
+
+```
+4e. Why this is historical: what an authorisation does TODAY
+  provider_auth_id                      first_seen_at             amount  result    delivery_id
+  ------------------------------------  ------------------------  ------  --------  -------------------------------
+  68c9d432-8070-4138-abd1-c2356c4ad40b  2026-09-11T08:36:37.544Z  $0.01   DECLINED  msg_3JAtegKxBEJdcb7FfPeEYB5pedL
+  85ff6441-a9ec-42ce-bc29-b4185a503c92  2026-09-11T08:34:31.607Z  $50.00  DECLINED  msg_3JAtOrffKk5iBBNqgsKIXYXOnnD
+  5da8ecd3-dd31-4e15-8950-33695f6663d4  2026-09-11T08:32:48.032Z  $50.00  DECLINED  msg_3JAtBsARJTcioEn8qTZ9oCIWrIl
+
+  Lithic's reason for the most recent authorisation: DECLINED ACCOUNT_DAILY_SPEND_LIMIT_EXCEEDED
+```
+
+The exemplar itself — **$50.00 authorised, $73.40 cleared**, the fuel-pump
+asymmetry the brief calls the heart of the track:
+
+```
+4b. The events, and the signed deliveries that carried them — bfd64bda-8c76-4224-aa39-10f81b6582b2
+  kind           amount  result    step           lithic_event_token                    delivery_id                      state  signature_verified_at
+  -------------  ------  --------  -------------  ------------------------------------  -------------------------------  -----  ------------------------
+  authorization  $50.00  APPROVED  AUTHORIZATION  b683104a-27e1-4969-9a5d-2df49d822dcb  msg_3J94LEcMYtMxxD5ndR4nHv4mNsl  done   2026-09-10T17:04:52.202Z
+  clearing       $73.40  APPROVED  CLEARING       1989ecb0-819b-4900-95fe-bb1f74cfa55d  msg_3J94LfxbpLIpmaZPrN0hIjY2r31  done   2026-09-10T17:04:55.713Z
+
+4c. The hold, and the ledger entries the deliveries produced
+  hold_id                               kind       external_ref                                 memo_balance  active_hold  explicit_closure_row
+  ------------------------------------  ---------  -------------------------------------------  ------------  -----------  --------------------
+  d1a88fd4-9951-4264-9744-0ed103fea093  card_auth  lithic:bfd64bda-8c76-4224-aa39-10f81b6582b2  $0.00         $0.00        false
+
+  booking_seq  ordinal  account                                                           amount
+  -----------  -------  ----------------------------------------------------------------  -------
+  414          0        9100 Holds Integration Fixture Co. — Holds — card authorisations  -$50.00     <- hold opened
+  414          1        9900 Memo contra                                                  $50.00
+  415          0        2100 Holds Integration Fixture Co. — Customer deposits            $73.40     <- clearing posted
+  415          1        2200 Card network settlement payable                              -$73.40
+  416          0        9100 Holds Integration Fixture Co. — Holds — card authorisations  $50.00     <- hold released
+  416          1        9900 Memo contra                                                  -$50.00
+  2786         0        2200 Card network settlement payable                              $1.19      <- interchange
+  2786         1        4100 Interchange income                                           -$1.19
+```
+
+Four things in that block:
+
+- **The hold is memo, not money.** It lives on `9100`/`9900`, off the customer's
+  `2100`. Available balance is ledger minus active holds, *derived*, never a
+  second stored number.
+- **The hold released exactly once**, and the proof is arithmetic rather than a
+  flag: `memo_balance_cents = 0`. `explicit_closure_row = false` is honest —
+  there is no `hold_closure` row for this one (DECISIONS 024), and the memo
+  balance is flat regardless. The money position is the arithmetic; the closure
+  row is bookkeeping about the arithmetic, and the runnable reports both rather
+  than the flattering one.
+- **Settlement is not authorisation.** $50.00 held, $73.40 posted, days apart in
+  the general case and seconds apart here because the sandbox obliges.
+- **`Holds Integration Fixture Co.`** is the business name, and it is a test
+  fixture. Said plainly rather than swapped for a prettier row: the *deliveries*
+  are genuine signed Lithic traffic, the *business* is a fixture the integration
+  suite stood up.
+
+And the provider agrees, event token for event token:
+
+```
+4d. The provider's own record of the same transaction
+  token                                 status   result    settlement  hold_at_provider  created
+  ------------------------------------  -------  --------  ----------  ----------------  --------------------
+  bfd64bda-8c76-4224-aa39-10f81b6582b2  SETTLED  APPROVED  -$73.40     $0.00             2026-09-10T17:04:50Z
+
+  type           result    amount  token                                 detailed_results
+  -------------  --------  ------  ------------------------------------  ----------------
+  AUTHORIZATION  APPROVED  $50.00  b683104a-27e1-4969-9a5d-2df49d822dcb  APPROVED
+  CLEARING       APPROVED  $73.40  1989ecb0-819b-4900-95fe-bb1f74cfa55d  APPROVED
+```
+
+### 3.6 The USDC payout — hash, block, ledger
+
+```
+5a. The settled payout in our book
+  quote_ref     rail  sold   bought                destination                                 entry_id                              value_date   booking_seq
+  ------------  ----  -----  --------------------  ------------------------------------------  ------------------------------------  -----------  -----------
+  FXQ-XYRJF6AJ  usdc  $3.00  3354 MXN minor units  0x000000000000000000000000000000000000dEaD  027255d5-ee38-4eed-ac50-9771ba8d589a  2026-09-11   2270
+
+  tx hash:  0x0acfad50d866e99ce4db08f3c09a2c8ca1d2771fd00ebcb6b0678fb75777d79e
+
+5c. What the chain says
+  block_number  block_hash                                                          tx_status      transfer_to                                 transfer_units                 gas_used
+  ------------  ------------------------------------------------------------------  -------------  ------------------------------------------  -----------------------------  --------
+  46666112      0xb962f51ab4dbc3e3da71310cd8fbbc336af1b81cd223b349cf8d01c13fa212f8  0x1 (success)  0x000000000000000000000000000000000000dead  1979521 (6dp = 1.979521 USDC)  44843
+
+  block number written into the ledger at posting time: 46666112
+  block number the node reports now:                    46666112
+  PROVEN      USDC transfer confirmed on Base Sepolia in block 46666112, and the ledger already said so
+```
+
+Public explorer, no credentials needed:
+`https://sepolia.basescan.org/tx/0x0acfad50d866e99ce4db08f3c09a2c8ca1d2771fd00ebcb6b0678fb75777d79e`
+
+The block number is not fetched and then displayed — it was **written into the
+journal entry's description at posting time** and is compared against what the
+node reports now. A reorg would show up as a mismatch rather than as silence.
+
+The entry itself, booked in USD cents like every other rail:
+
+```
+  ordinal  account                                                   amount  currency
+  -------  --------------------------------------------------------  ------  --------
+  0        4300 FX quote settlement variance                         -$0.01  USD
+  1        4200 Fee income                                           -$1.01  USD
+  2        2100 Ridgeline Robotics, Inc. — business current account  $3.00   USD
+  3        1140 USDC omnibus wallet — Base Sepolia                   -$1.97  USD
+  4        2900 Rounding residual clearing                           -$0.01  USD
+```
+
+**The sub-cent residual has its own account.** 9,521 of 10,000 USDC units of a
+cent went to `2900` rather than being truncated into the customer's leg or
+netted into FX variance. Pro-rata maths always leaves a penny and someone has to
+eat it deterministically; here it is named.
+
+**Seven rows in `fx_quote_settlement` carry a placeholder hash and are not
+payouts**, and the run says so rather than filtering them out:
+
+```
+  tx_hash                    rows  with_ledger_entry  with_destination_address  with_rate_observation  moved_money
+  -------------------------  ----  -----------------  ------------------------  ---------------------  -------------------------------------------------------
+  0xaaaaaaaaaaaaaaaa…aaaaaa  7     0                  0                         0                      NO — nothing posted, no destination, no rate observation
+  0x0acfad50d866e99c…77d79e  1     1                  1                         1                      yes
+```
+
+No ledger entry, no destination address, no rate observation. The FX settlement
+path is exercised by integration tests against this same live database, so those
+rows exist. Exactly one row in that table is a payout, and §5c asks the chain
+about that one.
+
+### 3.7 The Fedwire transfer
+
+```
+6a. The outbound wire behind the approved payment in §3
+  id                                          status    amount  imad                    submitted_at          routing_number  account_number  transaction_id
+  ------------------------------------------  --------  ------  ----------------------  --------------------  --------------  --------------  ----------------------------------------
+  sandbox_wire_transfer_z64990197n7mvli7cdqs  complete  $42.00  20260911wgpcflcf474978  2026-09-11T04:46:03Z  021000021       ••0000          sandbox_transaction_6ga3oovichtasqpoq1ey
+
+6b. Inbound wires we received, with the IMAD carried into the ledger
+  external_ref                                                      value_date  booking_seq  imad
+  ----------------------------------------------------------------  ----------  -----------  ----------------------
+  increase.wire:sandbox_inbound_wire_transfer_aixelen6yjsh8ap0djjf  2026-09-11  3297         20260911ajtfqkxz778542
+  increase.wire:sandbox_inbound_wire_transfer_rhwc6j2y0nk687sirnym  2026-09-11  3209         20260911jjatmqzm085046
+  increase.wire:sandbox_inbound_wire_transfer_8jrb04vi1mcrn8mtlqco  2026-09-11  2587         20260911fsxoaoyp248548
+
+6c. Every wire transfer this project originated at the provider
+  id                                          status    amount    imad                    reversal_imad           raised_by
+  ------------------------------------------  --------  --------  ----------------------  ----------------------  -----------------------
+  sandbox_wire_transfer_izgjq03g8sga77z2m0lh  reversed  $1250.00  20260911jpoframy752348  20260911ykjbdjpf361971  an integration test
+  sandbox_wire_transfer_z64990197n7mvli7cdqs  complete  $42.00    20260911wgpcflcf474978  -                       an approved instruction
+  sandbox_wire_transfer_eo0v3izozckf5cbb42rq  complete  $42.00    20260911chbowyvf727572  -                       an approved instruction
+```
+
+The **IMAD** is Fedwire's own identifier for a message, and it is the strongest
+settlement identity on this rail: one message, one settlement, and **a reversal
+is a different message with a different IMAD**. That is why an outbound wire
+reversal is booked as a new event at a new value date rather than as a correction
+of the original — the `reversal_imad` column above is the network agreeing with
+the schema.
+
+`raised_by` is read from the idempotency key. `payment:<id>` means the money-out
+path with its approvals behind it; anything else was raised by a test and has no
+instruction behind it — which is precisely why the consumer **parks** those
+deliveries instead of posting them.
+
+---
+
+## 4. Who can verify what, and with which credentials
+
+This matters, and the previous version of this document was vague about it.
+
+| Evidence | What a grader needs | Reproducible by them? |
+| --- | --- | --- |
+| `/api/health` — 7 live slots, the commit sha, per-slot round-trip evidence | nothing | **yes, right now** |
+| The 401 on a forged or unsigned webhook | nothing — `curl -X POST https://corgi-trial-psi.vercel.app/api/webhooks/lithic -d '{}'` | **yes, right now** |
+| The USDC payout on Base Sepolia | nothing — the public explorer link above | **yes, right now** |
+| `pnpm test`, `pnpm typecheck`, `pnpm lint` | the repo | **yes** — `137 files, 2485 passed, 389 skipped` with no credentials; the 389 are the integration tests, which need `RUN_DB_TESTS=1` and a database, and skip loudly rather than passing vacuously |
+| **Everything in `scripts/evidence.mjs` §1–§2** | the repo **and** a database URL | on request — read-only Neon access can be provisioned; the URL is a secret and is not in the repo |
+| **`scripts/evidence.mjs` §3–§6 provider legs** | the repo **and** sandbox API keys | on request, or via the screenshots in §5 |
+| `node scripts/livefire.mjs`, `pnpm db:check` | the repo and a database URL | on request |
+
+**This is why the shot list exists at all.** Screenshots are not a better form of
+evidence; they are the substitute for credentials that cannot be pasted into an
+email. So the shot list covers exactly the things a grader cannot otherwise check
+— provider-side account ownership, the environment badge, and the send side of
+the wire — and nothing else.
+
+`pnpm db:check` reads **35 passed, 1 failed** on this commit. The failure is
+deliberate and named: `v_refused_auth_hold is empty — 149 row(s)`, holds that
+withhold money against an authorisation whose result was never retained. It is
+left red because a guard that has been quietly excepted is not a guard. See
+DECISIONS and `docs/AUDIT.md`.
+
+---
+
+## 5. The shot list — three screenshots
+
+Each one says what it adds **beyond** the runnable. Nothing is asked for twice.
+
+**Before you start.** Do not capture an unmasked API key or webhook secret.
+Provider dashboards mask secrets by default — leave them masked. Crop or blur
+anything beginning `sk_`, `whsec_`, `secret_` or `access-sandbox-`.
+
+### Shot 1 — Lithic: the subscription and its delivery log
+
+```
+https://sandbox.lithic.com  →  Developers → Webhooks → ep_3J8yb9xommtOdKee1FzpUA4GBrW
+```
+
+**Must be in frame:**
+
+- the **sandbox environment indicator**, and the account/team name
+- token `ep_3J8yb9xommtOdKee1FzpUA4GBrW`
+- URL `https://corgi-trial-psi.vercel.app/api/webhooks/lithic` — the deployed
+  origin, not a tunnel, not localhost
+- state **enabled**, description *"Corgi work trial - card auth and clearing"*
+- the **attempts list, at least eight rows deep**: `SUCCESS` against `202`, with
+  timestamps and event tokens
+
+**What it adds beyond the runnable:** two things.
+
+1. **Account ownership and environment.** A grader without our API key cannot
+   confirm that this Lithic sandbox account is ours. The logged-in frame is the
+   only proof of that.
+2. **The send side, rendered by the sender.** Our tables can only show what
+   *arrived*. §3.2 already reconciles Lithic's attempts log against our inbox
+   through the API, but a grader cannot run that call. This frame is the same
+   fact in a form that needs no credential from them.
+
+This is the one shot the brief asks for literally ("screenshots including the
+webhook delivery log"), and it is worth taking for that reason alone.
+
+### Shot 2 — Increase: the ACH transfer that settled and then returned R01
+
+```
+https://dashboard.increase.com  →  sandbox  →  Transfers → sandbox_ach_transfer_x5vdo5m7b6k924sszlms
+```
+
+**Must be in frame:**
+
+- the **sandbox environment badge** and the account name
+- id `sandbox_ach_transfer_x5vdo5m7b6k924sszlms`, amount **$6,000.00**
+- status **`returned`**
+- **`settlement.settled_at` = `2026-09-11T04:15:06Z`, still populated** — this is
+  the whole point of the frame and must not be cropped
+- return reason **`insufficient_fund`** (R01)
+- the event timeline in order: `pending_submission` → `submitted` → settled →
+  `returned`
+
+Worth a second frame from the same login if it is free:
+*Developers → Event subscriptions →*
+`sandbox_event_subscription_001m261qr3eanr8aw8gq2v3605c`, **active**, pointed at
+`https://corgi-trial-psi.vercel.app/api/webhooks/increase`, created
+`2026-09-10T16:17:12Z`.
+
+**What it adds beyond the runnable:** the **provider's own status vocabulary**,
+which is the evidence for a design decision the runnable can only assert.
+Increase has **no `settled` status at all** — a settled transfer stays
+`submitted` and grows a `settled_at` — and **a return does not erase the
+settlement**. That is why `rail_event_semantics` books an ACH return as a *new
+event at a new value date* rather than as a correction of the original
+(DECISIONS 019), and why the adapter promotes `submitted + settled_at → settled`
+explicitly. One frame carries the whole argument. It also proves Increase account
+ownership and the sandbox environment, which no API output can.
+
+### Shot 3 — Stripe: the TEST MODE banner
+
+```
+https://dashboard.stripe.com/test/webhooks  →  we_1UEAf8DgSL5WTGpm2qVqN478
+```
+
+**Must be in frame:**
+
+- the **TEST MODE banner**, unmistakably
+- id `we_1UEAf8DgSL5WTGpm2qVqN478`, status **enabled**
+- URL `https://corgi-trial-psi.vercel.app/api/webhooks/stripe`
+- all four subscribed events:
+  `identity.verification_session.verified`, `…requires_input`, `…processing`,
+  `…canceled`
+
+**What it adds beyond the runnable:** it answers an **automatic-fail** question
+with an independent artefact. "Live-mode API keys" fails the trial outright.
+Our own evidence for test mode is our own code — `src/lib/env.schema.ts` refuses
+a key beginning `sk_live` at boot, and there is a test asserting it — and a
+system's own claim about its own keys is exactly the kind of evidence a grader
+should not have to accept. Stripe's banner is not our code. One frame, one
+automatic fail closed.
+
+If the same login is already open, the Identity session
+`vs_1UEDLcDgSL5WTGpmif87HEZ7` (**verified**, type `document`, `livemode: false`,
+2026-09-10T19:09:24Z) is a free second frame in the same tab — the session that
+produced the `identity.verification_session.verified` delivery sitting in our
+inbox. Optional; the banner is the shot that matters.
+
+---
+
+## 6. Shots deliberately not requested, and why
+
+The instinct is to screenshot every provider. Four are not worth a human's time,
+and asking for them would pad the pack with frames that prove nothing new.
+
+| Not requested | Why not |
+| --- | --- |
+| **Plaid — the keys page** | `/api/health` reports `open_banking: POST /institutions/get -> 200` as a **round trip from the deployed system**. That response is impossible without a valid `client_id` + sandbox secret pair, and that pair is impossible without a Plaid account. The keys page would prove the account exists; the 200 already does, and it is checkable by anyone with a browser. |
+| **GLEIF — the business registry slot** | There is no dashboard and no credential. `business_registry` runs on the **public GLEIF LEI register** (`GET api.gleif.org/v1/lei-records/{lei} -> 200`), chosen because every KYB provider on the brief's menu — Middesk, Persona KYB, Sumsub KYB — is gated behind sales or business verification that cannot be passed in a weekend. It is labelled a **substitution** on `/api/health`, not a KYB vendor. Anyone can curl it. |
+| **Base Sepolia — the wallet or the transaction** | The explorer link in §3.6 is public and needs no login. A screenshot of a public page is strictly worse than the URL to it. |
+| **Persona** | There is no Persona account and no dashboard. Director KYC runs on Stripe Identity instead, `/api/health` says so, and `/api/webhooks/persona` answers **503** rather than pretending. Nothing to photograph. |
+
+Two more absences, in case someone goes looking:
+
+- **There is no outbound-transfer screenshot for the USDC leg**, because the
+  evidence is the transaction hash on a public chain and the ledger entry that
+  names the block. A dashboard frame would add nothing and imply more.
+- **The ACH simulator and the scheme-file simulator are labelled simulators** in
+  the code, selected when a key is absent, and they log a `warn` line saying so.
+  They are not integrations and have no provider side.
+
+---
+
+## 7. What is live
+
+`/api/health` is the authority. If this file ever disagrees with that endpoint,
+**the endpoint is right** — it is computed at load time from real round trips,
+and this file is written down.
 
 ```
 https://corgi-trial-psi.vercel.app/api/health
 ```
 
-**Must show:** `"live": 4`, `"total": 7`, and the `evidence` string beside each
-of the seven `slots[]`.
+Seven slots, seven live, each with the round trip that proves it:
 
----
-
-## 1. Lithic — card issuing and the delivery log · 5 minutes
-
-Sandbox dashboard: **https://sandbox.lithic.com** → *Developers* → *Webhooks*
-(event subscriptions). This is the sandbox environment; make sure the
-environment selector is in frame so nobody has to guess.
-
-### 1a. The event subscription, pointing at the production URL
-
-**Capture:** the subscription's detail page.
-
-**Must be visible in the frame:**
-
-- token **`ep_3J8yb9xommtOdKee1FzpUA4GBrW`**
-- URL **`https://corgi-trial-psi.vercel.app/api/webhooks/lithic`** — the deployed
-  origin, not a tunnel and not localhost
-- state **enabled** (`"disabled": false`)
-- description *"Corgi work trial - card auth and clearing"*
-- the sandbox environment indicator
-
-### 1b. The delivery log showing 2xx
-
-**Capture:** the delivery / attempts list for that subscription, at least eight
-rows deep.
-
-**Must be visible in the frame:** a column of **`SUCCESS`** results against
-**`202`** response codes, the destination URL on each row, timestamps, and the
-event tokens. Recent rows to expect:
-
-```
-2026-09-10T17:33:31Z  SUCCESS  202  msg_3J97pH5aQY9RFCvS3y4DkGgza2x
-2026-09-10T17:17:43Z  SUCCESS  202  msg_3J95uENuagml3DKYTH9cf9aFhQV
-2026-09-10T17:17:43Z  SUCCESS  202  msg_3J95u9JSSQDtVGRtmoxr2iXNwkR
-```
-
-202 is the correct answer here, not 200: the route stops at *verified and
-persisted* and hands off to the drain, and 200 is reserved for a replay of an
-event already in the inbox.
-
-### If a screenshot is impossible
-
-The same two facts come out of the API, and the output is a better artefact than
-a screenshot because it can be re-run:
-
-```bash
-curl -s https://sandbox.lithic.com/v1/event_subscriptions \
-  -H "Authorization: $LITHIC_API_KEY"
-
-curl -s "https://sandbox.lithic.com/v1/event_subscriptions/ep_3J8yb9xommtOdKee1FzpUA4GBrW/attempts?page_size=20" \
-  -H "Authorization: $LITHIC_API_KEY"
-```
-
-**In the repo:** `src/app/api/webhooks/[provider]/route.ts` is the endpoint those
-deliveries hit; §5 below is the inbox they landed in; attack 8 in
-`node scripts/livefire.mjs` proves a real signed Lithic delivery and two replays
-of it produce exactly one row.
-
----
-
-## 2. Increase — ACH, and the return that is the interesting part · 5 minutes
-
-Dashboard: **https://dashboard.increase.com**, sandbox environment.
-
-### 2a. The event subscription
-
-**Capture:** *Developers* → *Event subscriptions* → the subscription detail.
-
-**Must be visible in the frame:**
-
-- id **`sandbox_event_subscription_001m261qr3eanr8aw8gq2v3605c`**
-- URL **`https://corgi-trial-psi.vercel.app/api/webhooks/increase`**
-- status **`active`**
-- created **`2026-09-10T16:17:12Z`**
-
-### 2b. The ACH transfer that was created, submitted, settled and returned R01
-
-**Capture:** the transfer detail page, including its event timeline.
-
-**Must be visible in the frame:**
-
-- id **`sandbox_ach_transfer_s2iljuavdzp2p68rh7v7`**
-- amount **74219** cents — **$742.19**, outbound ACH credit
-- status **`returned`**
-- **`settlement.settled_at` = `2026-09-10T16:13:05Z`, still populated** — this is
-  the frame's whole point, and it must not be cropped out
-- return reason **`insufficient_fund`** — R01
-- the lifecycle in order: `pending_submission` → `submitted` → settled →
-  `returned`
-
-Two things a reader should be able to see from that one frame: Increase has no
-`settled` status at all (a settled transfer stays `submitted` and grows
-`settled_at`), and the return does **not** erase the settlement. That is why
-`rail_event_semantics` books an ACH return as a *new event at a new value date*
-rather than as a correction of the original — DECISIONS 019.
-
-### If a screenshot is impossible
-
-```bash
-curl -s https://sandbox.increase.com/event_subscriptions \
-  -H "Authorization: Bearer $INCREASE_API_KEY"
-
-curl -s https://sandbox.increase.com/ach_transfers/sandbox_ach_transfer_s2iljuavdzp2p68rh7v7 \
-  -H "Authorization: Bearer $INCREASE_API_KEY"
-```
-
-**In the repo:** DECISIONS 019 records the whole lifecycle with timestamps;
-`research/ach/NOTES.md` has the measured API shapes; `src/lib/rails/` holds the
-Increase adapter and the explicit `submitted + settled_at → settled` promotion
-that the frame above justifies.
-
----
-
-## 3. Plaid — the sandbox account exists · 2 minutes
-
-Dashboard: **https://dashboard.plaid.com/developers/keys**
-
-**Capture:** the Keys page.
-
-**Must be visible in the frame:**
-
-- the team / account name, so it is clear this is a real Plaid account
-- the **`client_id`**
-- the **Sandbox** secret row, **masked** — the claim being evidenced is that the
-  sandbox credential exists, not what it is
-- the environment selector showing Sandbox
-
-Do not reveal the secret. A masked row proves the account; an unmasked one
-proves the account and burns the key.
-
-### If a screenshot is impossible
-
-The health endpoint's probe is the stronger evidence anyway, because it is a
-round trip rather than a page:
-
-```
-/api/health → slots[] → open_banking → evidence: "POST /institutions/get -> 200"
-```
-
-```bash
-curl -s -X POST https://sandbox.plaid.com/institutions/get \
-  -H 'Content-Type: application/json' \
-  -d "{\"client_id\":\"$PLAID_CLIENT_ID\",\"secret\":\"$PLAID_SECRET\",\"count\":1,\"offset\":0,\"country_codes\":[\"US\"]}"
-```
-
-**In the repo:** `src/lib/integrations/probe.ts` — and DECISIONS 011 explains why
-this particular probe sends a fixed, well-formed body: Plaid validates request
-*shape* before credentials, so a malformed probe returns `INVALID_FIELD` for a
-real key and a fake one alike.
-
----
-
-## 4. Stripe — Identity session and the registered endpoint · 4 minutes
-
-Test mode throughout. A key beginning `sk_live` is refused at boot
-(`src/lib/env.schema.ts`), and there is a test asserting it.
-
-### 4a. The registered webhook endpoint
-
-**Capture:** **https://dashboard.stripe.com/test/webhooks** → the endpoint
-detail.
-
-**Must be visible in the frame:**
-
-- id **`we_1UEAf8DgSL5WTGpm2qVqN478`**
-- URL **`https://corgi-trial-psi.vercel.app/api/webhooks/stripe`**
-- status **enabled**
-- the four subscribed events, all of them:
-  `identity.verification_session.verified`,
-  `identity.verification_session.requires_input`,
-  `identity.verification_session.processing`,
-  `identity.verification_session.canceled`
-- the **TEST MODE** banner
-
-### 4b. The Identity verification session
-
-**Capture:** **https://dashboard.stripe.com/test/identity/verification-sessions**
-→ the session detail.
-
-**Must be visible in the frame:**
-
-- id **`vs_1UEAUADgSL5WTGpmlut3O3hU`**
-- type **`document`**
-- status **`requires_input`**
-- `livemode: false`
-
-**Say what this is, plainly, wherever it is presented.** The session was created
-against the live Stripe API and it is genuinely a Stripe Identity session — that
-is what makes `director_kyc` live. Nobody completed the document upload, so it
-sits at `requires_input`. It is not a verified director. Stripe Identity also
-cannot be *driven* to `declined` or `needs_review` on demand, which is why
-Persona is item 7 on the week-two list: `perform-simulate-actions` pushes an
-inquiry through the non-happy paths and fires the real webhooks for each.
-
-### If a screenshot is impossible
-
-```bash
-curl -s "https://api.stripe.com/v1/webhook_endpoints?limit=5" -u "$STRIPE_SECRET_KEY:"
-curl -s "https://api.stripe.com/v1/identity/verification_sessions?limit=5" -u "$STRIPE_SECRET_KEY:"
-```
-
-**In the repo:** `/api/health` → `director_kyc` → evidence *"Stripe Identity
-enabled (Persona not configured)"*; `src/lib/kyb/`; DECISIONS 018 for why Stripe
-moved out of the registry slot and into KYC.
-
----
-
-## 5. In-repo evidence, needing no dashboard at all · 4 minutes
-
-Four artefacts. Capture the terminal output; it is reproducible, which a
-screenshot of somebody else's dashboard is not.
-
-### 5a. `node scripts/livefire.mjs`
-
-The seven published attacks plus the replay claim, run against production with no
-mocks in the directory.
-
-```bash
-set -a; . ./.env; set +a
-node scripts/livefire.mjs
-```
-
-**Must be visible:** the header naming the target
-(`https://corgi-trial-psi.vercel.app`) and the live provider sandboxes, and the
-final line — last run: **`PASS 6   FAIL 0   SKIP 2   of 8 attacks   79s`**.
-Capture the two SKIP blocks too, in full. A skip is not a pass, each one names
-exactly what could not be proven, and hiding them is the thing this whole
-submission is arguing against. The two skips are attack 2's `hold_closure` row
-(DECISIONS 024) and attack 7's health-freshness and provider-down UI.
-
-### 5b. `pnpm db:check`
-
-Connects as `corgi_app` — the role the running application actually uses — and
-attempts the forbidden.
-
-```bash
-set -a; . ./.env; set +a
-pnpm db:check
-```
-
-**Must be visible:** the first six `PASS` lines, each ending `permission denied
-for table journal_entry` / `journal_line`, and the final **`14 passed, 0
-failed`**. Verified again on 2026-09-10 against production.
-
-### 5c. `webhook_inbox` rows with verified signatures
-
-Read-only, as the restricted role:
-
-```bash
-set -a; . ./.env; set +a
-node --input-type=module -e '
-import postgres from "postgres";
-const sql = postgres(process.env.APP_DATABASE_URL, { ssl: "require", max: 1 });
-console.log(await sql`select provider, state, count(*)::int from webhook_inbox group by 1,2 order by 1,2`);
-console.log(await sql`select count(*)::int total,
-  count(*) filter (where headers ? ${"webhook-signature"})::int with_sig from webhook_inbox`);
-console.log(await sql`select provider_event_id, state, received_at,
-  octet_length(payload::text) bytes, headers->>${"webhook-signature"} sig
-  from webhook_inbox order by received_at desc limit 3`);
-await sql.end();'
-```
-
-**Must be visible:** **64 rows — 53 `done`, 11 `parked`**, all `lithic`; **60 of
-64 carrying a real `webhook-signature` header**; and at least one sample row with
-its two-signature Standard Webhooks header and a payload over 2,000 bytes, e.g.
-`msg_3J97pH5aQY9RFCvS3y4DkGgza2x` at `2026-09-10T17:33:31Z`, 2,339 bytes.
-
-Say what the four rows without a signature are rather than filtering them out:
-two are hand-made probe rows (`probe_…`, `probe2_…`) and two are the
-double-encoded deliveries from the bug in DECISIONS 020, where `payload` and
-`headers` were stored as jsonb *strings* until the `::text::jsonb` fix landed.
-Those two are also the rows that prove the retry path worked —
-`msg_3J8yjFYaE5cor4TG…` first failed at 16:18:43 and recovered at 16:23:23 once
-the cast was fixed, because a failed insert answers 500 rather than swallowing
-the delivery.
-
-The 11 `parked` rows are correct behaviour, not a backlog: they are
-authorisations on Lithic cards created directly in the sandbox and never
-registered to a customer here, so the consumer will not guess whose money to
-move. They are verified, durable, and post the moment a card is claimed.
-
-### 5d. The on-chain USDC balance
-
-Wallet **`0xd3629d7399945A1Ff2C5a1c5b0F7C9d32D3c2918`** on **Base Sepolia**
-(chain id 84532), USDC contract
-`0x036CbD53842c5426634e7929541eC2318f3dCF7e`.
-
-Block explorer, no credentials needed:
-
-```
-https://sepolia.basescan.org/address/0xd3629d7399945A1Ff2C5a1c5b0F7C9d32D3c2918
-```
-
-Or against the RPC:
-
-```bash
-set -a; . ./.env; set +a
-curl -s -X POST "$BASE_SEPOLIA_RPC_URL" -H 'content-type: application/json' \
- -d '{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x036CbD53842c5426634e7929541eC2318f3dCF7e","data":"0x70a08231000000000000000000000000d3629d7399945a1ff2c5a1c5b0f7c9d32d3c2918"},"latest"]}'
-curl -s -X POST "$BASE_SEPOLIA_RPC_URL" -H 'content-type: application/json' \
- -d '{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xd3629d7399945A1Ff2C5a1c5b0F7C9d32D3c2918","latest"]}'
-```
-
-**Must be visible:** USDC balance `0x1312d00` = **20.000000 USDC**, and native
-balance **0 wei**. That pair is the evidence, and it is evidence of a *limit*:
-the wallet can read the chain and cannot move a cent, because an ERC-20 transfer
-needs roughly 390000000000 wei. There is no outbound transaction to point at,
-and there should be no screenshot implying there is one.
-
----
-
-## 6. Simulated slots — do not go looking for dashboard evidence
-
-Three slots read `simulated` on `/api/health`. **None of them has a provider
-dashboard artefact to capture, and that is the honest answer rather than a gap in
-this pack.** Anyone asked to "find the screenshot" for these should stop here.
-
-| Slot | Why there is nothing to screenshot | Where the evidence of the *refusal* lives |
+| Slot | Provider | Evidence string from `/api/health` |
 | --- | --- | --- |
-| `business_registry` | Connect IS now enabled on the account, so a Connect dashboard exists; what is missing is a wired integration. Every KYB option on the brief's menu — Middesk, Persona KYB, Sumsub KYB — is gated behind sales or business verification. | Measured, not read off a support page: `POST /v1/accounts` first returned **400** *"You can only create new accounts if you've signed up for Connect"*, and after Connect was enabled mid-trial it returns **400** *"Stripe no longer recommends Accounts v1 for new Connect integrations. Create connected accounts with POST /v2/core/accounts instead"* — the entitlement check now passes and the v1 path is retired. DECISIONS 015, 017, 018. The probe is a parameterless `POST /v1/accounts`, measured failing in both directions. |
-| `stablecoin` | No transfer was ever originated, so no transaction hash exists and no explorer page will show one. | §5d above: 20.00 USDC and 0 wei of gas. DECISIONS 016 — the earlier probe called `balanceOf`, got a 200, and reported LIVE on a wallet that could not send. |
-| `card_webhooks` | The *label* is unprobed, not the deliveries. There is no separate dashboard object for it — the subscription and its delivery log are §1. | `/api/health` evidence string: *"credential present but NOT probed — no round trip proves this slot works"*. DECISIONS 026 — the fallback inherited liveness from a non-empty string, which is the failure of DECISIONS 011 reintroduced inside the module written to kill it. |
+| `card_issuing` | Lithic sandbox | `GET /v1/cards -> 200` |
+| `card_webhooks` | Lithic | `GET /v1/event_subscriptions -> 200` and `…/attempts -> 200`; subscription enabled at the deployed URL; latest delivery SUCCESS, our endpoint answered **202** |
+| `director_kyc` | Stripe Identity (test mode) | `Stripe Identity enabled (Persona not configured)` |
+| `business_registry` | **GLEIF LEI register** | `GET api.gleif.org /v1/lei-records/{lei} -> 200` — **a substitution** for Middesk / Persona KYB / Sumsub KYB, all gated |
+| `open_banking` | Plaid sandbox | `POST /institutions/get -> 200` |
+| `ach_rail` | Increase sandbox | `GET https://sandbox.increase.com/accounts?limit=1 -> 200` |
+| `stablecoin` | USDC on Base Sepolia | `15.03 USDC and 68659903703189 wei gas — a transfer is fundable` |
 
-Two more absences, in case someone goes hunting:
-
-- **Persona is not signed up.** There is no Persona account and no dashboard.
-  Director KYC runs on Stripe Identity instead (§4), and `/api/health` says so.
-- **The ACH simulator and the scheme-file simulator are labelled simulators**
-  in the code, selected when a key is absent, and they log a `warn` line saying
-  so. They are not integrations and have no provider side.
+That last string is deliberate. An earlier version of this slot called
+`balanceOf`, got a 200, and reported **live** on a wallet holding **zero gas**,
+which could not have sent a cent (DECISIONS 016). A liveness probe that cannot
+fail is not a probe. The slot now reports the gas balance because the gas balance
+is what makes the claim true.
 
 ---
 
-## Tick sheet
+## 8. Tick sheet
 
-| # | Evidence | Where | Counts only if the frame shows |
+| # | Evidence | Where | Counts only if |
 | --- | --- | --- | --- |
-| 0 | Live/simulated verdicts | `/api/health` | `live: 4`, `total: 7`, all seven `evidence` strings |
-| 1a | Lithic event subscription | sandbox.lithic.com → Developers → Webhooks | `ep_3J8yb9xommtOdKee1FzpUA4GBrW`, the `/api/webhooks/lithic` production URL, enabled |
-| 1b | Lithic delivery log | same subscription → attempts | `SUCCESS` / **202** rows with timestamps and event tokens |
-| 2a | Increase event subscription | dashboard.increase.com → Developers | `sandbox_event_subscription_001m261qr3eanr8aw8gq2v3605c`, `active`, `/api/webhooks/increase` |
-| 2b | Increase ACH lifecycle | Transfers → the transfer | `sandbox_ach_transfer_s2iljuavdzp2p68rh7v7`, $742.19, `returned`, `settled_at` still set, `insufficient_fund` |
-| 3 | Plaid account exists | dashboard.plaid.com/developers/keys | team name, `client_id`, **masked** sandbox secret, Sandbox selected |
-| 4a | Stripe webhook endpoint | dashboard.stripe.com/test/webhooks | `we_1UEAf8DgSL5WTGpm2qVqN478`, enabled, all four identity events, TEST MODE |
-| 4b | Stripe Identity session | dashboard.stripe.com/test/identity/verification-sessions | `vs_1UEAUADgSL5WTGpmlut3O3hU`, `document`, `requires_input`, `livemode: false` |
-| 5a | Live fire | `node scripts/livefire.mjs` | `PASS 6  FAIL 0  SKIP 2 of 8`, both skip reasons in full |
-| 5b | Immutability | `pnpm db:check` | six `permission denied` lines, `14 passed, 0 failed` |
-| 5c | Signed webhook inbox | SQL in §5c | 64 rows, 53 `done` / 11 `parked`, 60 with `webhook-signature` |
-| 5d | On-chain USDC | sepolia.basescan.org or RPC | 20.000000 USDC and **0 wei** gas |
+| 0 | The 22 claims | `node scripts/evidence.mjs` | exit `0`, `22 proven, 0 not proven`, and the commit line agrees with the deployment |
+| 1 | Live/simulated verdicts | `/api/health` | `live: 7`, `total: 7`, all seven `evidence` strings present |
+| 2 | Immutability | `pnpm db:check` | `35 passed, 1 failed`, the failure being `v_refused_auth_hold` and named as deliberate |
+| 3 | Live fire | `node scripts/livefire.mjs` | the scoreboard, **with every SKIP block in full** — a skip is not a pass, and each one names what could not be proven |
+| 4 | On-chain payout | `sepolia.basescan.org/tx/0x0acfad50…` | block `46666112`, status success, Transfer to `0x…dEaD` |
+| 5 | Lithic subscription + delivery log | screenshot, §5 shot 1 | sandbox badge, `ep_3J8yb9xommtOdKee1FzpUA4GBrW`, the production URL, `SUCCESS`/`202` rows |
+| 6 | Increase ACH lifecycle | screenshot, §5 shot 2 | `sandbox_ach_transfer_x5vdo5m7b6k924sszlms`, `returned`, **`settled_at` still set**, `insufficient_fund` |
+| 7 | Stripe test mode | screenshot, §5 shot 3 | the TEST MODE banner, `we_1UEAf8DgSL5WTGpm2qVqN478`, all four identity events |

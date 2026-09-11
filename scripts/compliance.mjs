@@ -1497,7 +1497,21 @@ define(NN, "NN9", "Money is never a float", async (r) => {
 
   /* ---- The migrations, so an UNAPPLIED float is caught too -------------- */
   const migDir = resolve(ROOT, "db/migrations");
-  const floatRe = /\b(float4|float8|double\s+precision|\breal\b|money|numeric|decimal)\b/i;
+  // Matches a TYPE in a column declaration, not the word anywhere on the line.
+  //
+  // The bare alternation flagged `'x-real-ip'` inside a CHECK constraint in
+  // 0038 — a string literal in an allow-list of forwarding headers, nothing to
+  // do with money — and reported NN9 FAIL against a book with no float
+  // anywhere. A guard crying wolf on a healthy tree is not a harmless false
+  // positive: NN9 is one of the ten non-negotiables, and the next person to
+  // see it red learns to scroll past it, which is exactly how the real one
+  // gets missed.
+  //
+  // A Postgres type follows an identifier and whitespace, so require that:
+  // `amount real`, `rate numeric(9,4)`, `x double precision`. A quoted literal
+  // cannot match, and neither can a word inside a hyphenated string.
+  const floatRe =
+    /^\s*"?[a-z_][a-z0-9_]*"?\s+(float4|float8|double\s+precision|real|money|numeric|decimal)\b/i;
   const migHits = [];
   if (existsSync(migDir)) {
     for (const file of readdirSync(migDir).filter((f) => f.endsWith(".sql")).sort()) {

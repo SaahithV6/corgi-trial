@@ -499,7 +499,34 @@ const REACH = [
        JOIN card_auth_event ev ON ev.auth_id = ca.id
       WHERE hs.active_hold_cents > 0
         AND ev.kind IN ('authorization','incremental_authorization')`],
-  ["v_hold_closure_not_terminal", "permanent hold closures", "SELECT count(*)::int AS n FROM hold_closure"],
+  // REACH IS THE VIEW'S OWN PREDICATE, NOT THE TABLE'S SIZE.
+  //
+  // This read `SELECT count(*) FROM hold_closure` and printed 228, while the
+  // view filters `reason = ANY (ARRAY[...five string literals...])` and can
+  // only ever see 126. So the section written to state each guard's reach
+  // overstated this one by 102 rows — 45% of the population invisible, while
+  // the line claiming to measure exactly that printed the larger number.
+  //
+  // That is the pattern this section exists to end, reproduced inside the
+  // mechanism built to end it: the reach query excluded precisely what the
+  // guard excludes. A reach figure is only worth printing if it is derived
+  // the same way the view selects, so it now counts rows the view's own
+  // predicate admits, and prints the shortfall beside it.
+  //
+  // The underlying defect stands and is NOT fixed here: discriminating a
+  // closure on free text means migration 0032's own closures fell outside
+  // the list by WORDING rather than intent. The real repair is a
+  // CHECK-constrained `source` column on hold_closure, filtered on that.
+  // Printing the gap is how it stops being invisible until then.
+  ["v_hold_closure_not_terminal", "permanent hold closures the view's reason filter admits",
+    `SELECT count(*)::int AS n FROM hold_closure hc
+      WHERE hc.reason = ANY (ARRAY[
+        'authorisation closed or expired by the network',
+        'final capture received',
+        'authorisation expiry reached',
+        'authorisation fully reversed',
+        'authorisation expired unused'])`,
+    "SELECT count(*)::int AS n FROM hold_closure"],
   ["v_wire_availability_drift", "uncleared-credit holds with a wire memo entry",
     `SELECT count(*)::int AS n FROM hold h
       WHERE h.kind = 'uncleared_credit'
@@ -508,10 +535,23 @@ const REACH = [
 ];
 
 console.log("\nGUARD REACH — the population each invariant ranges over (not a pass/fail)\n");
-for (const [view, what, query] of REACH) {
+for (const [view, what, query, totalQuery] of REACH) {
   try {
     const rows = await sql.unsafe(query);
     const n = rows[0]?.n ?? 0;
+    // A guard that can only see part of its table must say so HERE, where the
+    // reach is claimed, rather than in a document somebody has to find.
+    if (totalQuery !== undefined) {
+      const totals = await sql.unsafe(totalQuery);
+      const total = totals[0]?.n ?? 0;
+      if (total > n) {
+        const pct = total === 0 ? 0 : Math.round(((total - n) / total) * 100);
+        console.log(
+          `  ${view}\n      ranges over ${n} of ${total} — ${total - n} rows (${pct}%) are OUTSIDE this guard by construction`,
+        );
+        continue;
+      }
+    }
     console.log(
       n === 0
         ? `  EMPTY ${view} — 0 ${what}: green because there is nothing to be green about`
