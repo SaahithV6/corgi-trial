@@ -158,6 +158,26 @@ async function readPlatformState(conn: Queryable): Promise<PlatformStateRow> {
            -- ledger already publishes, and v_hold_drift proves that one.
            (SELECT count(*) FROM v_hold_state
              WHERE active_hold_cents <> 0)::int                     AS active_holds,
+           -- The ::bigint is load-bearing, and it is not defensive typing.
+           --
+           -- v_hold_state.active_hold_cents is NUMERIC, not bigint, however
+           -- much its name and the 0::bigint in one arm of its CASE suggest
+           -- otherwise: it folds SUM(l.amount_cents * a.normal_side), and
+           -- SUM over bigint returns numeric in Postgres, so the CASE resolves
+           -- to the common type. The driver registers a bigint parser for OID
+           -- 20 only, so a numeric column arrives as a STRING.
+           --
+           -- Without this cast the value reaches formatUsd() as "9097570",
+           -- toCents() refuses it (CentsInput is number | bigint, and
+           -- Number.isFinite does not coerce), and this panel throws rather
+           -- than rendering. Worse for anyone comparing: "0" !== 0n, so a
+           -- released hold would count as active.
+           --
+           -- It cost a red live-fire assertion tonight — a type mismatch that
+           -- reads on a scoreboard exactly like money in the wrong place. Cast
+           -- at every call site that reads this column; the view itself cannot
+           -- be corrected in place, because CREATE OR REPLACE VIEW refuses a
+           -- column type change and dropping it cascades.
            (SELECT COALESCE(SUM(ABS(active_hold_cents)), 0)
               FROM v_hold_state)::bigint                            AS active_hold_cents,
 
