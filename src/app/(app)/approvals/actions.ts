@@ -1,5 +1,9 @@
 "use server";
 
+import { cookies } from "next/headers";
+
+import { SESSION_COOKIE, verifySession } from "@/lib/auth/session";
+
 /**
  * The approvals screen's write path.
  *
@@ -109,6 +113,44 @@ export async function decideAction(
   _previous: DecisionResult,
   formData: FormData,
 ): Promise<DecisionResult> {
+  // A SESSION IS REQUIRED TO DECIDE A PAYMENT, AND THIS IS WHERE IT IS CHECKED.
+  //
+  // This module was exempted from `assertOperatorAction()` because it is
+  // rendered on `/client/approvals` as well as the console, and an operator-only
+  // guard would refuse a customer their own screen. The exemption was correct
+  // and the consequence was not: a server action posts to whatever page the
+  // browser is on, `/` is classified `customer`, and `/` renders this very form.
+  // So the middleware's write gate did not cover it and neither did the action
+  // guard. Measured on the deployed site: Approve and Reject rendered ENABLED to
+  // a visitor holding no credential at all.
+  //
+  // Approving a payment is the highest-privilege act in this system — it is the
+  // second signature the whole maker-checker design exists to require — so it
+  // needs a session whoever is asking, customer or operator. That is a real cost
+  // and it is stated in docs/AUTH.md rather than hidden: the customer surface has
+  // no sign-in of its own yet, so `/client/approvals` becomes read-only until one
+  // exists. A queue you can read and not act on is an honest screen; an Approve
+  // button that works for anybody is not.
+  //
+  // The database refuses independently — `assert_maker_checker()` raises 42501
+  // on a self-approval and `can_approve` is checked there too — but a trigger
+  // refusing an unauthenticated caller is the last line, not the first, and it
+  // cannot tell an anonymous visitor from the actor whose cookie they typed.
+  const session = await verifySession(
+    (await cookies()).get(SESSION_COOKIE)?.value,
+  );
+  if (!session.ok) {
+    return {
+      status: "refused",
+      instructionId: String(formData.get("instructionId") ?? ""),
+      code: "SIGN_IN_REQUIRED",
+      message:
+        "Deciding a payment needs a signed-in session. Nothing was written, and the payment is exactly where it was. " +
+        "Sign in at /signin and open the queue again — the role switch between Staff and Approver works behind that gate, " +
+        "and the rule that an initiator can never approve their own payment is enforced by the database either way.",
+    };
+  }
+
   const parsed = decisionSchema.safeParse({
     instructionId: formData.get("instructionId"),
     contentHash: formData.get("contentHash"),
