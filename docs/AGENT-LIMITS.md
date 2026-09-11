@@ -1,10 +1,17 @@
 # Operations we do not hand an autonomous agent
 
-The MCP surface at `POST /api/mcp` has four tools: `get_balance`,
-`list_transactions`, `list_recon_breaks`, and `initiate_payment`. Three read.
-The fourth writes a request into a queue a person has to work through. That is
-the whole surface, and the interesting property is not what is on it — it is
-what is missing and why.
+The MCP surface at `POST /api/mcp` has eight tools. Seven read —
+`get_balance`, `list_pots`, `list_transactions`, `list_payees`,
+`list_standing_orders`, `list_card_controls`, `list_recon_breaks`. The eighth
+writes a request into a queue a person has to work through. That is the whole
+surface, and the interesting property is not what is on it — it is what is
+missing and why.
+
+The reads grew and the writes did not. Four features shipped after the first
+cut of this surface — pots, the payee book, standing orders, card controls —
+and each one brought an obvious write with it. Every one of those writes is
+refused below, with the reason, because "the agent can already see it" is not an
+argument for letting it act.
 
 This document is the list of what is missing. It is not a policy we intend to
 enforce in code later; every item below is already absent from the tool
@@ -12,6 +19,24 @@ registry, and `src/lib/mcp/tools.test.ts` fails the build if a tool named after
 one of them appears. Where the database can also refuse the operation, the
 constraint is named, because a rule that lives only in a tool list is a rule
 that survives exactly until someone adds a tool.
+
+Since the newer readers arrived there is a second mechanical guard, and it
+exists because the guarantee genuinely weakened. `list_card_controls` reads
+through `@/lib/cards/store`, which also exports `setCardControls`;
+`list_payees` reads through `@/lib/payees/store`, which also exports
+`acknowledgeWarning`. A named import brings in one binding and nothing else, so
+nothing became reachable — but "we did not import the write" is a fact about a
+diff, and a fact about a diff is not a control.
+`src/lib/mcp/no-write-imports.test.ts` makes it one: it reads every import
+statement in `src/lib/mcp/` and fails the build if any of twenty-two named
+write functions, or any of seven write-only modules, appears in one. The
+failure message names the section of this document that argues the refusal.
+
+**Read the last section of this file before the debrief.** It sorts every
+refusal into "the database will not represent it", "the capability is not in
+the process", and "we chose not to expose it" — because those are three
+different strengths of guarantee and the panel is right to ask which one each
+item is.
 
 A note on framing before the list. "Autonomous" here means: acting on a bearer
 token, with no person reading the call before it happens. It does not mean
@@ -248,18 +273,429 @@ to prevent.
 
 ---
 
-## The principle underneath all eight
+# The refusals that came with the newer features
+
+Sections 1-8 were written when this surface had three readers. Everything below
+arrived with pots, payees, standing orders, card controls and the second
+stablecoin provider — features the agent can now SEE, which is exactly when the
+argument for letting it act gets made.
+
+## 9. Signing or broadcasting a stablecoin transfer
+
+**Absent tools:** `send_usdc`, `sign_transfer`, `broadcast_payout`,
+`provision_wallet`.
+
+There are now two USDC providers behind one interface: `direct`, which builds an
+EIP-1559 transaction and signs it here with a secp256k1 key, and `circle`, which
+asks Circle's Web3 Services to sign inside their custody. Neither is reachable
+from this surface, and the reason is the same for both even though the mechanics
+differ completely.
+
+**What stops it structurally.** Three things, in decreasing order of strength.
+
+1. *The capability is not in the process.* `src/lib/mcp/` imports nothing from
+   `@/lib/rails/stablecoin`. `no-write-imports.test.ts` names `sendUsdcPayout`,
+   `signTransaction`, `encodeSignedTransaction` and `settleTransaction` as
+   forbidden imports and the modules `stablecoin/tx` and `stablecoin/secp256k1`
+   as forbidden entirely, so the build fails if anyone adds one.
+2. *The credentials are not held.* The direct path reads
+   `USDC_SENDER_PRIVATE_KEY` at call time and holds it only for the life of the
+   provider object; the Circle path needs `CIRCLE_API_KEY` and
+   `CIRCLE_ENTITY_SECRET`. This surface never returns a secret and never accepts
+   one, and an MCP token is not a credential for any of those three.
+3. *The ledger side is separate anyway.* `settleTransaction()` is the single
+   place in the codebase that decides "the chain accepted this transfer", and
+   the booking that follows goes through `ledger/post.ts`, which this surface
+   cannot reach at all — §8.
+
+**What would have to change.** Somebody would have to import the adapter into
+the MCP module (and delete the guard test that stops them), and the deployment
+would have to put the signing key or the entity secret in reach of the request
+path that a bearer token can drive.
+
+**Why it is refused even though `initiate_payment` accepts the `usdc` rail.**
+This is the sharpest version of the whole document's rule. An agent CAN queue a
+USDC payout: it writes a `payment_instruction` naming a chain and an address,
+which a person then reads and approves and releases. What it cannot do is
+produce the signature. The distinction is not bureaucratic. A signed and
+broadcast USDC transfer is final at the second confirmation — there is no
+recall, no return code, no chargeback, no correcting entry that can bring the
+money back. Everything else in this system is repaired by appending a row. A
+broadcast is the one act with no inverse, so it is the one act that gets a
+human's hand on it by construction.
+
+## 10. Creating or amending a standing-order mandate
+
+**Absent tools:** `create_standing_order`, `amend_standing_order`,
+`cancel_standing_order`.
+
+This was the strongest candidate for a second write tool, and the argument for
+it is real: a mandate is not a payment, it moves no money on the day it is
+written, and every occurrence it produces does land in the approval queue. On
+that reading it looks exactly like `initiate_payment` — a request a person
+judges later.
+
+It is refused, for three reasons that only became visible when we tried to write
+the tool.
+
+**First: the mandate itself never enters the queue.** `createStandingOrder()`
+inserts a `standing_order` row. That row is not a `payment_instruction`, no
+`approval_policy` applies to it, and no approver ever sees "an agent proposed a
+recurring payment". What a person eventually sees is occurrence #1, thirty days
+later, looking like an ordinary scheduled debit. The context — that this
+recurring authority was created by an agent on a Tuesday from an email — is gone
+by the time anyone is asked. A write tool that lands in the queue *eventually*,
+in a form that hides what it is, is worse than one that does not land there at
+all, because it produces the appearance of review.
+
+**Second: it escapes the token's own ceiling.** A grant may carry
+`maxInstructionCents`, and `initiate_payment` enforces it on every call. A
+mandate's occurrences are not raised by `initiate_payment` — they are raised by
+the cron, under the mandate's `created_by` actor, through
+`runStandingOrders()`. So an agent capped at $50,000 per instruction could
+create a daily $49,000 mandate and never meet its ceiling again. The ceiling is
+a control on a single act; a mandate is a factory for acts. **An agent may write
+a request. It may not write a thing that writes requests.**
+
+**Third: amendment is worse than creation.** An existing mandate carries a
+customer's consent to a specific amount on a specific day. Changing the amount
+reuses that consent for something it was not given for, and does so in a row
+whose history a customer is unlikely to read.
+
+**What stops it structurally.** The capability is absent from the process:
+`createStandingOrder` and `cancelStandingOrder` are forbidden imports, and
+`@/lib/standing/fire` is a forbidden module. The database does not itself refuse
+an agent as `standing_order.created_by` — it is `REFERENCES actor(id)` with no
+kind restriction — so this one is **capability-absent, not unrepresentable**.
+The honest fix, if it ever mattered, is the pattern migration 0013 already
+established: add a `created_by_kind` column, a composite FK to
+`actor(id, kind)`, and a CHECK pinning it to `'human'`.
+
+## 11. Overriding a payee name-match warning
+
+**Absent tools:** `acknowledge_payee_warning`, `override_name_match`,
+`confirm_payee`.
+
+A `warn` finding on a payee — a close-but-not-identical holder name, a bank the
+directory does not list, a twin on the book with different details — is cleared
+by exactly one thing: a row in `payee_acknowledgement` naming an actor, an
+instant, and a reason somebody typed.
+
+**The signature is the whole control.** The warning is not information; the
+product ships the information anyway, on the screen. What the warning does is
+force a named person to put their name to "I know, and I am proceeding". An
+agent that can write that row has not satisfied the control, it has emptied it:
+the row still exists, the audit trail still says the warning was acknowledged,
+and nobody looked. That is strictly worse than no control, for the same reason
+§2 gives about an agent approving its own payment — it manufactures evidence of
+a judgement that was never made.
+
+There is a second reason specific to this check. The most valuable warning the
+payee book produces is `TWIN_WITH_DIFFERENT_DETAILS`: the same counterparty name
+already on the book with a different account. That is what a changed-bank-details
+fraud looks like, and it is also what an innocent duplicate looks like, and
+telling them apart requires something no agent can do — ringing the supplier on
+a number you already had. An agent asked to clear that warning will clear it
+from the same document that caused it.
+
+**What stops it structurally.** The capability is absent:
+`acknowledgeWarning` and `recordVerification` are forbidden imports. The
+database enforces the shape of an acknowledgement — `reason` is NOT NULL and
+non-blank, one per person per check — but `acknowledged_by` is
+`REFERENCES actor(id)` and would accept an agent. So: **capability-absent, not
+unrepresentable.** Making it unrepresentable is the 0013 pattern again, on
+`payee_acknowledgement`, and of everything in this document it is the change I
+would make first.
+
+**What the agent CAN do, and why that is enough.** `list_payees` returns the
+findings, the outcome, the freshness, the name source and the twin flag. An
+agent can put "this payee's routing number does not match the one on the book,
+last verified 101 days ago" into the `reason` field of an instruction, where the
+approver reads it. Surfacing the problem to the person who signs is the useful
+half. Signing it is the half that is not ours.
+
+## 12. Adding, re-checking or archiving a payee
+
+**Absent tools:** `add_payee`, `propose_payee`, `recheck_payee`,
+`archive_payee`.
+
+The other candidate for a second write tool, and it fails on a distinction worth
+stating carefully: **the payee book is a control input, not a queue.**
+
+`gatePaymentOnPayee()` runs inside `requestPayment()`'s transaction and decides
+whether a destination may be paid at all. It reads the book. So writing to the
+book is not asking a person for something — it is changing the thing that will
+decide, later, without anyone being asked again. That is the "may not change the
+rules that decide what is final" half of this document's rule, in a place where
+it is easy to miss because a payee looks like data rather than policy.
+
+Concretely: an agent that can add a payee can add one with a valid checksum and
+a plausible name, and every future payment to it passes the gate silently. No
+approval queue is involved, because the gate's whole purpose is to run before
+the queue.
+
+"But it would be a *proposal*, not a payee" is the obvious repair, and it needs
+a table that does not exist: a `payee_candidate` queue with its own screen and
+its own reviewer. That is a real feature with a real design, and half of it —
+a proposal table with no screen — would be worse than nothing, because the
+proposals would sit unread while the agent told customers they had been
+submitted.
+
+**What stops it structurally.** Capability-absent: `savePayee`, `archivePayee`,
+`recordVerification` and `confirmPayee` are forbidden imports. Nothing in the
+schema forbids an agent as `payee.created_by`. A re-check is refused for one
+more reason on top: `confirmPayee()` calls the routing directory and the
+identity provider, so an agent that could drive it could drive our provider
+quota from a loop, and this surface's `openWorldHint: false` — which clients
+use to decide whether to run a tool unattended — would become a lie.
+
+## 13. Changing card controls
+
+**Absent tools:** `set_card_controls`, `set_card_limit`, `block_mcc`,
+`unblock_mcc`, and (from §7) `freeze_card` / `unfreeze_card`.
+
+§7 refused issuing, freezing and unfreezing when cards first shipped. Controls
+are the same family and they deserve their own entry, because the failure mode
+is one step less obvious and one step worse.
+
+**A control change is a real-time authorisation decision made in advance.** The
+values in `card_control_version` are not configuration that a human later acts
+on. They ARE the answer the card network receives, inside Lithic's ASA timeout,
+measured in this system at 40-150ms, with no person anywhere on the path. So an
+agent that can unblock MCC 5542 has not requested a payment and has not
+approved one; it has arranged for the next fuel-pump authorisation to be
+approved, and there is no queue anywhere that will ever show that as a payment
+decision. The money moves, the ledger records an ordinary card settlement, and
+the only trace of the decision is a control version row nobody had a reason to
+read.
+
+Raising a limit is the same act in a quieter register. `daily_limit_cents` is
+the number `decide()` compares spend against; an agent that can set it to null
+has removed the control while leaving the screen that displays controls looking
+completely normal.
+
+There is also a direction-of-error argument that cuts the other way and I want
+to name it rather than pretend it does not exist. *Tightening* a control is
+safe-direction: blocking a category or lowering a limit stops money. An agent
+that detects an obvious compromise pattern at 03:00 and tightens is doing
+something defensible, and §7's debatable section already concedes the same point
+about freezing. I have kept it off anyway, for the reason §7 gives: a false
+positive on the one card a small business runs on is a payroll card declining at
+a pump, and a half-built version — tighten-only, with no notification, no SLA
+and no unwind path — is worse than none.
+
+**What stops it structurally.** Capability-absent, and now guarded:
+`setCardControls` is a forbidden import in `no-write-imports.test.ts`, and
+`tools.test.ts` refuses any tool whose name contains `freeze`, `unfreeze`,
+`set_control`, `set_limit`, `block_mcc` or `unblock`. The database enforces that
+control versions are append-only and contiguous — `card_control_version_key` on
+`(card_id, version)` plus `assert_card_control_version()`, which refuses a gap
+or a backwards `effective_from` — so a change could never be hidden. But
+`created_by` is `REFERENCES actor(id)`: an agent-attributed control version is
+representable. **Capability-absent, not unrepresentable**, and the 0013 pattern
+is the fix.
+
+**What the agent CAN do.** `list_card_controls` returns the controls, the
+decisions, the rule that fired and the reason. "Your card declined because
+category 5542 is blocked on it, under control version 3 set on the 8th; someone
+with access to the card console can change that" is a complete and useful
+answer. It ends with a person, which is the point.
+
+## 14. Firing a standing-order occurrence out of band
+
+**Absent tools:** `run_standing_orders`, `fire_occurrence`, `retry_occurrence`.
+
+Distinct from §10 — this is not creating authority, it is exercising authority
+that already exists, which sounds much safer and is not.
+
+Exactly-once across restarts and retries is the published requirement, and it is
+held by three things working together: `standing_order_occurrence` is UNIQUE on
+`(standing_order_id, scheduled_date)`; its `idempotency_key` is GENERATED by
+Postgres as `standing:<order>:<date>`; and `payment_instruction.idempotency_key`
+is itself UNIQUE, so a second attempt at the same date returns the ORIGINAL
+instruction instead of raising a second one.
+
+Notice what that guarantee is actually about: it makes the same DATE safe to
+attempt twice. It says nothing about attempting a date that was not due. A tool
+that fires "the next occurrence now" is a second way to choose a date, and the
+constraint that protects the first way cannot see it. An agent nudging a rent
+payment forward by two days because a customer asked produces a real debit on a
+day the mandate never authorised — and it will be perfectly idempotent, so
+running it twice will not even leave a second row to notice.
+
+**What stops it structurally.** `runStandingOrders()` is the only function that
+fires anything; `@/lib/standing/fire` is a forbidden module in the import guard,
+and `standing/index.ts` deliberately exports no helper that raises a payment on
+its own. The application reaches it from exactly one place, the cron route. The
+UNIQUE constraint and the generated key mean that even a compromised caller
+cannot double-fire a date — the damage is bounded to firing a date early, which
+is why this entry is about dates rather than about duplicates.
+
+## 15. Moving money into or out of a pot
+
+**Absent tools:** `move_to_pot`, `fund_pot`, `empty_pot`, `open_pot`,
+`close_pot`.
+
+A pot transfer moves nothing outside the bank: both legs are inside one
+customer's own deposit subtree, and `v_internal_transfer_impure` is an invariant
+view that stays empty precisely to prove it. It is the most harmless-looking
+write in the product.
+
+It is a journal posting, so §8 refuses it — an agent may write a reviewed
+instruction, never a fact — and `movePotFunds` and `openPot` are forbidden
+imports. But the specific reason is better than the general one.
+
+**Available balance is a control input.** Every funding decision in this system
+compares against available: `decideFunding()` for standing orders,
+`decideMove()` for pots themselves, the approval path for payments. Money in a
+pot is not in the main account's available balance. So an agent that can move
+money out of the payroll pot can make a funding check pass that would otherwise
+have failed — not by approving anything, just by relocating the money the check
+looks at. The rent goes out, the payroll does not, and every row involved is a
+perfectly ordinary internal transfer.
+
+The mirror case is as bad and quieter: an agent that moves money INTO a pot to
+"tidy up" has silently reduced the available balance that tomorrow's standing
+order is judged against, and the refusal that follows will name the shortfall
+without naming the cause.
+
+## 16. Approving a KYB manual review
+
+**Absent tool:** `approve_kyb`, `decide_kyb_review`.
+
+This is the one the schema makes **unrepresentable**, and it is the best example
+in the codebase of why that is a different kind of answer.
+
+A business whose automated KYB legs come back `needs_review` can be approved by
+a named operator, in writing. That decision is a row in `kyb_verification_leg`
+with `evidence = 'manual'`. Migration 0013 constrains it as follows:
+
+```sql
+ALTER TABLE actor ADD CONSTRAINT actor_id_kind_uniq UNIQUE (id, kind);
+
+ALTER TABLE kyb_verification_leg
+  ADD COLUMN decided_by_actor_id uuid,
+  ADD COLUMN decided_by_kind     actor_kind,
+  ADD CONSTRAINT kyb_leg_reviewer_fk
+    FOREIGN KEY (decided_by_actor_id, decided_by_kind) REFERENCES actor (id, kind),
+  ADD CONSTRAINT kyb_leg_reviewer_is_human CHECK (
+    decided_by_kind IS NULL OR decided_by_kind = 'human'),
+  ADD CONSTRAINT kyb_leg_manual_has_reviewer CHECK (
+    (evidence::text = 'manual') = (decided_by_actor_id IS NOT NULL)),
+  ADD CONSTRAINT kyb_leg_manual_has_reason CHECK (
+    evidence::text <> 'manual' OR length(btrim(decision_reason)) >= 20);
+```
+
+Read the first two together. The row carries the reviewer's `kind` alongside
+their id, and the composite foreign key forces that `kind` to be the one the
+`actor` table actually holds for that id — you cannot claim an agent is a human
+by writing `'human'` in the column, because the FK would find no matching
+`(id, kind)` pair. The CHECK then pins it to `'human'`. The combination means a
+KYB decision attributed to an agent is not a row Postgres will store, at all,
+from any connection, with or without our application code in the path.
+
+### Why that is better than a check in application code
+
+A check in application code is a statement about one code path. The composite FK
+is a statement about the data. Five concrete differences:
+
+1. **It covers paths that do not exist yet.** An application check protects the
+   function it is written in. The FK protects the admin console, the migration
+   script somebody runs at 2am, the backfill, the psql session, the feature
+   written next year by someone who never read this file. Every one of those is
+   a way the check gets skipped and the FK does not.
+2. **It cannot be skipped under pressure.** Application checks are removed in
+   incidents — that is when the pressure to "just approve it so the customer can
+   trade" is highest and the review of the change is weakest. Removing this one
+   requires a migration, which is a reviewed artefact with a name and a date.
+3. **It makes the bad state unrepresentable rather than unreachable.** There is
+   no moment, even inside a transaction that later rolls back, at which the
+   database holds a KYB approval by an agent. Anything reading the table —
+   including a replica, a dump, or an auditor's query — sees a set that cannot
+   contain the thing.
+4. **It fails loudly and specifically.** The refusal is an SQLSTATE at the
+   statement, not a branch that might be logged and swallowed. `dbcheck.mjs`
+   attempts forbidden writes on every run and asserts the refusals, so the
+   guarantee is demonstrated rather than asserted — the same way
+   `mcp.integration.test.ts` attempts an agent approval and asserts SQLSTATE
+   42501.
+5. **It survives being wrong about the application.** The strongest argument for
+   database-level rules is that they hold even when our belief about how the
+   code works turns out to be false. Two bugs in `availableBalance()` — recorded
+   at the top of `src/lib/mcp/gateway.ts` — are what that looks like in this
+   repo: careful code, confidently wrong, for weeks. A constraint does not
+   depend on our being right.
+
+**What would have to change for an agent to do it.** A migration dropping
+`kyb_leg_reviewer_is_human` and `kyb_leg_reviewer_fk`, plus a tool, plus
+whatever the deployment does to let the MCP process reach the KYB module — which
+it does not import at all today, and `manualReviewLeg` is a forbidden import.
+Three deliberate acts, each visible in review. That is the difference between
+"we chose not to" and "it cannot": both are answers, but only one of them
+survives the person who chose being replaced.
+
+---
+
+# Which of these cannot happen, and which we merely refuse
+
+The panel will ask, and the honest answer is not the same for every row.
+
+| Refusal | Strongest guarantee | Where it lives |
+| --- | --- | --- |
+| Approving a payment (§2) | **Unrepresentable** | `actor_only_humans_approve` CHECK + `assert_maker_checker()`; proved live, SQLSTATE 42501 |
+| Approving a KYB review (§16) | **Unrepresentable** | composite FK to `actor(id, kind)` + `kyb_leg_reviewer_is_human` |
+| Editing or deleting a money row (§8) | **Unrepresentable** | `corgi_app` holds no UPDATE or DELETE on the money tables; `dbcheck.mjs` attempts it every run |
+| Double-firing an occurrence (§14) | **Unrepresentable** | UNIQUE `(standing_order_id, scheduled_date)` + generated idempotency key + UNIQUE on `payment_instruction.idempotency_key` |
+| Retroactively changing a past approval (§3) | **Unrepresentable** | `approval_policy` append-only, unique `(rail, effective_from)`; instructions store `policy_id` |
+| Releasing a payment (§1) | Capability-absent | not imported; `releasePayment` forbidden in `no-write-imports.test.ts` |
+| Signing or broadcasting USDC (§9) | Capability-absent + no credentials | forbidden imports and modules; the signing key and entity secret are not in reach of this path |
+| Posting to the journal (§8) | Capability-absent | `@/lib/ledger/post` is a forbidden module |
+| Changing card controls (§13) | Capability-absent | `setCardControls` forbidden import |
+| Acknowledging a payee warning (§11) | Capability-absent | `acknowledgeWarning` forbidden import |
+| Writing the payee book (§12) | Capability-absent | `savePayee`, `archivePayee`, `confirmPayee` forbidden imports |
+| Creating or amending a mandate (§10) | Capability-absent | `createStandingOrder`, `cancelStandingOrder` forbidden imports |
+| Firing an occurrence out of band (§14) | Capability-absent | `@/lib/standing/fire` forbidden module; one caller in the app, the cron route |
+| Moving money between pots (§15) | Capability-absent | `@/lib/pots/transfer` forbidden module |
+| Issuing, freezing, unfreezing a card (§7) | Capability-absent | no import, no tool, name-banned in `tools.test.ts` |
+| Resolving a recon break (§5) | Capability-absent | the gateway's recon methods read; no write path exists |
+| Closing a book day (§6) | Capability-absent | not imported |
+| Rotating or minting credentials (§4) | Capability-absent | not imported; no tool returns or accepts a secret |
+
+Nothing on this surface rests on the tool list alone. That matters, because the
+tool list is the layer a future contributor changes by accident, and it is the
+only one of the three that a single well-meaning pull request can move.
+
+The five rows at the top are the ones I would defend without knowing anything
+about our code. The rest are real but conditional: they hold as long as nobody
+deletes a test and writes an import. **The gap between those two groups is the
+honest measure of this design, and closing more of it is a schema change, not a
+policy.** The specific next step is named three times above: `payee_acknowledgement`,
+`card_control_version` and `standing_order` all carry a plain
+`REFERENCES actor(id)`, and migration 0013 already demonstrates the four lines
+that would make an agent-attributed row impossible in each.
+
+---
+
+## The principle underneath all sixteen
 
 Every refusal above is an instance of one rule:
 
 > **An agent may state an intention. It may not make a fact final, and it may
 > not change the rules that decide what is final.**
 
-The three read tools observe facts. `initiate_payment` states an intention, in a
+The seven read tools observe facts. `initiate_payment` states an intention, in a
 row whose only consequence is that a person sees it. Everything on the list
 above is either the act of making something final (release, close, approve,
-adjust, post) or the act of moving the boundary of what needs a human (policy,
-credentials, card state).
+adjust, post, sign, fire) or the act of moving the boundary of what needs a
+human (policy, credentials, card controls, the payee book, a mandate).
+
+The newer entries added a third shape that is worth naming on its own, because
+it is the one that nearly got through: **an act that creates future acts.** A
+standing-order mandate is not a payment and does not finalise anything, so it
+passes the two tests above and is still refused — §10 — because it produces a
+stream of instructions that the agent's own per-instruction ceiling will never
+be applied to again. The extended rule: *an agent may write a request; it may
+not write a thing that writes requests.*
 
 This is a stronger and more useful rule than "agents should not touch money".
 It says exactly where the line is, it explains why `initiate_payment` is allowed
@@ -273,12 +709,15 @@ step, or because the operation *is* the later step.
 
 The corollary is that the line is enforced at the narrowest place it can be, not
 at the tool list. Where the database can refuse, it refuses: the actor CHECK, the
-maker-checker trigger, the revoked UPDATE grant. Where it cannot, the capability
-is simply absent from the process — the MCP module does not import
-`ledger/post.ts`, `approvals/decide.ts` or `approvals/release.ts`, so there is
-no code path to reach even by mistake. The tool list is the outermost and
-weakest layer, and it is the only one a future contributor can change by
-accident.
+maker-checker trigger, the composite reviewer FK, the revoked UPDATE grant, the
+UNIQUE on `(mandate, scheduled date)`. Where it cannot, the capability is absent
+from the process — the MCP module does not import `ledger/post.ts`,
+`approvals/decide.ts`, `approvals/release.ts`, `pots/transfer.ts`,
+`standing/fire.ts` or anything under `rails/stablecoin/`, and since the newer
+readers arrived that absence is asserted by a test rather than left to a
+reader's diff. The tool list is the outermost and weakest layer, and it is the
+only one a future contributor can change by accident — which is why the layer
+below it is now mechanical too.
 
 ---
 
@@ -350,3 +789,38 @@ and the approval queue are. It is the control that stops a well-meaning agent in
 a retry loop from consuming an approver's afternoon, and for that purpose a
 per-instance bucket is most of the value at none of the risk of putting a shared
 counter on the write path.
+
+**Whether there should be a second write tool at all.** The brief for this round
+of work offered one, and named two candidates: raising a standing-order mandate
+and proposing a payee. I added neither, and it is the decision in this document
+most worth arguing with.
+
+The case for a mandate tool is genuinely strong. Occurrences DO land in the
+approval queue; no money moves on the day the mandate is written; and a business
+that asks an agent "set up the rent" is asking for something reasonable. What
+killed it was §10's second reason rather than its first: the grant's
+`maxInstructionCents` ceiling applies to `initiate_payment` and not to the cron
+that raises occurrences, so a mandate is the one write on offer that escapes the
+token's own bound. If a future round wants this, the honest version is
+`maxRecurringCentsPerMonth` on the grant, a `standing_order_proposal` table with
+its own screen, and an approval that is about the MANDATE rather than about
+occurrence #1. That is three pieces of work, and two of them are not MCP.
+
+The case for a payee tool is weaker for a reason that took a while to see: the
+payee book is read by the gate that decides whether a payment may be made, so
+writing to it is not queueing a request, it is editing a control. A
+`payee_candidate` queue fixes that and is a real feature with a real screen; a
+proposal table with no screen would be worse than nothing.
+
+The argument against my own position is simple and I want it recorded: a surface
+with seven readers and one writer risks being a surface that tells people things
+and cannot help them, and there is a version of "safe" that is really just
+"useless, and therefore never audited". If this were a product rather than a
+trial, the first thing I would build is the mandate proposal queue — the feature
+that makes the write safe, not the tool that makes it possible.
+
+**One thing I would not argue about.** Every refusal above is a refusal to let
+an agent act unattended. None of them is a claim that the operation is
+dangerous *in itself*, and none of them should be read as a reason not to build
+a good screen for a person to do it on. The list is about who holds the pen,
+not about whether the pen exists.

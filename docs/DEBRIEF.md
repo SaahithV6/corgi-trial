@@ -468,7 +468,7 @@ The screen is at `/statements` and it is in the nav; the docs are stale in the
 
 ### 2.11 The agent surface — `src/lib/mcp/*`, `src/app/api/mcp/route.ts`, `docs/MCP.md`, `docs/AGENT-LIMITS.md`
 
-`POST /api/mcp`, Model Context Protocol over Streamable HTTP, four tools:
+`POST /api/mcp`, Model Context Protocol over Streamable HTTP, eight tools:
 `get_balance`, `list_transactions`, `list_recon_breaks` read; `initiate_payment`
 queues a request a person must work through.
 
@@ -1687,7 +1687,7 @@ design has.
 ### 3.9 "What does your agent surface let an agent do, and what does it refuse?"
 
 **Can:** read its own business's balance, transactions and reconciliation breaks,
-and queue one payment request. That is four tools and the list is closed.
+and queue one payment request. That is eight tools — seven read, one write — and the list is closed.
 
 **Cannot, and the refusal is not in the tool list:** release a payment, approve
 anything (including its own request), change an approval policy or threshold,

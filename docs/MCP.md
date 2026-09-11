@@ -825,13 +825,23 @@ Points worth making about that log:
 
 # A second transcript — the four readers added on day two
 
-Captured the same way as the transcript above: `next start` on port 3117, the
-production build, against the live Neon branch, with the published demo token.
-Captured 2026-09-11 at 01:17 UTC. Request and response bodies are verbatim,
-trimmed only where the omission is marked, and every id is a real id you can
-look up in the database. The same honest note applies: other workers were
-writing to this branch while it was captured, so the figures are a snapshot of
-that minute rather than fixtures.
+Captured against **the deployed system** — `POST https://corgi-trial-psi.vercel.app/api/mcp`,
+with the published demo token `corgi_mcp_demo_7f3a91c4e05b2d68a4c1` — on
+2026-09-11 at 01:26 UTC. Not a local server and not a fixture: these are the
+bytes Vercel returned, over the network, reading the live Neon branch.
+
+```bash
+curl -s -X POST https://corgi-trial-psi.vercel.app/api/mcp \
+  -H 'content-type: application/json' \
+  -H 'Authorization: Bearer corgi_mcp_demo_7f3a91c4e05b2d68a4c1' \
+  -d '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"list_pots","arguments":{}}}'
+```
+
+Request and response bodies are verbatim, trimmed only where the omission is
+marked, and every id is a real id you can look up in the database. The same
+honest note as the first transcript applies: other workers were writing to this
+branch while it was captured, so the figures are a snapshot of that minute
+rather than fixtures.
 
 ## 11. `list_pots` — the money `get_balance` cannot see
 
@@ -923,18 +933,18 @@ Filtering to the freshness label that should stop a draft:
   "jsonrpc": "2.0",
   "id": 21,
   "method": "tools/call",
-  "params": { "name": "list_payees", "arguments": { "freshness": "never", "limit": 2 } }
+  "params": { "name": "list_payees", "arguments": { "freshness": "never", "limit": 1 } }
 }
 ```
 
-**HTTP 200** (first of two shown)
+**HTTP 200**
 
 ```json
 {
   "content": [
     {
       "type": "text",
-      "text": "2 payee(s) on Ridgeline Robotics, Inc.'s book. 2 would pass the payee gate today; 0 would not (blocked, archived, or warned without a human acknowledgement). 2 have a verification that is stale or has never run. 0 share a holder name with another payee carrying different bank details, which is what a changed-bank-details fraud and an innocent duplicate both look like. This surface can read the book and cannot change it, re-check it, or acknowledge a warning."
+      "text": "1 payee(s) on Ridgeline Robotics, Inc.'s book. 1 would pass the payee gate today; 0 would not (blocked, archived, or warned without a human acknowledgement). 1 have a verification that is stale or has never run. 0 share a holder name with another payee carrying different bank details, which is what a changed-bank-details fraud and an innocent duplicate both look like. This surface can read the book and cannot change it, re-check it, or acknowledge a warning."
     }
   ],
   "structuredContent": {
@@ -973,7 +983,10 @@ Filtering to the freshness label that should stop a draft:
         "has_conflicting_twin": false,
         "payable": true
       }
-    ]
+    ],
+    "counts": { "never_checked": 1, "freshness_never": 1 },
+    "truncated": true,
+    "note": "Outcomes, freshness, name-match bands and findings come from the payee module's own verification record; nothing is recomputed here. …"
   }
 }
 ```
@@ -987,7 +1000,7 @@ writes the instruction — and this row is exactly why that distinction is in th
 schema text. An agent that reads `payable: true` and stops reading has learned
 less than one that reads the line above it.
 
-A verified payee on the same book carries the other half of the story:
+A verified payee on the same book — same endpoint, same token, `{"holder_name_contains": "ridgeline", "limit": 2}` — carries the other half of the story:
 
 ```json
 "verification": {

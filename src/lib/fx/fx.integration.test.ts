@@ -85,8 +85,18 @@ function describeResult(result: unknown): string {
   );
 }
 
-/** A live observation shape, without calling anybody. */
+/**
+ * A live observation shape, without calling anybody.
+ *
+ * The literal is DERIVED from the scaled integer rather than passed alongside
+ * it. The first version took both and defaulted the literal to "16.9435" for
+ * every currency, which put rows in the live database claiming the source had
+ * printed a peso rate for a real — harmless to the assertions, and exactly the
+ * kind of incoherent row that later gets read off a screen as a bug.
+ */
 function observation(rateScaled: bigint, currency = "MXN") {
+  const whole = rateScaled / RATE_SCALE;
+  const fraction = (rateScaled % RATE_SCALE).toString().padStart(8, "0").replace(/0+$/, "");
   return {
     source: "frankfurter.dev",
     evidence: "live" as const,
@@ -94,7 +104,7 @@ function observation(rateScaled: bigint, currency = "MXN") {
     quoteCurrency: currency,
     rateScaled,
     rateScale: RATE_SCALE,
-    literal: "16.9435",
+    literal: fraction === "" ? `${whole}` : `${whole}.${fraction}`,
     rateDate: "2026-09-10",
     fetchedAt: new Date().toISOString(),
     httpStatus: 200,

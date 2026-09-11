@@ -385,12 +385,24 @@ reads as corrected without a row being repaired.
 **An agent surface.** `POST /api/mcp` — Model Context Protocol over Streamable
 HTTP. Bearer token required, no development bypass, scoped per grant to one
 actor, one business, a rate and a maximum instruction size. Measured against the
-deployment at 2026-09-11T01:18Z, `tools/list` returns exactly four:
-`get_balance`, `list_transactions` and `list_recon_breaks` read, and
-`initiate_payment` queues a payment request a human must work through. The
-registry in the working tree has since grown to eight — four further reads — and
-those reach the deployed URL only on the next deploy, so **`tools/list` on the
-live endpoint is the authority, not the file tree.**
+deployment at 2026-09-11T02:05Z, `tools/list` returns **eight**: `get_balance`,
+`list_pots`, `list_transactions`, `list_payees`, `list_standing_orders`,
+`list_card_controls` and `list_recon_breaks` read, and `initiate_payment` queues
+a payment request a human must work through.
+
+**`tools/list` on the live endpoint is the authority, not the file tree.** This
+paragraph has been wrong in both directions inside one evening — first claiming
+more than the deployment served, then fewer — which is the argument for reading
+the endpoint rather than the repository.
+
+The four readers were added because their absence made an agent *confidently
+wrong* rather than merely unhelpful: `get_balance` reads chart code `2100`, so
+without `list_pots` an agent reports $23,713.13 for a business holding
+$38,713.13; a refused standing-order occurrence is not a journal row, so without
+`list_standing_orders` it answers "I see no record of that payment"; and a
+declined authorisation never reaches the ledger at all, so without
+`list_card_controls` it says "the bank declined your card" about a decline this
+system made.
 [`docs/AGENT-LIMITS.md`](./docs/AGENT-LIMITS.md) is the written list of
 operations deliberately absent from it, with the failure mode for each.
 

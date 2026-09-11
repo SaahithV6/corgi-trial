@@ -9,6 +9,11 @@ import "server-only";
  * `src/lib/standing/screen.ts` maintain, for the same reason: a component that
  * can open a connection is a component that eventually does.
  *
+ * The row-to-view mapping is NOT here. It is `./view.ts`, pure, because the
+ * fixtures that serve four of the five demo states have to use the same one —
+ * a fixture whose own arithmetic does not add up teaches a viewer the wrong
+ * thing about the feature being demonstrated.
+ *
  * ── WHAT RENDERING DOES AND DOES NOT DO ─────────────────────────────────────
  *
  * IT RAISES NOTHING AND COMMITS NOTHING. Re-rendering this page a hundred
@@ -31,19 +36,17 @@ import "server-only";
  */
 
 import type {
-  ArithmeticRow,
   PayoutsDataSource,
   PayoutsView,
   QuoteView,
-  RateSourceView,
 } from "@/components/payouts/data-contract";
 import { formatUsd } from "@/lib/format/money";
 import { sql, type Sql } from "@/lib/ledger/db";
 import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
 
 import { commitmentPosition } from "./gate";
-import { costCents, formatBps, formatMinorUnits, formatRate } from "./quote";
-import { frankfurterUrl, observeRate, rateAgeDays } from "./rate";
+import { formatBps } from "./quote";
+import { frankfurterUrl, observeRate } from "./rate";
 import { loadBusinesses, loadQuotes, type QuoteRecord } from "./store";
 import {
   CORRIDORS,
@@ -54,156 +57,15 @@ import {
   DEFAULT_SPREAD_BPS,
   type RateObservation,
 } from "./types";
-
-/** A signed USD figure with its sign shown. Deltas need the sign; totals do not. */
-function signedUsd(cents: bigint): string {
-  return `${cents > 0n ? "+" : ""}${formatUsd(cents)}`;
-}
-
-function rateView(quote: QuoteRecord, now: string): RateSourceView {
-  return {
-    source: quote.rateSource,
-    evidence: quote.rateEvidence,
-    literal: quote.rateLiteral,
-    rateDate: quote.rateDate,
-    ageDays: rateAgeDays(quote.rateDate, now),
-    httpStatus: quote.rateHttpStatus,
-    // The quote row does not carry the fallback reason — the reason belongs to
-    // the moment of the fetch and is on the observation. What the screen needs
-    // from a stored quote is the LABEL, which `evidence` is.
-    fallbackReason: null,
-  };
-}
-
-/**
- * The breakdown, in the order a person reads it.
- *
- * Built on the server because the browser must never multiply money, and
- * written as a list rather than a component so the wording of every
- * disclosure lives in one place and can be read end to end.
- */
-function arithmeticRows(quote: QuoteRecord): readonly ArithmeticRow[] {
-  const delivery = formatMinorUnits(quote.buyMinor, quote.buyExponent, quote.buyCurrency);
-  const midLabel = formatRate(quote.midRateScaled, quote.rateScale, { minDecimals: 4 });
-  const customerLabel = formatRate(quote.customerRateScaled, quote.rateScale, { minDecimals: 4 });
-
-  return [
-    {
-      label: "Amount in",
-      value: formatUsd(quote.sellCents),
-      note: "What leaves the customer's account. This figure is the commitment on our side of the trade and it does not move afterwards.",
-    },
-    {
-      label: "Fee",
-      value: `− ${formatUsd(quote.feeCents)}`,
-      note: `${formatUsd(quote.feeFlatCents)} flat plus ${formatBps(quote.feeBps)} of the amount, rounded up to the cent. Rounding a fee up is in our favour, by at most one cent.`,
-    },
-    {
-      label: "Converted",
-      value: formatUsd(quote.netCents),
-      emphasis: true,
-      note: "What is actually exchanged, after our fee. Everything below is computed from this number and not from the amount in.",
-    },
-    {
-      label: `Mid rate USD/${quote.buyCurrency}`,
-      value: midLabel,
-      note:
-        quote.rateEvidence === "live"
-          ? `Measured. ${quote.rateSource} printed “${quote.rateLiteral}” for ${quote.rateDate}${quote.rateHttpStatus === null ? "" : `, HTTP ${quote.rateHttpStatus}`}. A daily reference rate, not a dealable price — nobody trades at the mid.`
-          : `SIMULATED. This came from the built-in fallback table, recorded on ${quote.rateDate}, because the live source could not be reached. It is not a market rate.`,
-    },
-    {
-      label: "Our spread",
-      value: `− ${formatBps(quote.spreadBps)}`,
-      note: "Taken off the mid, rounded down. This is the charge that normally hides inside an FX rate; it is shown here as its own line, with the mid it was taken from printed above it.",
-    },
-    {
-      label: "Your rate",
-      value: customerLabel,
-      emphasis: true,
-      note: `The rate the customer is offered, and the rate they get if they accept — even if the market has moved by the time it settles. ${formatUsd(quote.netCents)} × ${customerLabel} is what follows.`,
-    },
-    {
-      label: "Beneficiary receives",
-      value: delivery,
-      emphasis: true,
-      note: `Rounded down to the ${quote.buyCurrency} minor unit: a fraction of one cannot be delivered by anybody, and rounding up would commit us to money we did not buy. THIS is the number the customer is committed to.`,
-    },
-  ];
-}
-
-function toView(quote: QuoteRecord, now: string): QuoteView {
-  const ttlSeconds = Math.max(
-    0,
-    Math.round((Date.parse(quote.expiresAt) - Date.parse(quote.createdAt)) / 1000),
-  );
-
-  return {
-    quoteRef: quote.quoteRef,
-    businessName: quote.businessName,
-    beneficiaryRef: quote.beneficiaryRef,
-    destinationAddress: quote.destinationAddress,
-    rail: quote.rail,
-    state: quote.state,
-
-    sellLabel: formatUsd(quote.sellCents),
-    feeLabel: formatUsd(quote.feeCents),
-    netLabel: formatUsd(quote.netCents),
-    midRateLabel: formatRate(quote.midRateScaled, quote.rateScale, { minDecimals: 4 }),
-    customerRateLabel: formatRate(quote.customerRateScaled, quote.rateScale, { minDecimals: 4 }),
-    spreadLabel: formatBps(quote.spreadBps),
-    // What our spread is worth on THIS quote, in dollars: the converted
-    // amount less what the delivery would have cost at the mid. A basis-point
-    // number the customer has to apply themselves is not a disclosure.
-    spreadValueLabel: formatUsd(
-      quote.netCents -
-        costCents({
-          buyMinor: quote.buyMinor,
-          rateScaled: quote.midRateScaled,
-          rateScale: quote.rateScale,
-          buyExponent: quote.buyExponent,
-        }),
-    ),
-    buyLabel: formatMinorUnits(quote.buyMinor, quote.buyExponent, quote.buyCurrency),
-    buyCurrency: quote.buyCurrency,
-
-    arithmetic: arithmeticRows(quote),
-    rate: rateView(quote, now),
-
-    createdAt: quote.createdAt,
-    createdByName: quote.createdByName,
-    expiresAt: quote.expiresAt,
-    expiresInSeconds: Number(quote.expiresInSeconds),
-    ttlSeconds,
-
-    acceptedAt: quote.acceptedAt,
-    acceptedByName: quote.acceptedByName,
-    acceptanceReference: quote.acceptanceReference,
-    acceptedWithSecondsToSpare:
-      quote.acceptedWithSecondsToSpare === null ? null : Number(quote.acceptedWithSecondsToSpare),
-    settleBy: quote.settleBy,
-    settlementWindowSeconds: quote.settlementWindowSeconds,
-
-    settledAt: quote.settledAt,
-    txHash: quote.txHash,
-    settlementCostLabel:
-      quote.settlementCostCents === null ? null : formatUsd(quote.settlementCostCents),
-    varianceLabel: quote.varianceCents === null ? null : signedUsd(quote.varianceCents),
-    varianceIsLoss: quote.varianceCents === null ? null : quote.varianceCents < 0n,
-
-    // Filled in by the caller for the focus quote only. A list of twenty rows
-    // must not make twenty outbound calls.
-    position: null,
-  };
-}
+import { quoteView, signedUsd } from "./view";
 
 /**
  * Ask what the mid is now, for a commitment we are still on the hook for.
  *
  * `observeRate` never throws: a source that is down produces a labelled
  * simulated reading, and the screen prints the label. A payouts screen that
- * 500s because a free rate feed is having an afternoon would be a worse
- * answer than one that says, in words, that it could not reach the source.
+ * 500s because a free rate feed is having an afternoon would be a worse answer
+ * than one that says, in words, that it could not reach the source.
  */
 async function withPosition(view: QuoteView, quote: QuoteRecord): Promise<QuoteView> {
   if (quote.state !== "accepted") return view;
@@ -245,7 +107,7 @@ export function livePayoutsSource(conn: Sql = sql): PayoutsDataSource {
           loadBusinesses(conn),
         ]);
 
-        const rows = quotes.map((quote) => toView(quote, asOf));
+        const rows = quotes.map((quote) => quoteView(quote, asOf));
 
         const focusIndex =
           filter.quoteRef === undefined
