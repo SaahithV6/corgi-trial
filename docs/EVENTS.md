@@ -468,6 +468,75 @@ socket inactivity, which a trickling server can dodge for ever), and the
 response is read to **8 KiB** and then the socket is destroyed, with 1 KiB
 stored as an excerpt.
 
+### The bound that was written down and did not hold
+
+**2026-09-11.** Both sentences above were true of the code and one of them was
+worthless, because the 8 KiB bound ended the *read* and never ended the
+*attempt*. `res.destroy()` at the cap emits `aborted` and `close` on the
+response and `close` on the request. It does **not** emit `end`, and it does not
+emit `error` — and `end` was the only handler that resolved the promise, while
+the `close` handler on the request cleared the wall-clock backstop that was
+supposed to catch exactly this. So the socket died, the timer was cancelled by
+the death, and the promise stayed pending. Measured against a real endpoint
+echoing 40 KiB:
+
+```
+{ requestBytes: 20010, cap: 8192, settledAfterMs: null, outcome: "NEVER SETTLED" }
+   — 40,014 ms of wall clock on a transport whose documented timeout is 10,000 ms,
+     still pending when the harness gave up. Control, same endpoint, 204 response: 544 ms.
+```
+
+`deliverOnce()` awaits that promise **sequentially**, once per delivery. So it
+is not one slow delivery: it is every later delivery, for every other customer,
+stopped for the life of the process — a denial of service any customer can cause
+by accident with a verbose error page. The queue's own rule is that delivery can
+never touch the ledger, and that held; what it could do was stop every other
+delivery, which is the other half of the same promise.
+
+**What a too-large delivery does now.** Hitting the cap settles the attempt
+**there**, inside the `data` handler, before destroying the socket — it does not
+destroy and hope. The outcome carries `limit: "response_too_large"` and an error
+that names the number, and `deliver.ts` turns a non-null `limit` into an
+immediate **dead letter** rather than spending the retry budget: the next attempt
+would read the same page off the same server.
+
+```
+HTTP 200 with a response body over the 8192-byte read limit (read 16152 bytes and
+stopped; the socket was closed rather than drained). A webhook acknowledgement must
+be short — answer with a status and a brief body. This delivery was not retried,
+because the next attempt would read the same page.
+   — settled in 545 ms, with the first 1 KiB of their own body kept as the excerpt.
+```
+
+Three rules now hold the file together, and they are worth stating because the
+bug was the absence of each:
+
+1. **Every terminal socket event settles the promise** — `end`, `error` *and*
+   `close`, on both halves. `close` is the only one that fires however an
+   exchange ended, so it is the catch-all under the other two rather than a
+   place to cancel timers.
+2. **A bound settles the promise where it is enforced**, not by killing a socket
+   and waiting for an event the kill just made impossible.
+3. **The wall-clock deadline is cleared by settlement alone.** It is
+   `timeoutMs + ATTEMPT_DEADLINE_GRACE_MS` (2 s), so the ordinary socket timeout
+   still wins the ordinary late endpoint and that delivery still retries; if the
+   deadline is what settles an attempt, the transport failed to police itself,
+   the outcome carries `limit: "attempt_deadline"`, and the delivery is dead with
+   the deadline named. Nothing on the wire can cancel it, and because settlement
+   always clears it, it cannot hold a serverless invocation open either.
+
+None of this touched the request options: no redirect was enabled, no second DNS
+resolution was introduced, and the pinned `lookup` is still the only resolution
+that happens. Asserted live against a real HTTPS endpoint, in the gated
+`src/lib/events/bounds.live.test.ts` — over-cap settles and dead-letters;
+under-cap is untouched and still 2xx (the regression a `close` backstop can
+introduce); and an ordinary timeout is still a **retryable** failure with
+`limit: null`, not a dead letter.
+
+```
+EVENTS_LIVE=1 npx vitest run src/lib/events/bounds.live.test.ts
+```
+
 **`ALL` resolved addresses, not the first.** A name with one public A record and
 one internal one is a bypass, not a coincidence — checking only the first
 address means the resolver's ordering decides whether we are safe today.
@@ -549,6 +618,48 @@ gives for `v_webhook_dead_letter`: a view cannot go stale against a schema
 change, and the customer log and the operator dead-letter list must read the
 same join or they will eventually disagree in front of somebody. **Neither view
 joins the secret table**, which is checkable by reading 0034 §9.
+
+### The grant 0002 made and the database did not have
+
+**2026-09-11.** `0002:321` says
+`GRANT SELECT ON v_webhook_dead_letter, v_webhook_parked TO corgi_app`, the file
+is hashed into `schema_migrations` exactly as applied, and the application role
+could not read either view:
+
+```
+SELECT count(*) FROM v_webhook_dead_letter     (as corgi_app)
+  -> ERROR: permission denied for view v_webhook_dead_letter
+relacl: {neondb_owner=arwdDxtm/neondb_owner}   — no corgi_app entry, on both views
+        (107 of the schema's 109 views ARE readable by corgi_app; these were the two)
+```
+
+**Both were true.** The statement ran, and then the privilege was removed out of
+band by our own tooling: `scripts/dbreset.mjs` rebuilds the schema, re-runs the
+migrations, and finishes with `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM
+corgi_app` followed by a hand-maintained re-grant list that names tables and no
+views. "ALL TABLES" includes views. The apply timestamps show which side of that
+reset each migration fell on — `0001`, `0002` and `0003` share one batch at
+`01:29:06.226Z / .981Z / 01:29:07.346Z` and `0005` onwards came later, over
+hours — so 0002's view grants were inside the reset and were eaten, while 0038's
+identical view grants, applied afterwards, are still there. `0008 §1` records
+the same injury being repaired by hand for 0001's thirteen derived views, found
+the same way: *"by running the application role against the live database rather
+than by reading the file."*
+
+`db/migrations/0045_webhook_view_grants.sql` re-grants both and then **asserts
+the privilege in the same transaction**, so the migration cannot claim what it
+did not create. Proven as `corgi_app` after it applied: `v_webhook_dead_letter`
+30 rows, `v_webhook_parked` 160 rows.
+
+**No screen fell back, because no screen reads them.** That is the second
+finding, and it is why nobody noticed for a day: `src/lib/home/summary.ts` counts
+dead and parked rows straight off `webhook_inbox`, `src/lib/chaos/observe.ts`
+groups the parked ones the same way, and both are readable. A documented staff
+surface was dead with no degraded screen and no logged error anywhere. **An
+unread view is a claim nobody checks.** `scripts/dbreset.mjs` will also do it
+again to the next grant a migration writes — its REVOKE-plus-hardcoded-list is a
+privilege policy that silently diverges from the migrations, and the durable fix
+is for the reset to stop re-granting by hand. That file was outside this change.
 
 ---
 
@@ -640,7 +751,11 @@ secret columns in v_outbound_delivery: []
 6. **Delivery is sequential within a batch.** Bounded and easy to reason about,
    but one slow endpoint slows its batch. The throughput knob is `batchSize`
    plus more frequent ticks, not concurrency, until measured — the same call
-   `dispatchOnce` makes, for the same reason.
+   `dispatchOnce` makes, for the same reason. **What that costs is now
+   bounded**: a single attempt can no longer fail to settle (§5, "The bound that
+   was written down and did not hold"), so the worst a hostile endpoint can buy
+   is `timeoutMs + 2 s` of one worker, once, and then a dead letter. Before that
+   fix, sequential delivery plus one unsettling promise was a permanent stop.
 
 7. **The retry budget is per delivery, not per endpoint.** An endpoint that has
    been down for a day dead-letters every event independently rather than being

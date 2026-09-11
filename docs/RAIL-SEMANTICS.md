@@ -346,6 +346,9 @@ inbound ACH deliveries for `sandbox_inbound_ach_transfer_07x75nyvzd1oxihtvuoe`
 ($10,000.00 from CORGI TREASURY) and 27 inbound wire deliveries. Every one of
 them names the shared FBO number. **A row that posts nothing is a result.**
 
+Those 27 wire deliveries stayed parked for the right reason and **said the wrong
+one** — §4d.
+
 ### Proven, not argued
 
 `src/lib/rails/increase/inbound-recall.integration.test.ts` drives the whole
@@ -368,6 +371,129 @@ read from two different provider fields and the test asserts each against the
 field it came from, but the **visible** day separation the brief pictures —
 Tuesday's credit, Thursday's recall — cannot be produced on this rail here. Said
 rather than staged.
+
+---
+
+## 4d. The inbound WIRE rows, made true the same way — and the rail difference that survives it
+
+**2026-09-11, after §4c.** §4c gave inbound ACH a lookup and left the wire
+consumer where it was. `src/lib/webhooks/consumers/increase-wire.ts` went on
+parking **every** inbound wire with this sentence:
+
+> *"this build issues no virtual account numbers, so there is no way to tell
+> which customer an inbound credit belongs to"*
+
+The first half stopped being true the moment `0042` issued seven numbers, one per
+business. **A park whose reason is false is worse than no park**: an operator
+reads it, concludes the capability does not exist, and stops looking — while the
+two rows in the table below sit there classified and unreachable.
+
+### What the two inbound wire rows decide now
+
+| key | value date from | what the consumer does |
+| --- | --- | --- |
+| `inbound_wire_transfer.created` | `payload.acceptance.accepted_at` | DR `1110` / CR the business's `2100`, plus an `uncleared_credit` hold under `wire`/`n/a` — **0 banking days, released in the same transaction** |
+| `inbound_wire_transfer.updated/reversed` | `payload.reversal.reversed_at` | DR the business's `2100` / CR `1110` at the day WE sent it back — a new outbound payment, never an edit of the arrival |
+
+Neither row changed. Neither `canonical_kind` changed. What changed is that the
+consumer now asks `findVirtualAccountNumber(inbound.account_number_id)` — the
+same function, the same table, the same refusal as ACH — and then books through
+`creditInboundWire()`.
+
+### The rail difference is a row of data, and `v_wire_availability_drift` asserts it
+
+This is the half worth stating precisely, because it is the reason a rail is an
+adapter and not a special case. The same consumer shape, the same hold machinery
+and the same `funds_availability_policy` table give **opposite** answers:
+
+| | ACH | wire |
+| --- | --- | --- |
+| policy row | `ach` / `new`, 2 banking days, release 09:00 | `wire` / `n/a`, **0** banking days, release **00:00** |
+| ledger balance | moves on arrival | moves on arrival |
+| available balance | **does not move** for two banking days | **moves with it, immediately** |
+| the invariant | the hold is the point | `v_wire_availability_drift` **must be empty** — one row per wire credit that became spendable later than the instant it was booked |
+
+Nothing above is an `if` in a consumer. The 00:00 release time is itself a
+correction somebody had to make (`funds_availability_policy`, effective
+2026-09-11): a zero-day policy with an ACH-shaped 09:00 release withholds every
+wire that arrives before 09:00 ET, on a rail whose day opens at 21:00 ET the
+night before.
+
+### Measured, on the live book, 2026-09-11 10:53–10:55Z
+
+**The redrive.** All 35 parked inbound-wire deliveries then on the book — the 27
+of §4c plus eight that had arrived since — were brought due and drained through
+the rebuilt consumer:
+
+* **32 deliveries, 16 transfers: still parked, nothing posted.** Every one is
+  addressed to `sandbox_account_number_96mzhz3n61f5p0jpvytc`, the programme's
+  shared FBO number, which is mapped to **nobody on purpose**. The reason they
+  now carry names that number, says how many numbers are mapped (7), and says
+  what an operator must do. **A redriven delivery that posts nothing is a
+  result.**
+* **3 deliveries, 1 transfer: resolved.**
+  `sandbox_inbound_wire_transfer_00lkxr57i04x31blx06x` ($12,500.00) carries a
+  `reversal` — it was sent back out of the FBO account before anyone attributed
+  it. There is no longer a customer to find and nothing to correct, because
+  nothing was ever booked, so the consumer reports it and marks the deliveries
+  done instead of waking a human about money that has left. Ledger effect:
+  **none**.
+* **4 deliveries, 2 transfers: dead-lettered**, having reached the 12-park
+  budget (`DEFAULT_RETRY_POLICY.maxParkAttempts`) —
+  `sandbox_inbound_wire_transfer_aixelen6yjsh8ap0djjf` and
+  `…_rhwc6j2y0nk687sirnym`, both FBO-addressed. Twelve parks is a little over
+  five hours of waiting; past that it is a missing fact, not a late one, and it
+  belongs in front of a person. They are in `v_webhook_dead_letter` — which the
+  application role can read again as of `0045`.
+
+**The booking half, proven by a real call rather than by a refusal.** No wire
+that had ever arrived on this book named a per-business number, so the redrive
+alone could only prove the refusal. One was simulated to a mapped number:
+
+```
+POST /simulations/inbound_wire_transfers
+     {account_number_id: sandbox_account_number_bh5spt0xmebnj6xq6t3l,   # Ridgeline Robotics
+      amount: 41234}
+  -> sandbox_inbound_wire_transfer_cz9s1u6u12znrr9njhau
+     accepted_at 2026-09-11T10:54:35Z   IMAD 20260911fqlrvcqr748694
+```
+
+Increase delivered `inbound_wire_transfer.created` and `.updated` to the
+deployed system, which parked both under the old sentence — the bug, live, on a
+wire it could have attributed. Redriven through the rebuilt consumer:
+
+```
+increase.inbound_wire_transfer.applied
+  transferId    sandbox_inbound_wire_transfer_cz9s1u6u12znrr9njhau
+  businessId    e274546d-6bdd-5266-b0fb-cc839a7811f9  (Ridgeline Robotics, Inc.)
+  accountNumber 123308582/3164662367
+  posted        inbound_wire_transfer.created @ 2026-09-11
+                -> entry 66abfafd-43a9-4f3d-8788-9b8f13de74a9
+                   DR 1110 / CR 2100, 41234 cents
+                   hold b625acf3-f92a-435a-bc2e-449ea8d68686, released on arrival
+  (second delivery: "already booked, nothing posted twice")
+```
+
+| | before | after |
+| --- | --- | --- |
+| ledger balance `2100` Ridgeline | 5,455,237 | 5,496,471 |
+| **available** | 1,943,719 | **1,984,953** |
+
+Both rose by the same 41,234 cents, in the same instant — which is the whole
+claim of the wire rail, and the opposite of what the ACH path does with the same
+code. `v_wire_credit` for that arrival reads `held_cents = 0` with
+`available_at 04:00Z` (midnight ET) against `credited_at 10:55:30Z`, and
+`v_wire_availability_drift` was **0 rows before and 0 rows after**.
+
+### What is still not true, and is nobody's guess
+
+The deployment at `corgi-trial-psi.vercel.app` still runs the pre-fix consumer,
+so every inbound wire that arrives before the next deploy is parked again under
+the old sentence by the live system — the redrive corrects the rows, not the
+binary. And `increase-wire.test.ts`'s stub client has no `getInboundTransfer`,
+so the unit test for "an inbound wire nobody can attribute" now exercises the
+consumer's capability refusal rather than the real lookup. The live evidence
+above is what covers that path today.
 
 ---
 

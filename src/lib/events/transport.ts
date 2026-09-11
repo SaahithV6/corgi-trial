@@ -430,20 +430,24 @@ export async function postSigned(opts: PostSignedOptions): Promise<DeliveryOutco
     // failed. It is cleared only by `finish`, never by a socket event, so
     // nothing that happens on the wire can cancel it; and because `finish`
     // always clears it, it cannot hold a serverless invocation open either
-    // (which is what the old `unref` was for).
-    deadline = setTimeout(() => {
-      req.destroy(new Error(`exchange exceeded ${deadlineMs}ms`));
-      finish({
-        kind: "no_response",
-        error:
-          `attempt abandoned: it exceeded the ${deadlineMs}ms hard deadline ` +
-          `(${timeoutMs}ms exchange timeout + ${ATTEMPT_DEADLINE_GRACE_MS}ms grace) without ` +
-          `producing any outcome. The socket was destroyed and the delivery worker released.`,
-        durationMs: Date.now() - started,
-        resolvedIp: pinned,
-        limit: "attempt_deadline",
-      });
-    }, deadlineMs);
+    // (which is what the old `unref` was for). Not armed at all if the attempt
+    // has somehow already settled by this line — a timer with nothing left to
+    // catch would only hold the process open for its own duration.
+    if (!settled) {
+      deadline = setTimeout(() => {
+        req.destroy(new Error(`exchange exceeded ${deadlineMs}ms`));
+        finish({
+          kind: "no_response",
+          error:
+            `attempt abandoned: it exceeded the ${deadlineMs}ms hard deadline ` +
+            `(${timeoutMs}ms exchange timeout + ${ATTEMPT_DEADLINE_GRACE_MS}ms grace) without ` +
+            `producing any outcome. The socket was destroyed and the delivery worker released.`,
+          durationMs: Date.now() - started,
+          resolvedIp: pinned,
+          limit: "attempt_deadline",
+        });
+      }, deadlineMs);
+    }
 
     req.on("error", (e: Error) => {
       finish({
