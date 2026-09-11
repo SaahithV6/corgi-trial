@@ -1,178 +1,116 @@
-# Freeze submission email — draft
-
-Reply on the existing thread. Everything inside the fence is the email.
-Verified against commit `463488a` and the deployed URL at 2026-09-11T22:38Z.
-
-```
 Subject: Work trial: Saahith Veeramaneni, Track 3
 
-Dear Corgi Staff,
+---
 
-Track 3, neobank. The four things.
+Hi both,
 
-1. DEPLOYED URL
+Track 3, Neobank. Frozen at commit `826276a`.
+
+**1 · Deployed URL**
 
 https://corgi-trial-psi.vercel.app
 
-Read it with no credential at all. Every operator screen and the whole customer
-surface are open to a visitor: balances, the ledger, approvals, the audit trail.
-Nothing is hidden behind the gate that you would need to see to judge the build.
+There is no login for the customer side — open it and it works. The operator
+console is **readable without any credential too**, on purpose: you can check
+every claim below without me mailing you a secret. Writing is what needs the
+passphrase.
 
-To ACT — approve a payment, move money, change a card — there is one passphrase,
-entered at /signin. I have put it in the line below this paragraph rather than in
-the repo, and it is the only credential in this submission.
+- **Customer** — https://corgi-trial-psi.vercel.app/client
+- **Operator** — https://corgi-trial-psi.vercel.app/
+- **To act** — sign in at `/signin` with `PASSPHRASE_HERE`, then the
+  **Acting as** control top-right switches between **Staff** (Priya Raman, no
+  approval rights) and **Approver** (Dana Okonkwo, can approve). The switch
+  selects which principal you are; it is not the credential.
 
-  Passphrase: <<SAAHITH: type the CONSOLE_PASSWORD value here before sending>>
+Anonymous `POST` to any operator route returns `401` with
+`x-corgi-authz: deny; SIGN_IN_REQUIRED`. With `CONSOLE_PASSWORD` unset the
+console still reads and still refuses every write — an unset secret closes the
+till, it never opens it. The trade is argued at the top of `docs/AUTH.md`
+rather than in a footnote.
 
-The two roles are not two passwords. They are a switch in the top right of every
-console page, labelled "Acting as", and each resolves to a different seeded
-database actor:
+**2 · Repo**
 
-  Staff (the default)   Priya Raman, can_approve = false
-  Approver (one click)  Dana Okonkwo, can_approve = true
+https://github.com/SaahithV6/corgi-trial — @AlexanderReinicke and @mojafa
+invited.
 
-So: sign in once, then use the switch to change which principal you are acting
-as. Raise a payment as Staff, switch to Approver, clear it. Staff cannot approve
-anything, and Dana cannot approve a payment she raised herself — that refuses
-with "that is you". The refusal is a database constraint, not a hidden button.
+**3 · Video**
 
-Signed out, a write is refused by the server rather than by a missing control:
-every one answers 401 with x-corgi-authz: deny; SIGN_IN_REQUIRED, so one curl
-proves it. The customer journey runs end to end from /client/open — apply, fund,
-staff, schedule, read a statement — on a business that held nothing until its
-KYB was approved at request time.
+VIDEO_LINK_HERE
 
-One command answers "is it all working", mapping the brief line by line against
-the live book and this deployment:
+**4 · Evidence of the live integrations**
 
-  pnpm confirm
+`/api/health` **publishes the webhook delivery log itself**, publicly, with no
+credential:
 
-It needs APP_DATABASE_URL. Say the word and I will send read-only database
-credentials so you can run it yourselves; otherwise the last run is in the repo.
+https://corgi-trial-psi.vercel.app/api/health
 
-2. REPO
+It carries Lithic's latest delivery with our endpoint's own HTTP 202 and its
+timestamp, per-provider last-delivery and lag, and the unrounded backlog —
+parked and dead-lettered counts, not a rounded-up "all good". It cannot go
+stale the way a screenshot can. EVIDENCE_EXTRA_HERE
 
-https://github.com/SaahithV6/corgi-trial
+---
 
-It is private, and the invitations to @AlexanderReinicke and @mojafa — sent
-10 September — are both still unaccepted as I write this. Until one is accepted
-that link is a 404 for you, so please accept the invitation at
-https://github.com/SaahithV6/corgi-trial/invitations before clicking. If you
-would rather not, reply and I will make the repo public or send a tarball of the
-tree at this commit.
+**One command, if you want the whole thing checked at once**
 
-The deployed commit is 463488a, and /api/health reports its own sha, so you can
-check the tree against what is running. The decision log (DECISIONS.md, 59
-entries, each timestamped, committed as I went rather than written at the end),
-the seed script, .env.example and the cut list are all in the repo.
-
-One thing about the seed, so you find it from me rather than from a blank
-screen: `pnpm migrate` then `node scripts/seed.mjs` builds the schema, the chart
-of accounts, the policies and the demo actors from nothing, idempotently. It
-posts no money, deliberately — hand-written journal rows would bypass
-`ledger_append()` and seed a book the invariants had never vetted. The postings
-you see on the deployed URL were made by `scripts/coreloop.mjs` driving the real
-server actions. So a fresh clone gives you a correct and empty ledger, and the
-money arrives when you run that.
-
-3. VIDEO
-
-[LINK — unlisted, under five minutes]
-
-4. EVIDENCE PACK
-
-[LINK — shared folder]
-
-The runnable half needs no link:
-
-  https://corgi-trial-psi.vercel.app/api/health
-
-/api/health is the authority on which slots are live — 7 of 7 at this reading,
-each carrying the call that earned the label, and it publishes the webhook
-delivery log alongside them: last delivery per provider, our own HTTP 202 back
-to Lithic, and the parked and dead-lettered counts, unrounded. You can read all
-of that without a credential from me.
-
-With the database URL there is more:
-
-  set -a; . ./.env; set +a
-  node scripts/evidence.mjs
-
-Claims about the live integrations, each printed beside the query or the call
-that proves it, exit code 1 if any of them stops being true. It connects as the
-application's restricted role, which holds no UPDATE or DELETE on a money table,
-so it could not have tidied anything on the way past.
-
-The business registry leg is GLEIF rather than one of the KYB providers on your
-menu, for the reason I asked about earlier on this thread.
-
-The standing red invariants in pnpm db:check, the parked and dead-lettered
-webhook backlog, the one live-fire attack I skip on purpose, and the missing
-off-ramp on the cross-border payout are all written up under "Known gaps, in one
-place" in the README. I would rather you read them there than find them.
-
-Thank you,
-Saahith Veeramaneni
+```
+pnpm confirm
 ```
 
-## Before sending — what Saahith must do
+It maps the brief line by line to a measurement taken at that moment — the ten
+non-negotiables, the v1 scope, the five integrations with their live-or-
+simulated column, the stretch ladder and the three things you say you grade
+hardest. Nothing in it means "looks right": a row whose evidence cannot be
+gathered prints UNPROVEN and says why, and it goes red when the write path is
+unverified rather than reporting a clean board.
 
-1. **Type the passphrase.** Replace the `<<SAAHITH: …>>` line with the
-   `CONSOLE_PASSWORD` value set on the Vercel project. It is deliberately not
-   written down anywhere in this repo, and no agent has been given it. Without
-   it the graders can read everything and approve nothing, which is the one
-   thing the trial explicitly asks them to do.
+```
+node scripts/coreloop.mjs
+```
 
-2. **Video link.** Still not recorded. `docs/VIDEO-SCRIPT.md` is the shot list.
-   Its FLAGS section matters: the Lithic sandbox daily spend cap was exhausted,
-   so do not simulate an authorisation on camera.
+drives the seven-arrow core loop against the deployed URL in about ninety
+seconds — open, fund, issue, authorise, settle for a different amount, raise a
+payment needing a second approver, correct it, reconcile. Last run:
+**PASS 7 · FAIL 0 · SKIP 0**, 112 HTTP calls to the deployment and 3 to the
+Lithic sandbox, Ridgeline moving $14,221.33 → $10,947.93 available.
 
-3. **Evidence folder link.** No screenshots captured, no folder exists. The
-   shot list is `docs/EVIDENCE-PACK.md` §5 — the Lithic subscription and its
-   delivery log, the Increase ACH transfer that settled and then returned R01,
-   and the Stripe TEST MODE banner. If you provision read-only dashboard access
-   instead, replace the bracketed link with the invite. If you send neither,
-   delete the heading's bracket and let /api/health carry item 4 alone — say so
-   plainly rather than leaving an empty placeholder in a sent email.
+**Where I would look first**
 
-4. **Three repo fixes that make the repo stop contradicting this email.** None
-   is mine to edit; all three are small, and `docs/SUBMISSION-CHECK.md` has the
-   evidence. (a) `.env.example` is missing `CONSOLE_PASSWORD` and
-   `CONSOLE_SESSION_SECRET` — two lines, and without them a grader's clone can
-   read everything and write nothing. (b) `docs/CUT-LIST.md` §6 still says
-   authentication was *"cut on day one and still cut"*; it shipped three commits
-   later. (c) `docs/DEMO.md` §1 still says *"There is nothing to sign into"*.
+- **Available is derived, not stored.** No table in this database has an
+  `available_cents` column. It is one SQL function with five terms, and the
+  customer screen, the console, the API and the agent all call that one.
+  `/client` prints the subtraction rather than the conclusion.
+- **The correction.** `/client/statements` opens on 2026-07-25: the original,
+  the reversal, the re-book, the closing balance already corrected, and the
+  document rebuilt twice on that page load with the same fingerprint both
+  times. Value date and booking date are different columns on the base table.
+- **The initiator cannot approve their own.** `/approvals`, top card: the
+  controls are disabled and the reason names `assert_maker_checker()` and
+  SQLSTATE 42501. The screen is telling you in advance what the database would
+  do; it is not the check. The agent surface obeys the same rule — across this
+  whole book it has requested 193 payments and approved 0.
 
-5. **The invitations.** Verified pending, not accepted, at 2026-09-11T22:30Z
-   (`gh api repos/SaahithV6/corgi-trial/invitations` — both created
-   2026-09-10T00:32:41Z, `expired: false`, permission `read`). If either is
-   accepted before you send, soften that paragraph to match.
+**What is not here, and why**
 
-## Numbers quoted above, and where they came from
+- **No mobile app.** Deliberately cut, early, and recorded as a decision rather
+  than discovered as a gap. Two surfaces already existed and a third would have
+  been a third place for the same money to be described differently.
+- **Six invariants are red right now**, and every one carries a written
+  argument in `scripts/dbcheck.mjs` itself. `dbcheck` prints
+  `NOT ON THE REGISTER` for any red that does not — there are none. The most
+  interesting is over-capture: it writes no closure row, because the network
+  reopened a hold after an over-capture and captured it, so closing on
+  captured-exceeds-authorised would have freed money that was still authorised.
+- **Reads are open to anyone with the link.** In a real bank that is not a
+  small deviation, and `docs/AUTH.md` says so in those words along with the
+  three things a real deployment needs that this does not have.
+- **Two rows on the book came from proving the payee gate**, both $1.00, both
+  still `requested`, neither approved or released. And a **$10,000 inbound ACH
+  from CORGI TREASURY is deliberately unbooked** — nothing on the book can say
+  whose it is, and mapping the account number would be guessing.
 
-- **commit 463488a** — `git log -1` and
-  `https://corgi-trial-psi.vercel.app/api/health` → `commit.shortSha`
-  `463488a`, source `VERCEL_GIT_COMMIT_SHA`. They agree.
-- **7 of 7 live** — same read, 2026-09-11T22:38Z. `integrations.live` 7,
-  `integrations.total` 7, `integrations.warnings` empty.
-- **status "ok"** — same read. The earlier draft said "degraded"; that is no
-  longer true. `webhookProcessing.degradedBy` and `webhookHealth.degradedBy`
-  are both empty. Re-read the endpoint before sending and match the line to it.
-- **Writes refused signed-out** — `curl -X POST -H 'Accept: application/json'
-  https://corgi-trial-psi.vercel.app/approvals` → `HTTP/2 401`,
-  `x-corgi-authz: deny; SIGN_IN_REQUIRED`.
-- **Reads open** — `/`, `/signin`, `/payments`, `/approvals`, `/accounts`,
-  `/team`, `/dashboard`, `/client`, `/client/open`, `/client/pay`,
-  `/client/funding` all return 200 with no cookie.
-- **59 decision entries** — `grep -cE '^## ' DECISIONS.md`, each headed with an
-  ISO-8601 UTC timestamp; 39 separate commits touch the file across all three
-  days.
+The decision log, seed script, `.env.example` and cut list are in the repo.
 
-## One thing the email deliberately does not claim
+Thanks — looking forward to the debrief.
 
-It does not say "there is no login". That sentence was true until commit
-5cd3729 and is now false — `docs/DEMO.md` §1 still says it, and still says "the
-credential is a role switch", which would send a grader hunting for a control
-that no longer grants the ability to act. **`docs/DEMO.md` needs correcting and
-I do not own that file.** If it is not corrected before sending, the email above
-is still accurate on its own terms, but the repo will contradict it.
+Saahith

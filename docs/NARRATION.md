@@ -1,150 +1,142 @@
-# The five-minute video — the core loop, arrow by arrow
+# The video — one continuous take, timed
 
-Recorded against **https://corgi-trial-psi.vercel.app**. The browser is driven
-at narration pace; you talk over it.
+Recorded against **https://corgi-trial-psi.vercel.app**, commit `826276a`.
+Six screens, no cuts. Times are cumulative from the moment recording starts.
 
-The brief names the loop. This is that loop, in that order, one shot per arrow:
-
-> open an account behind a real KYB check → fund it from a linked external bank →
-> issue a real (sandbox) card → authorise, then settle for a different amount days
-> later → send an outbound payment that needs a second approver → survive a
-> reversed settlement → reconcile the scheme file
-
-Three shots carry the things the brief says it grades hardest — **2, 4 and 6**.
-If you run long, cut shot 0 and shot 8. Never those three.
+The brief says it grades three things hardest: **the hold model under hostile
+sequencing, the bitemporal correction, and whether available balance is derived
+truth or a stored lie.** Those are 0:20, 1:30 and 2:20. Everything else can be
+trimmed; those cannot.
 
 ---
 
-## 0 · `/` — where we are  ·  ~15s
+### 0:00 — 0:20 · `/client` loads
 
-> "One book, two surfaces. The customer's side, and the bank's side. The console
-> is readable without a password on purpose, so you can check everything I am
-> about to say — but nothing can be *done* to the money without signing in."
+Ridgeline Robotics, the customer's own view.
 
----
-
-## 1 · `/client/open` — open an account behind a real KYB check  ·  ~30s
-
-> "A business applies. The registry leg is a live call to GLEIF; the director
-> check is live Stripe Identity. We report the **weaker** of the two, never an
-> average — one unanswered leg holds the whole application at pending."
-
-> "And there is no account yet. No deposit leaf exists until the checks pass, so
-> there is nothing to transact against. Pending and rejected are both real
-> states here, not screens we drew."
+> "This is a business current account. Two surfaces over one ledger — what a
+> customer sees, and what the bank sees. Same money, one implementation."
 
 ---
 
-## 2 · `/client` — the balance, and why two numbers  ·  ~45s  ← LONGEST HOLD
+### 0:20 — 1:05 · `/client` — the subtraction  ← **HOLD**
 
-> "Ledger balance, minus card holds, minus credits that have not cleared, minus
-> money already committed to leave. That subtraction is on the page because it
-> is exactly what the system does."
+Scroll to *"Why those two numbers are different"*.
 
-> "There is no `available` column in this database. Not on any table. It is a
-> SQL function with five terms, and every screen — customer, console, API,
-> agent — calls that same one. The brief asks whether available balance is
-> derived truth or a stored lie. It is derived, and it is provable rather than
-> asserted."
+> "Sixty-seven thousand seven hundred and fifty-nine in the account. Ten
+> nine-four-seven spendable. The difference is on the page, line by line:
+> twenty-four thousand of card payments waiting to settle, twenty-nine thousand
+> that has landed but not cleared, twenty-five hundred already on its way out."
 
----
-
-## 3 · `/client/funding` — fund it from a linked external bank  ·  ~30s
-
-> "The customer links their own bank through Plaid — their link, not ours. Money
-> arrives, and watch which number moves: the ledger goes up, and **available
-> does not**, because the credit has not cleared."
-
-> "Every one of these rows says on its face: originated, not transmitted. No ACH
-> entry was sent to a network. We are not going to let a screen imply otherwise."
+> "That last row says it — *the database's own answer, not a total added up on
+> this page*. There is no `available` column in this database. Not on any table.
+> It is one SQL function with five terms, and the customer screen, the console,
+> the API and the agent surface all call that same one."
 
 ---
 
-## 4 · `/client/cards` → `/client/activity` — authorise, then settle for a different amount  ·  ~50s  ← LONGEST HOLD
+### 1:05 — 1:50 · `/client/activity` — authorised vs settled  ← **HOLD**
 
-> "A card for each person on the team, issued through Lithic, with limits the
-> customer sets themselves — per-card, per-transaction, blocked merchant
-> categories — enforced inside the issuer's six-second window."
+Scroll to the first card row.
 
-Then activity:
+> "A fuel pump authorised fifty dollars. Two days later it settled for
+> seventy-three forty — **more** than it asked for, which pumps and restaurant
+> tips do constantly."
 
-> "A fuel pump authorises fifty dollars. Two days later it settles for
-> seventy-three forty — **more** than it asked for, which pumps and tips do
-> constantly. The hold released exactly once. The ledger posted the settled
-> amount. Both numbers are on the record because neither was ever wrong."
+> "The hold released exactly once. The ledger posted the settled amount. Both
+> numbers are on the record, because neither one was ever wrong."
 
-> "The hold is not stored either. It is a fold over the event set — authorised
-> minus captured, floored at zero — so no arrival order is a special case. A
-> settlement that arrives before its own authorisation parks and matches later."
+> "Underneath, an inbound ACH funding row — and it says *originated, not
+> transmitted*, because no entry was sent to a network. The screen will not
+> imply otherwise."
 
 ---
 
-## 5 · `/client/pay` → `/client/approvals` — a second approver  ·  ~35s
+### 1:50 — 2:45 · `/client/statements` — Tuesday, corrected  ← **LONGEST HOLD**
 
-> "Above the threshold it needs a second human. The person who raised it can
-> never approve it — and that is not a hidden button. It is a database trigger.
-> Try it and you get SQLSTATE 42501."
+Opens on 2026-07-25 by default.
 
-> "The agent surface obeys the same rule, and it has to: across this whole book
+> "A merchant took back a settlement and re-presented it for less. Here is that
+> day: the original clearing at two-forty-eight fifty, the reversal that took it
+> back, and the re-book at one-ninety-eight fifty. The closing balance already
+> carries the corrected figure."
+
+> "Nothing was edited. The original entry is still there — this ledger has no
+> UPDATE and no DELETE on a money row anywhere. A correction is three entries,
+> and the value date never moves; only the booking position does."
+
+Point at the three fingerprints.
+
+> "And it re-derives. Rebuilt twice while this page loaded, at two different
+> instants, same fingerprint both times, matching the one stored when the
+> statement was issued. Earlier versions are kept, not overwritten."
+
+---
+
+### 2:45 — 3:30 · `/approvals` — the second signature
+
+Scroll to the top card.
+
+> "Three thousand two hundred dollars, above the threshold, awaiting approval.
+> The initiator is Dana Okonkwo — and I'm signed in as Dana, so the row is
+> marked **that is you** and all three controls are dead."
+
+> "Read the reason: *this is not a rule the screen is applying*.
+> `assert_maker_checker()` in the database refuses the insert with SQLSTATE
+> 42501. The button is disabled so you learn it here rather than after pressing
+> it."
+
+> "The agent surface obeys the same rule, and it has to — across this whole book
 > the agent has requested a hundred and ninety-three payments and approved
 > zero."
 
 ---
 
-## 6 · `/client/statements` — survive a reversed settlement  ·  ~50s  ← LONGEST HOLD
+### 3:30 — 4:10 · `/breaks` — the nightly file
 
-**Open the statement for 2026-07-25** — group `eaf694e2`, booking seqs
-508/509/510, −$248.50 reversed and re-booked at −$198.50. That is the published
-day that carries a correction. (2026-09-08 also has one, at seqs 3/4/5, but
-Ridgeline has no published statement for it — do not open that day.)
+> "Last night's file against our ledger. Three categories — in-file-not-ledger,
+> in-ledger-not-file, amount mismatch — each asked a further question: *does the
+> book already explain this?*"
 
-> "A merchant took back a settlement days after it happened. The statement for
-> the day it happened now shows the corrected position — and the system can still
-> tell you what it believed at any earlier point, and exactly when it learned the
-> truth."
+> "One unexplained break, two hundred and forty dollars seventy-one, reference
+> LF6. That's a row deliberately deleted from tonight's file, and this is the
+> screen finding it, naming its category and ageing it."
 
-> "That is not a figure of speech. Every entry carries a booking position as well
-> as a value date, so you can ask the book what it knew as of any position and it
-> will answer."
-
-> "Value date and booking date are different columns on the base table, decided
-> on day one. This cannot be retrofitted at hour forty. A correction is three
-> entries — the original, the reversal, the re-book — and the value date never
-> moves. The original is still there. Nothing is rewritten, because this ledger
-> has no UPDATE and no DELETE on a money row at all."
-
-> "And it re-derives. It rebuilt twice on this page load, at two different
-> instants, same fingerprint."
+> "The age says *453 days ahead* — the file's business date is in 2027, because
+> the harness forward-dates it so the run is reachable from this screen. It says
+> ahead rather than minus four hundred, because a minus sign in an age column is
+> a puzzle, not a fact."
 
 ---
 
-## 7 · `/breaks` — reconcile the scheme file  ·  ~30s
+### 4:10 — 4:45 · `/chaos` — the weapon, handed over
 
-> "The processor's nightly file against our ledger. In-file-not-ledger,
-> in-ledger-not-file, amount mismatch — with aging, because a break nobody has
-> looked at for nine days is a different problem from one that appeared this
-> morning."
+> "And this is where we hand you the stick. Four controls: hold our own webhook
+> deliveries back, delay a settlement, duplicate a delivery, or release them in
+> reverse so a settlement arrives before the authorisation it belongs to."
 
-> "They said they would plant a row. Here is a planted one, and here is where it
-> went."
+> "It never touches the provider — these are deliveries we originated, held in
+> our own durable outbox, and they catch up when it's turned off. Nothing is
+> lost, which is the point."
 
 ---
 
-## 8 · The honest part  ·  ~25s
+### 4:45 — 5:00 · close
 
 > "Six invariants are red right now and every one has a written argument beside
-> it, in the script itself. Over-capture writes no closure row — because the
-> network reopened a hold after an over-capture and captured it, so closing on
-> captured-exceeds-authorised would have freed money that was still authorised."
-
-> "No mobile app: a deliberate cut. The console is readable by anyone with the
-> link: a trade, written at the top of the auth doc, not in a footnote."
+> it in the script that reports them. There's no mobile app — that was cut early
+> and written down as a decision. And the console you've been watching is
+> readable by anyone with the link, on purpose, so you can check all of this
+> without a password. Nothing can be *done* to the money without one."
 
 ---
 
-## One command, if they ask
+## If you need it shorter
 
-`pnpm confirm` — the brief, line by line, measured against the live book and the
-deployment. **23 pass · 0 fail · 1 cut · 0 unproven.** Nothing in it means
-"looks right": a row whose evidence cannot be gathered prints UNPROVEN and says
-why.
+Cut `/chaos` (4:10–4:45) and the close to one sentence. That lands at 4:15 and
+loses none of the three graded claims.
+
+## If a panel asks for one command
+
+`pnpm confirm` — the brief, line by line, measured now. `node scripts/coreloop.mjs`
+— the seven arrows in ninety seconds, last run PASS 7 / FAIL 0 / SKIP 0.
