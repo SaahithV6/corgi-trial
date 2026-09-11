@@ -13,6 +13,13 @@
  *      a reviewer can read rather than branches scattered through a handler.
  *   3. LOGGING — one structured line per delivery carrying provider, event id,
  *      verified, outcome and duration.
+ *   4. THE REFUSAL RECORD — a refused delivery leaves a row. `inbox.ts` is
+ *      right that an unverified payload is never persisted, but "nothing was
+ *      stored" meant the whole population of forged, misrouted and stale
+ *      attempts was invisible while `webhook_inbox` read complete. This is
+ *      where the 401 becomes a fact, without the 401 becoming any softer. See
+ *      `refusals.ts` for what is kept, what is refused, and why; and
+ *      docs/WEBHOOKS.md for the operator's view.
  *
  * THE ORDER IS LOAD-BEARING, and this module does not re-implement it. The
  * whole handler body is `await ingestWebhook(provider, req, ...)`, and
@@ -47,13 +54,25 @@ import {
   plaidVerifier,
   sqlExecutorFromPostgresJs,
   stripeVerifier,
+  toHeaderLookup,
   VerifierRegistry,
   type InboxStore,
   type IngestResult,
   type PlaidJwk,
   type ProviderName,
+  type SqlExecutor,
   type WebhookVerifier,
 } from './inbox';
+import {
+  classifyRefusal,
+  createPostgresRefusalStore,
+  createRefusalRecorder,
+  describeSignature,
+  probeBody,
+  readSourceAddress,
+  type RefusalRecorder,
+  type SignatureShape,
+} from './refusals';
 
 // ---------------------------------------------------------------------------
 // 1. The integration catalogue — the single source of truth
@@ -88,6 +107,23 @@ export interface WebhookIntegration {
    * Plaid's verifier needs the API credentials rather than a shared secret.
    */
   readonly verificationEnv: readonly string[];
+  /**
+   * Every env var this provider's CONSUMER needs after a delivery verifies.
+   *
+   * Distinct from `verificationEnv`, which gates whether we will accept the
+   * delivery at all. This gates whether we can act on one. Stripe's consumer
+   * reads the session back from the API rather than trusting the body — a
+   * deliberate choice, because events for one session share an `observed_at`
+   * and a stale one would otherwise win on `recorded_at` — and that read needs
+   * an API key the verifier never touches.
+   *
+   * It is declared here rather than derived from a slot because slots answer
+   * "is this capability live", and the answer can be yes with no credential at
+   * all: `business_registry` runs on GLEIF, a public API. When that slot went
+   * keyless, `STRIPE_SECRET_KEY` silently disappeared from this catalogue —
+   * a real requirement lost because it had been recorded in the wrong place.
+   */
+  readonly consumerEnv?: readonly string[] | undefined;
   /** Built only when every `verificationEnv` key is present. */
   readonly makeVerifier: (env: EnvBag) => WebhookVerifier;
 }
@@ -141,9 +177,13 @@ export const WEBHOOK_INTEGRATIONS: readonly WebhookIntegration[] = [
   {
     provider: 'stripe',
     label: 'Stripe',
-    purpose: 'business registry — the fifth provider, proving the registry is generic',
-    slots: ['business_registry'],
+    // Was "business registry — the fifth provider". That became false when the
+    // registry leg moved to the GLEIF LEI register, which is public and needs
+    // no credential; Stripe's live role here is director KYC via Identity.
+    purpose: 'director KYC via Stripe Identity, and the fifth provider proving the surface is generic',
+    slots: ['director_kyc'],
     verificationEnv: ['STRIPE_WEBHOOK_SECRET'],
+    consumerEnv: ['STRIPE_SECRET_KEY'],
     makeVerifier: (env) => stripeVerifier({ secret: mustRead(env, 'STRIPE_WEBHOOK_SECRET') }),
   },
 ];
@@ -216,6 +256,7 @@ export function integrationReports(env: EnvBag = process.env): IntegrationReport
       ...new Set([
         ...mine.flatMap((slot) => slot.missing),
         ...integration.verificationEnv.filter((key) => readEnv(env, key) === undefined),
+        ...(integration.consumerEnv ?? []).filter((key) => readEnv(env, key) === undefined),
       ]),
     ];
     // Every owning slot live AND a verifier registered. Never looser than the
@@ -299,7 +340,12 @@ export function verifierRegistryFor(env: EnvBag = process.env): VerifierRegistry
   return registry;
 }
 
-let storeCache: { url: string; store: InboxStore } | null = null;
+let storeCache: {
+  url: string;
+  executor: SqlExecutor;
+  store: InboxStore;
+  recorder: RefusalRecorder;
+} | null = null;
 
 /**
  * The inbox store, backed by Postgres as the RESTRICTED `corgi_app` role.
@@ -312,13 +358,34 @@ let storeCache: { url: string; store: InboxStore } | null = null;
  * connection that can UPDATE money rows.
  */
 export function inboxStoreFor(env: EnvBag = process.env): InboxStore {
+  return connectionFor(env).store;
+}
+
+/**
+ * The refusal recorder, on the SAME connection as the inbox.
+ *
+ * One pool, deliberately. A second pool opened by the 401 path would be a
+ * resource an unauthenticated caller can make us allocate, which is the class
+ * of thing this whole module is trying not to hand out. The recorder's own
+ * per-minute write budget is the other half of that argument — see
+ * `refusals.ts` §6.
+ *
+ * It is process-wide and cached alongside the store because its budget and its
+ * pending buckets ARE the rate limit: a recorder rebuilt per request would have
+ * a fresh budget per request, which is not a rate limit at all.
+ */
+export function refusalRecorderFor(env: EnvBag = process.env): RefusalRecorder {
+  return connectionFor(env).recorder;
+}
+
+function connectionFor(env: EnvBag): NonNullable<typeof storeCache> {
   const url = readEnv(env, 'APP_DATABASE_URL');
   if (url === undefined) {
     throw new Error(
       'APP_DATABASE_URL is not set. The application connects as the restricted corgi_app role; it never uses DATABASE_URL (owner) at runtime — see DECISIONS 008.',
     );
   }
-  if (storeCache && storeCache.url === url) return storeCache.store;
+  if (storeCache && storeCache.url === url) return storeCache;
   const sql = postgres(url, {
     max: 3,
     // Neon's pooled endpoint runs pgbouncer in transaction mode, which has no
@@ -328,9 +395,20 @@ export function inboxStoreFor(env: EnvBag = process.env): InboxStore {
     idle_timeout: 30,
     onnotice: () => {},
   });
-  const store = createPostgresInboxStore(sqlExecutorFromPostgresJs(sql));
-  storeCache = { url, store };
-  return store;
+  const executor = sqlExecutorFromPostgresJs(sql);
+  storeCache = {
+    url,
+    executor,
+    store: createPostgresInboxStore(executor),
+    recorder: createRefusalRecorder({
+      store: createPostgresRefusalStore(executor),
+      onError: (error) =>
+        logger({ base: { module: 'webhooks/refusals' } }).error('webhook.refusal.write_failed', {
+          error,
+        }),
+    }),
+  };
+  return storeCache;
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +431,8 @@ export interface WebhookRouteOptions {
   env?: EnvBag | undefined;
   now?: (() => Date) | undefined;
   log?: Logger | undefined;
+  /** Where refused deliveries are recorded. Injected by the tests. */
+  recorder?: RefusalRecorder | undefined;
 }
 
 /** What the log line and the README's table call this delivery. */
@@ -402,24 +482,103 @@ export async function handleWebhookRequest(
     return jsonResponse(httpStatus, requestId, { ...body, durationMs });
   };
 
-  // --- Provider validation, before the body is touched --------------------
-  //
   // The path segment is validated against the VERIFIER REGISTRY, not against a
   // string list: if there is no verifier there is no way to authenticate the
-  // caller, so there is nothing to do with the bytes. An unrecognised segment
-  // is a 404 and can never become a 500, because nothing is constructed from
-  // it — it is only ever a Map lookup.
+  // caller, so there is nothing to do with the bytes.
   const registry = options.registry ?? verifierRegistryFor(env);
+
+  // --- The refusal record -------------------------------------------------
+  //
+  // A refusal that leaves no row is a refusal nobody can count, and
+  // `webhook_inbox` structurally cannot hold one: a row exists there only
+  // because verification PASSED. So the 401 (and the 404) get a row of their
+  // own, in `webhook_refusal`, carrying the shape of the delivery and never its
+  // content. `refusals.ts` argues every column.
+  //
+  // Never awaited in a way that can change the answer: if recording throws, the
+  // recorder swallows it into a log line. A caller who has just failed
+  // authentication does not get to turn a 401 into a 500 by making our
+  // telemetry fail.
+  const headers = toHeaderLookup(req.headers);
+  const recordRefusal = async (
+    reason: string,
+    verifierFound: boolean,
+    signature: SignatureShape,
+    body: { sha256: string; bytes: number } | null,
+  ): Promise<ReturnType<typeof classifyRefusal>> => {
+    const reasonCode = classifyRefusal({ verifierFound, signature, reason });
+    try {
+      const recorder = options.recorder ?? refusalRecorderFor(env);
+      await recorder.observe({
+        // Sanitised HERE, once, so nothing downstream — the row, the index, the
+        // screen — ever sees an unvalidated path segment.
+        provider: sanitiseProvider(provider),
+        providerKnown: findIntegration(provider) !== undefined,
+        reasonCode,
+        source: readSourceAddress(headers),
+        signature,
+        body,
+        at: (options.now ?? (() => new Date()))(),
+      });
+    } catch (error) {
+      log.error('webhook.refusal.unrecorded', { reasonCode, error });
+    }
+    return reasonCode;
+  };
+
+  /**
+   * The signature header names of every verifier we have registered — a closed
+   * set of OUR header names, used to describe an attempted signature on a path
+   * segment that has no verifier of its own. Deduplicated; order is irrelevant
+   * because `describeSignature` picks the signature-bearing one.
+   */
+  const anySignatureHeaders = (): readonly string[] => [
+    ...new Set(registry.providers().flatMap((p) => registry.get(p)?.signatureHeaders ?? [])),
+  ];
+
+  // --- Provider validation, before the body is touched --------------------
+  //
+  // An unrecognised segment is a 404 and can never become a 500, because
+  // nothing is constructed from it — it is only ever a Map lookup.
+  //
+  // AND THE BODY IS NOT READ ON THIS PATH. There is no verifier, so there is
+  // nothing that could ever authenticate those bytes, and reading them to hash
+  // them would be reading an unauthenticated stream for a telemetry field. The
+  // refusal row therefore carries null body columns, and
+  // `webhook_refusal_body_read_iff_there_was_a_verifier` in 0038 makes that a
+  // database rule rather than a habit: an edit that starts reading the body
+  // here cannot store the result.
   if (registry.get(provider) === undefined) {
     const known = findIntegration(provider) !== undefined;
     if (!known) {
-      return finish(404, 'unknown_provider', false, {
-        error: {
-          code: 'UNKNOWN_PROVIDER',
-          message: `no webhook endpoint for '${sanitiseProvider(provider)}'`,
+      const reasonCode = await recordRefusal(
+        'no verifier registered for this path segment',
+        false,
+        describeSignature(headers, anySignatureHeaders()),
+        null,
+      );
+      return finish(
+        404,
+        'unknown_provider',
+        false,
+        {
+          error: {
+            code: 'UNKNOWN_PROVIDER',
+            message: `no webhook endpoint for '${sanitiseProvider(provider)}'`,
+          },
         },
-      });
+        { refusalReason: reasonCode },
+      );
     }
+    // DELIBERATELY NOT A REFUSAL ROW. This branch is not us refusing a caller,
+    // it is us admitting we cannot check one — a fact about our deployment, not
+    // about whoever knocked. It is already published, by name, in
+    // `/api/health`'s `integrations[].status = 'not_configured'` with the
+    // missing env var names beside it. Filing it here as well would mean a
+    // stranger could inflate our refusal rate by POSTing at an endpoint whose
+    // secret we forgot to set, and would put one fact in two places with two
+    // owners — the drift DECISIONS 021 exists to prevent.
+    //
     // Known provider, missing credentials. 503 rather than 404 on purpose:
     // 404 tells a real provider to give up on an event we simply cannot verify
     // yet, and the event is then gone. 503 is retryable, so the delivery
@@ -441,10 +600,23 @@ export async function handleWebhookRequest(
   // out of band in dispatch.ts, driven by cron — there is deliberately no
   // `after()` nudge here, because a nudge that usually runs is a delivery
   // mechanism people start to rely on.
+  //
+  // THE PROBE, AND WHY IT IS NOT A SECOND READ OF THE BODY.
+  //
+  // `ingestWebhook` reads `await req.text()` first, verifies over those exact
+  // bytes, and only then parses. Nothing here may move that read earlier. So
+  // instead of reading the body, this hands `ingestWebhook` a request whose
+  // `text()` delegates to the real one and takes a SHA-256 and a byte count on
+  // the way past. The body is a one-shot stream: reading it twice is
+  // impossible, which is what makes this a tee rather than a promise to behave.
+  // Nothing parses it, nothing branches on it, and the bytes are dropped with
+  // the stack frame. The digest is computed before verification because the
+  // READ always was; it is PERSISTED only after the verifier has refused.
+  const probe = probeBody(req);
   let result: IngestResult;
   try {
     const store = options.store ?? inboxStoreFor(env);
-    result = await ingestWebhook(provider, req, {
+    result = await ingestWebhook(provider, probe.request, {
       store,
       registry,
       ...(options.now === undefined ? {} : { now: options.now }),
@@ -469,7 +641,20 @@ export async function handleWebhookRequest(
     );
   }
 
-  return respondTo(result, finish);
+  // The refusal is recorded HERE and not inside `respondTo`, so that the switch
+  // below stays a pure, total mapping from `IngestResult` to a status code —
+  // the property that keeps it checkable against the README's failure table.
+  let refusalReason: string | undefined;
+  if (result.status === 'rejected' && (result.httpStatus === 401 || result.httpStatus === 404)) {
+    refusalReason = await recordRefusal(
+      result.reason,
+      result.httpStatus !== 404,
+      describeSignature(headers, registry.get(provider)?.signatureHeaders ?? anySignatureHeaders()),
+      probe.observed(),
+    );
+  }
+
+  return respondTo(result, finish, refusalReason);
 }
 
 /**
@@ -486,6 +671,8 @@ function respondTo(
     body: Record<string, unknown>,
     logFields?: Record<string, unknown>,
   ) => Response,
+  /** The `webhook_refusal.reason_code` this delivery was filed under, if any. */
+  refusalReason?: string | undefined,
 ): Response {
   switch (result.status) {
     case 'accepted':
@@ -548,10 +735,17 @@ function respondTo(
     case 'rejected':
       switch (result.httpStatus) {
         case 401:
-          // Nothing persisted. The reason goes to the log, not to the caller:
-          // whoever sent this has not authenticated, and "timestamp too old"
-          // versus "no v1 signature matched" is free information for someone
-          // probing the endpoint.
+          // The payload is not persisted, not parsed, not dispatched. The
+          // wording used to be "nothing was stored", and it is now "the payload
+          // was not ingested" because the first sentence stopped being true the
+          // moment `webhook_refusal` existed — a message that contradicts the
+          // system is the thing this build keeps finding.
+          //
+          // The REASON still goes to the log and not to the caller: whoever sent
+          // this has not authenticated, and "timestamp too old" versus "no v1
+          // signature matched" is free information for someone probing the
+          // endpoint. The refusal reason code is logged beside it, so an
+          // operator can join the log line to the row.
           return finish(
             401,
             'signature_invalid',
@@ -559,10 +753,10 @@ function respondTo(
             {
               error: {
                 code: 'WEBHOOK_SIGNATURE_INVALID',
-                message: 'signature verification failed; nothing was stored',
+                message: 'signature verification failed; the payload was not ingested',
               },
             },
-            { reason: result.reason },
+            { reason: result.reason, refusalReason: refusalReason ?? null },
           );
         case 404:
           return finish(
@@ -570,7 +764,7 @@ function respondTo(
             'unknown_provider',
             false,
             { error: { code: 'UNKNOWN_PROVIDER', message: 'no webhook endpoint for this provider' } },
-            { reason: result.reason },
+            { reason: result.reason, refusalReason: refusalReason ?? null },
           );
         case 400:
         default:

@@ -16,6 +16,7 @@ import "server-only";
  */
 
 import { sql, type Sql } from "@/lib/ledger/db";
+import { findAccount, findEntryByIdempotencyKey } from "@/lib/ledger/queries";
 
 import {
   CATCH_UP_WINDOW_DAYS,
@@ -277,31 +278,23 @@ export async function readInvariants(conn: Sql = sql): Promise<AccrualInvariants
     SELECT (SELECT count(*) FROM v_accrual_month_drift)  AS month_drift,
            (SELECT count(*) FROM v_accrual_ledger_drift) AS ledger_drift,
            (SELECT count(*) FROM v_accrual_unresolved)   AS unresolved,
-           -- DELIBERATELY NOT a count over v_accrual_gap.
+           -- v_accrual_gap, again — this used to be a hand-written copy of the
+           -- view's question with the bound corrected.
            --
-           -- That view bounds itself with CURRENT_DATE, which is resolved
-           -- against the SESSION TimeZone -- UTC on Neon. The book day is
-           -- America/New_York, so between 19:00 and midnight Eastern the view
-           -- is already on tomorrow and reports every schedule as owing a day
-           -- that has not happened yet. Measured: at 22:07 ET it returned 3
-           -- against a book that was fully caught up.
+           -- The view bounded itself with CURRENT_DATE, resolved against the
+           -- SESSION TimeZone (UTC on Neon) rather than the book day
+           -- (America/New_York), so between 19:00 and midnight Eastern it was
+           -- already on tomorrow and reported every schedule as owing a day
+           -- that had not happened. Measured: at 23:39 ET it returned 3 against
+           -- a book that was fully caught up. Nothing was ever mis-posted — the
+           -- tick takes its date from bookToday() and refuses to run ahead of
+           -- the book (accrue.ts) — but an indicator that cries wolf every
+           -- evening is an indicator nobody reads by the second week.
            --
-           -- Nothing is mis-posted by this — the tick takes its date from
-           -- bookToday() and refuses to run ahead of the book (accrue.ts) --
-           -- but an indicator that cries wolf every evening is an indicator
-           -- nobody reads by the second week. So the count is asked here with
-           -- the book date, which is the same question the view meant to ask.
-           -- The view itself needs a one-line fix in a later migration; 0020
-           -- is applied and a migration is immutable once applied.
-           (SELECT count(*)
-              FROM accrual_schedule s
-              CROSS JOIN LATERAL accrual_due_dates(
-                s.id,
-                s.start_date,
-                LEAST(COALESCE(s.end_date, (now() AT TIME ZONE 'America/New_York')::date),
-                      (now() AT TIME ZONE 'America/New_York')::date)
-              ) AS d
-           ) AS gap`;
+           -- Migration 0023 fixes the view itself (book_date(now())), so the
+           -- copy is deleted: two definitions of one question is the defect
+           -- DECISIONS 024 is about, and this module was carrying one.
+           (SELECT count(*) FROM v_accrual_gap)        AS gap`;
   if (row === undefined) throw new Error("accrual: the invariant query returned no row");
   return {
     monthDrift: Number(row.month_drift),
@@ -466,9 +459,7 @@ export async function postingFor(
  * is UNIQUE — but reading first makes the report honest about which run did it.
  */
 export async function entryForKey(idempotencyKey: string, conn: Sql): Promise<string | null> {
-  const [row] = await conn<{ id: string }[]>`
-    SELECT id FROM journal_entry WHERE idempotency_key = ${idempotencyKey}`;
-  return row?.id ?? null;
+  return (await findEntryByIdempotencyKey(idempotencyKey, conn))?.entryId ?? null;
 }
 
 export type RecordInput = {
@@ -540,18 +531,21 @@ export async function feeIncomeAccountId(
   code: string,
   conn: Sql = sql,
 ): Promise<string> {
-  const [row] = await conn<{ id: string }[]>`
-    SELECT id FROM account
-     WHERE entity_id = ${entityId}::uuid
-       AND code = ${code}
-       AND business_id IS NULL
-       AND closed_at IS NULL`;
-  if (row === undefined) {
+  // The house leaf for this code, scoped to the entity and not closed. The
+  // `SELECT id FROM account WHERE code = …` shape appeared in six modules with
+  // four different sets of predicates; this one keeps ITS predicates —
+  // `closed_at IS NULL` included, which most of the others omitted — by naming
+  // them rather than by writing the query again.
+  const account = await findAccount(
+    { code, scope: "house", entityId, includeClosed: false },
+    conn,
+  );
+  if (account === null) {
     throw new Error(
       `no account '${code}' in the chart for entity ${entityId}: accrual cannot post without it`,
     );
   }
-  return row.id;
+  return account.accountId;
 }
 
 /**

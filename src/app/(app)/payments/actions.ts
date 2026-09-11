@@ -85,8 +85,23 @@ export type Receipt = {
   readonly rail: string;
   readonly valueDate: string;
   readonly approvalsRequired: number;
-  /** `approvalsRequired > 0` — i.e. the amount reached the pinned threshold. */
+  /** `approvalsRequired > 0` — i.e. this payment needs a checker. */
   readonly needsApproval: boolean;
+  /**
+   * The pinned threshold is ZERO, so there is no band and nothing was
+   * "reached".
+   *
+   * Computed on the server from `policy.thresholdCents === 0n`, because that
+   * is where the `bigint` is. The receipt used to say "this amount reached the
+   * {threshold} threshold" in every approval case, which on the wire rail
+   * renders as "$42.00 reached the $0.00 threshold" — true, and nonsense. A
+   * threshold prices the band BELOW which an agent may act unattended, and
+   * that band exists only where a mistake inside it is recoverable: ACH draws
+   * one at $2,500 because an ACH entry is recallable for two banking days. A
+   * wire has no such mechanism at any amount, so the threshold is at the floor
+   * and the reason is not the size of the payment.
+   */
+  readonly thresholdIsFloor: boolean;
   /** False when this idempotency key had already been queued. Nothing new was written. */
   readonly created: boolean;
 };
@@ -167,6 +182,16 @@ const formSchema = z.object({
 
   holderName: z.string().trim().max(140).optional(),
   routingNumber: z.string().trim().max(40).optional(),
+  /**
+   * The WIRE variant of the ABA, which is a different number from the same
+   * bank's ACH variant — `021000021` versus `011401533` on the seeded Plaid
+   * item. Carried under its own name rather than reusing `routingNumber`
+   * because the mistake this rail actually suffers is substituting one for the
+   * other, and a field that accepts both names accepts the substitution in
+   * silence. Loose here, like every other field on this schema;
+   * `destinationSchema` is the validator.
+   */
+  wireRoutingNumber: z.string().trim().max(40).optional(),
   accountNumberLast4: z.string().trim().max(10).optional(),
   accountType: z.string().trim().max(20).optional(),
   bic: z.string().trim().max(40).optional(),
@@ -199,10 +224,26 @@ function buildDestination(fields: FormFields): unknown {
         accountType: fields.accountType ?? "",
       };
     case "wire":
+      // THE WIRE ABA IS THE ADDRESS; THE BIC IS AN EXTRA, AND IT USED TO BE
+      // THE ONLY ONE. A BIC identifies a bank on the SWIFT network and Fedwire
+      // does not read it, so with only a BIC on the destination there was
+      // nothing for `gatePaymentOnPayee()` to run the check digit over and
+      // nothing to match against the payee book — a wire got neither check, on
+      // the one rail that cannot recall money.
+      //
+      // Both keys are OMITTED rather than sent empty when the form did not
+      // supply them, because both are optional on `destinationSchema` and an
+      // empty string is not a missing value: `""` fails the nine-digit regex
+      // and would surface as a field error, while `undefined` reaches the
+      // gate's own refusal, which says which number is missing and why a BIC
+      // is not a substitute for it.
       return {
         type: "wire",
         holderName,
-        bic: fields.bic ?? "",
+        ...(fields.wireRoutingNumber === undefined || fields.wireRoutingNumber === ""
+          ? {}
+          : { wireRoutingNumber: fields.wireRoutingNumber }),
+        ...(fields.bic === undefined || fields.bic === "" ? {} : { bic: fields.bic }),
         accountNumberLast4: fields.accountNumberLast4 ?? "",
       };
     case "usdc":
@@ -254,6 +295,7 @@ export async function raisePaymentAction(
     reference: formData.get("reference") ?? "",
     holderName: formData.get("holderName") ?? undefined,
     routingNumber: formData.get("routingNumber") ?? undefined,
+    wireRoutingNumber: formData.get("wireRoutingNumber") ?? undefined,
     accountNumberLast4: formData.get("accountNumberLast4") ?? undefined,
     accountType: formData.get("accountType") ?? undefined,
     bic: formData.get("bic") ?? undefined,
@@ -361,6 +403,7 @@ export async function raisePaymentAction(
       valueDate: fields.valueDate,
       approvalsRequired,
       needsApproval: approvalsRequired > 0,
+      thresholdIsFloor: policy.thresholdCents === 0n,
       created,
     },
   };

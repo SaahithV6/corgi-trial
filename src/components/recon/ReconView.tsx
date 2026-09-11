@@ -153,7 +153,12 @@ function FooterNote({ filter }: { readonly filter: BreakFilter }) {
       >
         Clear filters
       </a>
-      .
+      {" · "}
+      <a href="/breaks" className="underline underline-offset-4">
+        Why each break exists
+      </a>{" "}
+      &mdash; the same breaks with their correction group reconstructed as a
+      timeline, on both time axes.
     </p>
   );
 }

@@ -1,24 +1,27 @@
 /**
  * The FX quote.
  *
- * Four modules and one seam, arranged so the two that can fail do not sit on
+ * Seven modules and one seam, arranged so the two that can fail do not sit on
  * the path of the one that must not:
  *
- *   types.ts   pure data — corridors, scales, states, refusal codes
- *   quote.ts   pure arithmetic — the four formulas, integers only
- *   rate.ts    the network — one free source, one labelled fallback
- *   store.ts   the database — reads, and the three append-only writes
- *   gate.ts    the predicate the payout path calls
+ *   types.ts       pure data — corridors, scales, states, refusal codes
+ *   quote.ts       pure arithmetic — the four formulas, integers only
+ *   allocation.ts  pure arithmetic — what a commitment costs at settlement,
+ *                  and where the sub-cent conversion residual lands (§12.6)
+ *   rate.ts        the network — one free source, one labelled fallback
+ *   store.ts       the database — reads, and the four append-only writes
+ *   gate.ts        the predicate the payout path calls
+ *   settle.ts      the journal entry, through postEntry() and nothing else
  *
- * `store.ts` and `gate.ts` are `server-only`; the other three are not, so the
- * arithmetic and the vocabulary can be tested, scripted and imported anywhere
- * without dragging a connection along.
+ * `store.ts`, `gate.ts` and `settle.ts` are `server-only`; the other four are
+ * not, so the arithmetic and the vocabulary can be tested, scripted and
+ * imported anywhere without dragging a connection along.
  *
- * NOTE that this barrel deliberately does NOT re-export `store.ts` or
- * `gate.ts`. Both are `server-only`, and a barrel that mixes them with the
- * pure modules means any import of `formatRate` pulls `postgres` into the
- * graph — which is the bug `src/lib/rails/stablecoin/index.ts` has to work
- * around by exporting its ledger module separately. Import those two by path.
+ * NOTE that this barrel deliberately does NOT re-export `store.ts`, `gate.ts`
+ * or `settle.ts`. All three are `server-only`, and a barrel that mixes them
+ * with the pure modules means any import of `formatRate` pulls `postgres` into
+ * the graph — which is the bug `src/lib/rails/stablecoin/index.ts` has to work
+ * around by exporting its ledger module separately. Import those three by path.
  */
 
 export {
@@ -62,6 +65,18 @@ export {
   type QuoteTerms,
   type SettlementVariance,
 } from "./quote";
+
+export {
+  FX_SETTLEMENT_ACCOUNTS,
+  deliveryCostUnits,
+  fundingAllocation,
+  settlementLines,
+  type DeliveryCostInput,
+  type FundingAllocation,
+  type FundingAllocationInput,
+  type SettlementLineInput,
+  type SettlementLinePlan,
+} from "./allocation";
 
 export {
   FIXED_RATE_TABLE,

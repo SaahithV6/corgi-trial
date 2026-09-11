@@ -46,7 +46,7 @@
  * the common case not fail.
  */
 
-import type { Sql } from "@/lib/ledger/queries";
+import { entityBookingWatermark, type Sql } from "@/lib/ledger/queries";
 
 import {
   UnknownAccountError,
@@ -163,6 +163,13 @@ export async function closeDay(
     const existing = await readBookDay(input.entityId, input.businessDate, scoped);
     if (existing !== null) return { bookDay: existing, created: false };
 
+    // The entity's own high-water mark, read inside the advisory lock taken
+    // above so it cannot move between the read and the insert. Asked of the
+    // ledger rather than re-expressed as `MAX(e.booking_seq)` here: it is the
+    // same aggregate over the same rows, and having it written down twice is
+    // how two modules end up closing a day at two different numbers.
+    const watermark = await entityBookingWatermark(input.entityId, scoped);
+
     const rows = await tx<
       {
         entity_id: string;
@@ -173,12 +180,10 @@ export async function closeDay(
       }[]
     >`
       INSERT INTO book_day (entity_id, business_date, booking_watermark, closed_by)
-      SELECT ${input.entityId}::uuid,
-             ${input.businessDate}::date,
-             COALESCE(MAX(e.booking_seq), 0)::bigint,
-             ${input.actorId}::uuid
-        FROM journal_entry e
-       WHERE e.entity_id = ${input.entityId}::uuid
+      VALUES (${input.entityId}::uuid,
+              ${input.businessDate}::date,
+              ${watermark}::bigint,
+              ${input.actorId}::uuid)
       RETURNING entity_id,
                 to_char(business_date, 'YYYY-MM-DD') AS business_date,
                 closed_at,

@@ -9,7 +9,8 @@
  * built to satisfy is narrow and absolute: **no figure on that page may be a
  * literal.** Every count and every amount comes from `readSystemState()`, run
  * against the journal at request time; every live/simulated verdict comes from
- * `readHealth()`, which fetches `/api/health` on the same origin rather than
+ * `readHealth()`, which fetches `/api/health` on this deployment's own origin
+ * — an origin from a configured allowlist, see failure mode 3 — rather than
  * re-deriving an opinion of its own.
  *
  * Two failure modes are designed for, because both are real:
@@ -27,6 +28,16 @@
  *    second with the first is exactly how a simulated integration ends up
  *    labelled LIVE.
  *
+ * 3. **The caller lies about which origin this is.** `resolveOrigin` takes the
+ *    host from an ALLOWLIST of origins this deployment is configured to be
+ *    reachable at, never from the header alone, and falls back to the
+ *    configured origin when the header names anything else. Before that, a
+ *    request could name any host and have the server fetch it and render the
+ *    reply as this system's live-versus-simulated table — a server-side
+ *    request forgery AND a spoofable honesty claim, on the one screen where
+ *    over-claiming a simulated integration is an automatic fail. The argument
+ *    is written out in full at `resolveOrigin`.
+ *
  * Why `/api/health` and not `probeIntegrations()` directly: DECISIONS 021.
  * That endpoint already published two contradicting verdicts for one slot, and
  * the fix was to stop having two sources rather than to reconcile them. A
@@ -38,7 +49,15 @@ import "server-only";
 
 import { fail, ok } from "@/lib/result";
 import type { ErrorShape, Result } from "@/lib/result";
-import { ledgerConnection, type Sql } from "@/lib/ledger/queries";
+import {
+  ledgerConnection,
+  NoCensusRowError,
+  readLedgerCensus,
+  type LedgerCensus,
+  type Queryable,
+  type Sql,
+  type TrialBalanceTotals,
+} from "@/lib/ledger/queries";
 
 /* -------------------------------------------------------------------------- */
 /* 1. Live system state                                                       */
@@ -69,15 +88,14 @@ export interface WebhookInboxState {
  * balance actually makes. `differenceCents` is the invariant: anything but
  * zero means the double-entry guarantee has been violated, and there is no
  * code path in this system that could repair it after the fact.
+ *
+ * It is the LEDGER'S type, re-exported rather than restated. This page used to
+ * declare its own copy and compute it from its own `SUM(amount_cents) FILTER`,
+ * which is exactly the shape `boundary.test.ts` exists to stop: a module
+ * outside `src/lib/ledger/**` holding a private answer to a question about the
+ * book. `readLedgerCensus` answers it now, once, for everybody.
  */
-export interface TrialBalance {
-  readonly debitCents: Cents;
-  readonly creditCents: Cents;
-  /** `debits − credits`. Zero, or the ledger is broken. */
-  readonly differenceCents: Cents;
-  /** How many accounts carry a balance in `v_trial_balance`. */
-  readonly accounts: number;
-}
+export type TrialBalance = TrialBalanceTotals;
 
 export interface SystemState {
   /** `now()` from the database, at the instant every figure below was read. */
@@ -106,14 +124,15 @@ export interface SystemState {
   readonly depositAccounts: number;
 }
 
-interface SystemStateRow {
+/**
+ * The half of the page that is NOT the ledger's to answer.
+ *
+ * `card_authorization`, `card_auth_event`, `v_hold_state` and `webhook_inbox`.
+ * Every column here needs a table the ledger does not own, which is the whole
+ * test that decided the split — see `readLedgerCensus`.
+ */
+interface PlatformStateRow {
   readonly read_at: Date;
-  readonly journal_entries: number;
-  readonly financial_entries: number;
-  readonly memo_entries: number;
-  readonly journal_lines: number;
-  readonly booking_watermark: bigint;
-  readonly last_posted_at: Date | null;
   readonly card_authorisations: number;
   readonly card_auth_events: number;
   readonly active_holds: number;
@@ -124,31 +143,102 @@ interface SystemStateRow {
   readonly webhook_parked: number;
   readonly webhook_dead: number;
   readonly last_delivery_at: Date | null;
-  readonly debit_cents: bigint;
-  readonly credit_cents: bigint;
-  readonly trial_balance_accounts: number;
-  readonly deposit_accounts: number;
+}
+
+async function readPlatformState(conn: Queryable): Promise<PlatformStateRow> {
+  const rows = await conn<PlatformStateRow[]>`
+    SELECT now()                                                    AS read_at,
+
+           (SELECT count(*) FROM card_authorization)::int           AS card_authorisations,
+           (SELECT count(*) FROM card_auth_event)::int              AS card_auth_events,
+
+           -- v_hold_state is the schema's own answer to "is this hold still
+           -- withholding money": the memo balance, zeroed when closed(E).
+           -- Recomputing it here would be a second opinion about a number the
+           -- ledger already publishes, and v_hold_drift proves that one.
+           (SELECT count(*) FROM v_hold_state
+             WHERE active_hold_cents <> 0)::int                     AS active_holds,
+           (SELECT COALESCE(SUM(ABS(active_hold_cents)), 0)
+              FROM v_hold_state)::bigint                            AS active_hold_cents,
+
+           (SELECT count(*) FROM webhook_inbox)::int                AS webhook_total,
+           (SELECT count(*) FROM webhook_inbox
+             WHERE state = 'done')::int                             AS webhook_done,
+           (SELECT count(*) FROM webhook_inbox
+             WHERE state = 'pending')::int                          AS webhook_pending,
+           (SELECT count(*) FROM webhook_inbox
+             WHERE state = 'parked')::int                           AS webhook_parked,
+           (SELECT count(*) FROM webhook_inbox
+             WHERE state = 'dead')::int                             AS webhook_dead,
+           (SELECT MAX(received_at) FROM webhook_inbox)             AS last_delivery_at`;
+
+  const row = rows[0];
+  if (row === undefined) {
+    // Unreachable against Postgres — a SELECT with no FROM returns one row —
+    // but a driver that returned nothing must not become `0 webhooks` on a
+    // screen that claims to be reading the live system.
+    throw new NoPlatformRowError();
+  }
+  return row;
+}
+
+class NoPlatformRowError extends Error {
+  constructor() {
+    super("the platform-state query returned no row");
+    this.name = "NoPlatformRowError";
+  }
 }
 
 /**
- * Every figure on the landing page, in ONE statement.
+ * The isolation level that replaces "keep it all in one string".
  *
- * One statement means one MVCC snapshot, which is the only way the numbers can
- * be describing the same instant. Twelve separate round trips would let an
- * entry land between the "journal entries" count and the trial balance, and
- * the page would then show a debit total that its own entry count cannot
- * account for — a discrepancy an operator would rightly read as a bug in the
- * ledger rather than as a race in the dashboard.
+ * Postgres takes ONE snapshot at the first statement of a REPEATABLE READ
+ * transaction and every later statement in it reads from that same snapshot.
+ * `READ ONLY` is belt and braces on a page that has no business writing: the
+ * application role already holds SELECT and INSERT and nothing else on the
+ * money tables (DECISIONS 008), and this adds a second, transaction-scoped
+ * refusal on top of the grant.
+ */
+const ONE_SNAPSHOT = "isolation level repeatable read read only";
+
+/**
+ * Every figure on the landing page, from ONE SNAPSHOT.
  *
- * Counts are cast `::int` and money `::bigint` deliberately. `count(*)` is
- * `int8`, which `src/lib/ledger/db.ts` parses into a JS `bigint` so that a cent
- * count can never silently lose precision — correct for money and needless
- * ceremony for a row count, so the counts are narrowed in SQL and the amounts
- * are not.
+ * ---------------------------------------------------------------------------
+ * It used to be one statement. It is now two, inside one transaction.
+ * ---------------------------------------------------------------------------
  *
- * Read-only by construction. The application role holds SELECT and INSERT and
- * nothing else on the money tables (DECISIONS 008), and this issues one SELECT:
- * a failure here cannot have moved anything.
+ * The original said it best and the reason has not changed: "One statement
+ * means one MVCC snapshot, which is the only way the numbers can be describing
+ * the same instant. Twelve separate round trips would let an entry land
+ * between the 'journal entries' count and the trial balance, and the page
+ * would then show a debit total that its own entry count cannot account for —
+ * a discrepancy an operator would rightly read as a bug in the ledger rather
+ * than as a race in the dashboard."
+ *
+ * All of that is still true, and none of it required the SQL to be in one
+ * string. Eleven of those figures came from `journal_entry`, `journal_line`
+ * and `account` and from nothing else, which made this file the largest unpaid
+ * entry on `boundary.test.ts` — a dashboard holding its own private trial
+ * balance, which is the exact failure that test was written after. They are
+ * `readLedgerCensus()` now. The rest, which genuinely needs `webhook_inbox`
+ * and `card_auth_event`, stayed here.
+ *
+ * What holds the guarantee together is the transaction, not the string. Both
+ * statements run inside `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`, so
+ * they share one snapshot and one `now()`, exactly as two halves of a single
+ * statement did — proven against the live database, where the two statements
+ * returned an identical `pg_current_snapshot()` and an identical `now()`, and
+ * the same two statements outside a transaction did not. The invariant is now
+ * enforced by Postgres and stated in a name, instead of depending on nobody
+ * ever splitting a 40-line template literal.
+ *
+ * The extra round trips are real and they are not the page's constraint: this
+ * runs concurrently with `readHealth()`, which fans out to five providers on a
+ * twelve-second budget and dominates the page by two orders of magnitude.
+ *
+ * Read-only by construction, twice over: see `ONE_SNAPSHOT`. A failure here
+ * cannot have moved anything.
  */
 export async function readSystemState(
   conn?: Sql,
@@ -156,104 +246,52 @@ export async function readSystemState(
   try {
     const db = conn ?? (await ledgerConnection());
 
-    const rows = await db<SystemStateRow[]>`
-      SELECT now()                                                    AS read_at,
-
-             (SELECT count(*) FROM journal_entry)::int                AS journal_entries,
-             (SELECT count(*) FROM journal_entry
-               WHERE book = 'financial')::int                         AS financial_entries,
-             (SELECT count(*) FROM journal_entry
-               WHERE book = 'memo')::int                              AS memo_entries,
-             (SELECT count(*) FROM journal_line)::int                 AS journal_lines,
-             (SELECT COALESCE(MAX(booking_seq), 0)
-                FROM journal_entry)::bigint                           AS booking_watermark,
-             (SELECT MAX(booking_time) FROM journal_entry)            AS last_posted_at,
-
-             (SELECT count(*) FROM card_authorization)::int           AS card_authorisations,
-             (SELECT count(*) FROM card_auth_event)::int              AS card_auth_events,
-
-             -- v_hold_state is the schema's own answer to "is this hold still
-             -- withholding money": the memo balance, zeroed when closed(E).
-             -- Recomputing it here would be a second opinion about a number the
-             -- ledger already publishes, and v_hold_drift proves that one.
-             (SELECT count(*) FROM v_hold_state
-               WHERE active_hold_cents <> 0)::int                     AS active_holds,
-             (SELECT COALESCE(SUM(ABS(active_hold_cents)), 0)
-                FROM v_hold_state)::bigint                            AS active_hold_cents,
-
-             (SELECT count(*) FROM webhook_inbox)::int                AS webhook_total,
-             (SELECT count(*) FROM webhook_inbox
-               WHERE state = 'done')::int                             AS webhook_done,
-             (SELECT count(*) FROM webhook_inbox
-               WHERE state = 'pending')::int                          AS webhook_pending,
-             (SELECT count(*) FROM webhook_inbox
-               WHERE state = 'parked')::int                           AS webhook_parked,
-             (SELECT count(*) FROM webhook_inbox
-               WHERE state = 'dead')::int                             AS webhook_dead,
-             (SELECT MAX(received_at) FROM webhook_inbox)             AS last_delivery_at,
-
-             -- The trial balance, as two positive figures. Debit lines are
-             -- positive and credit lines negative in one signed column (§2.2),
-             -- so the credit total is negated to be read as a magnitude.
-             (SELECT COALESCE(SUM(l.amount_cents)
-                       FILTER (WHERE l.amount_cents > 0), 0)
-                FROM journal_line l
-                JOIN journal_entry e ON e.id = l.entry_id
-               WHERE e.book = 'financial')::bigint                    AS debit_cents,
-             (SELECT COALESCE(-SUM(l.amount_cents)
-                       FILTER (WHERE l.amount_cents < 0), 0)
-                FROM journal_line l
-                JOIN journal_entry e ON e.id = l.entry_id
-               WHERE e.book = 'financial')::bigint                    AS credit_cents,
-             (SELECT count(*) FROM v_trial_balance
-               WHERE book = 'financial')::int                         AS trial_balance_accounts,
-
-             (SELECT count(*) FROM account
-               WHERE code = '2100'
-                 AND business_id IS NOT NULL
-                 AND closed_at IS NULL)::int                          AS deposit_accounts`;
-
-    const row = rows[0];
-    if (row === undefined) {
-      // Unreachable against Postgres — a SELECT with no FROM returns one row —
-      // but a driver that returned nothing must not become `0 entries` on a
-      // screen that claims to be reading the live book.
-      return fail(
-        "HOME_SUMMARY_NO_ROW",
-        "the system-state query returned no row",
-        { retryable: true, source: "home.summary" },
-      );
-    }
+    const { platform, census } = await db.begin<{
+      platform: PlatformStateRow;
+      census: LedgerCensus;
+    }>(ONE_SNAPSHOT, async (tx) => {
+      // Issued together so the two round trips overlap. Order does not matter:
+      // the snapshot is taken by whichever statement reaches the server first,
+      // and both then read from it.
+      const [platformRow, censusRow] = await Promise.all([
+        readPlatformState(tx),
+        readLedgerCensus(tx),
+      ]);
+      return { platform: platformRow, census: censusRow };
+    });
 
     return ok({
-      readAt: row.read_at,
-      journalEntries: row.journal_entries,
-      financialEntries: row.financial_entries,
-      memoEntries: row.memo_entries,
-      journalLines: row.journal_lines,
-      bookingWatermark: row.booking_watermark,
-      lastPostedAt: row.last_posted_at,
-      cardAuthorisations: row.card_authorisations,
-      cardAuthEvents: row.card_auth_events,
-      activeHolds: row.active_holds,
-      activeHoldCents: row.active_hold_cents,
+      readAt: platform.read_at,
+      journalEntries: census.journal.journalEntries,
+      financialEntries: census.journal.financialEntries,
+      memoEntries: census.journal.memoEntries,
+      journalLines: census.journal.journalLines,
+      bookingWatermark: census.journal.bookingWatermark,
+      lastPostedAt: census.journal.lastPostedAt,
+      cardAuthorisations: platform.card_authorisations,
+      cardAuthEvents: platform.card_auth_events,
+      activeHolds: platform.active_holds,
+      activeHoldCents: platform.active_hold_cents,
       webhooks: {
-        total: row.webhook_total,
-        done: row.webhook_done,
-        pending: row.webhook_pending,
-        parked: row.webhook_parked,
-        dead: row.webhook_dead,
-        lastDeliveryAt: row.last_delivery_at,
+        total: platform.webhook_total,
+        done: platform.webhook_done,
+        pending: platform.webhook_pending,
+        parked: platform.webhook_parked,
+        dead: platform.webhook_dead,
+        lastDeliveryAt: platform.last_delivery_at,
       },
-      trialBalance: {
-        debitCents: row.debit_cents,
-        creditCents: row.credit_cents,
-        differenceCents: row.debit_cents - row.credit_cents,
-        accounts: row.trial_balance_accounts,
-      },
-      depositAccounts: row.deposit_accounts,
+      // The ledger's own figures, including the difference it derives rather
+      // than stores. This page no longer has an opinion about any of them.
+      trialBalance: census.trialBalance,
+      depositAccounts: census.depositAccounts,
     });
   } catch (thrown) {
+    if (thrown instanceof NoCensusRowError || thrown instanceof NoPlatformRowError) {
+      return fail("HOME_SUMMARY_NO_ROW", thrown.message, {
+        retryable: true,
+        source: "home.summary",
+      });
+    }
     return readFailure("system state", thrown);
   }
 }
@@ -294,31 +332,151 @@ export interface HealthView {
 }
 
 /**
- * The origin this request arrived on.
+ * The origin this deployment is reachable at, from an ALLOWLIST.
  *
- * Same-origin is the point: the landing page must read the health endpoint
- * *of this deployment*, not of a URL baked in at build time, or a preview
- * deployment would render production's verdicts. Vercel terminates TLS at the
- * edge, so `x-forwarded-proto` is what says whether the public URL is https —
- * the inbound request the function actually sees is plain http.
+ * ===========================================================================
+ * WHY THIS IS NOT "WHATEVER THE HOST HEADER SAID"
+ * ===========================================================================
+ *
+ * It was, and that was a hole with two distinct edges.
+ *
+ * `x-forwarded-host` is supplied by the caller. Trusting it meant the server
+ * issued an outbound `fetch` to a host the caller chose — a textbook
+ * server-side request forgery primitive, from a server that holds Neon,
+ * Lithic, Increase, Plaid and Circle credentials.
+ *
+ * The second edge is worse for this particular build, because it is an
+ * HONESTY failure and this trial fails hardest on those. The response of that
+ * fetch is parsed by `parseHealth` and rendered as THIS SYSTEM'S integration
+ * table — which slots are live, which are simulated. A caller who controls the
+ * fetched host controls that table. Everything else in this codebase exists to
+ * make sure a simulated capability is never presented as live: `/api/health`
+ * is declared the single authority, `scripts/audit-claims.mjs` runs to prove
+ * no document contradicts it, and `parseHealth` refuses to read the second,
+ * joined copy of the slot list because that copy once disagreed. A spoofable
+ * liveness panel undoes all of it in one request with one header.
+ *
+ * ===========================================================================
+ * SO THE HEADER IS A SELECTOR, NOT A SOURCE
+ * ===========================================================================
+ *
+ * The header still decides WHICH of several known origins to read, because the
+ * original reason for consulting it is real: a preview deployment must render
+ * its own verdicts rather than production's, and only the request knows which
+ * deployment it landed on. What it can no longer do is name an origin nobody
+ * configured. The permitted set comes entirely from the environment —
+ * `VERCEL_URL` (this deployment; the one case where the per-deployment host is
+ * the right one, because we are fetching OURSELVES), `VERCEL_BRANCH_URL` (the
+ * preview's branch alias), `VERCEL_PROJECT_PRODUCTION_URL`, the host of
+ * `APP_BASE_URL`, and the built-in production origin — plus loopback for local
+ * development.
+ *
+ * A host outside that set is not an error and does not throw: it falls back to
+ * the configured origin. Falling back renders a TRUE table for the wrong
+ * deployment, which is a far better failure than a true-looking table for an
+ * origin an attacker picked. There is no wildcard — `*.vercel.app` would be
+ * the same hole with an extra step, since anyone can deploy to that domain.
+ *
+ * Vercel terminates TLS at the edge, so `x-forwarded-proto` still says whether
+ * the public URL is https; the inbound request the function sees is plain
+ * http. The proto is only ever applied to a host that already passed the
+ * allowlist, so it cannot smuggle anything.
  */
-export function resolveOrigin(headers: {
-  get(name: string): string | null;
-}): string | null {
-  const host = headers.get("x-forwarded-host") ?? headers.get("host");
-  if (host === null || host.trim() === "") return null;
 
-  const forwarded = headers.get("x-forwarded-proto");
-  // A proxy chain sends a comma-separated list; the first hop is ours.
-  const declared = forwarded?.split(",")[0]?.trim();
-  const proto =
-    declared !== undefined && declared !== ""
-      ? declared
-      : /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host.trim())
-        ? "http"
-        : "https";
+/**
+ * The production origin, as a literal.
+ *
+ * The same constant, spelled the same way, already exists in
+ * `rails/plaid/adapter.ts` and `integrations/probes/lithic-webhooks.ts`, each
+ * keeping its own copy so the module depends on nothing outside itself. This
+ * is the third and it follows that convention deliberately: the landing page
+ * importing a Plaid adapter to learn its own address would be a worse coupling
+ * than one repeated string.
+ */
+export const DEFAULT_DEPLOYMENT_ORIGIN = "https://corgi-trial-psi.vercel.app";
 
-  return `${proto}://${host.trim()}`;
+/** `localhost`, `127.0.0.1` or `[::1]`, with or without a port. */
+const LOOPBACK = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+
+type ProcessEnv = Record<string, string | undefined>;
+
+/** Every host this deployment will fetch itself at, lowercased. */
+function permittedHosts(processEnv: ProcessEnv): ReadonlySet<string> {
+  const hosts = new Set<string>();
+
+  const add = (value: string | undefined): void => {
+    const trimmed = value?.trim();
+    if (trimmed === undefined || trimmed === "") return;
+    // Accept a bare host or a full URL; `APP_BASE_URL` is the latter.
+    try {
+      hosts.add(new URL(trimmed).host.toLowerCase());
+      return;
+    } catch {
+      hosts.add(trimmed.toLowerCase());
+    }
+  };
+
+  add(processEnv["VERCEL_URL"]);
+  add(processEnv["VERCEL_BRANCH_URL"]);
+  add(processEnv["VERCEL_PROJECT_PRODUCTION_URL"]);
+  add(processEnv["APP_BASE_URL"]);
+  add(DEFAULT_DEPLOYMENT_ORIGIN);
+
+  return hosts;
+}
+
+/**
+ * Where to read health when no header names a permitted host.
+ *
+ * Explicit configuration first, then the stable production host, then the
+ * built-in. Never `VERCEL_URL`: as a FALLBACK the per-deployment host is the
+ * wrong answer for the same reason the Lithic and Plaid probes refuse it — it
+ * is superseded within the hour. It is permitted ABOVE only because a request
+ * that actually arrived on it is, by definition, this deployment.
+ */
+function configuredOrigin(processEnv: ProcessEnv): string | null {
+  const base = processEnv["APP_BASE_URL"]?.trim();
+  if (base !== undefined && base !== "") {
+    return base.endsWith("/") ? base.slice(0, -1) : base;
+  }
+
+  const production = processEnv["VERCEL_PROJECT_PRODUCTION_URL"]?.trim();
+  if (production !== undefined && production !== "") return `https://${production}`;
+
+  return DEFAULT_DEPLOYMENT_ORIGIN;
+}
+
+export function resolveOrigin(
+  headers: { get(name: string): string | null },
+  processEnv: ProcessEnv = process.env,
+): string | null {
+  const permitted = permittedHosts(processEnv);
+
+  // `x-forwarded-host` first, then `host` — the original preference, kept,
+  // because on Vercel the former is the public name and the latter is
+  // internal. Both are now candidates rather than answers.
+  for (const raw of [headers.get("x-forwarded-host"), headers.get("host")]) {
+    const host = raw?.trim();
+    if (host === undefined || host === "") continue;
+    const loopback = LOOPBACK.test(host);
+    if (!loopback && !permitted.has(host.toLowerCase())) continue;
+
+    const forwarded = headers.get("x-forwarded-proto");
+    // A proxy chain sends a comma-separated list; the first hop is ours.
+    const declared = forwarded?.split(",")[0]?.trim();
+    const proto =
+      declared !== undefined && declared !== ""
+        ? declared
+        : loopback
+          ? "http"
+          : "https";
+
+    return `${proto}://${host}`;
+  }
+
+  // Nothing the request said is a host we are reachable at. Read the origin we
+  // were configured with instead of the one we were handed.
+  return configuredOrigin(processEnv);
 }
 
 /** The health probe fans out to five providers; each has its own 4s budget. */

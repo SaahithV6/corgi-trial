@@ -37,7 +37,13 @@ import type {
   AccrualView,
   Arithmetic,
   DayRow,
+  InterestArithmetic,
+  InterestDayRow,
+  InterestMonthRow,
+  InterestPanelView,
+  InterestScheduleRow,
   MonthRow,
+  RateCardRow,
   ScheduleRow,
 } from "@/components/accrual/data-contract";
 
@@ -55,6 +61,21 @@ import {
   type AccrualSchedule,
   type DailyAllocation,
 } from "./types";
+import {
+  listInterestMonths,
+  listInterestPostings,
+  listInterestSchedules,
+  listRateCard,
+  readInterestInvariants,
+} from "./interest-store";
+import {
+  explainInterest,
+  type DailyInterest,
+  type InterestMonth,
+  type InterestPosting,
+  type InterestRatePolicy,
+  type InterestSchedule,
+} from "./interest-types";
 
 /** The one bigint -> number narrowing in the read path. Refuses, never rounds. */
 function toCents(value: bigint): number {
@@ -141,12 +162,133 @@ function toMonthRow(month: AccrualMonth): MonthRow {
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/* Interest                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `toCents`'s sibling for the two operands of the exact fraction.
+ *
+ * They are COUNTS OF SCALED UNITS and not money — `|balance| × rateBps` and
+ * `10000 × dayCount` — so they get their own narrowing with its own name,
+ * rather than being pushed through a function called `toCents` that would make
+ * a reader think a numerator was a sum of money. The range check is the same,
+ * and it refuses rather than rounds for the same reason.
+ */
+function toScaledUnits(value: bigint): number {
+  if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < -BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(
+      `${value} scaled units is past Number.MAX_SAFE_INTEGER; the fraction cannot be rendered exactly`,
+    );
+  }
+  return Number(value);
+}
+
+function toInterestArithmetic(i: DailyInterest): InterestArithmetic {
+  return {
+    basisBalanceCents: toCents(i.basisBalanceCents),
+    side: i.side,
+    rateBps: i.rateBps,
+    dayCount: i.dayCount,
+    numerator: toScaledUnits(i.numerator),
+    denominator: toScaledUnits(i.denominator),
+    wholeCents: toCents(i.wholeCents),
+    remainderUnits: toScaledUnits(i.remainderUnits),
+    rounding: i.rounding,
+    amountCents: toCents(i.amountCents),
+    customerEffectCents: toCents(i.customerEffectCents),
+    // Built from the same integers the ledger used, not re-derived from the
+    // narrowed numbers — so the sentence and the figures cannot disagree.
+    explanation: explainInterest(i),
+  };
+}
+
+function toRateCardRow(p: InterestRatePolicy): RateCardRow {
+  return {
+    id: p.id,
+    tier: p.tier,
+    tierDescription: p.tierDescription,
+    effectiveFrom: p.effectiveFrom,
+    supersededOn: p.supersededOn,
+    creditRateBps: p.creditRateBps,
+    overdraftRateBps: p.overdraftRateBps,
+    dayCountDenominator: p.dayCountDenominator,
+    note: p.note,
+    createdAt: p.createdAt,
+    daysPriced: p.daysPriced,
+  };
+}
+
+function toInterestScheduleRow(s: InterestSchedule): InterestScheduleRow {
+  return {
+    id: s.id,
+    accountId: s.accountId,
+    accountName: s.accountName,
+    businessName: s.businessName,
+    rateTier: s.rateTier,
+    currency: s.currency,
+    startDate: s.startDate,
+    endDate: s.endDate,
+    scheduleKey: s.scheduleKey,
+    nextDueDate: s.nextDueDate,
+    currentBalanceCents: toCents(s.currentBalanceCents),
+  };
+}
+
+function toInterestDayRow(p: InterestPosting): InterestDayRow {
+  return {
+    interestDayId: p.interestDayId,
+    scheduleId: p.scheduleId,
+    accountId: p.accountId,
+    businessName: p.businessName,
+    rateTier: p.rateTier,
+    accrualDate: p.accrualDate,
+    idempotencyKey: p.idempotencyKey,
+    claimedAt: p.claimedAt,
+    claimedBy: p.claimedBy,
+    disposition: p.disposition,
+    entryId: p.entryId,
+    skipReason: p.skipReason,
+    arithmetic: p.interest === null ? null : toInterestArithmetic(p.interest),
+    policyId: p.policyId,
+    policyEffectiveFrom: p.policyEffectiveFrom,
+    // A decimal STRING, not a number: a booking sequence is an identity, it is
+    // never added to anything, and rendering it through `Number` would be the
+    // one place in this file where precision could be lost for no gain.
+    observedBookingSeq: p.observedBookingSeq === null ? null : p.observedBookingSeq.toString(),
+    decidedAt: p.decidedAt,
+    decidedByRun: p.decidedByRun,
+  };
+}
+
+function toInterestMonthRow(m: InterestMonth): InterestMonthRow {
+  return {
+    scheduleId: m.scheduleId,
+    businessName: m.businessName,
+    rateTier: m.rateTier,
+    monthStart: m.monthStart,
+    daysClaimed: m.daysClaimed,
+    daysPosted: m.daysPosted,
+    daysSkipped: m.daysSkipped,
+    daysCredit: m.daysCredit,
+    daysOverdraft: m.daysOverdraft,
+    daysRoundedUp: m.daysRoundedUp,
+    daysRoundedDown: m.daysRoundedDown,
+    daysTieToEven: m.daysTieToEven,
+    daysExact: m.daysExact,
+    creditInterestCents: toCents(m.creditInterestCents),
+    overdraftInterestCents: toCents(m.overdraftInterestCents),
+    minBasisCents: m.minBasisCents === null ? null : toCents(m.minBasisCents),
+    maxBasisCents: m.maxBasisCents === null ? null : toCents(m.maxBasisCents),
+  };
+}
+
 /**
  * Load the screen.
  *
- * One entry point, so the schedules, the months, the days and the invariants
- * are consistent as of one read rather than four that could interleave with a
- * concurrent tick.
+ * One entry point, so the schedules, the months, the days and the invariants —
+ * for BOTH products — are consistent as of one read rather than nine that
+ * could interleave with a concurrent tick.
  */
 export async function loadAccrualView(
   query: AccrualQuery = {},
@@ -154,13 +296,47 @@ export async function loadAccrualView(
   try {
     const asOf = new Date().toISOString();
 
-    const [bookDate, schedules, postings, months, invariants] = await Promise.all([
+    const [
+      bookDate,
+      schedules,
+      postings,
+      months,
+      invariants,
+      rateCard,
+      interestSchedules,
+      interestPostings,
+      interestMonths,
+      interestInvariants,
+    ] = await Promise.all([
       bookToday(),
       listSchedules(50),
       listPostings(240),
       listMonths(60),
       readInvariants(),
+      listRateCard(40),
+      listInterestSchedules(50),
+      listInterestPostings(240),
+      listInterestMonths(60),
+      readInterestInvariants(),
     ]);
+
+    const allInterestDays = interestPostings.map(toInterestDayRow);
+    const interestDays =
+      query.scheduleId === undefined
+        ? allInterestDays
+        : allInterestDays.filter((row) => row.scheduleId === query.scheduleId);
+
+    const interest: InterestPanelView = {
+      rateCard: rateCard.map(toRateCardRow),
+      schedules: interestSchedules.map(toInterestScheduleRow),
+      days: interestDays,
+      months: interestMonths.map(toInterestMonthRow),
+      invariants: interestInvariants,
+      selected:
+        query.interestDayId === undefined
+          ? null
+          : (allInterestDays.find((row) => row.interestDayId === query.interestDayId) ?? null),
+    };
 
     const allDays = postings.map(toDayRow);
 
@@ -186,6 +362,7 @@ export async function loadAccrualView(
       months: months.map(toMonthRow),
       invariants,
       selected,
+      interest,
     });
   } catch (thrown) {
     // A read failure is a VALUE here, so the screen's error state is a branch

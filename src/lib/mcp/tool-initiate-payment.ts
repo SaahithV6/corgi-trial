@@ -372,7 +372,9 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
         requested: money(amountCents),
         available: money(snapshot.availableCents),
         ledger: money(snapshot.ledgerCents),
-        held: money(snapshot.holdsCents + snapshot.unclearedCents),
+        held: money(
+          snapshot.holdsCents + snapshot.unclearedCents + snapshot.pendingOutboundCents,
+        ),
       },
     );
   }

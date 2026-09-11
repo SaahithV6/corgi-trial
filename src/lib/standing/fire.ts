@@ -320,6 +320,10 @@ async function fireOne(
                 ledgerCents: availability.ledgerCents,
                 holdsCents: availability.holdsCents,
                 unclearedCents: availability.unclearedCents,
+                // All FIVE terms since 0023. The row's CHECK constraint
+                // re-derives available from the other four and refuses a
+                // refusal that cannot be added up by hand.
+                pendingOutboundCents: availability.pendingOutboundCents,
                 availableCents: availability.availableCents,
               }),
           ...(decision.shortfallCents === undefined
@@ -394,6 +398,7 @@ async function fireOne(
                 ledgerCents: availability.ledgerCents,
                 holdsCents: availability.holdsCents,
                 unclearedCents: availability.unclearedCents,
+                pendingOutboundCents: availability.pendingOutboundCents,
                 availableCents: availability.availableCents,
               }),
         },

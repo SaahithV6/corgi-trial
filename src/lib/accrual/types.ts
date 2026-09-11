@@ -62,6 +62,8 @@
 
 import { z } from "zod";
 
+import type { InterestRunReport } from "./interest-types";
+
 /* -------------------------------------------------------------------------- */
 /* Vocabulary — mirrors the enums in 0020_accrual.sql exactly                  */
 /* -------------------------------------------------------------------------- */
@@ -380,6 +382,21 @@ export type AccrualRunResult = {
   /** Total cents posted by this tick. Zero on a pure replay. */
   readonly postedCents: bigint;
   readonly days: readonly DayReport[];
+  /**
+   * The interest leg of the SAME tick — see `interest.ts`.
+   *
+   * A separate field rather than more `days`, because they are different
+   * arithmetic on different tables with different exactly-once keys, and a
+   * reader of this report should not have to guess which rule produced a row.
+   *
+   * EVERY MONEY FIELD INSIDE IT IS A DECIMAL STRING, not a `bigint`.
+   * `/api/cron/accrual` serialises this whole object with `NextResponse.json`,
+   * `JSON.stringify` throws on a `bigint`, and that route hand-narrows exactly
+   * the four bigint fields it knows about. A new one would have been a 500 on
+   * the cron path — so the interest report crosses that boundary already
+   * narrowed, as decimal strings and never as `number`.
+   */
+  readonly interest: InterestRunReport;
   readonly durationMs: number;
 };
 

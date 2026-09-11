@@ -35,6 +35,7 @@ import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { postEntry } from "@/lib/ledger/post";
+import { findAccount, readAccountIdentity } from "@/lib/ledger/queries";
 import { fail, ok, type Result } from "@/lib/result";
 
 import { getPayment } from "./instructions";
@@ -95,13 +96,14 @@ async function contraAccountId(
   if (rail === "internal") {
     return destination.type === "internal" ? destination.accountId : null;
   }
-  const [row] = await conn<{ id: string }[]>`
-    SELECT id FROM account
-     WHERE code = ${HOUSE_CONTRA_CODE[rail]}
-       AND business_id IS NULL
-       AND entity_id = ${entityId}::uuid
-     LIMIT 1`;
-  return row?.id ?? null;
+  // The house settlement leaf for this rail, by code, scoped to the entity.
+  // `SELECT id FROM account WHERE code = …` appeared in six modules; this is
+  // the ledger's own filter, so there is one answer to "which account is 2300".
+  const account = await findAccount(
+    { code: HOUSE_CONTRA_CODE[rail], scope: "house", entityId },
+    conn,
+  );
+  return account?.accountId ?? null;
 }
 
 /**
@@ -124,13 +126,17 @@ export async function releasePayment(
 
   try {
     return await conn.begin(async (tx) => {
-      const [account] = await tx<{ entity_id: string }[]>`
-        SELECT entity_id FROM account WHERE id = ${instruction.accountId}::uuid`;
-      if (account === undefined) {
+      // `entity_id` is a column of `account` and a foreign key, not a
+      // definition of money — but reading it is still the ledger's to answer.
+      const account = await readAccountIdentity(
+        instruction.accountId,
+        tx as unknown as Sql,
+      );
+      if (account === null) {
         return fail("NO_SUCH_INSTRUCTION", "The account this payment leaves does not exist.");
       }
 
-      const contraId = await contraAccountId(payment, account.entity_id, tx as unknown as Sql);
+      const contraId = await contraAccountId(payment, account.entityId, tx as unknown as Sql);
       if (contraId === null) {
         return fail(
           "INVALID_REQUEST",
@@ -140,7 +146,7 @@ export async function releasePayment(
 
       const entryId = await postEntry(
         {
-          entityId: account.entity_id,
+          entityId: account.entityId,
           valueDate: instruction.valueDate,
           book: "financial",
           description: `Outbound ${instruction.rail} · ${describeDestination(instruction.destination)}`,

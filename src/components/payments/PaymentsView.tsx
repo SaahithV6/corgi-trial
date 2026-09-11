@@ -124,6 +124,7 @@ export async function PaymentsView({ view }: { readonly view: View }) {
             accounts={snapshot.accounts}
             policies={snapshot.policies}
             defaultValueDate={snapshot.defaultValueDate}
+            wirePayeesByBusiness={snapshot.wirePayeesByBusiness}
             prefill={view.state === "edge" ? edgePrefill(snapshot) : null}
             live={live}
           />

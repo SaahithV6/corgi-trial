@@ -12,34 +12,20 @@
  * returned to a tenant token even when an entry touches both sides.
  *
  * ---------------------------------------------------------------------------
- * TWO BUGS FOUND IN `ledger/balances.ts` WHILE WIRING THIS UP.
+ * THIS MODULE NO LONGER DEFINES A BALANCE. That is the most important fact
+ * about it, and it was not true until recently.
  *
- * `availableBalance()` there does not run against migration 0001, and would
- * return the wrong number if it did. Both were reproduced against the live
- * Neon branch. That file belongs to another worker in this build, so this one
- * is not edited — the findings are recorded here and in the handover.
- *
- *   1. It filters `hold h ... WHERE h.business_id = $1`. The `hold` table has
- *      no `business_id` column (0001 lines 218-239: account_id,
- *      memo_account_id, kind, external_ref, value_date, expires_at,
- *      available_at, policy_id, created_at). Postgres answers
- *      `column h.business_id does not exist`, so the call raises rather than
- *      returning a wrong balance — which is the better of the two failures.
- *      The join it wants is `hold.account_id -> account.business_id`.
- *
- *   2. Its `active_holds` CTE sums EVERY line of each hold's memo entries.
- *      `assert_entry_balanced()` (0001 §8) applies to the memo book as well as
- *      the financial one, so every one of those entries nets to exactly zero
- *      by construction, and the CTE therefore computes a hold size of 0 for
- *      every hold that ever existed. Available balance would silently equal
- *      ledger balance — the single number the brief says must be derived, and
- *      the one a hold demo is graded on. The sum has to be restricted to the
- *      hold's own memo leaf, `l.account_id = hold.memo_account_id`.
- *
- * So this module computes the hold itemisation itself, correctly, and uses
- * `balances.ts` for the three functions that ARE right and that carry the
- * bitemporal semantics: `ledgerBalanceAsOf`, `balanceAsBelieved` and
- * `bookingWatermarkAt`.
+ * Two bugs in `ledger/balances.ts`'s `availableBalance()` were found here while
+ * wiring this surface up — a `hold.business_id` column that does not exist, and
+ * an `active_holds` CTE summing every line of a memo entry that nets to zero by
+ * construction, which computed a hold size of 0 for every hold that ever
+ * existed. Both were reproduced against the live Neon branch. The response at
+ * the time was for this file to compute the hold itemisation itself, and that
+ * response was wrong in the long run: it made the agent surface the FIFTH
+ * definition of available balance in a system that had just spent a migration
+ * collapsing four. See the block below the imports for what replaced it and
+ * what that cost. Every money figure this file returns now comes from a
+ * function in `src/lib/ledger/**`.
  * ---------------------------------------------------------------------------
  */
 
@@ -48,24 +34,44 @@ import "server-only";
 import { getPayment, requestPayment } from "@/lib/approvals";
 import { destinationSchema, type PaymentDestination, type PayoutRail } from "@/lib/approvals/types";
 import { listCardsWithControls, listDecisions } from "@/lib/cards/store";
+// Reached past `@/lib/disputes`, deliberately: the barrel re-exports
+// `./operations`, which imports `postEntry`. See `listDisputes` below.
+import { listDisputeEvents, listDisputeStates } from "@/lib/disputes/store";
 import { loadPayeeBook } from "@/lib/payees/store";
 import { listPots as listPotsOfBusiness, readIdentity as readPotIdentity } from "@/lib/pots/store";
-import {
-  balanceAsBelieved,
-  bookingWatermarkAt,
-  ledgerBalanceAsOf,
-} from "@/lib/ledger/balances";
+import { bookingWatermarkAt } from "@/lib/ledger/balances";
 import { sql as defaultSql, type Sql } from "@/lib/ledger/db";
+import {
+  accountAvailability,
+  bookingTimeOfSeq,
+  currentBookingWatermark,
+  findAccount as findLedgerAccount,
+  holdItemisationAsOf,
+  listAccounts,
+  listLedgerLines,
+  readAccountIdentity,
+  readSnapshot,
+  type LedgerSnapshot,
+} from "@/lib/ledger/queries";
 import { toReconBreak } from "@/lib/recon/diff";
 
 import { ToolError } from "./types";
 import type {
   AccountRef,
+  AccrualDayRow,
+  AccrualFilter,
+  AccrualMonthRow,
+  AccrualPage,
+  AccrualScheduleRow,
   BalanceSnapshot,
   CardControlFilter,
   CardControlPage,
   CardControlRow,
   CardDecisionRow,
+  DisputeEventProjection,
+  DisputeFilter,
+  DisputePage,
+  DisputeRowProjection,
   Gateway,
   PayeeFilter,
   PayeeFindingRow,
@@ -87,16 +93,62 @@ import type {
   TransactionRow,
 } from "./types";
 
-/**
- * "Every value date there will ever be." Used when the caller asked for the
- * balance with no as-of, so that a future-dated entry is included exactly as
- * the rest of the product includes it. Not `now()`: two readers of the same
- * ledger disagreeing about whether a scheduled item counts is worse than
- * either answer alone.
+/*
+ * ===========================================================================
+ * THE FIFTH DEFINITION OF AVAILABLE BALANCE IS GONE. THIS IS THE ENTRY.
+ * ===========================================================================
+ *
+ * This file used to compute the agent's available balance itself, out of
+ * `holdItemisationAsOf` — and that computation differed from
+ * `ledger_availability()`, the definition every screen in the product uses,
+ * in two ways that both push the SAME DIRECTION:
+ *
+ *   1. it dropped `manual` holds, so an operator hold withheld nothing; and
+ *   2. it had no pending-outbound term, so a debit already booked to leave
+ *      tomorrow was still counted as spendable today.
+ *
+ * Both make the agent's figure LARGER than the customer's own screen. That is
+ * the worst possible direction for this particular error, because
+ * `initiate_payment` funds-checks against exactly this number: an agent could
+ * queue a payment the customer's screen says they cannot afford, and the whole
+ * safety argument for this surface is that an agent can only ever PROPOSE.
+ * A proposal built on a number nobody else agrees with is not a proposal, it
+ * is a disagreement with a customer's balance made on their behalf. Migration
+ * 0022 collapsed four such definitions that differed by $30,662.10; this was
+ * the fifth, and it escaped `v_balance_definition_drift` because that view
+ * compares the definitions it knows about and this one was never registered
+ * with it.
+ *
+ * So it is not registered — it is DELETED. Every figure below now comes from
+ * `accountAvailability()`, which is one call to `ledger_availability()`, the
+ * same Postgres function `v_available_balance` and the drift view are built
+ * on. There is no longer a fifth definition to keep in step.
+ *
+ * WHAT THAT COST, STATED PLAINLY. Three figures an agent could previously be
+ * given have moved, all of them DOWN:
+ *
+ *   * manual holds are now withheld;
+ *   * future-dated debits are now subtracted;
+ *   * future-dated CREDITS are no longer included — the old code asked for the
+ *     balance at value date 9999-12-31, which handed the demo account
+ *     $8,421.30 of standing-order credits value-dated 2027 as money it could
+ *     spend today.
+ *
+ * Every one of those changes is conservative, and conservative is the only
+ * defensible direction here: being cautious costs an agent a refusal it could
+ * have avoided, being permissive costs a customer a payment they could not
+ * afford.
+ *
+ * `holdItemisationAsOf` is still called, for ONE thing it can do that
+ * `ledger_availability()` cannot — it splits the hold total into card
+ * authorisations and uncleared credits and counts them, which is what turns
+ * "available is $X" into an itemisation a person can check. The MONEY comes
+ * from the authoritative function; the split and the counts are description.
+ * The manual-hold term, which used to be silently missing, is now visible as
+ * `otherHoldsCents` — the difference between the authoritative hold total and
+ * the card-auth holds the itemisation can name.
+ * ===========================================================================
  */
-const END_OF_TIME = "9999-12-31";
-
-const BOOK_TZ = "America/New_York";
 
 /**
  * The most occurrences one call will read across every mandate on the page.
@@ -110,6 +162,20 @@ const STANDING_OCCURRENCE_CEILING = 500;
 
 /** How deep a decline filter will scan. See the call site. */
 const DECISION_SCAN_CEILING = 300;
+
+/**
+ * How many of a business's dispute cases one call reads before filtering.
+ *
+ * `v_dispute_state` is a fold over the event stream, so status is computed and
+ * cannot be pushed into a WHERE clause without re-implementing the fold here —
+ * which is the one thing this file refuses to do, because a second opinion
+ * about whether a case is closed is a second opinion about whether the
+ * customer's money is theirs. So the fold is asked for the business's cases
+ * and the status filter is applied to the result. The ceiling bounds that: a
+ * business with more than 200 disputes is an incident, and the page the tool
+ * returns is capped far below it.
+ */
+const DISPUTE_SCAN_CEILING = 200;
 
 /**
  * `standing_order.counterparty` as a destination, or null.
@@ -192,37 +258,29 @@ export function liveGateway(options: GatewayOptions = {}): Gateway {
       // A tenant token cannot name a house account, so `1110` (the FBO cash
       // account, which is every customer's money pooled) is simply not
       // addressable through this surface.
-      const rows = await conn<
-        {
-          id: string;
-          code: string;
-          name: string;
-          currency: string;
-          book: "financial" | "memo";
-          is_postable: boolean;
-        }[]
-      >`
-        SELECT id, code, name, currency, book, is_postable
-          FROM account
-         WHERE business_id = ${businessId}::uuid
-           AND code = ${code}
-           AND closed_at IS NULL
-         LIMIT 1`;
-
-      const row = rows[0];
-      if (row === undefined) return null;
+      const account = await findLedgerAccount(
+        { businessId, code, includeClosed: false },
+        conn,
+      );
+      if (account === null) return null;
       return {
-        accountId: row.id,
-        code: row.code,
-        name: row.name,
-        currency: row.currency.trim(),
-        book: row.book,
-        isPostable: row.is_postable,
+        accountId: account.accountId,
+        code: account.code,
+        name: account.name,
+        currency: account.currency,
+        book: account.book,
+        isPostable: account.isPostable,
       };
     },
 
     async balanceNow(businessId: string, accountId: string): Promise<BalanceSnapshot> {
-      return snapshot(conn, businessId, accountId, END_OF_TIME, null, null);
+      // ONE snapshot, three axes, taken once. `readSnapshot` is the ledger's
+      // own live point — `clock_timestamp()` rather than `now()`, today's
+      // business day from the database's `book_date()`, and the highest
+      // booking sequence we have learned. Three reads against three separate
+      // `now()` calls drift by however long the round trips took.
+      const point = await readSnapshot(conn);
+      return snapshot(conn, businessId, accountId, point);
     },
 
     async balanceAsOf(
@@ -231,13 +289,26 @@ export function liveGateway(options: GatewayOptions = {}): Gateway {
       asOfValueDate: string,
       asOfBookingSeq: bigint | null,
     ): Promise<BalanceSnapshot> {
-      // The closure cut-off has to be a wall clock, because `hold_closure`
-      // carries `closed_at` and no booking sequence. Translating the
-      // watermark back into an instant keeps the two axes consistent: a hold
-      // released after the moment we are asking about was still open then.
-      const closureCutoff =
-        asOfBookingSeq === null ? null : await bookingTimeOfSeq(conn, asOfBookingSeq);
-      return snapshot(conn, businessId, accountId, asOfValueDate, asOfBookingSeq, closureCutoff);
+      // The hold-release predicate needs a wall clock, because `hold_closure`
+      // carries `closed_at` and no booking sequence. Translating the watermark
+      // back into an instant keeps the two axes consistent: a hold released
+      // after the moment we are asking about was still open then. With no
+      // watermark, the question is "what does today's knowledge say about that
+      // business day", so the instant is now and the watermark is the live one.
+      const [asOf, watermark] = await Promise.all([
+        asOfBookingSeq === null
+          ? Promise.resolve(null)
+          : bookingTimeOfSeq(asOfBookingSeq, conn),
+        asOfBookingSeq === null
+          ? currentBookingWatermark(conn)
+          : Promise.resolve(asOfBookingSeq),
+      ]);
+
+      return snapshot(conn, businessId, accountId, {
+        asOf: asOf ?? new Date(),
+        valueDate: asOfValueDate,
+        bookingWatermark: watermark,
+      });
     },
 
     async bookingWatermarkAt(at: Date): Promise<bigint> {
@@ -248,96 +319,56 @@ export function liveGateway(options: GatewayOptions = {}): Gateway {
       businessId: string,
       filter: TransactionFilter,
     ): Promise<TransactionPage> {
-      const clauses = [conn`a.business_id = ${businessId}::uuid`];
-      if (filter.accountCode !== null) clauses.push(conn`a.code = ${filter.accountCode}`);
-      if (filter.valueDateFrom !== null) {
-        clauses.push(conn`l.value_date >= ${filter.valueDateFrom}::date`);
-      }
-      if (filter.valueDateTo !== null) {
-        clauses.push(conn`l.value_date <= ${filter.valueDateTo}::date`);
-      }
-      if (filter.bookingDateFrom !== null) {
-        clauses.push(
-          conn`(e.booking_time AT TIME ZONE ${BOOK_TZ})::date >= ${filter.bookingDateFrom}::date`,
-        );
-      }
-      if (filter.bookingDateTo !== null) {
-        clauses.push(
-          conn`(e.booking_time AT TIME ZONE ${BOOK_TZ})::date <= ${filter.bookingDateTo}::date`,
-        );
-      }
-      if (filter.rail !== null) clauses.push(conn`e.rail = ${filter.rail}::rail`);
-      if (filter.book !== null) clauses.push(conn`e.book = ${filter.book}::account_book`);
-      if (filter.cursorBookingSeqBelow !== null) {
-        clauses.push(conn`l.booking_seq < ${filter.cursorBookingSeqBelow}`);
-      }
-
-      const where = clauses.reduce((acc, clause) => conn`${acc} AND ${clause}`);
-
-      // One extra row, to answer "is there a next page" without a count(*).
-      const rows = await conn<
+      // ONE EXTRA ROW, to answer "is there a next page" without a count(*).
+      //
+      // The query itself is `listLedgerLines` now. It used to be assembled
+      // here out of nine optional `conn\`…\`` fragments reduced into a WHERE
+      // clause — which meant the agent surface owned its own definition of
+      // what a transaction row is, columns, sign convention and all. An agent
+      // and a screen disagreeing about a customer's transactions is the exact
+      // failure `src/lib/ledger/boundary.test.ts` was written to stop, and it
+      // would have happened in front of a customer.
+      const rows = await listLedgerLines(
         {
-          entry_id: string;
-          code: string;
-          name: string;
-          value_date: string;
-          booking_date: string;
-          booking_time: Date;
-          booking_seq: bigint;
-          entry_type: "original" | "reversal" | "rebook";
-          book: "financial" | "memo";
-          description: string;
-          rail: string | null;
-          external_ref: string | null;
-          amount_cents: bigint;
-          currency: string;
-          memo: string | null;
-          reverses_entry_id: string | null;
-          correction_group_id: string | null;
-        }[]
-      >`
-        SELECT e.id                                        AS entry_id,
-               a.code, a.name,
-               l.value_date::text                          AS value_date,
-               (e.booking_time AT TIME ZONE ${BOOK_TZ})::date::text AS booking_date,
-               e.booking_time,
-               l.booking_seq,
-               e.entry_type, e.book, e.description, e.rail, e.external_ref,
-               (l.amount_cents * a.normal_side)::bigint    AS amount_cents,
-               l.currency, l.memo,
-               e.reverses_entry_id, e.correction_group_id
-          FROM journal_line l
-          JOIN account a       ON a.id = l.account_id
-          JOIN journal_entry e ON e.id = l.entry_id
-         WHERE ${where}
-         ORDER BY l.booking_seq DESC, l.ordinal ASC
-         LIMIT ${filter.limit + 1}`;
+          businessId,
+          accountCode: filter.accountCode,
+          valueDateFrom: filter.valueDateFrom,
+          valueDateTo: filter.valueDateTo,
+          bookingDateFrom: filter.bookingDateFrom,
+          bookingDateTo: filter.bookingDateTo,
+          rail: filter.rail,
+          book: filter.book,
+          bookingSeqBelow: filter.cursorBookingSeqBelow,
+          limit: filter.limit + 1,
+        },
+        conn,
+      );
 
       const page = rows.slice(0, filter.limit);
       const last = page[page.length - 1];
       const nextCursor =
-        rows.length > filter.limit && last !== undefined ? last.booking_seq.toString() : null;
+        rows.length > filter.limit && last !== undefined ? last.bookingSeq.toString() : null;
 
       return {
         rows: page.map(
           (r): TransactionRow => ({
-            entryId: r.entry_id,
-            accountCode: r.code,
-            accountName: r.name,
-            valueDate: r.value_date,
-            bookingDate: r.booking_date,
-            bookingTime: r.booking_time.toISOString(),
-            bookingSeq: r.booking_seq,
-            entryType: r.entry_type,
+            entryId: r.entryId,
+            accountCode: r.accountCode,
+            accountName: r.accountName,
+            valueDate: r.valueDate,
+            bookingDate: r.bookingDate,
+            bookingTime: r.bookingTime.toISOString(),
+            bookingSeq: r.bookingSeq,
+            entryType: r.entryType,
             book: r.book,
             description: r.description,
             rail: r.rail,
-            externalRef: r.external_ref,
-            amountCents: r.amount_cents,
-            currency: r.currency.trim(),
+            externalRef: r.externalRef,
+            amountCents: r.amountCents,
+            currency: r.currency,
             memo: r.memo,
-            reversesEntryId: r.reverses_entry_id,
-            correctionGroupId: r.correction_group_id,
+            reversesEntryId: r.reversesEntryId,
+            correctionGroupId: r.correctionGroupId,
           }),
         ),
         nextCursor,
@@ -376,6 +407,15 @@ export function liveGateway(options: GatewayOptions = {}): Gateway {
            AND (${filter.includeExplained} OR v.explained_by IS NULL)
            AND (${filter.category}::text IS NULL OR v.break_kind = ${filter.category}::text)
            AND (${filter.minAgeDays}::int IS NULL OR v.age_days >= ${filter.minAgeDays}::int)
+           -- TENANCY STAYS IN SQL, and it is the one ledger reference in
+           -- this file that is NOT moving behind a named reader. See the
+           -- paragraph above: a pre-fetch is a filter someone can forget to
+           -- apply, and on an agent surface the thing being forgotten would be
+           -- tenant isolation. Expressing it as "ask the ledger which of these
+           -- entries are yours, then filter in TypeScript" makes the isolation
+           -- a step rather than a predicate, and a step can be reordered,
+           -- short-circuited or dropped by someone editing the paging logic.
+           -- Two references, deliberately kept. DECISIONS has the argument.
            AND EXISTS (
                  SELECT 1
                    FROM journal_line l
@@ -731,6 +771,306 @@ export function liveGateway(options: GatewayOptions = {}): Gateway {
       };
     },
 
+    async listDisputes(businessId: string, filter: DisputeFilter): Promise<DisputePage> {
+      // `listDisputeStates` is the disputes module's OWN read of
+      // `v_dispute_state`, and it already takes a business id — the tenant
+      // predicate is in its WHERE clause, not applied here afterwards.
+      //
+      // IMPORTED FROM `@/lib/disputes/store` AND NOT FROM `@/lib/disputes`.
+      // The barrel re-exports `./operations`, which imports `postEntry`. A
+      // named import from the barrel would bring in one binding and nothing
+      // else, so nothing would become CALLABLE — but it would put the
+      // journal-writing module into this process's graph, and "the MCP module
+      // does not import ledger/post.ts" is the strongest sentence in
+      // docs/AGENT-LIMITS.md. It stays true by reaching past the barrel.
+      // `no-write-imports.test.ts` now fails the build on either spelling.
+      const states = await listDisputeStates(
+        { businessId, limit: DISPUTE_SCAN_CEILING },
+        conn,
+      );
+
+      // Counted over every case, then filtered. A caller asking for open cases
+      // and being told "0" should still learn that eleven closed ones exist —
+      // otherwise "do we have any disputes" gets the wrong answer from the
+      // tool that was supposed to know.
+      const openCount = states.filter((s) => !s.isClosed).length;
+      const closedCount = states.length - openCount;
+
+      const matched = states.filter((state) => {
+        if (filter.status !== null) return state.status === filter.status;
+        if (filter.openOnly && state.isClosed) return false;
+        return true;
+      });
+
+      const page = matched.slice(0, filter.limit);
+
+      // One events query per case on the page, in parallel, and only when the
+      // caller asked. A case has at most a dozen events, and the page is
+      // capped at 25 — so this is bounded by construction rather than by hope.
+      const eventsByCase = filter.includeEvents
+        ? await Promise.all(page.map((state) => listDisputeEvents(state.id, conn)))
+        : page.map(() => []);
+
+      return {
+        cases: page.map((state, index): DisputeRowProjection => {
+          const events = eventsByCase[index] ?? [];
+          return {
+            disputeId: state.id,
+            caseRef: state.caseRef,
+            disputedEntryId: state.disputedEntryId,
+            reason: state.reason,
+            network: state.network,
+            networkCode: state.networkCode,
+            narrative: state.narrative,
+            amountCents: state.amountCents,
+            status: state.status,
+            isClosed: state.isClosed,
+            raisedByName: state.raisedByName,
+            raisedAt: state.raisedAt,
+            valueDate: state.valueDate,
+            decidedOn: state.decidedOn,
+            networkOutsideDate: state.networkOutsideDate,
+            daysToOutsideDate: state.daysToOutsideDate,
+            advancedCents: state.advancedCents,
+            heldCents: state.heldCents,
+            holdReleased: state.holdReleased,
+            needsAuthorization: state.needsAuthorization,
+            authorizations: state.authorizations,
+            requiredApprovals: state.requiredApprovals,
+            thresholdCents: state.thresholdCents,
+            events: events.map(
+              (event): DisputeEventProjection => ({
+                kind: event.kind,
+                occurredAt: event.occurredAt,
+                valueDate: event.valueDate,
+                actorName: event.actorName,
+                actorKind: event.actorKind,
+                amountCents: event.amountCents,
+                entryId: event.entryId,
+                detail: event.detail,
+              }),
+            ),
+          };
+        }),
+        openCount,
+        closedCount,
+      };
+    },
+
+    async listAccruals(businessId: string, filter: AccrualFilter): Promise<AccrualPage> {
+      // TENANCY WITHOUT TOUCHING THE LEDGER'S TABLES.
+      //
+      // The accrual tables key on `account_id` and carry no `business_id`, so
+      // the obvious query is `JOIN account a ON a.id = s.account_id WHERE
+      // a.business_id = $1` — seven times over, once per statement below. That
+      // is seven new direct references to `account` from a module outside
+      // `src/lib/ledger/**`, which is precisely the debt `ledger/boundary.test.ts`
+      // is a ratchet against: 235 such references across 50 files is how this
+      // system ended up with four disagreeing definitions of a balance.
+      //
+      // So the business's accounts are resolved ONCE, through the ledger's own
+      // named reader, and the accrual queries filter on that id list. The list
+      // is small — a business has a handful of leaves — and it comes from the
+      // single definition of "which accounts are this business's" rather than
+      // from a predicate this file writes seven times and could get subtly
+      // wrong in one of them.
+      //
+      // `v_accrual_month` is the exception and it needs no help: the view
+      // carries its own `business_id` column, so the predicate is direct.
+      const accounts = await listAccounts({ businessId }, conn);
+      const accountIds = accounts.map((a) => a.accountId);
+      if (accountIds.length === 0) {
+        return {
+          schedules: [],
+          months: [],
+          days: [],
+          invariants: { monthDrift: 0, ledgerDrift: 0, unresolved: 0, gapDays: 0 },
+          accruedToDateCents: 0n,
+        };
+      }
+
+      // What is NOT re-derived here is the arithmetic. Every figure below is a
+      // stored column that `accrual_posting_arithmetic` re-computed with
+      // `accrual_daily_share()` before Postgres would accept the row.
+      const [schedules, months, days, invariants, accrued] = await Promise.all([
+        conn<
+          {
+            schedule_id: string;
+            plan_name: string;
+            product: string;
+            account_id: string;
+            monthly_cents: bigint;
+            currency: string;
+            start_date: string;
+            end_date: string | null;
+          }[]
+        >`
+          SELECT s.id AS schedule_id, s.plan_name, s.product::text AS product,
+                 s.account_id, s.monthly_cents, s.currency,
+                 s.start_date::text AS start_date, s.end_date::text AS end_date
+            FROM accrual_schedule s
+           WHERE s.account_id = ANY(${accountIds}::uuid[])
+           ORDER BY s.start_date DESC, s.plan_name
+           LIMIT ${filter.scheduleLimit}`,
+
+        conn<
+          {
+            schedule_id: string;
+            plan_name: string;
+            month_start: string;
+            days_in_month: number;
+            monthly_cents: bigint;
+            residual_pennies_in_month: number;
+            residual_pennies_applied: bigint;
+            days_claimed: bigint;
+            days_decided: bigint;
+            days_posted: bigint;
+            days_skipped: bigint;
+            accrued_cents: bigint;
+            remaining_cents: bigint;
+            month_complete: boolean;
+          }[]
+        >`
+          SELECT m.schedule_id, m.plan_name, m.month_start::text AS month_start,
+                 m.days_in_month, m.monthly_cents, m.residual_pennies_in_month,
+                 m.residual_pennies_applied, m.days_claimed, m.days_decided,
+                 m.days_posted, m.days_skipped,
+                 -- SUM(bigint) is numeric in Postgres and the driver's bigint
+                 -- override keys on OID 20, so an uncast aggregate arrives as
+                 -- a JS number. Cast, or the money silently stops being exact.
+                 m.accrued_cents::bigint   AS accrued_cents,
+                 m.remaining_cents::bigint AS remaining_cents,
+                 m.month_complete
+            FROM v_accrual_month m
+           WHERE m.business_id = ${businessId}::uuid
+           ORDER BY m.month_start DESC, m.plan_name
+           LIMIT ${filter.monthLimit}`,
+
+        conn<
+          {
+            schedule_id: string;
+            plan_name: string;
+            accrual_date: string;
+            disposition: "posted" | "skipped" | null;
+            entry_id: string | null;
+            skip_reason: string | null;
+            monthly_cents: bigint | null;
+            days_in_month: number | null;
+            day_of_month: number | null;
+            base_share_cents: bigint | null;
+            residual_pennies: number | null;
+            residual_applied: boolean | null;
+            amount_cents: bigint | null;
+            cumulative_cents: bigint | null;
+            claimed_at: Date;
+            decided_at: Date | null;
+          }[]
+        >`
+          SELECT ad.schedule_id, s.plan_name,
+                 ad.accrual_date::text AS accrual_date,
+                 ap.disposition::text  AS disposition,
+                 ap.entry_id, ap.skip_reason,
+                 ap.monthly_cents, ap.days_in_month, ap.day_of_month,
+                 ap.base_share_cents, ap.residual_pennies, ap.residual_applied,
+                 ap.amount_cents, ap.cumulative_cents,
+                 ad.claimed_at, ap.decided_at
+            FROM accrual_day ad
+            JOIN accrual_schedule s ON s.id = ad.schedule_id
+            LEFT JOIN accrual_posting ap ON ap.accrual_day_id = ad.id
+           WHERE s.account_id = ANY(${accountIds}::uuid[])
+             AND (${filter.includeSkipped} OR ap.disposition IS DISTINCT FROM 'skipped')
+           ORDER BY ad.accrual_date DESC, s.plan_name
+           LIMIT ${filter.dayLimit}`,
+
+        conn<
+          { month_drift: bigint; ledger_drift: bigint; unresolved: bigint; gap_days: bigint }[]
+        >`
+          SELECT
+            (SELECT count(*) FROM v_accrual_month_drift d
+              WHERE d.account_id = ANY(${accountIds}::uuid[]))   AS month_drift,
+            (SELECT count(*)
+               FROM v_accrual_ledger_drift d
+               JOIN accrual_day ad      ON ad.id = d.accrual_day_id
+               JOIN accrual_schedule s  ON s.id  = ad.schedule_id
+              WHERE s.account_id = ANY(${accountIds}::uuid[]))   AS ledger_drift,
+            (SELECT count(*) FROM v_accrual_unresolved u
+              WHERE u.account_id = ANY(${accountIds}::uuid[]))   AS unresolved,
+            (SELECT count(*) FROM v_accrual_gap g
+              WHERE g.account_id = ANY(${accountIds}::uuid[]))   AS gap_days`,
+
+        conn<{ total: bigint }[]>`
+          SELECT COALESCE(SUM(ap.amount_cents), 0)::bigint AS total
+            FROM accrual_posting ap
+            JOIN accrual_day ad     ON ad.id = ap.accrual_day_id
+            JOIN accrual_schedule s ON s.id  = ad.schedule_id
+           WHERE s.account_id = ANY(${accountIds}::uuid[])
+             AND ap.disposition = 'posted'`,
+      ]);
+
+      const counts = invariants[0];
+      const nameOf = new Map(accounts.map((a) => [a.accountId, a.name]));
+
+      return {
+        schedules: schedules.map(
+          (row): AccrualScheduleRow => ({
+            scheduleId: row.schedule_id,
+            planName: row.plan_name,
+            product: row.product,
+            accountName: nameOf.get(row.account_id) ?? "",
+            monthlyCents: row.monthly_cents,
+            currency: row.currency.trim(),
+            startDate: row.start_date,
+            endDate: row.end_date,
+          }),
+        ),
+        months: months.map(
+          (row): AccrualMonthRow => ({
+            scheduleId: row.schedule_id,
+            planName: row.plan_name,
+            monthStart: row.month_start,
+            daysInMonth: row.days_in_month,
+            monthlyCents: row.monthly_cents,
+            residualPenniesInMonth: row.residual_pennies_in_month,
+            residualPenniesApplied: Number(row.residual_pennies_applied),
+            daysClaimed: Number(row.days_claimed),
+            daysDecided: Number(row.days_decided),
+            daysPosted: Number(row.days_posted),
+            daysSkipped: Number(row.days_skipped),
+            accruedCents: row.accrued_cents,
+            remainingCents: row.remaining_cents,
+            monthComplete: row.month_complete,
+          }),
+        ),
+        days: days.map(
+          (row): AccrualDayRow => ({
+            scheduleId: row.schedule_id,
+            planName: row.plan_name,
+            accrualDate: row.accrual_date,
+            disposition: row.disposition,
+            entryId: row.entry_id,
+            skipReason: row.skip_reason,
+            monthlyCents: row.monthly_cents,
+            daysInMonth: row.days_in_month,
+            dayOfMonth: row.day_of_month,
+            baseShareCents: row.base_share_cents,
+            residualPennies: row.residual_pennies,
+            residualApplied: row.residual_applied,
+            amountCents: row.amount_cents,
+            cumulativeCents: row.cumulative_cents,
+            claimedAt: row.claimed_at.toISOString(),
+            decidedAt: row.decided_at?.toISOString() ?? null,
+          }),
+        ),
+        invariants: {
+          monthDrift: Number(counts?.month_drift ?? 0n),
+          ledgerDrift: Number(counts?.ledger_drift ?? 0n),
+          unresolved: Number(counts?.unresolved ?? 0n),
+          gapDays: Number(counts?.gap_days ?? 0n),
+        },
+        accruedToDateCents: accrued[0]?.total ?? 0n,
+      };
+    },
+
     async queuePayment(input: QueuePaymentInput): Promise<QueuedPayment> {
       // `requestPayment` is the approvals module's own entry point for this
       // surface. It validates, picks the policy version in force on the value
@@ -809,90 +1149,74 @@ async function snapshot(
   conn: Sql,
   businessId: string,
   accountId: string,
-  asOfValueDate: string,
-  asOfBookingSeq: bigint | null,
-  closureCutoff: Date | null,
+  point: LedgerSnapshot,
 ): Promise<BalanceSnapshot> {
-  const ledgerCents =
-    asOfBookingSeq === null
-      ? await ledgerBalanceAsOf(accountId, asOfValueDate, conn)
-      : await balanceAsBelieved(accountId, asOfValueDate, asOfBookingSeq, conn);
+  // THE TENANT CHECK, MADE EXPLICIT RATHER THAN INHERITED.
+  //
+  // Every caller reaches this through `findAccount(businessId, code)`, so the
+  // account id is already the product of a scoped lookup. That is not a
+  // boundary — it is a boundary that depends on an earlier query having been
+  // correct, which this file refuses to rely on elsewhere and should not rely
+  // on here. `ledger_availability()` takes an account id and no business, so
+  // the predicate that used to ride along inside the hold query has to be
+  // stated somewhere, and stating it is one indexed lookup by primary key.
+  const identity = await readAccountIdentity(accountId, conn);
+  if (identity === null || identity.businessId !== businessId) {
+    throw new ToolError(
+      "ACCOUNT_NOT_FOUND",
+      "That account does not belong to the business this token is scoped to.",
+    );
+  }
 
-  const rows = await conn<
-    {
-      holds_cents: bigint;
-      uncleared_cents: bigint;
-      card_hold_count: number;
-      uncleared_hold_count: number;
-    }[]
-  >`
-    WITH scoped AS (
-      SELECT h.id, h.kind, h.memo_account_id
-        FROM hold h
-        JOIN account a ON a.id = h.account_id
-       WHERE a.business_id = ${businessId}::uuid
-         AND h.account_id  = ${accountId}::uuid
-         AND h.value_date <= ${asOfValueDate}::date
-         AND NOT EXISTS (
-               SELECT 1 FROM hold_closure c
-                WHERE c.hold_id = h.id
-                  AND (${closureCutoff}::timestamptz IS NULL
-                       OR c.closed_at <= ${closureCutoff}::timestamptz)
-                  -- ...and the closure has not been reversed as at the same
-                  -- cut-off. Without this an agent reads a balance $60.00
-                  -- higher than the customer's, on holds that are still
-                  -- authorised. See migration 0011.
-                  AND NOT EXISTS (
-                        SELECT 1 FROM hold_closure_reversal r
-                         WHERE r.hold_id = c.hold_id
-                           AND (${closureCutoff}::timestamptz IS NULL
-                                OR r.reversed_at <= ${closureCutoff}::timestamptz)))
+  // THE ONE DEFINITION. `accountAvailability` is a single call to
+  // `ledger_availability()` — the same function `v_available_balance` and
+  // `v_balance_definition_drift` are built on, and therefore the same number
+  // the customer's own screen shows. See the block at the top of this file for
+  // what this replaced and what it cost.
+  //
+  // The itemisation runs beside it for the hold SPLIT and the counts, which
+  // the availability function does not return. Its money terms are used only
+  // to name the card-authorisation share; the totals are the authority's.
+  const [availability, itemisation] = await Promise.all([
+    accountAvailability(accountId, point, conn),
+    holdItemisationAsOf(
+      {
+        businessId,
+        accountId,
+        asOfValueDate: point.valueDate,
+        asOfBookingSeq: point.bookingWatermark,
+        closureCutoff: point.asOf,
+      },
+      conn,
     ),
-    sized AS (
-      SELECT s.id, s.kind,
-             COALESCE(SUM(l.amount_cents), 0)::bigint AS cents
-        FROM scoped s
-        LEFT JOIN journal_entry e ON e.hold_id = s.id
-        LEFT JOIN journal_line  l ON l.entry_id   = e.id
-                                 AND l.account_id = s.memo_account_id
-                                 AND l.value_date <= ${asOfValueDate}::date
-                                 AND (${asOfBookingSeq}::bigint IS NULL
-                                      OR l.booking_seq <= ${asOfBookingSeq}::bigint)
-       GROUP BY s.id, s.kind
-    )
-    SELECT COALESCE(SUM(ABS(cents)) FILTER (WHERE kind = 'card_auth'), 0)::bigint
-             AS holds_cents,
-           COALESCE(SUM(ABS(cents)) FILTER (WHERE kind = 'uncleared_credit'), 0)::bigint
-             AS uncleared_cents,
-           COUNT(*) FILTER (WHERE kind = 'card_auth'        AND cents <> 0)::int
-             AS card_hold_count,
-           COUNT(*) FILTER (WHERE kind = 'uncleared_credit' AND cents <> 0)::int
-             AS uncleared_hold_count
-      FROM sized`;
+  ]);
 
-  const r = rows[0];
-  const holdsCents = r?.holds_cents ?? 0n;
-  const unclearedCents = r?.uncleared_cents ?? 0n;
+  // Everything the itemisation can name, and everything it cannot, separately.
+  // `otherHoldsCents` is the term that was previously missing altogether: the
+  // authoritative hold total less the card authorisations, which is the
+  // operator (`manual`) holds. Clamped at zero because it is a description
+  // rather than an input — if the two ever disagreed the other way, the
+  // authoritative total still stands and the split is what is wrong.
+  const cardAuthHoldsCents =
+    itemisation.holdsCents > availability.holdsCents
+      ? availability.holdsCents
+      : itemisation.holdsCents;
+  const otherHoldsCents = availability.holdsCents - cardAuthHoldsCents;
 
   return {
-    ledgerCents,
-    holdsCents,
-    unclearedCents,
+    ledgerCents: availability.ledgerCents,
+    holdsCents: availability.holdsCents,
+    cardAuthHoldsCents,
+    otherHoldsCents,
+    unclearedCents: availability.unclearedCents,
+    pendingOutboundCents: availability.pendingOutboundCents,
     // Allowed to go negative, deliberately: an over-captured fuel-pump
     // authorisation settles above what was authorised and the customer really
     // is overdrawn. A floor at zero would hide that from the agent.
-    availableCents: ledgerCents - holdsCents - unclearedCents,
-    cardHoldCount: r?.card_hold_count ?? 0,
-    unclearedHoldCount: r?.uncleared_hold_count ?? 0,
+    availableCents: availability.availableCents,
+    cardHoldCount: itemisation.cardHoldCount,
+    unclearedHoldCount: itemisation.unclearedHoldCount,
   };
 }
 
-/** The wall clock at which a booking sequence was recorded. */
-async function bookingTimeOfSeq(conn: Sql, seq: bigint): Promise<Date | null> {
-  const rows = await conn<{ booking_time: Date }[]>`
-    SELECT booking_time FROM journal_entry
-     WHERE booking_seq <= ${seq}
-     ORDER BY booking_seq DESC
-     LIMIT 1`;
-  return rows[0]?.booking_time ?? null;
-}
+

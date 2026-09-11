@@ -37,6 +37,18 @@ const d = RUN ? describe : describe.skip;
 
 const TOKEN_A = "corgi_mcp_integration_ridgeline_0001";
 const TOKEN_B = "corgi_mcp_integration_kettle_000002";
+/**
+ * A third grant, scoped to whichever business actually has dispute cases and
+ * accrual postings.
+ *
+ * `businessA` is "the first KYB-approved business with a 2100 leaf, by legal
+ * name", which is the right fixture for balances and payments and is not
+ * necessarily the one carrying disputes. Asserting the shape of an empty list
+ * proves nothing, and loosening the assertion to `>= 0` would be a test that
+ * passes whether or not the query works. So the data is found first and the
+ * token is pointed at it.
+ */
+const TOKEN_C = "corgi_mcp_integration_disputes_003";
 const URL = "http://localhost:3000/api/mcp";
 
 d("the MCP surface, against the live database", () => {
@@ -49,6 +61,8 @@ d("the MCP surface, against the live database", () => {
   let businessB: string;
   let agentActorId: string;
   let humanApproverId: string;
+  let businessWithDisputes: string | null;
+  let businessWithAccrual: string | null;
   let run: number;
 
   async function post(body: unknown, token: string | null = TOKEN_A): Promise<Response> {
@@ -127,6 +141,25 @@ d("the MCP surface, against the live database", () => {
     agentActorId = agent.id;
     humanApproverId = human.id;
 
+    const [disputed] = await sql<{ business_id: string }[]>`
+      SELECT business_id FROM v_dispute_state GROUP BY business_id ORDER BY count(*) DESC LIMIT 1`;
+    businessWithDisputes = disputed?.business_id ?? null;
+
+    // Asked of `v_accrual_month`, which carries its own `business_id`, rather
+    // than by joining `account` — `ledger/boundary.test.ts` is a ratchet on
+    // direct references to the ledger's tables from outside `src/lib/ledger/`,
+    // and integration tests are deliberately held to it too: a test that
+    // reaches into `account` to find a business is a test with its own opinion
+    // about what a business's accounts are.
+    const [accrued] = await sql<{ business_id: string }[]>`
+      SELECT m.business_id
+        FROM v_accrual_month m
+       WHERE m.business_id IS NOT NULL AND m.days_posted > 0
+       GROUP BY m.business_id
+       ORDER BY sum(m.days_posted) DESC
+       LIMIT 1`;
+    businessWithAccrual = accrued?.business_id ?? null;
+
     gateway = liveGateway();
     audit = new MemoryAuditSink();
     server = createMcpServer({
@@ -135,6 +168,12 @@ d("the MCP surface, against the live database", () => {
         JSON.stringify([
           { label: "it-a", token: TOKEN_A, actorId: agentActorId, businessId: businessA },
           { label: "it-b", token: TOKEN_B, actorId: agentActorId, businessId: businessB },
+          {
+            label: "it-c",
+            token: TOKEN_C,
+            actorId: agentActorId,
+            businessId: businessWithDisputes ?? businessA,
+          },
         ]),
       ),
       audit,
@@ -334,17 +373,95 @@ d("the MCP surface, against the live database", () => {
     expect(rendered).not.toMatch(/"card_[A-Za-z0-9]{12,}"/);
   });
 
-  it("keeps two tenants apart on the four newer readers as well", async () => {
+  it("keeps two tenants apart on every reader that touches customer data", async () => {
     // Same argument as the balance test: scope comes from the token, so the
     // same call under B's token cannot reach A's rows. Asserted per tool
-    // because each one is a different query.
-    for (const tool of ["list_pots", "list_payees", "list_standing_orders", "list_card_controls"]) {
+    // because each one is a different query — and the list is every reader
+    // rather than a sample, because the one that gets forgotten is the one
+    // that leaks.
+    for (const tool of [
+      "list_pots",
+      "list_payees",
+      "list_standing_orders",
+      "list_card_controls",
+      "list_disputes",
+      "list_accruals",
+    ]) {
       const body = await call(tool, {}, TOKEN_B);
       const result = body["result"] as Record<string, unknown>;
       const data = result["structuredContent"] as Record<string, unknown>;
       if (result["isError"] === true) continue;
       expect((data["business"] as Record<string, unknown>)["id"]).toBe(businessB);
     }
+  });
+
+  it("runs list_disputes against the live case fold", async () => {
+    expect(businessWithDisputes, "seed first: no dispute cases on the book").not.toBeNull();
+
+    const data = structured(
+      await call("list_disputes", { open_only: false, limit: 5 }, TOKEN_C),
+    );
+    const counts = data["counts"] as Record<string, number | undefined>;
+    expect((counts["open"] ?? 0) + (counts["closed"] ?? 0)).toBeGreaterThan(0);
+    expect((data["cases"] as unknown[]).length).toBeGreaterThan(0);
+
+    for (const row of data["cases"] as Record<string, unknown>[]) {
+      // Status is a fold over the event stream, so it must be one the model
+      // knows; and the money must be a cent string, never a JSON number.
+      expect(String(row["status_meaning"]).length).toBeGreaterThan(10);
+      expect(typeof (row["amount_claimed"] as Record<string, unknown>)["cents"]).toBe("string");
+      expect(typeof (row["held"] as Record<string, unknown>)["cents"]).toBe("string");
+      // Every transition that moved money was made by a named human. This is
+      // assert_dispute_lifecycle()'s guarantee, read back off real rows.
+      for (const event of row["events"] as Record<string, unknown>[]) {
+        if (event["kind"] === "provisional_credit_authorized") {
+          expect(event["actor_kind"]).toBe("human");
+        }
+      }
+    }
+  });
+
+  it("runs list_accruals and the stored arithmetic re-derives", async () => {
+    // Whichever business actually has postings; the point of this test is the
+    // arithmetic on real rows, and an empty list would assert nothing.
+    const token = businessWithAccrual === businessWithDisputes ? TOKEN_C : TOKEN_A;
+    const data = structured(await call("list_accruals", { days: 40, months: 3 }, token));
+    expect((data["days"] as unknown[]).length).toBeGreaterThan(0);
+
+    for (const day of data["days"] as Record<string, unknown>[]) {
+      const maths = day["arithmetic"] as Record<string, unknown> | null;
+      if (maths === null) continue;
+
+      const price = BigInt(String((maths["monthly_price"] as Record<string, string>)["cents"]));
+      const n = BigInt(maths["days_in_month"] as number);
+      const d = BigInt(maths["day_of_month"] as number);
+      const amount = BigInt(String((maths["amount"] as Record<string, string>)["cents"]));
+
+      // Largest remainder, recomputed here in bigint from the three inputs the
+      // row stored. If this file and `accrual_daily_share()` ever disagreed,
+      // the row could not have been written — so this asserts that the tool
+      // PROJECTED the stored columns rather than recomputing them wrongly.
+      expect(amount).toBe(price / n + (d <= price % n ? 1n : 0n));
+    }
+
+    // The two that must be zero forever, scoped to this business.
+    expect(data["invariants"]).toMatchObject({ month_drift: 0, ledger_drift: 0 });
+  });
+
+  it("tells an agent what it is refused, and why, rather than 'unknown tool'", async () => {
+    const data = structured(await call("list_agent_limits", { operation: "approve_payment" }));
+    const first = (data["refusals"] as Record<string, unknown>[])[0];
+    expect(first?.["section"]).toBe(2);
+    expect(first?.["guarantee"]).toBe("unrepresentable");
+
+    // And the guessed tool name itself is answered as a refusal rather than a
+    // typo — the error carries the reason and points at the explaining tool.
+    const guess = await call("approve_payment", {});
+    const error = guess["error"] as Record<string, unknown>;
+    const detail = error["data"] as Record<string, unknown>;
+    expect(detail["refused"]).toBe(true);
+    expect(String(detail["reason"])).toMatch(/refused operation/);
+    expect(detail["explain_with"]).toBe("list_agent_limits");
   });
 
   it("keeps two tenants apart on real rows", async () => {

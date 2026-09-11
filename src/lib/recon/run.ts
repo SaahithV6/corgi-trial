@@ -36,6 +36,7 @@ import "server-only";
 import { createHash } from "node:crypto";
 
 import { sql, type Sql } from "@/lib/ledger/db";
+import { currentBookingWatermark } from "@/lib/ledger/queries";
 
 import { ageBucketOf } from "./aging";
 import { matchFile, readBreaks, type MatchPassResult } from "./diff";
@@ -86,10 +87,10 @@ export async function runReconciliation(
     const runNo = next?.run_no ?? 1;
 
     // The watermark is taken BEFORE the diff reads the book, so the run's
-    // recorded position can never be later than what it actually saw.
-    const [wm] = await tx<{ watermark: bigint }[]>`
-      SELECT COALESCE(MAX(booking_seq), 0)::bigint AS watermark FROM journal_entry`;
-    const bookingWatermark = wm?.watermark ?? 0n;
+    // recorded position can never be later than what it actually saw. Asked of
+    // the ledger by name; it is the same aggregate over the same rows that
+    // statements and the home console were each computing for themselves.
+    const bookingWatermark = await currentBookingWatermark(scoped);
 
     const match = await matchFile(input.fileId, input.actorId, scoped);
     const breaks = await readBreaks({ fileId: input.fileId }, scoped);

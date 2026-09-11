@@ -104,6 +104,63 @@ export type PolicyOptionView = {
   readonly note: string;
 };
 
+/**
+ * One confirmed wire beneficiary the clerk may pick.
+ *
+ * WHY THE WIRE BRANCH IS A PICKER AND THE ACH BRANCH IS NOT. It is not a
+ * convenience, and the asymmetry is the point.
+ *
+ * `originateApprovedWire()` REFUSES a beneficiary that is not on this
+ * business's confirmed payee book (`WIRE_PAYEE_NOT_ON_BOOK`), because a wire
+ * is final on receipt and business email compromise is a WELL-FORMED
+ * instruction: a real-sounding beneficiary, a real bank, a valid ABA, sent
+ * from a real employee's real mailbox. Nothing about it is wrong on its face,
+ * and the only control that has ever worked against it is a second person who
+ * was not in the email thread — which is `required_approvals = 2` — plus the
+ * beneficiary having been checked BEFORE the urgency arrived.
+ *
+ * With a free-text field, that refusal arrives at ORIGINATION: after the
+ * instruction is raised, after two humans have approved it, after the ledger
+ * entry is posted. A clerk can raise a wire on this screen that cannot be
+ * sent, and finds out two approvals too late. The picker moves the refusal to
+ * the front, where it costs nobody anything.
+ *
+ * AND IT IS WRONG FOR ACH, deliberately. `gatePaymentOnPayee()` does not
+ * require pre-registration there, because the costs of requiring it — the
+ * one-off refund, the emergency supplier payment, the payment raised by the
+ * MCP agent from an invoice — are costs of DELAY, and on ACH a delay is
+ * recoverable because the entry is: two banking days of recall. On a wire it
+ * is not. The asymmetry between these two branches is that one difference,
+ * and nothing else.
+ *
+ * `wireRoutingNumber` crosses to the client, and that is not a leak: it is a
+ * PUBLIC bank identifier, it is already printed on the ACH branch's own input,
+ * and it is about to be submitted from this form anyway. The full account
+ * number never appears — `accountNumberLast4` is all the book stores.
+ */
+export type WirePayeeOption = {
+  readonly payeeId: string;
+  readonly displayName: string;
+  /** The name that goes on the Fedwire message. ISO 20022 `creditor.name`. */
+  readonly holderName: string;
+  /** The receiving bank's 9-digit WIRE ABA. Not its ACH ABA. */
+  readonly wireRoutingNumber: string;
+  readonly accountNumberLast4: string;
+  readonly institutionName: string | null;
+  /** `verified` / `warned` / null when nothing has ever been checked. */
+  readonly outcome: string | null;
+  /** True when a named human has signed for a standing warning. */
+  readonly acknowledged: boolean;
+  /** `fresh` / `ageing` / `stale` / `never`, derived by `v_payee_book`. */
+  readonly freshness: string;
+  /**
+   * What `gatePaymentOnPayee()` will say about this beneficiary, predicted.
+   * Null means it will not refuse. A PREDICTION: the gate re-decides inside
+   * the transaction that writes the instruction, under its own snapshot.
+   */
+  readonly gateRefusalCode: string | null;
+};
+
 /** What the edge state puts in the form before anyone types. */
 export type Prefill = {
   readonly accountId: string | null;
@@ -121,6 +178,14 @@ export type PaymentsSnapshot = {
   readonly accounts: readonly SourceAccountView[];
   /** Every version of every payout rail's policy, newest first within a rail. */
   readonly policies: readonly PolicyOptionView[];
+  /**
+   * The confirmed wire beneficiaries, by the business whose account they
+   * belong to. Keyed by `businessId` because the payee book is keyed by
+   * business and the form's source account chooses which one is in scope —
+   * a picker that offered another customer's beneficiaries would be a payee
+   * book with no boundary.
+   */
+  readonly wirePayeesByBusiness: Readonly<Record<string, readonly WirePayeeOption[]>>;
   /** Today in the banking timezone. The form's default value date. */
   readonly defaultValueDate: ValueDate;
   readonly asOf: Instant;

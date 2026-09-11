@@ -2,7 +2,7 @@
  * Every adapter in this directory, and the one function that assembles them.
  *
  * `allRailAdapters()` is what a health surface, a settlement feed or a
- * generated capability table asks for. It builds the five adapters from an
+ * generated capability table asks for. It builds the adapters from an
  * environment bag and NOTHING ELSE: no network, no database handle, no key
  * read into module scope. Constructing the set is free; only `probe()` costs a
  * round trip.
@@ -28,6 +28,12 @@ import { achSimAdapter, increaseAchAdapter } from './ach';
 import { lithicCardAdapter } from './card';
 import { plaidOpenBankingAdapter } from './openbanking';
 import { readEnvValue } from './probe-http';
+// FROM `../wire/adapter`, NOT `../wire`. The wire package's index re-exports
+// `./ledger` and `./outbound`, both of which are `server-only` because they
+// hold a database connection. `./adapter` touches no database and no clock, so
+// importing it here keeps `allRailAdapters()` the free, import-anywhere
+// function its header promises.
+import { increaseWireAdapter } from '../wire/adapter';
 
 export interface AllRailsOptions {
   readonly env?: Readonly<Record<string, string | undefined>> | undefined;
@@ -74,6 +80,21 @@ export function allRailAdapters(opts: AllRailsOptions = {}): readonly RailAdapte
     achAdapterFor(env),
     lithicCardAdapter({ env }),
     plaidOpenBankingAdapter({ env }),
+    // THE WIRE RAIL, ADDED UNCONDITIONALLY, and the choice is the same one
+    // Lithic and Plaid get rather than the one ACH gets.
+    //
+    // ACH is conditional because its slot is served by ONE of two adapters and
+    // listing a live rail beside its own simulator would describe a deployment
+    // that does not exist. There is no wire simulator: the slot is served by
+    // this adapter or by nothing. So it is listed the way the card and
+    // open-banking slots are — always present, with `probe()` reporting
+    // `not_configured` on a box with no `INCREASE_API_KEY`. Dropping the row
+    // when the key is absent would make an unconfigured rail INVISIBLE on the
+    // honesty table, which is the one thing that table exists not to do.
+    //
+    // Construction is free: `IncreaseWireClient` reads the key at call time,
+    // not at construction, so this cannot throw on a box with no credential.
+    increaseWireAdapter({ env }),
   ];
   if (opts.stablecoin !== undefined) rails.push(opts.stablecoin);
   return rails;

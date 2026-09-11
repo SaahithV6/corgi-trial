@@ -1,8 +1,8 @@
 # The MCP surface
 
 `POST /api/mcp` is a Model Context Protocol server over Streamable HTTP. It
-speaks `initialize`, `tools/list` and `tools/call`, and it exposes eight tools —
-seven that read and one that writes:
+speaks `initialize`, `tools/list` and `tools/call`, and it exposes eleven tools
+— ten that read and one that writes:
 
 | Tool | Writes? | What it answers |
 | --- | --- | --- |
@@ -12,13 +12,17 @@ seven that read and one that writes:
 | `list_payees` | no | The payee book: each saved destination's verification outcome, freshness, name-match result and findings |
 | `list_standing_orders` | no | Mandates, their next due date, and their occurrences — including refused ones, with the code and the four figures the funding decision was made against |
 | `list_card_controls` | no | Card limits, blocks and state, plus the real-time authorisation decisions with the rule that fired |
+| `list_accruals` | no | The platform fee day by day, each with the arithmetic that produced it, the month roll-ups, and the gap that means the tick has stopped |
+| `list_disputes` | no | Card disputes with status folded from the case's event stream, provisional credit advanced, how much is still held, and the network deadline |
 | `list_recon_breaks` | no | Open reconciliation breaks with category, reason code, age and severity |
+| `list_agent_limits` | no | The twenty operations this surface refuses, each with the argument, whether the database forbids it or the capability is merely absent, and where the operation actually lives |
 | `initiate_payment` | **queues a request** | Writes one `payment_instruction` into the human approval queue. Moves no money, and cannot approve or release what it wrote |
 
-Four of those readers were added after the first cut of this surface, when
-pots, the payee book, standing orders and card controls shipped. Each one was
-added for the same reason, and it is not "the feature exists": without it the
-agent was **confidently wrong** rather than merely unhelpful.
+Seven of those readers were added after the first cut of this surface, as pots,
+the payee book, standing orders, card controls, disputes and fee accrual
+shipped. Each one was added for the same reason, and it is not "the feature
+exists": without it the agent was **confidently wrong** rather than merely
+unhelpful.
 
 | Without it, the agent would say | Because |
 | --- | --- |
@@ -26,12 +30,26 @@ agent was **confidently wrong** rather than merely unhelpful.
 | "I've drafted a payment to the account on the invoice" | nothing let it check that destination against the book first |
 | "I see no record of that payment" | a scheduled payment that was refused is an occurrence row, not a journal row |
 | "the bank declined your card" | a declined authorisation never reaches the ledger; the decision log is the only record |
+| "you have an unexplained hold of $198.50" | provisional credit on a dispute is advanced INTO the ledger balance and held, so it is a hold with no card behind it |
+| "you were charged twice" | a clawback on a lost dispute is a NEW entry, not a reversal, so it sits beside the grant and looks exactly like a duplicate |
+| "your daily fee is wrong — some days are 84¢ and some are 83¢" | largest-remainder allocation, working correctly, so a complete month sums to the price exactly rather than within a penny |
+| "I can't do that" (and then inventing a workaround) | `unknown tool "approve_payment"` is indistinguishable from a typo; nothing told the model the name was refused **on purpose** |
 
-**The number of tools that write is still one.** That is the shape of this
-surface: reads grew, writes did not, and the argument for refusing the obvious
-new writes — a standing-order mandate, a payee, a card control, an
-acknowledgement — is in [AGENT-LIMITS.md](./AGENT-LIMITS.md) §10-§13 alongside
-everything else deliberately absent.
+**The number of tools that write is still one.** Reads went from three to ten;
+writes went from one to one. That asymmetry is the shape of this surface, and
+the argument for refusing every obvious new write — a standing-order mandate, a
+payee, a card control, an acknowledgement, a dispute intake, a provisional
+credit, an accrual schedule, the accrual tick — is in
+[AGENT-LIMITS.md](./AGENT-LIMITS.md) §10-§20 alongside everything else
+deliberately absent. §17 is the one worth reading: a `raise_dispute` tool
+*passes* the test `initiate_payment` passes, and is refused anyway.
+
+**One of the ten readers is the refusal list itself.** `list_agent_limits`
+serves AGENT-LIMITS.md through the protocol, generated from
+`src/lib/mcp/limits.ts` so the policy and the executable cannot drift, and
+`src/lib/mcp/limits.test.ts` fails the build if any tool the document claims is
+absent ever appears in the registry. Calling a refused name now answers with the
+reason rather than with `unknown tool` alone — see §19 of the transcript below.
 
 ---
 
@@ -814,14 +832,120 @@ Points worth making about that log:
   institution — and anything matching a secret or a full account number does not.
   There is no full account number to redact here in the first place: the
   destination schema only accepts `account_number_last4`.
-- **Where it lands.** One JSON line per call through `@/lib/log`, the same drain
-  the rest of the system writes to. A durable `mcp_audit` table is a
-  `teeAuditSink` away and its DDL is at the bottom of `src/lib/mcp/audit.ts`; it
-  is not added here because migrations are owned by another worker in this
-  build. The write tool's trail is already durable and immutable regardless —
-  `payment_instruction` and its `requested` event record the agent's actor id,
-  the amount, the destination, the value date and the content hash, on tables
-  `corgi_app` holds no `UPDATE` or `DELETE` on.
+- **Where it lands.** Two places now — see §10a. The line above is the first;
+  the second is a row in `mcp_audit`. The write tool's trail never depended on
+  either: `payment_instruction` and its `requested` event record the agent's
+  actor id, the amount, the destination, the value date and the content hash,
+  synchronously and transactionally, on tables `corgi_app` holds no `UPDATE` or
+  `DELETE` on.
+
+## 10a. …and one row, in a table that cannot be edited
+
+The log line above used to be the whole record. A log line is a retention
+window, and ten read tools were serving a customer's balances, transactions,
+payees, pots, standing orders, card controls, accruals, disputes and
+reconciliation breaks to an autonomous agent with no durable record in the
+database that any of it happened.
+
+`src/app/api/mcp/route.ts` now tees every audit record through
+`src/lib/audit/sink.ts` into `mcp_audit`
+(`db/migrations/0035_audit.sql` §2), which carries the same four layers of
+defence `journal_entry` does: `corgi_app` holds `SELECT` and `INSERT` and
+nothing else, a `BEFORE UPDATE OR DELETE` trigger refuses the rest regardless of
+role, a `TRUNCATE` trigger closes the last door, and there is no `UPDATE` path
+in application code. It is projected onto `/audit` as `actor_kind = 'agent'`.
+
+Four real calls against the running server, and the rows they left. `at`,
+`request_id` and `client_key` are dropped for width; nothing else is:
+
+```
+ tool              | outcome        | error_code        | actor_id | business_id | grant_label           | grant_fp | arguments                                                | duration_ms
+-------------------+----------------+-------------------+----------+-------------+-----------------------+----------+----------------------------------------------------------+-------------
+ get_balance       | ok             | (null)            | 3743dc53…| e274546d…   | demo-read-and-propose | 7b5c37ab | {}                                                       | 1988
+ approve_payment   | protocol_error | REFUSED_OPERATION | 3743dc53…| e274546d…   | demo-read-and-propose | 7b5c37ab | {"instruction_id": "any"}                                | 1
+ list_transactions | protocol_error | INVALID_ARGUMENTS | 3743dc53…| e274546d…   | demo-read-and-propose | 7b5c37ab | {"limit": 5, "business_id": "1151e7b5-…-68cd714178ce"}   | 2
+ (null)            | refused        | UNKNOWN_TOKEN     | (null)   | (null)      | (null)                | (null)   | (null)                                                   | 1
+```
+
+Read those four rows in order and they are the argument for the table:
+
+1. A successful read. `arguments` is `{}` and `result` is `{"basis":"current"}` —
+   ids and counts a reader can walk to, never the customer's figures. The
+   balance is derivable from the ledger at any moment; what is not otherwise
+   recoverable is that an agent asked for it.
+2. **A refused tool name.** `approve_payment` does not exist on this surface and
+   never will — `docs/AGENT-LIMITS.md` §2. The row is the point: an agent
+   probing for tools it is not allowed to call is precisely the signal this
+   table exists to capture, and `REFUSED_OPERATION` rather than `UNKNOWN_TOOL`
+   makes the probe greppable and distinguishable from a typo.
+3. **A scope violation.** The agent named another tenant's `business_id` as a
+   tool argument. It was refused by the strict schema — no tool on this surface
+   accepts a business identifier, which is `FORBIDDEN_PARAMETER_NAMES` written
+   as data — and the row now holds both halves of the fact: `arguments` carries
+   the business it *asked* for, and the `business_id` column carries the one its
+   token is *scoped to*. An investigator needs exactly that pair.
+4. **A refusal at the door.** An unrecognised bearer token. `actor_id`,
+   `business_id`, `grant_label` and `grant_fp` are all null, because an unknown
+   token has no actor and inventing one would be the only dishonest row in this
+   schema. It is projected onto the trail as book-wide rather than dropped.
+
+No token appears in any of them. `grant_fp` is four bytes of the token's sha256
+— enough to tell two grants sharing a label apart in an investigation, useless
+to anyone who steals the row:
+
+```
+SELECT count(*) FROM mcp_audit
+ WHERE (arguments::text || coalesce(result::text,'')
+        || coalesce(grant_fp,'') || coalesce(grant_label,'')) LIKE '%corgi_mcp_demo%';
+ → 0
+```
+
+And the refusal cannot be quietly turned into a success:
+
+```
+UPDATE mcp_audit SET outcome = 'ok' WHERE outcome = 'refused';
+ → ERROR: permission denied for table mcp_audit
+DELETE FROM mcp_audit WHERE outcome = 'refused';
+ → ERROR: permission denied for table mcp_audit
+```
+
+### `x-corgi-audit` — which way an audit failure fails
+
+Every response from this endpoint carries one of:
+
+| Header | Meaning |
+| --- | --- |
+| `x-corgi-audit: persisted` | Every audit record for this call is a row in `mcp_audit`. |
+| `x-corgi-audit: degraded` | The row did not land, or had not landed by the deadline. The answer in the body is still correct; the claim that the call is on the trail is withdrawn. |
+| `x-corgi-audit: idle` | Nothing reached the sink. A bug in the server, and it must not look like a clean run. |
+
+**It fails open for the call and closed for the claim.** The house position in
+`docs/AGENT-LIMITS.md` is that a check which cannot record its own failure is
+worse than no check, and it binds here — but it is satisfied by making the
+failure loud, not by refusing the read. `server.handlePost` builds the audit
+record in a `finally`, *after* dispatch, so by the time the sink is reached the
+gateway has already issued its `SELECT`s and the balance is already in the
+response object. Refusing there would withhold the answer while leaving the data
+access identical: a gate that runs after the thing it gates. And the correlated
+case is already closed — every read tool queries the same pool this `INSERT`
+uses, so a database that is gone has already failed the read on its own.
+
+What it must never do is succeed silently, so the insert is **awaited inside the
+request**. The obvious shape, `void insert().catch(log)`, is the trap: a
+serverless instance is frozen the moment the response is returned, and a
+detached insert is dropped along with its own catch handler — no row, no error
+line, no gap anybody can see. The cost is one round-trip on every call. A
+failure gets an error-level `mcp.audit.persist_failed` line naming the request
+id, the tool and the outcome, *and* the header above, so the caller learns it
+too. The full argument, including the two-phase design that would be needed if
+this surface ever grew a read whose mere execution is the sensitive act, is the
+header of `src/lib/audit/sink.ts`; the failure paths are executed in
+`src/lib/audit/sink.test.ts` against an injected failing handle, because a
+failure path nobody has run is a comment.
+
+The tee order is load-bearing: `loggerAuditSink` first, because it touches no
+database, so the record survives Postgres being gone — degraded from durable to
+a retention window rather than to nothing.
 
 # A second transcript — the four readers added on day two
 
@@ -1239,6 +1363,347 @@ belief is the dangerous one. `tools.test.ts` asserts the refusal over every
 registered schema and over every name in `FORBIDDEN_PARAMETER_NAMES`, so a
 future tool cannot quietly accept one.
 
+---
+
+# A third transcript — disputes, accrual, and the refusal list
+
+**Captured 2026-09-11, real HTTP against the live Neon branch**, business
+`e274546d-6bdd-5266-b0fb-cc839a7811f9` (Ridgeline Robotics, Inc.), token
+`corgi_mcp_demo_7f3a91c4e05b2d68a4c1`.
+
+**Honest labelling, because this matters more than the transcript does.** The
+first two transcripts above were captured against
+`https://corgi-trial-psi.vercel.app/api/mcp`. This one was captured against the
+same code serving the same `/api/mcp` route over HTTP on port 3921, reading the
+**same live Neon database** — real rows, real ids, real money — because the
+production deploy of this revision had not been cut when it was taken. The
+deployed URL is live and answers; what it serves is the previous revision, with
+eight tools. §16 below uses that fact deliberately: it runs the SAME call
+against both and shows what changed. Every id and every figure in this section
+is a real row you can go and look at.
+
+## 16. The bug this transcript found: the agent surface had its own available balance
+
+Before anything else, because it is the most important thing in this section and
+it is a correctness finding rather than a feature.
+
+The same call, to the same account, at the same instant, against two revisions:
+
+```console
+$ curl -s -X POST https://corgi-trial-psi.vercel.app/api/mcp \
+    -H 'authorization: Bearer corgi_mcp_demo_7f3a91c4e05b2d68a4c1' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+         "params":{"name":"get_balance","arguments":{}}}'
+```
+
+| | deployed revision | this revision |
+| --- | --- | --- |
+| `ledger_balance` | **$56,370.19** | **$40,834.69** |
+| `available_balance` | **$34,754.19** | **$17,718.69** |
+| itemised | card_auth_holds −$360.00, uncleared_credits −$21,256.00 | card_auth_holds −$360.00, uncleared_credits −$21,256.00, **pending_outbound −$1,500.00** |
+
+**The agent was being told it had $17,035.50 more available than the customer's
+own screen shows.** Two mechanisms, both pushing the same way:
+
+* **$15,535.50** of future-dated CREDITS. The old code asked for the balance at
+  value date `9999-12-31`, so standing-order credits value-dated in 2027 counted
+  as money the customer had today.
+* **$1,500.00** of debits already booked to leave on a future value date, which
+  the old code did not subtract at all. Plus operator (`manual`) holds, which it
+  dropped silently — there happen to be none on this account today, which is
+  luck rather than design.
+
+This was a **fifth definition of available balance** in a system that had just
+spent migration 0022 collapsing four that differed by $30,662.10. It escaped
+`v_balance_definition_drift` because that view compares the definitions it knows
+about and this one, being TypeScript in `src/lib/mcp/`, was never registered with
+it. It matters more here than it would anywhere else, because `initiate_payment`
+funds-checks against exactly this number: a permissive balance means an agent
+queueing a payment the customer's own screen says they cannot afford, and the
+entire safety argument for this surface is that an agent can only ever *propose*.
+
+It is now **deleted rather than registered**. The figure comes from
+`accountAvailability()`, one call to `ledger_availability()`. Checked against the
+view the customer's screens read, at the same instant:
+
+```console
+$ psql -c "SELECT available_cents, card_hold_cents, uncleared_credit_cents,
+                  pending_outbound_cents
+             FROM v_available_balance WHERE account_id = 'a0c41a37-…-03455f048fac'"
+
+ available_cents | card_hold_cents | uncleared_credit_cents | pending_outbound_cents
+-----------------+-----------------+------------------------+------------------------
+         1771869 |           36000 |                2125600 |                 150000
+
+$ psql -c "SELECT count(*) FROM v_balance_definition_drift"
+ 0
+```
+
+`1771869` cents is `$17,718.69` — the agent's number and the customer's number
+are now the same number, because they are the same function.
+
+## 17. `list_disputes` — the hold with no card behind it
+
+```console
+$ curl -s -X POST http://localhost:3921/api/mcp \
+    -H 'authorization: Bearer corgi_mcp_demo_7f3a91c4e05b2d68a4c1' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+         "params":{"name":"list_disputes","arguments":{"open_only":false,"limit":3}}}'
+```
+
+```
+3 dispute case(s) for Ridgeline Robotics, Inc. (0 open, 22 closed in total),
+$427.00 claimed, $397.00 advanced as provisional credit, of which $0.00 is still
+held and therefore NOT spendable. Nothing is waiting on an authorisation. Status
+is folded from each case's event stream, so it cannot disagree with what was
+posted.
+```
+
+One case, in full:
+
+```json
+{
+  "dispute_id": "eafa6679-5f6d-43cb-b448-5c6684fdba53",
+  "case_ref": "DSP-20260911-VRYFD0",
+  "disputed_entry_id": "eaf694e2-1266-43d9-b782-41101e000af4",
+  "reason": "goods_not_received",
+  "network_code": "13.1",
+  "amount_claimed": { "cents": "19850", "display": "$198.50" },
+  "status": "closed_lost_written_off",
+  "is_closed": true,
+  "decided_on": "2026-09-11",
+  "network_outside_date": "2027-01-09",
+  "days_to_outside_date": 120,
+  "advanced": { "cents": "19850", "display": "$198.50" },
+  "held":     { "cents": "0",     "display": "$0.00"   },
+  "hold_released": true,
+  "awaiting": {
+    "needs_authorization": true,
+    "authorizations_held": 1,
+    "authorizations_required": 1,
+    "authorization_threshold": { "cents": "5000", "display": "$50.00" },
+    "who": "Nothing — the case is closed."
+  }
+}
+```
+
+And the timeline, which is the half worth having:
+
+```json
+[
+  { "kind": "raised",                        "actor": "Dana Okonkwo",  "actor_kind": "human", "amount": "$198.50", "entry_id": null },
+  { "kind": "provisional_credit_authorized", "actor": "Miles Ferrara", "actor_kind": "human", "amount": null,      "entry_id": null },
+  { "kind": "provisional_credit_granted",    "actor": "Miles Ferrara", "actor_kind": "human", "amount": "$198.50", "entry_id": "33579e4b-f16e-47cc-8f29-f0ccf497a0a2" },
+  { "kind": "lost",                          "actor": "Miles Ferrara", "actor_kind": "human", "amount": null,      "entry_id": null },
+  { "kind": "credit_written_off",            "actor": "Miles Ferrara", "actor_kind": "human", "amount": "$198.50", "entry_id": "df83f40f-e772-4b2b-9a05-b730cc37de44" }
+]
+```
+
+Two things to read out of that. **The raiser and the authoriser are different
+people, and both are `actor_kind: "human"`** — not because this tool checks, but
+because `assert_dispute_lifecycle()` refuses any other row, and the timeline
+shows it rather than asserting it. And **`credit_written_off` cites its own
+journal entry**, distinct from the grant's: two entries, two facts, neither one
+a reversal of the other.
+
+### A bug this call found in the tool itself
+
+The first capture of exactly this call said:
+
+```
+… $0.00 is still held and therefore NOT spendable.
+2 case(s) are waiting on a second human to authorise the advance; no agent can be that human.
+```
+
+Both of those cases had been decided and settled. `needs_authorization` on
+`v_dispute_state` is a property of the **claim** — the amount is at or above the
+policy threshold — and it stays true after a case closes; the summary counted it
+without the `is_closed` guard. That is precisely the confidently-wrong sentence
+this tool exists to prevent, produced by the tool, and it only showed up because
+the call was made against real rows rather than a fixture. Fixed, and
+`tool-list-disputes.test.ts` now has a case named for it.
+
+## 18. `list_accruals` — the penny, explained
+
+```console
+$ … '{"jsonrpc":"2.0","id":2,"method":"tools/call",
+      "params":{"name":"list_accruals","arguments":{"days":4,"months":2}}}'
+```
+
+```
+Ridgeline Robotics, Inc. is on Business Standard at $25.00/month and Sub-cent
+probe (integration suite) at $0.20/month. $9.24 has accrued in total across 4
+day(s) shown. 2026-09: $9.23 of $25.00 across 11 posted day(s), month-to-date,
+so this is not the month's bill yet. Most recent posted day 2026-09-11: $25.00 ÷
+30 days = 83¢ per day, with 10¢ left over. day 11 is past the first 10, so it
+carries none: 83¢. No accrual days are outstanding. Month and ledger drift are
+both zero.
+```
+
+The two adjacent days that differ by a penny — the thing an agent reports as a
+bug:
+
+```json
+[
+  { "accrual_date": "2026-09-11", "amount": "$0.83",
+    "entry_id": "19b1c82c-708e-4dd6-b34f-679e41dd717c",
+    "arithmetic": { "base_share": "$0.83", "residual_pennies": 10, "residual_applied": false,
+      "month_to_date": "$9.23", "remaining_this_month": "$15.77",
+      "explanation": "$25.00 ÷ 30 days = 83¢ per day, with 10¢ left over. day 11 is past the first 10, so it carries none: 83¢." } },
+
+  { "accrual_date": "2026-09-10", "amount": "$0.84",
+    "entry_id": "96d5a30b-c9bc-49c9-93a3-82dd7a856041",
+    "arithmetic": { "base_share": "$0.83", "residual_pennies": 10, "residual_applied": true,
+      "month_to_date": "$8.40", "remaining_this_month": "$16.60",
+      "explanation": "$25.00 ÷ 30 days = 83¢ per day, with 10¢ left over. day 10 is one of the first 10, so it carries one of those pennies: 83¢ + 1¢ = 84¢." } }
+]
+```
+
+Every integer there is a stored column that `accrual_posting_arithmetic`
+re-derived with `accrual_daily_share()` before Postgres would accept the row, and
+the sentence is built by `explainAllocation()` from those same integers — so the
+prose and the figures cannot disagree. The month roll-up and the invariants:
+
+```json
+{ "month_start": "2026-09-01", "days_in_month": 30,
+  "monthly_price": "$25.00", "accrued": "$9.23", "remaining": "$15.77",
+  "days_posted": 11, "days_skipped": 0,
+  "residual_pennies_in_month": 10, "residual_pennies_applied": 10,
+  "month_complete": false, "sums_to_price": true }
+
+{ "month_drift": 0, "ledger_drift": 0, "unresolved": 0, "gap_days": 0, "healthy": true }
+```
+
+`gap_days` is the one allowed to be non-zero, and it is the reason it is
+returned: days a schedule owes that nothing has claimed. Persistently non-zero
+means the tick is not running and the customer is **silently not being billed**,
+which is the single failure a quiet accrual job otherwise hides.
+
+## 19. The refusal list, executed
+
+This is the part that turns a written policy into an executable one.
+
+```console
+$ … '{"params":{"name":"list_agent_limits",
+      "arguments":{"operation":"unblock the fuel category on the ops card"}}}'
+```
+
+```
+4 of 20 refusals match "unblock the fuel category on the ops card". None of the
+matches is enforced by the schema; every one is enforced by the capability not
+being in this process, which is a real guarantee and a weaker one. The closest is
+§13, changing a card control — which is not code this process holds at all.
+list_card_controls returns the controls, the decisions, the rule that fired and
+the reason … The rule underneath all of them: an agent may state an intention, it
+may not make a fact final, and it may not change the rules that decide what is
+final.
+```
+
+```json
+{
+  "section": 13,
+  "operation": "Changing a card control",
+  "absent_tools": ["set_card_controls", "set_card_limit", "block_mcc", "unblock_mcc"],
+  "why": "A control change IS a real-time authorisation decision, made in advance. … An agent that unblocks MCC 5542 has not requested a payment and has not approved one; it has arranged for the next fuel-pump authorisation to be approved, and no queue anywhere will ever show that as a payment decision.",
+  "guarantee": "capability-absent",
+  "enforced_by": [
+    "setCardControls is a forbidden import",
+    "tools.test.ts refuses any tool whose name contains set_control, set_limit, block_mcc or unblock",
+    "card_control_version is append-only and contiguous: UNIQUE (card_id, version) plus assert_card_control_version()"
+  ],
+  "instead": "list_card_controls returns the controls, the decisions, the rule that fired and the reason …"
+}
+```
+
+Asked about the dispute write instead, it answers §17 and reports that one of
+the matching refusals is schema-enforced rather than merely absent:
+
+```console
+$ … '{"arguments":{"operation":"raise a dispute for the customer"}}'
+
+5 of 20 refusals match "raise a dispute for the customer". 1 of the matches is
+enforced by the schema rather than by this tool list, meaning no connection can
+write the row — ours included. The closest is §17, raising, withdrawing or
+progressing a dispute …
+```
+
+### And calling a refused tool now says so
+
+Before this work, guessing a refused name got `unknown tool`, which is
+indistinguishable from a typo and invites a model to try a synonym:
+
+```console
+$ … '{"params":{"name":"set_card_controls","arguments":{"mcc":"5542"}}}'
+```
+
+```json
+{
+  "code": -32602,
+  "message": "unknown tool \"set_card_controls\"",
+  "data": {
+    "available": ["get_balance", "list_pots", "list_transactions", "list_payees",
+                  "list_standing_orders", "list_card_controls", "list_accruals",
+                  "list_disputes", "list_recon_breaks", "list_agent_limits",
+                  "initiate_payment"],
+    "refused": true,
+    "reason": "This is not a missing tool, it is a refused operation: changing a card control. See docs/AGENT-LIMITS.md §13.",
+    "instead": "list_card_controls returns the controls, the decisions, the rule that fired and the reason …",
+    "explain_with": "list_agent_limits"
+  }
+}
+```
+
+```console
+$ … '{"params":{"name":"approve_payment","arguments":{}}}'
+```
+
+```json
+{
+  "refused": true,
+  "reason": "This is not a missing tool, it is a refused operation: approving anything. See docs/AGENT-LIMITS.md §2.",
+  "instead": "A second human approves, on the approvals screen. The agent can watch the state through the instruction it queued.",
+  "explain_with": "list_agent_limits"
+}
+```
+
+The `available` list is derived from the registry rather than typed out, which is
+its own small fix: it had been a literal of four names through three tools being
+added, so a model that correctly guessed `list_pots` was told in writing that
+`list_pots` did not exist.
+
+## 20. Scope, on the new readers
+
+The tenant boundary is the same one, asserted the same way. An argument naming a
+business is refused at parse time rather than ignored — including the caller's
+OWN business id, because a tool that accepts it is a tool whose scope comes from
+the caller:
+
+```console
+$ … '{"params":{"name":"list_disputes",
+      "arguments":{"business_id":"e274546d-6bdd-5266-b0fb-cc839a7811f9"}}}'
+
+{"code":-32602,
+ "message":"invalid arguments: (root) — Unrecognized key: \"business_id\"",
+ "data":{"problems":[{"field":"(root)","problem":"Unrecognized key: \"business_id\""}]}}
+```
+
+`mcp.integration.test.ts` runs the cross-tenant check against the live database
+over every reader that touches customer data — `list_pots`, `list_payees`,
+`list_standing_orders`, `list_card_controls`, `list_disputes`, `list_accruals` —
+rather than over a sample, because the one that gets forgotten is the one that
+leaks. `list_agent_limits` is not in that list for a reason worth stating: it
+reads no customer data at all, touches no table, and never calls the gateway,
+which `limits.test.ts` asserts by handing it a gateway that throws on any
+access. The same answer is correct for every business, because these are
+properties of the surface and not of an account.
+
+Timings on the calls above, against the live Neon branch: `initialize` 46 ms,
+`tools/list` 12 ms, `list_disputes` 1,094 ms (three cases, each with its event
+timeline), `list_accruals` 894 ms, `get_balance` 1,051 ms, `list_agent_limits`
+7-9 ms after the first call — it reads nothing.
+
+---
+
 ## Rate limits
 
 Two budgets, because a read and a write cost different things.
@@ -1269,6 +1734,7 @@ implied away in `src/lib/mcp/ratelimit.ts`, and discussed in
 | `-32600` | Not a JSON-RPC 2.0 request; batching; oversized body | 400 / 413 |
 | `-32601` | Unknown method, or a capability this server does not declare | 200 |
 | `-32602` | Unknown tool, or arguments that do not validate — the tool never ran | 200 |
+| `-32602` + `data.refused` | The tool name is one this surface **deliberately does not have**. Carries the reason, the section of AGENT-LIMITS.md, where the operation actually lives, and `explain_with: "list_agent_limits"`. Audited as `REFUSED_OPERATION` rather than `UNKNOWN_TOOL`, so a model probing for write tools is greppable in the audit log | 200 |
 | `-32603` | Internal error | 500 |
 | `-32001` | No token, or a token that does not resolve | 401 |
 | `-32002` | Refused before dispatch (bad `Origin`) | 403 |
@@ -1291,3 +1757,27 @@ The live suite (`src/lib/mcp/mcp.integration.test.ts`) proves the SQL runs
 against this schema, that the tenant predicate holds on real rows, and that the
 agent cannot approve its own instruction. It writes real `payment_instruction`
 rows, which stay: the table is append-only and those rows are the evidence.
+
+Three of the twenty live cases are worth naming, because each asserts something
+this document claims rather than something the code does:
+
+* **the cross-tenant check runs over every reader that touches customer data** —
+  `list_pots`, `list_payees`, `list_standing_orders`, `list_card_controls`,
+  `list_disputes`, `list_accruals` — rather than over a sample, because the one
+  that gets forgotten is the one that leaks;
+* **`list_accruals` re-derives the largest-remainder allocation in `bigint`**
+  from the three inputs each row stored, and asserts it equals the amount the
+  row carries. That checks the tool PROJECTED the stored columns rather than
+  recomputing them, which is the whole basis for calling those figures "the
+  arithmetic" instead of "a calculation";
+* **a guessed write tool is answered as a refusal** — `approve_payment` comes
+  back with `refused: true`, the section number, and `explain_with`.
+
+Three guard suites hold the policy to the surface, and they fail the build
+rather than a review:
+
+| Suite | What it refuses |
+| --- | --- |
+| `tools.test.ts` | A tool whose NAME matches a refused operation, or that declares a `business_id`-shaped parameter |
+| `no-write-imports.test.ts` | An import of any of forty write functions or twelve write-only modules — including the `@/lib/disputes` and `@/lib/accrual` BARRELS, which re-export modules that import `postEntry` |
+| `limits.test.ts` | Any drift between `docs/AGENT-LIMITS.md` (as `limits.ts`) and the registry: if a tool the document says is absent ever appears, this goes red |

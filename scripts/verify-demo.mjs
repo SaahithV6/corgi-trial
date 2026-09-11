@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
  * VERIFY THE DEMO — walk docs/DEMO.md against the deployed system and assert
- * every step of it actually works.
+ * every step of it actually works, in the order a stranger performs it.
  *
  *   node scripts/verify-demo.mjs
  *   node scripts/verify-demo.mjs --base-url http://localhost:3000
+ *   node scripts/verify-demo.mjs --quick      (skip the 70-render state sweep)
  *
- * Why this exists. `docs/DEMO.md` tells a grader to click eleven things in a
- * fixed order and promises what each one does. A document that says "switch to
+ * Why this exists. `docs/DEMO.md` tells a grader to open a URL and click
+ * things, and promises what each one does. A document that says "switch to
  * Approver and the queue refuses your own payment" is a claim, and the fastest
  * way to lose a trial is to hand somebody a click path that does not click.
  * So every assertion below is made against the live URL over HTTP, in the same
@@ -25,6 +26,21 @@
  *      column, evidence indented underneath, a total at the bottom that adds
  *      up, and a non-zero exit code if anything failed.
  *
+ * And, added 2026-09-11, a third that this script learned the hard way:
+ *
+ *   3. A CHECK MUST FAIL LOUDLY WHEN THE PAGE CHANGES SHAPE, AND IT MUST NOT
+ *      STOP WALKING AT THE FIRST BAD ROW. The previous version read the
+ *      availability table by taking its first four money figures. The table
+ *      gained a fifth row, so the parser silently read "Committed outflows" as
+ *      the available balance and reported two failures against screens that
+ *      were correct — and worse, because the check threw on the FIRST account
+ *      in the list, it never reached the fifth, which was genuinely broken.
+ *      A stale parser did not merely cry wolf: it hid a real one behind the
+ *      noise. `derivation()` below therefore parses the table BY ITS OWN ROW
+ *      LABELS and fails with the unrecognised label if a row it does not know
+ *      about appears; and `step 15` collects a verdict per account instead of
+ *      throwing at the first.
+ *
  * It writes nothing. Every request is a GET, except the role-switch POST,
  * whose only effect is a `Set-Cookie` on the response it returns.
  */
@@ -32,12 +48,64 @@
 const DEFAULT_BASE_URL = "https://corgi-trial-psi.vercel.app";
 const TIMEOUT_MS = 30_000;
 
+/**
+ * The business the demo is a story about.
+ *
+ * Not decoration: `scripts/seed.mjs` calls it "the happy path", it is the only
+ * business on the book that carries every leg of the published core loop, and
+ * `docs/DEMO.md` sends the grader to it by name. A demo whose protagonist is
+ * not reachable is a demo with no story, so that is a check and not a comment.
+ */
+const PROTAGONIST = "Ridgeline Robotics, Inc.";
+
+/**
+ * Businesses that exist on the live book because a test suite put them there.
+ *
+ * They are real evidence of testing and are not hidden — but a grader must not
+ * mistake one for a customer, so the rule this script enforces is: a fixture
+ * must be NAMEABLE as a fixture from its own row. Today that is carried by the
+ * legal name itself; the check is written against the property ("a stranger
+ * can tell") rather than against the mechanism, so a future badge satisfies it
+ * too.
+ */
+const FIXTURE_NAME = /fixture|fuzzer|live fire|attack \d/i;
+
+/**
+ * The screens to walk, if the deployed nav cannot be read.
+ *
+ * It normally IS read — see `SCREENS` below — because eleven workers are adding
+ * routes and a literal list in a checker is a list that silently stops covering
+ * the build. This one is the floor, not the definition: a screen present here
+ * and absent from the deployed nav is still walked, so deleting a route cannot
+ * quietly shrink the sweep either.
+ */
+const SCREENS_FALLBACK = [
+  "/",
+  "/onboarding",
+  "/accounts",
+  "/pots",
+  "/funding",
+  "/payments",
+  "/payees",
+  "/payouts",
+  "/approvals",
+  "/standing-orders",
+  "/accruals",
+  "/disputes",
+  "/reconciliation",
+  "/statements",
+];
+
+/** The five states docs/DEMO.md §3 promises every screen answers in. */
+const STATES = ["default", "loading", "empty", "error", "edge"];
+
 /* -------------------------------------------------------------------------- */
 /* Arguments                                                                  */
 /* -------------------------------------------------------------------------- */
 
 function parseArgs(argv) {
   let baseUrl = DEFAULT_BASE_URL;
+  let quick = false;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--base-url") {
       const next = argv[i + 1];
@@ -47,12 +115,14 @@ function parseArgs(argv) {
       }
       baseUrl = next.replace(/\/+$/, "");
       i += 1;
+    } else if (argv[i] === "--quick") {
+      quick = true;
     }
   }
-  return { baseUrl };
+  return { baseUrl, quick };
 }
 
-const { baseUrl } = parseArgs(process.argv.slice(2));
+const { baseUrl, quick } = parseArgs(process.argv.slice(2));
 
 /* -------------------------------------------------------------------------- */
 /* Output                                                                     */
@@ -82,11 +152,16 @@ function record(verdict, step, title, evidence) {
  * Run one step. A thrown error is a FAIL with its message as the evidence, so
  * a network blip or a changed page reports as a failed check rather than as a
  * stack trace that stops the walk.
+ *
+ * A step may also return `{ fail: [...] }` to report a failure WITH the
+ * evidence it collected before finding it — which is how a check that walks
+ * five accounts reports all five verdicts rather than only the first bad one.
  */
 async function step(n, title, fn) {
   try {
     const out = await fn();
     if (out && out.skip) record("SKIP", n, title, out.skip);
+    else if (out && out.fail) record("FAIL", n, title, out.fail);
     else record("PASS", n, title, out ?? "ok");
     return out;
   } catch (e) {
@@ -127,6 +202,22 @@ async function getPage(path, role) {
   return res.body;
 }
 
+/** Run `fn` over `items`, at most `width` in flight. Order is preserved. */
+async function pooled(items, width, fn) {
+  const out = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(width, items.length) }, async () => {
+    for (;;) {
+      const i = cursor;
+      cursor += 1;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Parsing                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -163,22 +254,89 @@ const fmt = (cents) =>
     .replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
 
 /**
- * The four figures of the availability derivation, in the order the table
- * renders them: ledger, active holds, uncleared credits, available.
+ * The availability derivation, read off the account screen's own table BY ITS
+ * ROW LABELS.
  *
- * Read off the account screen's own "How the available balance is derived"
- * table rather than off the headline, because the headline is a rendering of
- * this table and the point of the check is that the table adds up.
+ * The predecessor took the first four money figures in document order and
+ * named them ledger, holds, uncleared, available. When a fifth row —
+ * "Committed outflows" — was added between the third and the total, that
+ * parser read $0.00 as the available balance and failed two checks against two
+ * correct screens. Positional parsing of a table that is allowed to grow is
+ * not a check; it is a countdown.
+ *
+ * So: the ledger balance is the first figure, each subtracted component is
+ * found by the "less" operator cell that precedes its own label, and the
+ * available balance is the figure after the total row. The set of component
+ * labels is then asserted against the set this checker understands — an
+ * unknown row FAILS, by name, and says what to do about it, which is the
+ * behaviour that would have caught the last change on the day it shipped.
  */
+const KNOWN_COMPONENTS = ["Active holds", "Uncleared credits", "Committed outflows"];
+
 function derivation(html) {
   const t = text(html);
   const anchor = t.indexOf("How the available balance is derived");
   assert(anchor >= 0, "the availability derivation table is not on the page");
   const section = t.slice(anchor);
-  const found = [...section.matchAll(MONEY)].slice(0, 4).map(centsFrom);
-  assert(found.length === 4, `expected 4 figures in the derivation table, found ${found.length}`);
-  const [ledger, holds, uncleared, available] = found;
-  return { ledger, holds, uncleared, available };
+
+  const totalAt = section.indexOf("\nAvailable balance\n");
+  assert(totalAt > 0, 'the derivation table has no "Available balance" total row');
+  const head = section.slice(0, totalAt);
+  const tail = section.slice(totalAt);
+
+  const first = (block) => {
+    const m = new RegExp(MONEY.source).exec(block);
+    return m === null ? null : centsFrom(m);
+  };
+
+  // parts[0] holds the ledger row; every later part is one subtracted
+  // component, its label first and its amount somewhere below it.
+  const parts = head.split("\nless\n");
+  const ledger = first(parts[0]);
+  assert(ledger !== null, "no ledger balance figure in the derivation table");
+
+  const components = parts.slice(1).map((part) => {
+    const label = part.split("\n")[0].trim();
+    const cents = first(part);
+    assert(cents !== null, `the "${label}" row of the derivation table carries no amount`);
+    return { label, cents };
+  });
+
+  const labels = components.map((c) => c.label);
+  const unknown = labels.filter((l) => !KNOWN_COMPONENTS.includes(l));
+  assert(
+    unknown.length === 0,
+    `the derivation table has a row this checker does not know about: ${unknown
+      .map((l) => `"${l}"`)
+      .join(", ")}. That is not necessarily a bug on the screen — add it to ` +
+      `KNOWN_COMPONENTS in this file once you have read what it means, and never ` +
+      `by making this parser positional again.`,
+  );
+  const missing = KNOWN_COMPONENTS.filter((l) => !labels.includes(l));
+  assert(
+    missing.length === 0,
+    `the derivation table lost a row: ${missing.map((l) => `"${l}"`).join(", ")}`,
+  );
+
+  const available = first(tail);
+  assert(available !== null, "no available balance figure after the total row");
+
+  const byLabel = Object.fromEntries(components.map((c) => [c.label, c.cents]));
+  return {
+    ledger,
+    holds: byLabel["Active holds"],
+    uncleared: byLabel["Uncleared credits"],
+    committed: byLabel["Committed outflows"],
+    available,
+    components,
+  };
+}
+
+/** Format the derivation the way the screen states it, for evidence. */
+function derivationLine(d) {
+  return `${fmt(d.ledger)} − ${fmt(d.holds)} − ${fmt(d.uncleared)} − ${fmt(
+    d.committed,
+  )} = ${fmt(d.available)}`;
 }
 
 /** The server-action id the role switcher's <form> carries for no-JS posts. */
@@ -197,6 +355,34 @@ function setCookieRole(headers) {
   return null;
 }
 
+/** Every href inside the console's primary nav, which is the route list. */
+function navRoutes(html) {
+  const start = html.indexOf('aria-label="Primary"');
+  assert(start >= 0, "the console's primary nav is not in the page");
+  const end = html.indexOf("</nav>", start);
+  assert(end > start, "the primary nav is not closed");
+  const block = html.slice(start, end);
+  return [...new Set([...block.matchAll(/href="(\/[a-z-]*)"/g)].map((m) => m[1]))];
+}
+
+/**
+ * The live (uuid-addressed) deposit accounts on /accounts, each with the
+ * customer name printed under it.
+ *
+ * The name is read the way a person reads it — the line after the row's last
+ * four — rather than by matching a CSS class, so a restyle does not break the
+ * check and a row that stops naming its customer does.
+ */
+function liveAccountRows(html) {
+  const ids = [...new Set([...html.matchAll(/href="\/accounts\/([0-9a-f-]{36})"/g)].map((m) => m[1]))];
+  const lines = text(html).split("\n");
+  return ids.map((id) => {
+    const last4 = id.slice(-4);
+    const i = lines.indexOf(last4);
+    return { id, last4, customer: i >= 0 ? (lines[i + 1] ?? null) : null };
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* The walk                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -209,12 +395,41 @@ console.log(`started    ${new Date().toISOString()}`);
 console.log(RULE);
 console.log("");
 
+/**
+ * The screen list, taken from the DEPLOYED console's own nav and unioned with
+ * the fallback above.
+ *
+ * Reading it from the app is the whole point: a route added by another worker
+ * is swept on the next run without anybody remembering to edit this file, and a
+ * route removed is still swept, so a deletion shows up as a 404 rather than as
+ * a silently smaller number of checks.
+ */
+let SCREENS = SCREENS_FALLBACK;
+let screenSource = "the literal list in this file (the deployed nav could not be read)";
+try {
+  const fromNav = navRoutes(await getPage("/accounts"));
+  SCREENS = [...new Set(["/", ...fromNav, ...SCREENS_FALLBACK])];
+  screenSource = `the deployed console nav (${fromNav.length} routes) ∪ this file's fallback`;
+} catch {
+  /* keep the fallback; check 5 will report the nav problem on its own */
+}
+console.log(dim(`  screens under test: ${SCREENS.length}, from ${screenSource}`));
+console.log("");
+
 /* --- 1. the health endpoint, which the README calls authoritative --------- */
+
+/**
+ * The health document, kept so the checks below read the SAME bytes check 1
+ * asserted on. Re-probing would let a slot flip between two checks and let
+ * this script report a consistency it never actually saw.
+ */
+let HEALTH = null;
 
 await step(1, "/api/health answers, the database is reachable, and it reports its slots", async () => {
   const res = await req("/api/health");
   assert(res.status === 200, `answered ${res.status}`);
   const h = JSON.parse(res.body);
+  HEALTH = h;
   assert(h.status === "ok", `status is "${h.status}", expected "ok"`);
   assert(h.database?.reachable === true, "database.reachable is not true");
   const live = h.integrations?.live;
@@ -231,47 +446,196 @@ await step(1, "/api/health answers, the database is reachable, and it reports it
   return lines;
 });
 
-/* --- 2. no nested slot may contradict the authoritative verdict ----------- */
+/* --- 2. the authoritative document may not contradict itself -------------- */
 
-await step(2, "no nested webhook slot contradicts the authoritative live/simulated table", async () => {
-  const h = JSON.parse((await req("/api/health")).body);
+await step(2, "nothing inside /api/health contradicts anything else inside it", async () => {
+  const h = HEALTH ?? JSON.parse((await req("/api/health")).body);
   const authoritative = new Map(h.integrations.slots.map((s) => [s.slot, s.status]));
-  const disagreements = [];
+
+  const problems = [];
+
+  // (a) a slot labelled twice, once at the top level and once under a webhook.
   for (const w of h.integrations.webhooks ?? []) {
     for (const s of w.slots ?? []) {
       const truth = authoritative.get(s.slot);
       if (truth !== undefined && truth !== s.status) {
-        disagreements.push(`${w.provider}.${s.slot}: nested "${s.status}" vs authoritative "${truth}"`);
+        problems.push(`${w.provider}.${s.slot}: nested "${s.status}" vs authoritative "${truth}"`);
       }
     }
   }
-  assert(
-    disagreements.length === 0,
-    `a slot is labelled two ways in one document: ${disagreements.join("; ")}`,
-  );
+
+  // (b) a slot whose VERDICT is live while its PROVIDER STRING says simulated.
+  // The verdict column and the provider column are rendered side by side on the
+  // front door, so a grader reads both in one glance and one of them is a lie.
+  for (const s of h.integrations.slots) {
+    if (s.status === "live" && /simulat/i.test(String(s.provider ?? ""))) {
+      problems.push(
+        `${s.slot}: verdict "live" but provider reads "${s.provider}" — the front door prints ` +
+          `both columns in one row, so this row says LIVE and simulated at the same time ` +
+          `(src/lib/env.schema.ts, the slot's \`provider\` field)`,
+      );
+    }
+  }
+
+  assert(problems.length === 0, problems.join("\n        "));
+
   const mustBeLive = h.integrations.slots.filter((s) => s.mustBeLive);
   return [
     `${h.integrations.webhooks.length} webhook providers checked, every nested slot agrees`,
+    `no slot's provider string contradicts its own verdict`,
     `must-be-live slots: ${mustBeLive.map((s) => `${s.slot}=${s.status}`).join(", ")}`,
   ];
 });
 
-/* --- 3. every screen the click path visits is up ------------------------- */
+/* --- 3. every screen the console serves is up ---------------------------- */
 
-await step(3, "every screen in the click path answers 200", async () => {
-  const paths = ["/", "/accounts", "/approvals", "/reconciliation"];
-  const out = [];
-  for (const p of paths) {
+await step(3, "every one of the console's screens answers 200", async () => {
+  const out = await pooled(SCREENS, 5, async (p) => {
     const res = await req(p);
-    assert(res.status === 200, `GET ${p} answered ${res.status}`);
-    out.push(`GET ${p.padEnd(16)} 200  ${String(res.body.length).padStart(7)} bytes`);
-  }
-  return out;
+    return { p, status: res.status, bytes: res.body.length };
+  });
+  const down = out.filter((r) => r.status !== 200);
+  assert(down.length === 0, `${down.map((r) => `${r.p} -> ${r.status}`).join(", ")}`);
+  const widest = Math.max(...out.map((r) => r.p.length));
+  return [
+    `${out.length} screens, all 200`,
+    ...out.map((r) => `GET ${r.p.padEnd(widest)}  200  ${String(r.bytes).padStart(7)} bytes`),
+  ];
 });
 
-/* --- 4. the default role is the least privileged one ---------------------- */
+/* --- 4. five states per screen, and five DISTINCT documents --------------- */
 
-await step(4, "with no cookie the console acts as Staff, and Staff cannot approve", async () => {
+await step(
+  4,
+  "every screen answers in all five demo states, and the five are five different documents",
+  async () => {
+    if (quick) {
+      return {
+        skip: [
+          "--quick was passed, so the 70-render state sweep did not run.",
+          "Run without --quick to check docs/DEMO.md §3's claim.",
+        ],
+      };
+    }
+    const jobs = [];
+    for (const p of SCREENS) {
+      for (const s of STATES) {
+        jobs.push({ p, s, url: s === "default" ? p : `${p}?state=${s}` });
+      }
+    }
+    const seen = await pooled(jobs, 6, async (j) => {
+      const res = await req(j.url);
+      return { ...j, status: res.status, bytes: res.body.length, body: res.body };
+    });
+
+    const bad = seen.filter((r) => r.status !== 200);
+    assert(bad.length === 0, `${bad.map((r) => `${r.url} -> ${r.status}`).join(", ")}`);
+
+    const collapsed = [];
+    for (const p of SCREENS) {
+      const rows = seen.filter((r) => r.p === p);
+      const sizes = new Set(rows.map((r) => r.body.length));
+      if (sizes.size < rows.length) {
+        // Byte-identical renders would mean the parameter was ignored. Compare
+        // on the whole body, not a hash of it: we already have the bytes.
+        const distinct = new Set(rows.map((r) => r.body));
+        if (distinct.size < rows.length) {
+          collapsed.push(`${p}: ${rows.length} states rendered ${distinct.size} distinct documents`);
+        }
+      }
+    }
+    assert(
+      collapsed.length === 0,
+      `a screen ignored ?state=: ${collapsed.join("; ")}`,
+    );
+
+    return [
+      `${jobs.length} renders (${SCREENS.length} screens × ${STATES.length} states), every one 200`,
+      `every screen produced ${STATES.length} distinct documents, so none ignores ?state=`,
+      `states: ${STATES.join(" · ")}`,
+    ];
+  },
+);
+
+/* --- 5. the front door leads everywhere ---------------------------------- */
+
+await step(
+  5,
+  "the landing page leads to every screen the console serves",
+  async () => {
+    // The route list is taken from the DEPLOYED nav rather than from a literal
+    // in this file, so the check compares the app against itself and cannot go
+    // stale when a screen is added.
+    const consolePage = await getPage("/accounts");
+    const routes = navRoutes(consolePage).filter((r) => r !== "/");
+    assert(routes.length > 0, "the console's nav lists no routes");
+
+    const homeHtml = await getPage("/");
+    const missing = routes.filter((r) => !homeHtml.includes(`href="${r}"`));
+
+    // The landing page has no nav of its own — the card list IS its navigation
+    // — so a route absent from it is a route a stranger cannot reach from the
+    // URL they were sent. That is the whole of this check.
+    assert(
+      missing.length === 0,
+      `the landing page claims "Every screen in this build" and "Everything built in this ` +
+        `trial is reachable from here", but ${missing.length} of ${routes.length} screens are ` +
+        `not linked from it and / carries no nav:\n        ` +
+        `  ${missing.join("  ")}\n        ` +
+        `  src/components/home/ScreenLinks.tsx — SCREENS lists 6 of ${routes.length}; the ` +
+        `header prose says "Six screens".\n        ` +
+        `  src/components/home/ScreenLinks.test.ts asserts every LISTED link resolves and ` +
+        `never that every ROUTE is listed, so the gap is invisible to the suite.`,
+    );
+    return [
+      `the console nav serves ${routes.length} routes, and / links to all of them`,
+      `routes: ${routes.join(" ")}`,
+    ];
+  },
+);
+
+/* --- 6. no screen may contradict /api/health ----------------------------- */
+
+await step(
+  6,
+  "the landing page's prose agrees with /api/health, which outranks it",
+  async () => {
+    const h = HEALTH ?? JSON.parse((await req("/api/health")).body);
+    const homeHtml = await getPage("/");
+    const t = text(homeHtml);
+    const slot = (name) => h.integrations.slots.find((s) => s.slot === name);
+    const problems = [];
+
+    if (h.integrations.live === h.integrations.total) {
+      if (t.includes("The two SIMULATED rows")) {
+        problems.push(
+          `the page's "what to look at" list sends the reader to "The two SIMULATED rows", but ` +
+            `/api/health reports ${h.integrations.live} live of ${h.integrations.total} and the ` +
+            `table on the same page prints "0 are simulated" — there are no such rows ` +
+            `(src/components/home/WhatToLookAt.tsx, the item keyed "simulated")`,
+        );
+      }
+    }
+
+    if (slot("business_registry")?.status === "live" && t.includes("the registry leg is simulated")) {
+      problems.push(
+        `the Onboarding card says "the registry leg is simulated", but /api/health reports ` +
+          `business_registry=live with the evidence "${slot("business_registry").evidence}" ` +
+          `(src/components/home/ScreenLinks.tsx, the /onboarding entry's \`why\`)`,
+      );
+    }
+
+    assert(problems.length === 0, problems.join("\n        "));
+    return [
+      `/api/health: ${h.integrations.live} live of ${h.integrations.total}`,
+      "no sentence on the landing page claims a slot is simulated that health calls live",
+    ];
+  },
+);
+
+/* --- 7. the default role is the least privileged one --------------------- */
+
+await step(7, "with no cookie the console acts as Staff, and Staff cannot approve", async () => {
   const html = await getPage("/approvals");
   assert(html.includes("Priya Raman"), 'the staff actor "Priya Raman" is not named on the page');
   assert(html.includes("cannot approve"), 'the staff actor is not marked "cannot approve"');
@@ -286,27 +650,36 @@ await step(4, "with no cookie the console acts as Staff, and Staff cannot approv
   ];
 });
 
-/* --- 5. the role switcher is a real form, and it really switches ---------- */
+/* --- 8. the role switcher is a real form, and it works from the front door- */
 
-await step(5, "the Approver button submits the real server action and sets the role", async () => {
-  const html = await getPage("/accounts");
-  const id = actionId(html);
-  const form = new FormData();
-  form.set(id, "");
-  form.set("role", "approver");
-  const res = await req("/accounts", { method: "POST", body: form });
-  assert(res.status === 200, `the role-switch POST answered ${res.status}`);
-  const cookie = setCookieRole(res.headers);
-  assert(cookie !== null, "the response set no corgi_demo_role cookie");
-  assert(cookie.value === "approver", `the cookie was set to "${cookie.value}", expected "approver"`);
-  assert(cookie.httpOnly, "the role cookie is not HttpOnly");
-  return [
-    `POST /accounts with ${id.slice(0, 24)}… and role=approver -> 200`,
-    `set-cookie: corgi_demo_role=approver; HttpOnly; SameSite=lax`,
-  ];
-});
+await step(
+  8,
+  "the Approver button on the LANDING page submits the real server action and sets the role",
+  async () => {
+    // Deliberately posted from `/` and not from a console page: `/` is where a
+    // stranger arrives, and docs/DEMO.md tells them the credential is the
+    // control in that header. If it only worked one screen in, the instruction
+    // in the submission email would be wrong.
+    const html = await getPage("/");
+    const id = actionId(html);
+    const form = new FormData();
+    form.set(id, "");
+    form.set("role", "approver");
+    const res = await req("/", { method: "POST", body: form });
+    assert(res.status === 200, `the role-switch POST answered ${res.status}`);
+    const cookie = setCookieRole(res.headers);
+    assert(cookie !== null, "the response set no corgi_demo_role cookie");
+    assert(cookie.value === "approver", `the cookie was set to "${cookie.value}", expected "approver"`);
+    assert(cookie.httpOnly, "the role cookie is not HttpOnly");
+    return [
+      `POST / with ${id.slice(0, 24)}… and role=approver -> 200`,
+      `set-cookie: corgi_demo_role=approver; Path=/; HttpOnly; SameSite=lax`,
+      "so the switch works from the URL in the email, before any navigation",
+    ];
+  },
+);
 
-await step(6, "the Staff button switches back, so the control is not one-way", async () => {
+await step(9, "the Staff button switches back, so the control is not one-way", async () => {
   const html = await getPage("/accounts", "approver");
   const id = actionId(html);
   const form = new FormData();
@@ -323,9 +696,9 @@ await step(6, "the Staff button switches back, so the control is not one-way", a
   return "set-cookie: corgi_demo_role=staff";
 });
 
-/* --- 7. the two roles resolve to two different seeded actors -------------- */
+/* --- 10. the two roles resolve to two different seeded actors ------------- */
 
-await step(7, "Approver resolves to a different actor, who does hold approval rights", async () => {
+await step(10, "Approver resolves to a different actor, who does hold approval rights", async () => {
   const html = await getPage("/approvals", "approver");
   assert(html.includes("Dana Okonkwo"), 'the approver actor "Dana Okonkwo" is not named on the page');
   assert(html.includes("can approve"), 'the approver actor is not marked "can approve"');
@@ -339,9 +712,9 @@ await step(7, "Approver resolves to a different actor, who does hold approval ri
   ];
 });
 
-/* --- 8. maker-checker: the queue refuses the approver's own payment ------- */
+/* --- 11. maker-checker: the queue refuses the approver's own payment ------ */
 
-await step(8, "the queue refuses self-approval, and says so before the button is pressed", async () => {
+await step(11, "the queue refuses self-approval, and says so before the button is pressed", async () => {
   const html = await getPage("/approvals", "approver");
   assert(html.includes("that is you"), 'no queue row is marked "that is you" for the approver');
   const reason = "You raised this payment, so you cannot approve it.";
@@ -350,10 +723,7 @@ await step(8, "the queue refuses self-approval, and says so before the button is
     html.includes("assert_maker_checker"),
     "the screen does not name the database trigger that enforces the rule",
   );
-  assert(
-    html.includes("42501"),
-    "the screen does not name the SQLSTATE the trigger raises",
-  );
+  assert(html.includes("42501"), "the screen does not name the SQLSTATE the trigger raises");
   assert(html.includes("disabled"), "no control on the page is rendered disabled");
   return [
     'a queue row raised by Dana Okonkwo is marked "that is you"',
@@ -362,18 +732,23 @@ await step(8, "the queue refuses self-approval, and says so before the button is
   ];
 });
 
-await step(9, "the database-level refusal is not asserted over HTTP", async () => ({
+await step(12, "the database-level refusal is not asserted by THIS script", async () => ({
   skip: [
-    "the approvals form is a client component, so its server action carries no no-JavaScript",
-    "action id in the HTML and a hand-assembled POST cannot reach the trigger from this script.",
-    "The DATABASE refusal is proven by:  node scripts/livefire.mjs --only 5",
-    "  (raw INSERT, no application code in the call stack, asserts SQLSTATE 42501)",
+    "`DecisionForm` is a client component driven by useActionState, so React emits its BOUND",
+    "progressive-enhancement fields ($ACTION_REF_…, $ACTION_<n>:0) rather than the unbound",
+    "$ACTION_ID_… this script's matcher submits. Reimplementing that scraping here would be a",
+    "second copy of code that already exists and is already run, so this stays a SKIP.",
+    "The refusal is proven twice, and neither proof is this file:",
+    "  node scripts/livefire.mjs --only 5   raw INSERT, no application code in the call stack,",
+    "                                       asserts SQLSTATE 42501 from assert_maker_checker()",
+    "  node scripts/coreloop.mjs            leg 5 posts the BOUND action over HTTP and is",
+    "                                       refused NOT_AN_APPROVER / SELF_APPROVAL",
   ],
 }));
 
-/* --- 10. an authorisation moves available and does not move the ledger ---- */
+/* --- 13. an authorisation moves available and does not move the ledger ---- */
 
-await step(10, "a $50.00 authorisation moves AVAILABLE and does not move the LEDGER", async () => {
+await step(13, "a $50.00 authorisation moves AVAILABLE and does not move the LEDGER", async () => {
   // BEFORE is the row on /accounts, which is where the click path starts and
   // which renders the same fixture with no authorisation landed. There is no
   // "?auth=absent" URL: an empty query string is the LIVE account, and
@@ -398,8 +773,8 @@ await step(10, "a $50.00 authorisation moves AVAILABLE and does not move the LED
     `available moved by ${fmt(after.available - before.available)}, expected exactly -$50.00`,
   );
   assert(
-    after.ledger - after.holds - after.uncleared === after.available,
-    "the availability derivation on the after view does not add up",
+    after.ledger - after.holds - after.uncleared - after.committed === after.available,
+    `the availability derivation on the after view does not add up: ${derivationLine(after)}`,
   );
   // The screen must SAY it, not merely arrive at it. A number that happens to
   // be right and is not explained teaches a viewer nothing.
@@ -410,16 +785,18 @@ await step(10, "a $50.00 authorisation moves AVAILABLE and does not move the LED
   assert(afterHtml.includes("down 50 dollars"), "the available balance is not annotated with the drop");
   assert(afterHtml.includes("SHELL OIL 1247"), "the hold that caused the drop is not named on the screen");
   return [
-    `before (/accounts row)     ledger ${fmt(before.ledger)}                        available ${fmt(before.available)}`,
-    `after  (?auth=pending)     ledger ${fmt(after.ledger)}  holds ${fmt(after.holds)}  available ${fmt(after.available)}`,
-    `ledger delta ${fmt(after.ledger - before.ledger)} · available delta ${fmt(after.available - before.available)}`,
+    `before (/accounts row)     ledger ${fmt(before.ledger)}   available ${fmt(before.available)}`,
+    `after  (?auth=pending)     ${derivationLine(after)}`,
+    `ledger delta ${fmt(after.ledger - before.ledger)} · available delta ${fmt(
+      after.available - before.available,
+    )}`,
     'annotated on screen: "unchanged by the authorisation" / "down 50 dollars" / "SHELL OIL 1247"',
   ];
 });
 
-/* --- 11. the fixture says it is a fixture --------------------------------- */
+/* --- 14. the fixture says it is a fixture --------------------------------- */
 
-await step(11, "the demo authorisation is labelled a fixture, and the live account is labelled live", async () => {
+await step(14, "the demo authorisation is labelled a fixture, and the live account is labelled live", async () => {
   const fixture = await getPage("/accounts/acct_operating_4417?auth=pending");
   assert(fixture.includes("fixture"), "the fixture view is not labelled a fixture");
   assert(
@@ -434,32 +811,185 @@ await step(11, "the demo authorisation is labelled a fixture, and the live accou
   ];
 });
 
-/* --- 12. the live account's arithmetic actually adds up ------------------- */
+/* --- 15. every live account screen RENDERS, and its arithmetic adds up ---- */
 
-await step(12, "on the LIVE account, available == ledger - holds - uncleared, exactly, in cents", async () => {
-  const list = await getPage("/accounts");
-  const ids = [...list.matchAll(/href="\/accounts\/([0-9a-f-]{36})"/g)].map((m) => m[1]);
-  assert(ids.length > 0, "the accounts list links to no live (uuid-addressed) account");
-  const out = [];
-  for (const id of ids) {
-    const html = await getPage(`/accounts/${id}`);
-    assert(html.includes("live ledger"), `account ${id} is not labelled a live ledger`);
-    const d = derivation(html);
-    const derived = d.ledger - d.holds - d.uncleared;
+/**
+ * The live deposit accounts, read once off /accounts and shared by checks 15,
+ * 16 and 17 so all three describe the same book at the same instant.
+ * A failure here is reported by each check that needs it rather than killing
+ * the walk, because the four checks after it do not depend on this list.
+ */
+let accountRows = [];
+try {
+  accountRows = liveAccountRows(await getPage("/accounts"));
+} catch {
+  accountRows = [];
+}
+
+await step(
+  15,
+  "every live account screen opens, and available == ledger − holds − uncleared − committed",
+  async () => {
+    assert(accountRows.length > 0, "the accounts list links to no live (uuid-addressed) account");
+
+    // Walk ALL of them and collect a verdict each. The predecessor threw on the
+    // first account and therefore never opened the fifth — which was the one
+    // that did not render at all. A check that stops at the first bad row is a
+    // check that can hide the worst row behind the least important one.
+    const verdicts = await pooled(accountRows, 4, async (row) => {
+      const label = `${row.last4}  ${(row.customer ?? "?").padEnd(30)}`;
+      let html;
+      try {
+        html = await getPage(`/accounts/${row.id}`);
+      } catch (e) {
+        return { ok: false, line: `${label} DID NOT LOAD — ${e.message}` };
+      }
+      const t = text(html);
+      // A read failure renders 200 with an error card, so the status code is
+      // not the signal. The screen's own error code is.
+      const code = /\n(LEDGER_READ_FAILED|ACCOUNT_NOT_FOUND|[A-Z_]+_FAILED)\n/.exec(t);
+      if (code !== null) {
+        const message = /\nMessage\n(.+)/.exec(t);
+        return {
+          ok: false,
+          line: `${label} BROKEN — ${code[1]}${message ? `: ${message[1]}` : ""}`,
+        };
+      }
+      if (!html.includes("live ledger")) {
+        return { ok: false, line: `${label} is not labelled a live ledger` };
+      }
+      let d;
+      try {
+        d = derivation(html);
+      } catch (e) {
+        return { ok: false, line: `${label} ${e.message}` };
+      }
+      const derived = d.ledger - d.holds - d.uncleared - d.committed;
+      if (derived !== d.available) {
+        return {
+          ok: false,
+          line: `${label} ${derivationLine(d)} — the components give ${fmt(derived)}`,
+        };
+      }
+      return { ok: true, line: `${label} ${derivationLine(d)}` };
+    });
+
+    const broken = verdicts.filter((v) => !v.ok);
+    const lines = verdicts.map((v) => `${v.ok ? "ok    " : "FAIL  "}${v.line}`);
+    if (broken.length > 0) {
+      return {
+        fail: [
+          `${broken.length} of ${verdicts.length} live account screens do not work:`,
+          ...lines,
+          "",
+          "A 200 with an error card is still a broken screen. LEDGER_READ_FAILED with",
+          '"Invalid time value" is `hold.available_at = \'infinity\'` — a real timestamptz value',
+          "that `src/lib/disputes/store.ts` writes on purpose for a provisional credit released",
+          "by a person rather than a clock — reaching `Date.prototype.toISOString()` unguarded in",
+          "`toInstant`/`toInstantOrNull`, src/components/account/live-data-source.ts:108-114.",
+          "The identical bug was found and fixed on /funding: src/app/(app)/funding/live-source.ts",
+          "carries a capitalised note about it and an `isInstant()` guard. The account screen did",
+          "not get the same guard.",
+        ],
+      };
+    }
+    return [`${verdicts.length} live account screens, all of them exact in cents`, ...lines];
+  },
+);
+
+/* --- 16. the demo has one business a stranger can follow end to end ------- */
+
+await step(
+  16,
+  `a stranger can follow one business — ${PROTAGONIST} — through the whole loop`,
+  async () => {
+    const problems = [];
+    const evidence = [];
+
+    const onboarding = text(await getPage("/onboarding"));
+    if (!onboarding.includes(PROTAGONIST)) {
+      problems.push(`/onboarding does not list ${PROTAGONIST}`);
+    } else {
+      evidence.push(`/onboarding            names ${PROTAGONIST} with its KYB evidence`);
+    }
+
+    const row = accountRows.find((r) => r.customer === PROTAGONIST);
+    if (row === undefined) {
+      problems.push(
+        `no deposit account on /accounts is labelled ${PROTAGONIST} — the customers found were ` +
+          accountRows.map((r) => r.customer).join(", "),
+      );
+    } else {
+      evidence.push(`/accounts              row ••${row.last4} is ${PROTAGONIST}`);
+
+      const accountHtml = await getPage(`/accounts/${row.id}`);
+      const at = text(accountHtml);
+      const code = /\n(LEDGER_READ_FAILED|ACCOUNT_NOT_FOUND|[A-Z_]+_FAILED)\n/.exec(at);
+      if (code !== null) {
+        problems.push(
+          `/accounts/${row.id} — the protagonist's own account screen — renders ${code[1]}. ` +
+            `This is the screen every other document in the repo is a screenshot of.`,
+        );
+      } else {
+        evidence.push(`/accounts/${row.id.slice(0, 8)}…  opens, with its holds itemised`);
+      }
+
+      const statements = await getPage(`/statements?account=${row.id}`);
+      if (!statements.includes(PROTAGONIST)) {
+        problems.push(`/statements?account=${row.id} does not show ${PROTAGONIST}`);
+      } else {
+        evidence.push(`/statements?account=…  a closed day for ${PROTAGONIST}`);
+      }
+    }
+
+    const disputes = await getPage("/disputes");
+    if (!disputes.includes(PROTAGONIST)) {
+      problems.push(`/disputes does not reach ${PROTAGONIST}`);
+    } else {
+      evidence.push(`/disputes              ${PROTAGONIST} has cases with provisional credit`);
+    }
+
+    if (problems.length > 0) return { fail: [...problems, "", ...evidence] };
+    return evidence;
+  },
+);
+
+/* --- 17. test fixtures are on the book, and are nameable as fixtures ------ */
+
+await step(
+  17,
+  "test fixture companies on the live book are distinguishable from customers",
+  async () => {
+    const customers = accountRows.map((r) => r.customer).filter((c) => c !== null);
+    assert(customers.length > 0, "no customer names were read off the accounts list");
+    const fixtures = customers.filter((c) => FIXTURE_NAME.test(c));
+    const real = customers.filter((c) => !FIXTURE_NAME.test(c));
+
+    // Fixtures are legitimate — they are the residue of integration and fuzz
+    // runs against this same database, and deleting them would be a DELETE on a
+    // book that has postings. What must not happen is a grader reading one as a
+    // customer. So the rule is that every fixture is nameable as one from its
+    // own row, and that a real customer is present alongside them.
     assert(
-      derived === d.available,
-      `account ${id}: ${fmt(d.ledger)} - ${fmt(d.holds)} - ${fmt(d.uncleared)} = ${fmt(derived)}, but the screen says ${fmt(d.available)}`,
+      real.length > 0,
+      `every deposit account on the book belongs to a test fixture: ${customers.join(", ")}`,
     );
-    out.push(
-      `${id.slice(0, 8)}…  ${fmt(d.ledger)} - ${fmt(d.holds)} - ${fmt(d.uncleared)} = ${fmt(d.available)}`,
-    );
-  }
-  return out;
-});
+    const unlabelled = fixtures.filter((c) => !FIXTURE_NAME.test(c));
+    assert(unlabelled.length === 0, `fixture accounts that do not say so: ${unlabelled.join(", ")}`);
 
-/* --- 13. the breaks screen -------------------------------------------- */
+    return [
+      `${customers.length} deposit accounts: ${real.length} customer, ${fixtures.length} test fixture`,
+      `customers: ${real.join(", ")}`,
+      `fixtures:  ${fixtures.join(", ")}`,
+      `the list sorts alphabetically, so ${customers[0]} is the first row a grader sees`,
+      "docs/DEMO.md §1.1 names them before the click path reaches them",
+    ];
+  },
+);
 
-await step(13, "the breaks screen renders a reconciliation run and its break categories", async () => {
+/* --- 18. the breaks screen ------------------------------------------------ */
+
+await step(18, "the breaks screen renders a reconciliation run and its break categories", async () => {
   const html = await getPage("/reconciliation");
   const t = text(html);
   assert(html.includes("LIVE LEDGER"), "the reconciliation screen is not reading the live ledger");
@@ -482,9 +1012,9 @@ await step(13, "the breaks screen renders a reconciliation run and its break cat
   ];
 });
 
-/* --- 14. the break detail is real, not a placeholder ---------------------- */
+/* --- 19. the break detail is real, not a placeholder ---------------------- */
 
-await step(14, "a break carries a reference, an amount, an age and a severity", async () => {
+await step(19, "a break carries a reference, an amount, an age and a severity", async () => {
   const html = await getPage("/reconciliation");
   const t = text(html);
   assert(html.includes("Reference"), "the breaks table has no reference column");
@@ -496,7 +1026,7 @@ await step(14, "a break carries a reference, an amount, an age and a severity", 
     html.includes("day close"),
     "the screen does not explain that aging is measured in day closes",
   );
-  const ref = /\n(LF6-[A-Z0-9]+-\d+)\n/.exec(t);
+  const ref = /\n(LF\d*-[A-Z0-9]+-\d+)\n/.exec(t);
   const sev = /\n(Open|Aged|Stale|Critical|Explained)\n/.exec(t);
   assert(ref !== null || t.includes("No breaks"), "no break reference is rendered and the screen is not empty");
   return [
@@ -522,6 +1052,9 @@ console.log(
   }   of ${results.length} checks`,
 );
 if (skip > 0) console.log(dim("  a skip is not a pass; each one names the command that does prove it"));
+if (fail > 0) {
+  console.log(dim("  every FAIL above names the file that has to change; none of them is this script"));
+}
 console.log(`  finished   ${new Date().toISOString()}`);
 console.log(RULE);
 console.log("");

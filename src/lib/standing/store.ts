@@ -532,6 +532,15 @@ export type OutcomeInput = {
       readonly ledgerCents?: bigint;
       readonly holdsCents?: bigint;
       readonly unclearedCents?: bigint;
+      /**
+       * The fifth term: debits already booked for a future value date
+       * (migration 0022). Recorded since 0023, and the CHECK constraint
+       * `standing_order_outcome_availability_identity` refuses a row that
+       * carries it and does not add up — so this is not four figures plus a
+       * remainder any more, it is the decomposition of the number the
+       * payment was refused against.
+       */
+      readonly pendingOutboundCents?: bigint;
       readonly availableCents?: bigint;
       readonly shortfallCents?: bigint;
     }
@@ -564,6 +573,7 @@ export async function recordOutcome(input: OutcomeInput, conn: Sql): Promise<boo
           ledger: null as string | null,
           holds: null as string | null,
           uncleared: null as string | null,
+          pendingOutbound: null as string | null,
           available: null as string | null,
           shortfall: null as string | null,
         }
@@ -574,6 +584,7 @@ export async function recordOutcome(input: OutcomeInput, conn: Sql): Promise<boo
           ledger: centsOrNull(input.ledgerCents),
           holds: centsOrNull(input.holdsCents),
           uncleared: centsOrNull(input.unclearedCents),
+          pendingOutbound: centsOrNull(input.pendingOutboundCents),
           available: centsOrNull(input.availableCents),
           shortfall: centsOrNull(input.shortfallCents),
         };
@@ -582,7 +593,8 @@ export async function recordOutcome(input: OutcomeInput, conn: Sql): Promise<boo
     INSERT INTO standing_order_outcome
       (occurrence_id, disposition, instruction_id, refusal_code, refusal_reason,
        observed_ledger_cents, observed_holds_cents, observed_uncleared_cents,
-       observed_available_cents, shortfall_cents, decided_by_run)
+       observed_pending_outbound_cents, observed_available_cents,
+       shortfall_cents, decided_by_run)
     VALUES
       (${input.occurrenceId}::uuid,
        ${input.disposition}::standing_order_disposition,
@@ -592,6 +604,7 @@ export async function recordOutcome(input: OutcomeInput, conn: Sql): Promise<boo
        ${flat.ledger}::bigint,
        ${flat.holds}::bigint,
        ${flat.uncleared}::bigint,
+       ${flat.pendingOutbound}::bigint,
        ${flat.available}::bigint,
        ${flat.shortfall}::bigint,
        ${input.runId})

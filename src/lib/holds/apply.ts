@@ -12,13 +12,62 @@
  *     6. H_cur := memo_balance(hold)           (the journal's own answer)
  *     7. append H_new − H_cur, if non-zero     (compare-and-append)
  *
- * Steps 1–5 are one transaction and steps 1, 6, 7 are a second. The split is
- * deliberate and it is the crash-safety argument made physical: the closure row
- * is durable before the release posting is attempted, and `availableBalance()`
- * reads "released" as that row existing. A process that dies between the two
- * leaves the customer's available balance already correct; the posting lands on
- * the next event or on the expiry sweep, and lands as a no-op if the balance is
- * already zero.
+ * ALL SEVEN ARE ONE TRANSACTION. They were not, and the change is migration
+ * 0036's, so the argument that used to be here is worth keeping beside the one
+ * that replaced it.
+ *
+ * ─── The split that used to be here, and why it is gone ─────────────────────
+ *
+ * Steps 1–5 were one transaction and steps 1, 6, 7 a second. The stated reason
+ * was crash safety in the RELEASE direction: the closure row is durable before
+ * the release posting is attempted, `availableBalance()` reads "released" as
+ * that row existing, so a process that dies between the two leaves the
+ * customer's available balance already correct and the posting lands later.
+ *
+ * That argument is sound, and it buys nothing, because `v_hold_state` does not
+ * read release from the closure row alone:
+ *
+ *     is_released = (closure ∧ ¬reversal)
+ *                 ∨ (kind = 'card_auth' ∧ v_card_auth_hold.is_closed)
+ *                 ∨ (kind = 'uncleared_credit' ∧ now() ≥ available_at)
+ *
+ * The second disjunct is `saw_final ∨ saw_close ∨ now() ≥ expires_at ∨ A ≤ 0`,
+ * derived from the EVENT SET. For a card authorisation the money is therefore
+ * free the moment the FACTS commit, whether or not the closure row landed and
+ * whether or not the posting did. The split was protecting a customer-
+ * favourable outcome that the derived predicate already guarantees.
+ *
+ * Run the same argument in the OPENING direction and it inverts: the facts
+ * commit, `H(E)` says $50 is authorised, and the memo entry that withholds it
+ * has not landed. Availability subtracts the memo balance, which is zero, so
+ * the customer can spend money a merchant is going to claim. Measured on this
+ * book: 342ms at p50, 2.1s at p95, over 474 authorisations. A process killed
+ * inside that window leaves it permanently.
+ *
+ * So the two directions did not need opposite orderings; the release direction
+ * needed no ordering at all. Merging costs nothing new either: step 3 ALREADY
+ * calls `postEntry()` → `ledger_append()` inside this transaction while holding
+ * the row lock, so the memo posting introduces no lock that was not taken here
+ * before and no ordering that was not already established.
+ *
+ * What merging does change is the failure mode, and it changes it in the right
+ * direction. Before: the facts commit and the withholding does not, so a crash
+ * fails OPEN — money spendable that should not be. After: neither commits, the
+ * envelope stays undelivered, the redelivery replays the lot, and a crash fails
+ * CLOSED. Between "we forgot to withhold" and "we have not processed it yet",
+ * only the second is a state a bank can be in.
+ *
+ * `settleHoldPosting()` keeps its own transaction and stays exported, because
+ * `expiry.ts`, `completion.ts` and `scripts/repair-0028-premature-closures.mjs`
+ * all call it from outside a delivery, and because the compare-and-append being
+ * runnable at any time from anywhere is the property the recovery rests on.
+ *
+ * ─── And the recovery is still required ─────────────────────────────────────
+ *
+ * Atomicity fixes this code. It does not fix a hold written by something that
+ * is not this code — which is what actually produced migration 0036 — nor a
+ * deployed build older than this one, nor anything already in the book. See
+ * `completion.ts`.
  *
  * ─── Why this is exactly-once ────────────────────────────────────────────────
  *
@@ -29,9 +78,9 @@
  * `UNIQUE` on `journal_entry`, so even a bug that bypassed the lock could not
  * append a second delta for the same event.
  *
- * AT LEAST ONCE IN EFFECT: availability does not depend on the posting. It
- * subtracts `hold_closure`-open holds only, so the moment the closure row
- * commits the money is free, whether or not the memo entry ever lands.
+ * AT LEAST ONCE IN EFFECT: availability does not depend on the posting. For a
+ * card authorisation it re-derives release from the event set, so the moment
+ * the FACTS commit the money is free, whether or not the memo entry ever lands.
  *
  * AND THE EFFECT IS IDEMPOTENT: after a release `H_cur = 0`, so every
  * recomputation yields `Δ = 0` and appends nothing. At-most-once posting plus
@@ -46,12 +95,14 @@
 import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
+import { reconcileSettlementEvent, type ReconcileOutcome } from "@/lib/interchange";
+import { rootLogger } from "@/lib/log";
 import type { Transaction } from "@/lib/rails/lithic/types";
 import { resolveEventSemanticsBatch } from "@/lib/rails/semantics";
 
 import { postCardCorrection, type CorrectionPosted } from "./corrections";
 import { deriveCardEvents, type DerivedCardEvents } from "./lithic-events";
-import { holdState, type CardEvent, type HoldState } from "./model";
+import { holdState, movesFinancialBook, type CardEvent, type HoldState } from "./model";
 import {
   CARD_AUTH_EXPIRY_DAYS,
   closeHold,
@@ -90,6 +141,14 @@ export interface HoldOutcome {
   readonly state: HoldState;
   /** `hold_closure` written by THIS call (false if it already existed). */
   readonly closurePosted: boolean;
+  /**
+   * Provider event ids this payload says the network REFUSED.
+   *
+   * Reporting only — the money consequence is already structural, because a
+   * refused step is ingested under a kind that feeds no term of `H(E)` and
+   * moves no financial book. See `deriveCardEvents`.
+   */
+  readonly refusedEvents: readonly string[];
   /** `H_new − H_cur`. Zero means the memo book already said the right thing. */
   readonly deltaCents: bigint;
   readonly memoEntryId: string | null;
@@ -111,6 +170,22 @@ export interface HoldOutcome {
    * reconciliation signal, and the honest place for it is a break, not a guess.
    */
   readonly providerDisagrees: boolean;
+  /**
+   * What this delivery did to INTERCHANGE, one entry per settlement event it
+   * touched. Empty for a payload that carried no clearing, force post or
+   * refund — an authorisation earns nothing, which is the whole point.
+   *
+   * See `interchangeHook()` below for why it is reported rather than thrown.
+   */
+  readonly interchange: readonly InterchangeStep[];
+}
+
+/** One settlement event's interchange outcome, for the caller's receipt. */
+export interface InterchangeStep {
+  readonly providerEventId: string;
+  readonly outcome: ReconcileOutcome["status"] | "failed";
+  /** Present when the reconcile threw. The money path already committed. */
+  readonly error?: string;
 }
 
 export interface UnmatchedCorrection {
@@ -141,8 +216,31 @@ function expiryFor(createdAt: Date): Date {
 }
 
 /**
- * Steps 1–5: record the facts, move the money they moved, close the hold if the
- * event set says it is finished.
+ * The event whose arrival prompts the recompute, and the date it books at.
+ *
+ * Deterministic: the last member of the payload's derived set, so a replay of
+ * the same payload produces the same idempotency key and therefore the same
+ * no-op. `completion.ts` resolves the same event from the database — the last
+ * member of the SET under `loadCardEvents()`'s ordering — so a repair and a
+ * redelivery collide on one key instead of appending twice.
+ */
+function triggerOf(derived: DerivedCardEvents): {
+  providerEventId: string;
+  valueDate: string;
+} {
+  const trigger = derived.events.at(-1);
+  return {
+    providerEventId: trigger?.providerEventId ?? `state:${derived.providerAuthId}`,
+    valueDate: trigger?.valueDate ?? derived.valueDate,
+  };
+}
+
+/**
+ * Steps 1–7: record the facts, move the money they moved, close the hold if the
+ * event set says it is finished, and drive the memo book to `H(E)`.
+ *
+ * One transaction. See the module header for why the memo posting moved in
+ * here, and for the argument it displaced.
  */
 async function recordFacts(
   derived: DerivedCardEvents,
@@ -169,6 +267,9 @@ async function recordFacts(
       closurePosted: boolean;
       financialEntryIds: string[];
       events: CardEvent[];
+      deltaCents: bigint;
+      memoEntryId: string | null;
+      holdCents: bigint;
     }
 > {
   const card = await resolveCard(ctx.provider, derived.providerCardToken, ctx.conn);
@@ -201,6 +302,39 @@ async function recordFacts(
       ctx.inboxId,
       tx,
     );
+
+    // Step 2b. THE VERDICT, beside the fact and in the same transaction.
+    //
+    // `card_auth_event` is append-only in two layers — `corgi_app` holds
+    // SELECT and INSERT only, and a trigger refuses UPDATE for every role
+    // including the owner — so the network's `result` cannot live ON the row
+    // and is appended next to it instead (migration 0026). One row per event,
+    // `PRIMARY KEY (event_id)`, which is what makes it exactly-once in the
+    // same way `hold_closure` is.
+    //
+    // It is written HERE, inside the same transaction as the facts, because a
+    // fact whose verdict landed separately could be committed without one —
+    // and "we recorded the event but not whether it happened" is precisely the
+    // state this whole change exists to end.
+    //
+    // NULL when the payload carried no `result` for the step: that is "we were
+    // not told", which is not the same claim as APPROVED and is not invented
+    // into one. `source = 'ingest'` arms the trigger that refuses to let a
+    // refused step be filed under a kind that feeds the hold arithmetic.
+    for (const event of derived.events) {
+      await tx`
+        INSERT INTO card_auth_event_result
+               (event_id, result, provider_step, source, inbox_id)
+        SELECT cae.id,
+               ${derived.results.get(event.providerEventId) ?? null},
+               ${derived.stepTypes.get(event.providerEventId) ?? null},
+               'ingest',
+               ${ctx.inboxId}::uuid
+          FROM card_auth_event cae
+         WHERE cae.auth_id = ${identity.authId}::uuid
+           AND cae.provider_event_id = ${event.providerEventId}
+        ON CONFLICT (event_id) DO NOTHING`;
+    }
 
     // Step 3. Money, through postEntry() and therefore through ledger_append().
     // Every one of these is idempotent on `card:<kind>:<provider_event_id>`, so
@@ -242,6 +376,35 @@ async function recordFacts(
       ? await closeHold(identity.holdId, closureReason(state), ctx.actorId, tx)
       : false;
 
+    // Steps 6 and 7. THE COMPARE-AND-APPEND, in this transaction.
+    //
+    // `H(E)` is final by step 4 and nothing after this point can change it:
+    // the corrections that run once this commits reverse and re-book on the
+    // FINANCIAL book only — `readTargetEntry()` finds its target by
+    // `financialPostingKey()` and requires the customer's 2100 leaf among the
+    // lines, so no correction can reach a memo entry — and the interchange
+    // hook posts 2200/4100. So the memo book computed here is the memo book
+    // this delivery ends with, and there is nothing to recompute afterwards.
+    const trigger = triggerOf(derived);
+    const current = await memoHoldBalance(identity.holdId, identity.memoAccountId, tx);
+    const delta = state.holdCents - current;
+    const memoEntryId = await postHoldDelta(
+      {
+        identity,
+        deltaCents: delta,
+        valueDate: trigger.valueDate,
+        providerEventId: trigger.providerEventId,
+        description:
+          delta > 0n
+            ? `Card hold opened/increased ${derived.providerAuthId}`
+            : `Card hold reduced/released ${derived.providerAuthId}`,
+        actorId: ctx.actorId,
+        externalRef: derived.providerAuthId,
+        inboxId: ctx.inboxId,
+      },
+      tx,
+    );
+
     return {
       status: "recorded" as const,
       identity,
@@ -250,6 +413,9 @@ async function recordFacts(
       closurePosted,
       financialEntryIds,
       events,
+      deltaCents: delta,
+      memoEntryId,
+      holdCents: state.holdCents,
     };
   });
 }
@@ -427,25 +593,19 @@ export async function applyCardTransaction(
       });
   }
 
-  // The event whose arrival prompted this recompute. Deterministic: the last
-  // member of the payload's derived set, so a replay of the same payload
-  // produces the same idempotency key and therefore the same no-op.
-  const trigger = derived.events.at(-1);
-  const providerEventId = trigger?.providerEventId ?? `state:${derived.providerAuthId}`;
-  const valueDate = trigger?.valueDate ?? derived.valueDate;
+  // NOTE: there is no compare-and-append here any more. It happened inside
+  // `recordFacts`, in the same transaction as the facts it is derived from.
+  // See the module header. `settleHoldPosting()` is still the way to run one
+  // from OUTSIDE a delivery, and `expiry.ts` and `completion.ts` both do.
 
-  const settled = await settleHoldPosting(
-    recorded.identity,
-    {
-      providerEventId,
-      valueDate,
-      externalRef: derived.providerAuthId,
-      actorId,
-      now,
-      inboxId,
-    },
+  // THE INTERCHANGE HOOK. Last, and after the corrections, deliberately —
+  // see `interchangeHook()`.
+  const interchange = await interchangeHook(derived, classified.ids, {
+    provider,
+    actorId,
+    inboxId,
     conn,
-  );
+  });
 
   return {
     status: "applied",
@@ -455,8 +615,9 @@ export async function applyCardTransaction(
     newEvents: recorded.newEvents,
     state: recorded.state,
     closurePosted: recorded.closurePosted,
-    deltaCents: settled.deltaCents,
-    memoEntryId: settled.entryId,
+    refusedEvents: derived.refused,
+    deltaCents: recorded.deltaCents,
+    memoEntryId: recorded.memoEntryId,
     financialEntryIds: recorded.financialEntryIds,
     corrections,
     unmatchedCorrections,
@@ -474,6 +635,104 @@ export async function applyCardTransaction(
     providerDisagrees:
       !recorded.state.closed &&
       (derived.providerView.holdMatchesEvents === false ||
-        derived.providerView.eventDerivedHoldCents !== settled.holdCents),
+        derived.providerView.eventDerivedHoldCents !== recorded.holdCents),
+    interchange,
   };
+}
+
+/**
+ * Book, unbook and re-price the interchange this delivery's settlements are
+ * worth.
+ *
+ * ─── Why this is here and not in postCardMovement() ─────────────────────────
+ *
+ * INTERCHANGE IS EARNED ON THE CLEARING, NOT ON THE AUTHORISATION, and this
+ * module is unusually strict about that distinction already: an authorisation
+ * moves the memo book only and there is no code path from one to a financial
+ * posting. Booking revenue at authorisation would book it on money that may
+ * never settle — the amount can change, the capture can never arrive, and an
+ * expiry or a full reversal ends with nothing having moved. So the hook fires
+ * exactly where the money does.
+ *
+ * It is not inside `postCardMovement()` because the interchange entry is a
+ * SEPARATE entry (2200/4100) and not a third line on the clearing:
+ * `postCardCorrection()` refuses to re-book an entry that is not exactly two
+ * lines, so a third line would break the correction path for every partially
+ * corrected settlement on this book. See migration 0031 §2.
+ *
+ * ─── Why it runs LAST, after the corrections ────────────────────────────────
+ *
+ * Lithic sends the whole `events[]` array every time, so one payload routinely
+ * carries a settlement AND the correction that undoes it. Running after
+ * `postCardCorrection()` means `reconcileSettlementEvent()` sees the
+ * settlement's correction group in its final state and books, then immediately
+ * unbooks, in one call — which is the same pair of facts the ledger would
+ * carry if they had arrived days apart. Running first would book the revenue
+ * and leave the unbooking to a step that might not run.
+ *
+ * ─── Why it is a REPORT and not a throw ─────────────────────────────────────
+ *
+ * By the time this runs, the customer's money has already moved and committed.
+ * Throwing here would fail the webhook consumer and force a redelivery of work
+ * that is already done — harmless, because every layer is idempotent, but it
+ * would also mean a hole in the rate card could stop card settlements being
+ * processed at all. A revenue-recognition problem must not take the money path
+ * down with it.
+ *
+ * So a failure is reported in three places instead of one: on the result, in
+ * the structured log, and — because the settlement stays unpriced —
+ * `v_interchange_unpriced` lists it with its reason until someone acts. The
+ * repair is to call the reconcile again; it is idempotent and total.
+ *
+ * ─── Correction events are skipped, and cannot double-count anyway ──────────
+ *
+ * A step the table classified `correction` posted no financial entry of its
+ * own (`recordFacts` skips it), so there is no `card:<kind>:<event>` entry for
+ * `v_interchange_candidate` to find and the reconcile would return
+ * `not_found`. The explicit skip is belt to that braces, and it keeps the
+ * receipt honest: a correction is not a settlement and should not appear as
+ * one.
+ */
+async function interchangeHook(
+  derived: DerivedCardEvents,
+  correctionIds: ReadonlySet<string>,
+  ctx: {
+    readonly provider: string;
+    readonly actorId: string;
+    readonly inboxId: string | null;
+    readonly conn: Sql;
+  },
+): Promise<readonly InterchangeStep[]> {
+  const steps: InterchangeStep[] = [];
+
+  for (const event of derived.events) {
+    if (correctionIds.has(event.providerEventId)) continue;
+    // Only the kinds that moved the financial book can have earned anything.
+    if (!movesFinancialBook(event.kind)) continue;
+
+    try {
+      const outcome = await reconcileSettlementEvent(ctx.provider, event.providerEventId, {
+        actorId: ctx.actorId,
+        inboxId: ctx.inboxId,
+        run: "interchange:card-webhook",
+        conn: ctx.conn,
+      });
+      steps.push({ providerEventId: event.providerEventId, outcome: outcome.status });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      rootLogger.error("interchange.reconcile_failed", {
+        provider: ctx.provider,
+        providerEventId: event.providerEventId,
+        providerAuthId: derived.providerAuthId,
+        error: message,
+      });
+      steps.push({
+        providerEventId: event.providerEventId,
+        outcome: "failed",
+        error: message,
+      });
+    }
+  }
+
+  return steps;
 }

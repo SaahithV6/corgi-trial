@@ -39,6 +39,26 @@ references (`LF6-<tag>-n`), its own idempotency keys, and its own business date
 where one is needed. Every assertion is either a DELTA measured across the run's
 own window or a lookup BY REFERENCE. Nothing counts rows in a shared table.
 
+**And an attack owns the customer it measures.** This was the suite's largest
+hole and it took two red attacks to see it. Every attack used to reach for the
+same row — `ORDER BY business_id LIMIT 1` — and then measure that customer's
+whole position, or one of its days, across a window. So attacks 1, 2, 3 and 7
+were all measuring the same business at the same time as each other, as the
+database-backed integration suites, as the demo scripts, and as every other
+agent on this branch. **A global quantity under concurrent writers is not the
+quantity an attack claims to be reading**, and DECISIONS 028 recorded exactly
+this vulnerability in attacks 1, 2 and 4 and left it because they were passing —
+a green result produced by the weakness is not evidence against the weakness.
+Attacks 3 and 7 now open their OWN business (deterministic id, idempotent,
+opened through the owner role because `corgi_app` holds only SELECT on
+`account`; ids chosen to sort ABOVE the seeded businesses so that attacks still
+using `LIMIT 1` cannot pick them up). Where an assertion can be attributed to
+this run's own rows instead of to a business at all, it is — see attack 7's
+two-watermark isolation, which cancels every other writer arithmetically. The
+rule this suite now holds itself to: **never widen a tolerance to absorb
+another writer. A tolerance wide enough to absorb a concurrent hold is wide
+enough to absorb the bug the attack exists to catch.**
+
 **Where something is constructed rather than provider-originated, it says so.**
 Two attacks need an event the sandbox will not produce (a clearing that arrives
 before its authorisation; a delivery that never arrives at all). Both build the
@@ -89,25 +109,52 @@ and only one of them holds today:
 
 ### 3 — the backdated correction
 
-Posts a $73.40 card clearing on a synthetic settlement day, takes the booking
-watermark (that is "the intermediate day"), then reverses at the ORIGINAL value
-date. Both answers are then read back in the same run:
+Two parts, both driven from the PROVIDER end. Part A is entirely Lithic's: a
+real `/v1/simulate/return` settlement and a real `/v1/simulate/return_reversal`
+of it, signed and delivered over the internet to the deployed endpoint. Part B
+is the brief's sentence literally — a $50 fuel-pump authorisation, a $73.40
+clearing, and then the reversal of THAT, which Lithic's sandbox measurably
+refuses (`400 Return reversal is not supported for debit transactions`), so one
+`CORRECTION_CREDIT` step is synthesised, dated the NEXT DAY, and nothing else
+is: the signature, the transport, the verification, the inbox, the drain and
+the posting are all production. A negative control proves the signature is
+being checked.
 
-* settlement day as the ledger reads it **now** → the corrected figure;
-* settlement day **as believed** at the intermediate watermark → the
-  pre-correction figure.
+Both parts then read the statement for settlement day at two booking
+watermarks, through `renderStatement()` — the real renderer, the one
+`/statements` and `publishStatement` use.
 
-They differ by exactly 7340, neither overwrote the other, the original row's
-description and amount are unchanged, and the correction group holds two
-entries. A second test asks the database to `UPDATE journal_entry` and asserts
-`permission denied`, because the whole argument rests on the original row being
-unchangeable.
+* the line the correction ADDED is dated settlement day and carries exactly
+  minus the settled amount;
+* the entry it corrects reads identically in both renderings — neither
+  overwrote the other;
+* the correction posted nothing at its own date.
 
-**One honest note.** There is no statement RENDERER in this codebase — the
-`statement` table exists and nothing writes to it — so "pull the statement" is
-executed as `ledgerBalanceAsOf(account, day)`, which is the fold a statement is
-a rendering of (DESIGN §13). The evidence line says so. It is a live query
-against live rows, not a substitute figure.
+**The last one used to be asserted as "the learning day's statement has zero
+lines", and it failed, twice, at nine.** The nine were Plaid funding credits
+and released ACH payments booked to that day by the rest of the build —
+measured: value date 2026-09-11 on the demo account already carried nine
+entries at `booking_seq` 1395…1931 before the attack ran, and not one of them
+was the correction's. The assertion was testing "nobody else used this account
+that day", which was true when the book was small and was never the property
+under test. It is not loosened, it is pointed at the rows this run created,
+from three directions: no entry under the key such a posting would carry
+(`card:%:<correction event>`), no financial entry of this transaction or its
+correction group dated anywhere but settlement day, and not one line of OURS on
+the learning day's rendered statement. What that day carries otherwise is other
+people's traffic, and is now reported in the evidence instead of asserted
+about.
+
+The same reasoning applies to the whole-day figures. "The day's closing moved
+by exactly 7340 over exactly one new line" is a claim about the whole book on a
+shared database, so it is asserted when nothing else was booked to that day
+inside the window and REPORTED, with the interfering entries named, when
+something was. The line-level assertions above are unconditional, and they are
+the attack's actual claim.
+
+A third test asks the database to `UPDATE journal_entry` and to `DELETE FROM
+journal_line` and asserts `permission denied` on both, because the whole
+correction argument rests on the original row being unchangeable.
 
 ### 4 — settlement before its authorisation
 
@@ -193,6 +240,18 @@ says five minutes; five minutes of a rehearsal suite is five minutes nobody
 runs, and the claim is about state rather than duration. Set it to 300 for the
 real thing.
 
+**The two visibility claims need a silence that no attack can own.** The money
+half is isolated to this attack's own business and its own rows, but
+`webhookHealth`'s Lithic verdict is derived from `MAX(webhook_inbox.received_at)`
+across the whole deployment — one feed, not one customer. So the induced silence
+is defeated by anybody else delivering a Lithic event, and when that happens the
+test reports what defeated it ("7 restart(s) — something is still delivering")
+and SKIPS rather than asserting something weaker. Measured both ways on the same
+code: 3/3 with the branch to itself, and a skip on the health claim with a dozen
+agents running suites against the same Lithic sandbox. Run attack 7 when the
+branch is quiet, or accept the skip and read its reason — which is the rule this
+suite is written under.
+
 The money half is asserted BY ATTRIBUTION — the swallowed transaction produced
 zero inbox rows and zero authorisations; the recovered hold's own memo account
 carries exactly one entry of −5000 and zero financial entries — and the
@@ -204,6 +263,46 @@ attack for another process's writes. When the window is not quiet the freeze
 cross-check is reported as not evaluated, with the count, and the attribution
 stands alone. A suite that reports someone else's writes as our system
 inventing money is worse than one that says which it could not tell apart.
+
+**Two things about that measurement were wrong until now, and they are the same
+mistake this whole debrief is about: what a guard excluded was shaped exactly
+like the failure it existed to catch.**
+
+* *It waited for the wrong row.* `src/lib/holds/apply.ts` splits one event into
+  two transactions on purpose — facts and closure first, the memo posting
+  second — so `card_authorization` exists before the money is withheld. The
+  test polled for the authorisation and then read `available`. Measured on the
+  failing suite run: the hold row committed at 03:45:45.251Z and its opening
+  posting at 03:45:45.581Z, and the position was read in the 330ms between
+  them, so available read the same figure at both ends of a window that had
+  genuinely moved by $50. Reconstructed afterwards, the account's active holds
+  were 40000 at the start and 45000 at the end: the ledger was right and the
+  read was early. It now waits for the POSTING, which is what the claim is
+  about, and treats a fact that lands without its withholding as a failure with
+  its own message rather than a skip.
+* *Its quiet-window guard watched the wrong book.* It counted `journal_entry
+  WHERE book = 'financial'` before asserting a delta on `available` — and
+  `available` is moved by the MEMO book, because that is where a hold lives.
+  Every card hold in the suite walked straight through it. Worse, `available`
+  also moves with the CLOCK and no entry at all: `ledger_availability` matures
+  uncleared credits at `available_at`, expires card holds at `expires_at`, and
+  pulls a warehoused ACH credit into the ledger term when `book_date()` reaches
+  its value date — measured here as a multi-million-cent step at 00:00
+  America/New_York, fifteen minutes from the failing run.
+
+The fix is not a better guard, because a guard is an exclusion and an exclusion
+shaped like the failure is how this keeps happening. **The delta is ISOLATED
+instead.** The app's own `accountAvailability()` is asked the same question at
+ONE instant and TWO watermarks — the pair either side of this run's own opening
+posting. Everything anybody else wrote is in both readings and cancels; the
+clock is identical on both sides and cancels; what is left is this attack's own
+$50. Cross-attack and cross-process interference is prevented by construction
+rather than detected afterwards, which is the honest answer to a shared
+database: not "was anyone else writing", but "measure only our own rows".
+
+The whole-business freeze and delta are still asserted on top, now guarded by a
+count over BOTH books and bounded by a watermark rather than a wall clock, and
+still reported rather than asserted when the episode was not quiet.
 
 **The other two claims now pass, and they are INDUCED rather than found.**
 `/api/health` publishes `integrations.webhookHealth` and the console shell
@@ -277,6 +376,10 @@ the directory before appending. Evidence must never be the thing that fails a
 live-fire run.
 
 **What a run leaves behind**, all of it deliberate and none of it removable:
+two live-fire fixture businesses, `Live Fire — attack 3` and `Live Fire —
+attack 7`, opened once and reused by every subsequent run (attack 3's nets to
+zero — every settlement it books it also reverses; attack 7's accumulates one
+$50 memo hold per run, which the seven-day expiry sweeper closes);
 Lithic cards and transactions in the sandbox; `webhook_inbox` rows; card
 authorisations, holds and memo postings; one financial settlement per
 over-capture; two scheme files and two reconciliation runs on a forward-dated
@@ -313,37 +416,65 @@ make the scoreboard greener; the skip is the finding.
 
 ---
 
-## 4b. What PASSES but is narrower than it sounds
+## 4b. The limit that used to live here, and what retired it
 
-Not a skip — a pass whose limit belongs next to it rather than in a footnote.
+Kept rather than deleted, because the SHAPE of it is the through-line of this
+debrief and four of the five instances in this repo look exactly like it.
 
-**Attack 7 — the outage is REPORTED but does not ESCALATE.** With Lithic
-genuinely stale, `/api/health` publishes
-`webhookHealth.providers[lithic].verdict = "stale"` with the lag in seconds, and
-the console renders the provider-down banner. But `degradesDeployment` is
-`false`, `degradedBy` is empty and the top-level `status` stays `"ok"`.
+**Attack 7 shipped with a gap recorded on the scoreboard rather than asserted
+away: the outage was REPORTED and did not ESCALATE.** With Lithic genuinely
+stale, `/api/health` published `webhookHealth.providers[lithic].verdict =
+"stale"` and the console rendered the provider-down banner — but
+`degradesDeployment` was `false`, `degradedBy` was empty and the top-level
+`status` stayed `"ok"`. Measured at the time: stale at 184s, `status` "ok". A
+monitor watching `status` alone saw a healthy deployment with its card rail
+dark.
 
-That is not a threshold being missed. `delivery-health.ts` gates escalation on
-four conditions, one of which is that the provider's integration is probed live,
-and `route.ts` derives that as **every** Lithic slot reading `live`:
+That was not a threshold being missed. `delivery-health.ts` gates escalation on
+the provider's integration being probed live, and `route.ts` derived that as
+**every** Lithic slot reading `live`:
 
 ```ts
 integrationLive: w.slots.length > 0 && w.slots.every((s) => probedStatus.get(s.slot) === 'live')
 ```
 
-Lithic owns two slots. `card_webhooks` has no probe, so since DECISIONS 026 it
-reads `unprobed` and is labelled `simulated` — correctly, because nothing has
-proven it by a round trip. `every(... === 'live')` is therefore permanently
-false, so the escalation clause **can never fire on this deployment** and no
-webhook outage can move the top-level status. The note the endpoint prints in
-that state says the integration "is not live", which is true of `card_webhooks`
-and misleading about the card rail as a whole.
+Lithic owns two slots, and `card_webhooks` had no probe, so it read `unprobed`
+and was labelled `simulated` — honestly, because nothing had proven it by a
+round trip. One honest absence of evidence made the clause unsatisfiable for
+ever. **The guard's exclusion was shaped exactly like the failure it existed to
+catch.**
 
-A reader of `webhookHealth` sees the outage. A monitor watching `status` alone
-does not. Same shape as the `v_hold_drift` blind spot in DECISIONS 026: a check
-whose exclusion is shaped exactly like the thing it should catch. The test
-asserts the claim the attack makes — the endpoint reports it — and records this
-limit as evidence on the scoreboard.
+Two things retired it, and the test asserts both:
+
+1. `card_webhooks` earned a real probe — `GET /v1/event_subscriptions` plus that
+   subscription's `/attempts` log showing Lithic's own record of our endpoint
+   answering HTTP 202. It reads `live` now.
+2. The gate became `some` (DECISIONS 028), so no single slot's degradation can
+   silence the alarm.
+
+(2) is not made redundant by (1): that probe reads Lithic's own delivery log, so
+it goes not-live in precisely the conditions that ARE the outage — our endpoint
+rejecting deliveries reads `unauthorised`, an unreadable `/attempts` reads
+`unreachable`. Under `every`, either would have disarmed the alarm at the exact
+moment deliveries were being lost. So the test re-derives the degraded case from
+the outage's own published facts with `card_webhooks` forced not-live, through
+the same pure function `/api/health` calls, and asserts that the alarm stays
+armed under `some` and would have been silenced under `every`.
+
+**There is no remaining limit recorded for attack 7.** It now asserts the
+stronger claim the attack's wording implies — a webhook outage moves the
+top-level status — by inducing one and reading `status: "degraded"` with
+`degradedBy: ["lithic"]` and `database.reachable: true`, so that the word is
+the feed and not a coincidental database failure.
+
+The two mistakes retired from the same file's MONEY half in this same pass — a
+test that read a balance between the two commits of a deliberately two-phase
+apply, and a quiet-window guard that counted the financial book while asserting
+a quantity the memo book moves — are written up under §2, attack 7. They are the
+same shape as this one. That is the finding: **every guard that failed in this
+build failed because what it excluded looked exactly like the thing it was
+meant to catch**, and the durable answer is not a better exclusion but a
+measurement that isolates our own rows.
 
 ---
 

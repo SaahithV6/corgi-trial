@@ -27,6 +27,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import type * as ApprovalsModule from "./index";
 import type { sql as SqlHandle } from "@/lib/ledger/db";
+import { listBusinesses } from "@/lib/ledger/queries";
 
 const RUN = process.env.RUN_DB_TESTS === "1";
 const d = RUN ? describe : describe.skip;
@@ -88,8 +89,28 @@ d("maker-checker, against the live database", () => {
        WHERE kind = 'human' AND business_id IS NULL ORDER BY display_name`;
     const [agentRow] = await sql<{ id: string }[]>`
       SELECT id FROM actor WHERE kind = 'agent' ORDER BY display_name LIMIT 1`;
-    const [account] = await sql<{ id: string }[]>`
-      SELECT id FROM account WHERE code = '2100' AND business_id IS NOT NULL LIMIT 1`;
+    // A customer deposit account THIS SUITE CAN RAISE PAYMENTS AGAINST.
+    //
+    // This was `SELECT id FROM account WHERE code = '2100' AND business_id IS
+    // NOT NULL LIMIT 1` — no ORDER BY, so which account it returned was
+    // Postgres's physical row order and nothing else. It happened to return
+    // Ridgeline for months. Three fixture companies have since been seeded by
+    // other suites ("Hold Fuzzer Fixture Co.", "Holds Integration Fixture
+    // Co.", "Pots Integration Fixture Co."), none of them KYB-approved, and
+    // any of them could have been returned by a vacuum or a re-cluster — at
+    // which point every case below fails with "Verification is still in
+    // progress" rather than with anything about maker-checker.
+    //
+    // The predicate the suite always MEANT is spelled out instead: an open
+    // deposit account whose business may transact, chosen deterministically.
+    const fundable = await sql<{ business_id: string }[]>`
+      SELECT business_id FROM v_business_kyb
+       WHERE kyb_status = 'approved'
+       ORDER BY business_id`;
+    const businesses = await listBusinesses(sql);
+    const approved = new Set(fundable.map((r) => r.business_id));
+    const account =
+      businesses.find((b) => b.depositOpen && approved.has(b.businessId)) ?? null;
 
     const approvers = humans.filter((h) => h.can_approve);
     const makers = humans.filter((h) => !h.can_approve);
@@ -100,7 +121,7 @@ d("maker-checker, against the live database", () => {
     checker = approvers[0]!.id;
     checker2 = approvers[1]!.id;
     agent = agentRow.id;
-    accountId = account.id;
+    accountId = account.depositAccountId as string;
   });
 
   /* ---------------------------------------------------------------------- */

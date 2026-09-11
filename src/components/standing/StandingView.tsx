@@ -87,10 +87,12 @@ export async function StandingView({
           <p>
             {view.invariants.doubleFires} occurrence
             {view.invariants.doubleFires === 1 ? "" : "s"} in{" "}
-            <code>v_standing_order_double_fire</code>. This view cannot be
-            non-empty while <code>payment_instruction.idempotency_key</code> is
-            UNIQUE, so a non-zero count here means that index is gone. Stop the
-            cron before the next tick.
+            <code>v_standing_order_double_fire</code>. The view matches
+            instructions to a mandate by its <em>keyspace</em> rather than by one
+            exact key, so this fires on the failure the UNIQUE index cannot see:
+            a second instruction for the same mandate and date under a different
+            spelling of the key. Read <code>instruction_keys</code> on the row to
+            see which two, then stop the cron before the next tick.
           </p>
         </Note>
       ) : null}

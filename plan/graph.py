@@ -40,300 +40,286 @@ def N(id, title, cat, dur, deps=(), owner="claude", files=(), status="todo", ris
 # them. They are first in the graph for exactly that reason.
 # ---------------------------------------------------------------------------
 N("H01", "Lithic sandbox signup, copy API key", "human-gate", 15, [], "human", ["env"],
-  risk="entire card track blocks on this. if gated, whole track is at risk")
+  risk="entire card track blocks on this. if gated, whole track is at risk", status="done")
 N("H02", "Persona sandbox signup, create KYB template, copy key", "human-gate", 25, [], "human", ["env"],
-  risk="KYB is the one genuinely gate-able slot. fallback is R02's job")
-N("H03", "Plaid sandbox signup, copy client_id + secret", "human-gate", 12, [], "human", ["env"])
+  risk="KYB is the one genuinely gate-able slot. fallback is R02's job", status="done")
+N("H03", "Plaid sandbox signup, copy client_id + secret", "human-gate", 12, [], "human", ["env"], status="done")
 N("H04", "Increase sandbox signup, copy key", "human-gate", 15, [], "human", ["env"],
-  risk="if not self-serve, fall back to A07 simulator and label honestly")
-N("H05", "Neon project create, copy DATABASE_URL (pooled + direct)", "human-gate", 10, [], "human", ["env"])
+  risk="if not self-serve, fall back to A07 simulator and label honestly", status="done")
+N("H05", "Neon project create, copy DATABASE_URL (pooled + direct)", "human-gate", 10, [], "human", ["env"], status="done")
 N("H06", "Vercel project create, link repo, set env vars", "human-gate", 15, ["H05"], "human", ["env","vercel"])
 N("H07", "GitHub repo private + graders invited", "human-gate", 5, [], "human", ["repo"], "done")
 N("H08", "Generate throwaway Base Sepolia wallet, fund ETH from faucet", "human-gate", 15, [], "human", ["env"],
-  risk="testnet only. never a key that has touched real funds")
+  risk="testnet only. never a key that has touched real funds", status="done")
 N("H09", "Circle faucet: testnet USDC to that wallet", "human-gate", 10, ["H08"], "human", ["env"])
-N("H10", "Send T+2h attack plan email", "human-gate", 10, ["C01"], "human", ["thread"])
-N("H11", "Loom/YouTube account ready for the 5-min video", "human-gate", 5, [], "human", ["video"])
+N("H10", "Send T+2h attack plan email", "human-gate", 10, ["C01"], "human", ["thread"], status="done")
+N("H11", "Loom/YouTube account ready for the 5-min video", "human-gate", 5, [], "human", ["video"], status="done")
 N("H12", "Register webhook URLs in all four provider dashboards", "human-gate", 25,
   ["H18","W04","W05","W06","W07"], "human", ["providers"],
   risk="cannot be done until a stable prod URL exists. sequencing trap")
 N("H13", "Capture evidence pack: dashboard screenshots + webhook delivery logs", "human-gate", 40,
   ["LF01","LF02","LF03"], "human", ["evidence"])
 N("H14", "Record the 5-minute video", "human-gate", 45, ["O10","O07"], "human", ["video"])
-N("H15", "Send T+24h money-moves email", "human-gate", 10, ["C02"], "human", ["thread"])
+N("H15", "Send T+24h money-moves email", "human-gate", 10, ["C02"], "human", ["thread"], status="done")
 N("H16", "Send freeze submission email", "human-gate", 15, ["C03"], "human", ["thread"])
 
 # ---------------------------------------------------------------------------
 # R — research. Six are already in flight; the rest are queued behind nothing.
 # ---------------------------------------------------------------------------
-N("R01", "Lithic API: simulate auth/clear/void, webhook sig, ASA", "research", 45, [], "agent", ["research/lithic"], "doing")
-N("R02", "KYB self-serve reality check + fallback architecture", "research", 45, [], "agent", ["research/kyb"], "doing",
+N("R01", "Lithic API: simulate auth/clear/void, webhook sig, ASA", "research", 45, [], "agent", ["research/lithic"], "done")
+N("R02", "KYB self-serve reality check + fallback architecture", "research", 45, [], "agent", ["research/kyb"], "done",
   risk="answer determines whether we have two live slots or one")
-N("R03", "Plaid sandbox: link token, sandbox public token, auth, JWT verify", "research", 40, [], "agent", ["research/plaid"], "doing")
-N("R04", "ACH rail bake-off: Increase vs Moov vs MT, R01 return recipe", "research", 45, [], "agent", ["research/ach"], "doing")
-N("R05", "Base Sepolia USDC: contract, faucets, viem, idempotent send", "research", 40, [], "agent", ["research/usdc"], "doing")
-N("R06", "Bitemporal double-entry ledger schema + hold model design", "research", 70, [], "agent", ["research/ledger"], "doing",
+N("R03", "Plaid sandbox: link token, sandbox public token, auth, JWT verify", "research", 40, [], "agent", ["research/plaid"], "done")
+N("R04", "ACH rail bake-off: Increase vs Moov vs MT, R01 return recipe", "research", 45, [], "agent", ["research/ach"], "done")
+N("R05", "Base Sepolia USDC: contract, faucets, viem, idempotent send", "research", 40, [], "agent", ["research/usdc"], "done")
+N("R06", "Bitemporal double-entry ledger schema + hold model design", "research", 70, [], "agent", ["research/ledger"], "done",
   risk="single most important artifact. everything downstream reads it")
-N("R07", "MCP TypeScript SDK: server shape, transport, hosting on Vercel", "research", 35, [], "agent", ["research/mcp"])
+N("R07", "MCP TypeScript SDK: server shape, transport, hosting on Vercel", "research", 35, [], "agent", ["research/mcp"], status="done")
 N("R08", "Next.js App Router raw-body webhooks + Vercel runtime constraints", "research", 30, [], "agent", ["research/platform"],
-  risk="raw body for signature verification is a classic App Router footgun")
-N("R09", "Turn the 7 published live-fire attacks into concrete test specs", "research", 40, [], "agent", ["research/livefire"])
-N("R10", "Auth/session for two demo roles on Vercel, minimal and explainable", "research", 25, [], "agent", ["research/auth"])
-N("R11", "Prior art: Increase/Modern Treasury public writing on hold models", "research", 30, [], "agent", ["research/priorart"])
-N("R12", "US ACH return codes + timing windows, R01/R02/R03 semantics", "research", 30, [], "agent", ["research/ach"])
-N("R13", "Statement reproducibility patterns + content-hash approach", "research", 25, [], "agent", ["research/statements"])
-
+  risk="raw body for signature verification is a classic App Router footgun", status="done")
+N("R09", "Turn the 7 published live-fire attacks into concrete test specs", "research", 40, [], "agent", ["research/livefire"], status="done")
+N("R10", "Auth/session for two demo roles on Vercel, minimal and explainable", "research", 25, [], "agent", ["research/auth"], status="done")
+N("R11", "Prior art: Increase/Modern Treasury public writing on hold models", "research", 30, [], "agent", ["research/priorart"], status="done")
+N("R12", "US ACH return codes + timing windows, R01/R02/R03 semantics", "research", 30, [], "agent", ["research/ach"], status="done")
+N("R13", "Statement reproducibility patterns + content-hash approach", "research", 25, [], "agent", ["research/statements"], status="done")
 # ---------------------------------------------------------------------------
 # S — scaffold. Cheap, and unblocks everyone.
 # ---------------------------------------------------------------------------
-N("S01", "pnpm init, Next.js App Router, TypeScript strict", "scaffold", 20, [], "claude", ["app/config"])
-N("S02", "Tailwind + base layout + design tokens", "scaffold", 25, ["S01"], "agent", ["app/ui-base"])
-N("S03", "Drizzle install + config against Neon", "scaffold", 20, ["S01","H05"], "claude", ["db/config"])
-N("S04", "zod env schema, fail fast on missing keys", "scaffold", 20, ["S01"], "agent", ["app/env"])
-N("S05", ".env.example documenting every key", "scaffold", 15, ["S04"], "agent", ["env-docs"])
+N("S01", "pnpm init, Next.js App Router, TypeScript strict", "scaffold", 20, [], "claude", ["app/config"], status="done")
+N("S02", "Tailwind + base layout + design tokens", "scaffold", 25, ["S01"], "agent", ["app/ui-base"], status="done")
+N("S03", "Drizzle install + config against Neon", "scaffold", 20, ["S01","H05"], "claude", ["db/config"], status="done")
+N("S04", "zod env schema, fail fast on missing keys", "scaffold", 20, ["S01"], "agent", ["app/env"], status="done")
+N("S05", ".env.example documenting every key", "scaffold", 15, ["S04"], "agent", ["env-docs"], status="done")
 N("S06", "Hello-world deploy to Vercel, prove the pipeline", "scaffold", 20, ["S01","H06"], "claude", ["vercel"],
-  risk="do this in hour 2, not hour 40. a broken deploy path found late is fatal")
-N("S07", "GitHub Actions: typecheck + unit tests on push", "scaffold", 25, ["S01"], "agent", ["ci"])
-N("S08", "Vitest setup + test DB strategy", "scaffold", 30, ["S03"], "agent", ["test/config"])
-N("S09", "Structured logging + request ids", "scaffold", 25, ["S01"], "agent", ["app/log"])
-N("S10", "Error boundary + typed API result helper", "scaffold", 20, ["S01"], "agent", ["app/errors"])
-
+  risk="do this in hour 2, not hour 40. a broken deploy path found late is fatal", status="done")
+N("S07", "GitHub Actions: typecheck + unit tests on push", "scaffold", 25, ["S01"], "agent", ["ci"], status="done")
+N("S08", "Vitest setup + test DB strategy", "scaffold", 30, ["S03"], "agent", ["test/config"], status="done")
+N("S09", "Structured logging + request ids", "scaffold", 25, ["S01"], "agent", ["app/log"], status="done")
+N("S10", "Error boundary + typed API result helper", "scaffold", 20, ["S01"], "agent", ["app/errors"], status="done")
 # ---------------------------------------------------------------------------
 # L — the ledger. The thing that is graded hardest and cannot be retrofitted.
 # ---------------------------------------------------------------------------
 N("L01", "Money type: bigint cents, no floats, rounding rule written down", "ledger", 35, ["S01"], "claude", ["lib/money"],
-  risk="every downstream number depends on this being right and boring")
+  risk="every downstream number depends on this being right and boring", status="done")
 N("L02", "accounts table + normal balance side per account type", "ledger", 35, ["S03","R06"], "claude", ["db/schema"],
-  risk="customer deposit is OUR liability. getting the sign wrong poisons everything")
+  risk="customer deposit is OUR liability. getting the sign wrong poisons everything", status="done")
 N("L03", "journal_entries: value_date and booking_date as separate columns", "ledger", 40, ["L02"], "claude", ["db/schema"],
-  risk="bitemporality decided here or never")
-N("L04", "journal_lines: entry_id, account_id, direction, amount_cents", "ledger", 30, ["L03"], "claude", ["db/schema"])
-N("L05", "Constraint: lines of an entry sum to zero, enforced in DB", "ledger", 35, ["L04"], "claude", ["db/constraints"])
+  risk="bitemporality decided here or never", status="done")
+N("L04", "journal_lines: entry_id, account_id, direction, amount_cents", "ledger", 30, ["L03"], "claude", ["db/schema"], status="done")
+N("L05", "Constraint: lines of an entry sum to zero, enforced in DB", "ledger", 35, ["L04"], "claude", ["db/constraints"], status="done")
 N("L06", "REVOKE UPDATE/DELETE on money tables + RAISE triggers", "ledger", 40, ["L04"], "claude", ["db/constraints"],
-  risk="this is the automatic-fail clause. make it structural, not a promise")
-N("L07", "Test: attempt UPDATE and DELETE on money rows, assert both fail", "ledger", 30, ["L06","S08"], "agent", ["test/immutability"])
-N("L08", "Chart of accounts seed + the reasoning for each account", "ledger", 35, ["L02"], "agent", ["db/seed-coa"])
-N("L09", "postEntry(): transactional, balanced, append-only posting API", "ledger", 50, ["L05","L01"], "claude", ["lib/ledger"])
-N("L10", "Idempotent posting: (source, source_ref) unique, replay is a no-op", "ledger", 35, ["L09"], "claude", ["lib/ledger"])
-N("L11", "Projection: ledger balance as of a value date", "ledger", 40, ["L09"], "claude", ["lib/balances"])
+  risk="this is the automatic-fail clause. make it structural, not a promise", status="done")
+N("L07", "Test: attempt UPDATE and DELETE on money rows, assert both fail", "ledger", 30, ["L06","S08"], "agent", ["test/immutability"], status="done")
+N("L08", "Chart of accounts seed + the reasoning for each account", "ledger", 35, ["L02"], "agent", ["db/seed-coa"], status="done")
+N("L09", "postEntry(): transactional, balanced, append-only posting API", "ledger", 50, ["L05","L01"], "claude", ["lib/ledger"], status="done")
+N("L10", "Idempotent posting: (source, source_ref) unique, replay is a no-op", "ledger", 35, ["L09"], "claude", ["lib/ledger"], status="done")
+N("L11", "Projection: ledger balance as of a value date", "ledger", 40, ["L09"], "claude", ["lib/balances"], status="done")
 N("L12", "Projection: balance as we BELIEVED it on a booking date", "ledger", 45, ["L11"], "claude", ["lib/balances"],
-  risk="the bitemporal proof. they will ask for it live")
-N("L13", "reverseAndRebook(): correction as new entries, never an edit", "ledger", 45, ["L09"], "claude", ["lib/ledger"])
-N("L14", "Correction scenario test: Tue settlement reversed Thu", "ledger", 40, ["L13","L12"], "agent", ["test/correction"])
-N("L15", "Statement generator for a closed day", "ledger", 55, ["L11"], "claude", ["lib/statements"])
-N("L16", "Statement content-hash: re-run produces byte-identical output", "ledger", 35, ["L15","R13"], "agent", ["lib/statements"])
-N("L17", "Test: closed-day statement reproducible after a later correction", "ledger", 35, ["L16","L13"], "agent", ["test/statements"])
-N("L18", "Trial balance check: every account, sums to zero, exposed as a job", "ledger", 30, ["L11"], "agent", ["lib/ledger"])
-N("L19", "Rounding residual: deterministic assignment + unit tests", "ledger", 30, ["L01"], "agent", ["lib/money"])
-N("L20", "Ledger README: explain every table out loud in the debrief", "ledger", 35, ["L06","L12"], "agent", ["docs/ledger"])
-
+  risk="the bitemporal proof. they will ask for it live", status="done")
+N("L13", "reverseAndRebook(): correction as new entries, never an edit", "ledger", 45, ["L09"], "claude", ["lib/ledger"], status="done")
+N("L14", "Correction scenario test: Tue settlement reversed Thu", "ledger", 40, ["L13","L12"], "agent", ["test/correction"], status="done")
+N("L15", "Statement generator for a closed day", "ledger", 55, ["L11"], "claude", ["lib/statements"], status="done")
+N("L16", "Statement content-hash: re-run produces byte-identical output", "ledger", 35, ["L15","R13"], "agent", ["lib/statements"], status="done")
+N("L17", "Test: closed-day statement reproducible after a later correction", "ledger", 35, ["L16","L13"], "agent", ["test/statements"], status="done")
+N("L18", "Trial balance check: every account, sums to zero, exposed as a job", "ledger", 30, ["L11"], "agent", ["lib/ledger"], status="done")
+N("L19", "Rounding residual: deterministic assignment + unit tests", "ledger", 30, ["L01"], "agent", ["lib/money"], status="done")
+N("L20", "Ledger README: explain every table out loud in the debrief", "ledger", 35, ["L06","L12"], "agent", ["docs/ledger"], status="done")
 # ---------------------------------------------------------------------------
 # D — holds and the authorisation lifecycle. The heart of Track 3.
 # ---------------------------------------------------------------------------
-N("D01", "holds table + hold state enum", "holds", 35, ["L04","R06"], "claude", ["db/schema"])
-N("D02", "card_events append-only table, one row per provider event", "holds", 30, ["D01"], "claude", ["db/schema"])
-N("D03", "Auth received -> open hold, available drops, ledger does not", "holds", 45, ["D02","L09"], "claude", ["lib/holds"])
-N("D04", "Incremental auth raises an existing hold", "holds", 35, ["D03"], "agent", ["lib/holds"])
-N("D05", "Partial capture: post settled amount, reduce hold", "holds", 40, ["D03"], "claude", ["lib/holds"])
-N("D06", "Multiple captures against one auth", "holds", 40, ["D05"], "agent", ["lib/holds"])
+N("D01", "holds table + hold state enum", "holds", 35, ["L04","R06"], "claude", ["db/schema"], status="done")
+N("D02", "card_events append-only table, one row per provider event", "holds", 30, ["D01"], "claude", ["db/schema"], status="done")
+N("D03", "Auth received -> open hold, available drops, ledger does not", "holds", 45, ["D02","L09"], "claude", ["lib/holds"], status="done")
+N("D04", "Incremental auth raises an existing hold", "holds", 35, ["D03"], "agent", ["lib/holds"], status="done")
+N("D05", "Partial capture: post settled amount, reduce hold", "holds", 40, ["D03"], "claude", ["lib/holds"], status="done")
+N("D06", "Multiple captures against one auth", "holds", 40, ["D05"], "agent", ["lib/holds"], status="done")
 N("D07", "Over-capture (tip/fuel): settle above auth, hold still releases once", "holds", 40, ["D05"], "claude", ["lib/holds"],
-  risk="the published fuel-pump attack. $50 auth, $73.40 clearing")
-N("D08", "Auth expiry sweeper: release stale holds, idempotent", "holds", 40, ["D03"], "agent", ["lib/holds"])
-N("D09", "Void / auth reversal releases the hold", "holds", 30, ["D03"], "agent", ["lib/holds"])
+  risk="the published fuel-pump attack. $50 auth, $73.40 clearing", status="done")
+N("D08", "Auth expiry sweeper: release stale holds, idempotent", "holds", 40, ["D03"], "agent", ["lib/holds"], status="done")
+N("D09", "Void / auth reversal releases the hold", "holds", 30, ["D03"], "agent", ["lib/holds"], status="done")
 N("D10", "Force post: unmatched clearing. NO Lithic endpoint exists - see 004", "holds", 45, ["D05"], "claude", ["lib/holds"],
-  risk="Lithic has no force-post simulate endpoint. model it in the scheme file + FINANCIAL_AUTHORIZATION")
+  risk="Lithic has no force-post simulate endpoint. model it in the scheme file + FINANCIAL_AUTHORIZATION", status="done")
 N("D11", "Out-of-order: settlement lands before its auth. park it.", "holds", 50, ["D10"], "claude", ["lib/holds"],
-  risk="published attack. must not crash and must not double-count")
-N("D12", "Orphan matcher: reconcile parked settlements when auth arrives", "holds", 45, ["D11"], "claude", ["lib/holds"])
+  risk="published attack. must not crash and must not double-count", status="done")
+N("D12", "Orphan matcher: reconcile parked settlements when auth arrives", "holds", 45, ["D11"], "claude", ["lib/holds"], status="done")
 N("D13", "Exactly-once hold release, proven by construction not by luck", "holds", 50, ["D07","D09","D12","D18"], "claude", ["lib/holds"],
-  risk="graded hardest. must survive any arrival order")
+  risk="graded hardest. must survive any arrival order", status="done")
 N("D14", "Available balance projection = ledger - active holds +/- policy", "holds", 45, ["D13","L11"], "claude", ["lib/balances"],
-  risk="must be derived. a stored column here is an instant loss")
-N("D15", "Uncleared-credit policy: inbound ACH not available until window passes", "holds", 35, ["D14","R12"], "claude", ["lib/balances"])
+  risk="must be derived. a stored column here is an instant loss", status="done")
+N("D15", "Uncleared-credit policy: inbound ACH not available until window passes", "holds", 35, ["D14","R12"], "claude", ["lib/balances"], status="done")
 N("D16", "Property test: random permutations of a lifecycle, invariants hold", "holds", 60, ["D13"], "agent", ["test/holds"],
-  risk="this is what makes the live fire boring. worth every minute")
-N("D17", "Hold model ASCII state diagram in the docs", "holds", 25, ["D13"], "agent", ["docs/holds"])
-
+  risk="this is what makes the live fire boring. worth every minute", status="done")
+N("D17", "Hold model ASCII state diagram in the docs", "holds", 25, ["D13"], "agent", ["docs/holds"], status="done")
 N("D18", "SETTLE partial-clearing arithmetic against the live sandbox", "holds", 30, ["A03"], "claude", ["lib/holds"], "done",
   risk="docs contradict themselves. clearing 600 of a 1000 auth: hold 400/PENDING or 0/SETTLED? "
        "the hold model depends on the answer. measure it, do not assume it")
-N("D20", "Resolve /simulate/void: returned 200 but left the hold unchanged", "holds", 30, ["A03"], "agent", ["lib/rails/lithic"])
+N("D20", "Resolve /simulate/void: returned 200 but left the hold unchanged", "holds", 30, ["A03"], "agent", ["lib/rails/lithic"], status="done")
 N("D19", "Serial rate limiter: Lithic simulate writes are 1 RPS in sandbox", "holds", 30, ["A03"], "agent", ["lib/rails/lithic"],
-  risk="a 50-txn seed takes 100s. biggest operational constraint on the track")
-
+  risk="a 50-txn seed takes 100s. biggest operational constraint on the track", status="done")
 # ---------------------------------------------------------------------------
 # W — webhooks. Signature, idempotency, ordering, degradation.
 # ---------------------------------------------------------------------------
 N("W01", "Raw-body capture in App Router route handlers", "webhooks", 30, ["S01","R08"], "claude", ["app/webhooks"],
-  risk="parsing before verifying is the classic bug. verify the raw bytes")
+  risk="parsing before verifying is the classic bug. verify the raw bytes", status="done")
 N("W02", "webhook_inbox table, unique (provider, provider_event_id)", "webhooks", 30, ["S03"], "claude", ["db/schema"],
-  risk="replay becomes a no-op at the DB, not in application code")
-N("W03", "Generic verify -> persist -> enqueue -> 200 fast handler", "webhooks", 45, ["W01","W02"], "claude", ["app/webhooks"])
-N("W04", "Lithic signature verification", "webhooks", 35, ["W03","R01","H01"], "agent", ["lib/verify/lithic"])
-N("W05", "Persona signature verification", "webhooks", 30, ["W03","R02","H02"], "agent", ["lib/verify/persona"])
-N("W06", "Plaid JWT verification incl. body SHA-256 compare", "webhooks", 40, ["W03","R03","H03"], "agent", ["lib/verify/plaid"])
-N("W07", "Increase signature verification", "webhooks", 30, ["W03","R04","H04"], "agent", ["lib/verify/increase"])
-N("W08", "Dispatcher: route inbox rows to idempotent consumers", "webhooks", 45, ["W03"], "claude", ["lib/dispatch"])
-N("W09", "Test: replay the same event twice, assert one effect", "webhooks", 30, ["W08","S08"], "agent", ["test/webhooks"])
-N("W10", "Test: deliver events out of order, assert convergence", "webhooks", 40, ["W08","D12"], "agent", ["test/webhooks"])
-N("W11", "Dead-letter queue + bounded retry with backoff", "webhooks", 40, ["W08"], "agent", ["lib/dispatch"])
+  risk="replay becomes a no-op at the DB, not in application code", status="done")
+N("W03", "Generic verify -> persist -> enqueue -> 200 fast handler", "webhooks", 45, ["W01","W02"], "claude", ["app/webhooks"], status="done")
+N("W04", "Lithic signature verification", "webhooks", 35, ["W03","R01","H01"], "agent", ["lib/verify/lithic"], status="done")
+N("W05", "Persona signature verification", "webhooks", 30, ["W03","R02","H02"], "agent", ["lib/verify/persona"], status="done")
+N("W06", "Plaid JWT verification incl. body SHA-256 compare", "webhooks", 40, ["W03","R03","H03"], "agent", ["lib/verify/plaid"], status="done")
+N("W07", "Increase signature verification", "webhooks", 30, ["W03","R04","H04"], "agent", ["lib/verify/increase"], status="done")
+N("W08", "Dispatcher: route inbox rows to idempotent consumers", "webhooks", 45, ["W03"], "claude", ["lib/dispatch"], status="done")
+N("W09", "Test: replay the same event twice, assert one effect", "webhooks", 30, ["W08","S08"], "agent", ["test/webhooks"], status="done")
+N("W10", "Test: deliver events out of order, assert convergence", "webhooks", 40, ["W08","D12"], "agent", ["test/webhooks"], status="done")
+N("W11", "Dead-letter queue + bounded retry with backoff", "webhooks", 40, ["W08"], "agent", ["lib/dispatch"], status="done")
 N("W12", "Graceful degradation when a provider is down", "webhooks", 40, ["W11"], "claude", ["lib/dispatch"],
-  risk="published attack: they kill provider webhooks for 5 minutes mid-demo")
-N("W13", "Webhook delivery log screen, staff-visible", "webhooks", 40, ["W08","S02"], "agent", ["app/ui/webhooks"])
-N("W14", "Backfill/poller as an explicit fallback, clearly secondary", "webhooks", 40, ["W12"], "agent", ["lib/dispatch"])
-
+  risk="published attack: they kill provider webhooks for 5 minutes mid-demo", status="done")
+N("W13", "Webhook delivery log screen, staff-visible", "webhooks", 40, ["W08","S02"], "agent", ["app/ui/webhooks"], status="done")
+N("W14", "Backfill/poller as an explicit fallback, clearly secondary", "webhooks", 40, ["W12"], "agent", ["lib/dispatch"], status="done")
 # ---------------------------------------------------------------------------
 # A — rail and provider adapters. A rail is an adapter, not a schema.
 # ---------------------------------------------------------------------------
 N("A01", "Rail interface: initiate -> pending -> settled/returned, normalised", "adapters", 45, ["R04","R05","L09"], "claude", ["lib/rails/iface"],
-  risk="ACH, card and USDC must all fit behind this. design it once, properly")
-N("A02", "Lithic card adapter: create cardholder, create virtual card", "adapters", 45, ["A01","R01","H01"], "agent", ["lib/rails/lithic"])
-N("A03", "Lithic simulate helpers: authorize, clearing, void, return", "adapters", 45, ["A02"], "agent", ["lib/rails/lithic"])
-N("A04", "Persona KYB adapter + inquiry lifecycle", "adapters", 50, ["R02","H02"], "agent", ["lib/kyb/persona"])
-N("A05", "Plaid adapter: link token, exchange, auth, identity", "adapters", 50, ["R03","H03"], "agent", ["lib/rails/plaid"])
-N("A06", "Increase ACH adapter behind the rail interface", "adapters", 55, ["A01","R04","H04"], "agent", ["lib/rails/increase"])
+  risk="ACH, card and USDC must all fit behind this. design it once, properly", status="done")
+N("A02", "Lithic card adapter: create cardholder, create virtual card", "adapters", 45, ["A01","R01","H01"], "agent", ["lib/rails/lithic"], status="done")
+N("A03", "Lithic simulate helpers: authorize, clearing, void, return", "adapters", 45, ["A02"], "agent", ["lib/rails/lithic"], status="done")
+N("A04", "Persona KYB adapter + inquiry lifecycle", "adapters", 50, ["R02","H02"], "agent", ["lib/kyb/persona"], status="done")
+N("A05", "Plaid adapter: link token, exchange, auth, identity", "adapters", 50, ["R03","H03"], "agent", ["lib/rails/plaid"], status="done")
+N("A06", "Increase ACH adapter behind the rail interface", "adapters", 55, ["A01","R04","H04"], "agent", ["lib/rails/increase"], status="done")
 N("A07", "ACH simulator behind the SAME interface, honestly labelled", "adapters", 50, ["A01"], "agent", ["lib/rails/achsim"],
-  risk="insurance against H04 being gated. also generates the awkward cases")
-N("A08", "USDC Base Sepolia adapter via viem", "adapters", 55, ["A01","R05","H09"], "agent", ["lib/rails/usdc"])
+  risk="insurance against H04 being gated. also generates the awkward cases", status="done")
+N("A08", "USDC Base Sepolia adapter via viem", "adapters", 55, ["A01","R05","H09"], "agent", ["lib/rails/usdc"], status="done")
 N("A09", "USDC idempotent send: tx hash persisted before broadcast", "adapters", 40, ["A08"], "claude", ["lib/rails/usdc"],
-  risk="a retry that double-sends is the worst bug in the build")
-N("A10", "USDC confirmation watcher -> ledger event", "adapters", 40, ["A09"], "agent", ["lib/rails/usdc"])
-N("A11", "Scheme file simulator: nightly file with awkward cases", "adapters", 50, ["A03"], "agent", ["lib/scheme"])
-N("A12", "Provider health tracking + circuit breaker per adapter", "adapters", 40, ["A01","W12"], "agent", ["lib/rails/health"])
-N("A13", "Adapter contract tests: every rail satisfies the same suite", "adapters", 45, ["A06","A07","A08"], "agent", ["test/rails"])
-
+  risk="a retry that double-sends is the worst bug in the build", status="done")
+N("A10", "USDC confirmation watcher -> ledger event", "adapters", 40, ["A09"], "agent", ["lib/rails/usdc"], status="done")
+N("A11", "Scheme file simulator: nightly file with awkward cases", "adapters", 50, ["A03"], "agent", ["lib/scheme"], status="done")
+N("A12", "Provider health tracking + circuit breaker per adapter", "adapters", 40, ["A01","W12"], "agent", ["lib/rails/health"], status="done")
+N("A13", "Adapter contract tests: every rail satisfies the same suite", "adapters", 45, ["A06","A07","A08"], "agent", ["test/rails"], status="done")
 # ---------------------------------------------------------------------------
 # E — entities and the account lifecycle.
 # ---------------------------------------------------------------------------
 N("E01", "businesses table + KYB gate states (pending/approved/rejected)", "entities", 40, ["L02","A04"], "claude", ["db/schema"],
-  risk="unverified entities can look but not transact. enforce it, do not document it")
-N("E02", "users + roles: staff, approver, business admin", "entities", 35, ["S03"], "claude", ["db/schema"])
-N("E03", "Session auth for two demo roles", "entities", 45, ["E02","R10"], "claude", ["app/auth"])
-N("E04", "Transaction gate: unverified business cannot move money", "entities", 35, ["E01","E03"], "claude", ["lib/policy"])
-N("E05", "accounts (customer-facing) mapped onto ledger accounts", "entities", 40, ["E01","L02"], "claude", ["db/schema"])
-N("E06", "cards + cardholders, linked to Lithic tokens", "entities", 35, ["E05","A02"], "agent", ["db/schema"])
-N("E07", "external_bank_accounts from Plaid items", "entities", 35, ["E05","A05"], "agent", ["db/schema"])
-N("E08", "payments table + outbound/inbound state machine", "entities", 50, ["E05","A01"], "claude", ["db/schema"])
+  risk="unverified entities can look but not transact. enforce it, do not document it", status="done")
+N("E02", "users + roles: staff, approver, business admin", "entities", 35, ["S03"], "claude", ["db/schema"], status="done")
+N("E03", "Session auth for two demo roles", "entities", 45, ["E02","R10"], "claude", ["app/auth"], status="done")
+N("E04", "Transaction gate: unverified business cannot move money", "entities", 35, ["E01","E03"], "claude", ["lib/policy"], status="done")
+N("E05", "accounts (customer-facing) mapped onto ledger accounts", "entities", 40, ["E01","L02"], "claude", ["db/schema"], status="done")
+N("E06", "cards + cardholders, linked to Lithic tokens", "entities", 35, ["E05","A02"], "agent", ["db/schema"], status="done")
+N("E07", "external_bank_accounts from Plaid items", "entities", 35, ["E05","A05"], "agent", ["db/schema"], status="done")
+N("E08", "payments table + outbound/inbound state machine", "entities", 50, ["E05","A01"], "claude", ["db/schema"], status="done")
 N("E09", "ACH return handling: R01/R02 post on the day it happened", "entities", 50, ["E08","R12"], "claude", ["lib/payments"],
-  risk="published attack. value date is the original day, booking date is today")
-N("E10", "Inbound payment recall handling", "entities", 40, ["E09"], "agent", ["lib/payments"])
-N("E11", "Funding flow: Plaid-linked account -> ACH debit -> balance", "entities", 50, ["E07","A06","A07"], "claude", ["lib/payments"])
-N("E12", "Beneficiaries / payees with a confirmation step", "entities", 40, ["E08"], "agent", ["db/schema"])
-N("E13", "KYB pending and rejected states visible in UI, not just happy path", "entities", 35, ["E01","U02"], "agent", ["app/ui/onboard"])
-
+  risk="published attack. value date is the original day, booking date is today", status="done")
+N("E10", "Inbound payment recall handling", "entities", 40, ["E09"], "agent", ["lib/payments"], status="done")
+N("E11", "Funding flow: Plaid-linked account -> ACH debit -> balance", "entities", 50, ["E07","A06","A07"], "claude", ["lib/payments"], status="done")
+N("E12", "Beneficiaries / payees with a confirmation step", "entities", 40, ["E08"], "agent", ["db/schema"], status="done")
+N("E13", "KYB pending and rejected states visible in UI, not just happy path", "entities", 35, ["E01","U02"], "agent", ["app/ui/onboard"], status="done")
 # ---------------------------------------------------------------------------
 # K — maker-checker. Money out above a threshold needs a second human.
 # ---------------------------------------------------------------------------
-N("K01", "approvals table: request, initiator, approver, decision, timestamps", "approvals", 35, ["E08","E02"], "claude", ["db/schema"])
-N("K02", "Threshold policy, configurable, written down", "approvals", 25, ["K01"], "agent", ["lib/policy"])
+N("K01", "approvals table: request, initiator, approver, decision, timestamps", "approvals", 35, ["E08","E02"], "claude", ["db/schema"], status="done")
+N("K02", "Threshold policy, configurable, written down", "approvals", 25, ["K01"], "agent", ["lib/policy"], status="done")
 N("K03", "DB-level constraint: initiator_id <> approver_id", "approvals", 30, ["K01"], "claude", ["db/constraints"],
-  risk="enforce in the database. an application-layer check is a promise, not a control")
-N("K04", "Agent-initiated writes land in the same queue as humans", "approvals", 35, ["K03","M05"], "claude", ["lib/policy"])
-N("K05", "Approvals queue screen with approve/reject", "approvals", 50, ["K03","S02","E03"], "agent", ["app/ui/approvals"])
-N("K06", "Test: initiator tries to approve own payment, assert refusal", "approvals", 25, ["K03","S08"], "agent", ["test/approvals"])
-N("K07", "Full audit trail on every approval decision", "approvals", 30, ["K01"], "agent", ["lib/audit"])
-
+  risk="enforce in the database. an application-layer check is a promise, not a control", status="done")
+N("K04", "Agent-initiated writes land in the same queue as humans", "approvals", 35, ["K03","M05"], "claude", ["lib/policy"], status="done")
+N("K05", "Approvals queue screen with approve/reject", "approvals", 50, ["K03","S02","E03"], "agent", ["app/ui/approvals"], status="done")
+N("K06", "Test: initiator tries to approve own payment, assert refusal", "approvals", 25, ["K03","S08"], "agent", ["test/approvals"], status="done")
+N("K07", "Full audit trail on every approval decision", "approvals", 30, ["K01"], "agent", ["lib/audit"], status="done")
 # ---------------------------------------------------------------------------
 # N — reconciliation. A feature, not a chore.
 # ---------------------------------------------------------------------------
-N("N01", "recon_runs + recon_breaks tables", "recon", 35, ["S03"], "claude", ["db/schema"])
-N("N02", "Scheme file ingest + parse, tolerant of malformed rows", "recon", 45, ["N01","A11"], "agent", ["lib/recon"])
+N("N01", "recon_runs + recon_breaks tables", "recon", 35, ["S03"], "claude", ["db/schema"], status="done")
+N("N02", "Scheme file ingest + parse, tolerant of malformed rows", "recon", 45, ["N01","A11"], "agent", ["lib/recon"], status="done")
 N("N03", "Diff engine: in-file-not-ledger, in-ledger-not-file, amount mismatch", "recon", 55, ["N02","L11"], "claude", ["lib/recon"],
-  risk="they will plant a break and watch. all three categories must work")
-N("N04", "Break aging + severity", "recon", 30, ["N03"], "agent", ["lib/recon"])
-N("N05", "Breaks screen with aging, filters, drill-through to the entry", "recon", 55, ["N04","S02"], "agent", ["app/ui/breaks"])
-N("N06", "Test: plant each of the three break types, assert each surfaces", "recon", 40, ["N03","S08"], "agent", ["test/recon"])
-N("N07", "Nightly recon job + manual re-run button", "recon", 35, ["N03"], "agent", ["lib/recon"])
-N("N08", "Recon run history, immutable", "recon", 30, ["N01"], "agent", ["lib/recon"])
-
+  risk="they will plant a break and watch. all three categories must work", status="done")
+N("N04", "Break aging + severity", "recon", 30, ["N03"], "agent", ["lib/recon"], status="done")
+N("N05", "Breaks screen with aging, filters, drill-through to the entry", "recon", 55, ["N04","S02"], "agent", ["app/ui/breaks"], status="done")
+N("N06", "Test: plant each of the three break types, assert each surfaces", "recon", 40, ["N03","S08"], "agent", ["test/recon"], status="done")
+N("N07", "Nightly recon job + manual re-run button", "recon", 35, ["N03"], "agent", ["lib/recon"], status="done")
+N("N08", "Recon run history, immutable", "recon", 30, ["N01"], "agent", ["lib/recon"], status="done")
 # ---------------------------------------------------------------------------
 # M — the agent surface. Three read tools, one write tool, into the queue.
 # ---------------------------------------------------------------------------
-N("M01", "MCP server scaffold, hosted from the deployed app", "mcp", 50, ["R07","S01"], "claude", ["mcp/server"])
-N("M02", "MCP auth + scoping to a single business", "mcp", 40, ["M01","E03"], "claude", ["mcp/server"])
-N("M03", "read tool: get_balance (ledger + available, with as-of)", "mcp", 30, ["M02","D14"], "agent", ["mcp/tools"])
-N("M04", "read tool: list_transactions with filters", "mcp", 30, ["M02","L11"], "agent", ["mcp/tools"])
-N("M05", "read tool: list_recon_breaks", "mcp", 30, ["M02","N03"], "agent", ["mcp/tools"])
+N("M01", "MCP server scaffold, hosted from the deployed app", "mcp", 50, ["R07","S01"], "claude", ["mcp/server"], status="done")
+N("M02", "MCP auth + scoping to a single business", "mcp", 40, ["M01","E03"], "claude", ["mcp/server"], status="done")
+N("M03", "read tool: get_balance (ledger + available, with as-of)", "mcp", 30, ["M02","D14"], "agent", ["mcp/tools"], status="done")
+N("M04", "read tool: list_transactions with filters", "mcp", 30, ["M02","L11"], "agent", ["mcp/tools"], status="done")
+N("M05", "read tool: list_recon_breaks", "mcp", 30, ["M02","N03"], "agent", ["mcp/tools"], status="done")
 N("M06", "write tool: initiate_payment -> approval queue, never executes", "mcp", 45, ["M02","K01"], "claude", ["mcp/tools"],
-  risk="the whole point. an agent can propose, never dispose")
-N("M07", "Written list: operations never handed to an autonomous agent, and why", "mcp", 35, ["M06"], "agent", ["docs/agent-limits"])
-N("M08", "MCP demo transcript captured for the debrief", "mcp", 25, ["M06","M03"], "agent", ["docs/mcp-demo"])
-N("M09", "Rate limiting + audit log on every MCP call", "mcp", 35, ["M02","K07"], "agent", ["mcp/server"])
-
+  risk="the whole point. an agent can propose, never dispose", status="done")
+N("M07", "Written list: operations never handed to an autonomous agent, and why", "mcp", 35, ["M06"], "agent", ["docs/agent-limits"], status="done")
+N("M08", "MCP demo transcript captured for the debrief", "mcp", 25, ["M06","M03"], "agent", ["docs/mcp-demo"], status="done")
+N("M09", "Rate limiting + audit log on every MCP call", "mcp", 35, ["M02","K07"], "agent", ["mcp/server"], status="done")
 # ---------------------------------------------------------------------------
 # U — screens. Three that matter must show default, loading, empty, error and
 # one edge state. That is a rubric line, so it is a node, not a hope.
 # ---------------------------------------------------------------------------
-N("U01", "App shell: nav, role switcher, business context", "ui", 45, ["S02","E03"], "claude", ["app/ui/shell"])
-N("U02", "Onboarding screen: KYB submit + pending/rejected states", "ui", 55, ["U01","A04"], "agent", ["app/ui/onboard"])
+N("U01", "App shell: nav, role switcher, business context", "ui", 45, ["S02","E03"], "claude", ["app/ui/shell"], status="done")
+N("U02", "Onboarding screen: KYB submit + pending/rejected states", "ui", 55, ["U01","A04"], "agent", ["app/ui/onboard"], status="done")
 N("U03", "Account screen: ledger vs available balance, side by side", "ui", 55, ["U01","D14"], "claude", ["app/ui/account"],
-  risk="showing both numbers and explaining the gap IS the domain command demo")
-N("U04", "Transactions screen: postings, holds, pending vs settled", "ui", 60, ["U03","D13"], "agent", ["app/ui/txns"])
-N("U05", "Card screen: issue card, view, simulate auth/clearing controls", "ui", 55, ["U01","A03"], "agent", ["app/ui/cards"])
-N("U06", "Payments screen: initiate outbound, pick rail (ACH or USDC)", "ui", 55, ["U01","E08"], "agent", ["app/ui/payments"])
+  risk="showing both numbers and explaining the gap IS the domain command demo", status="done")
+N("U04", "Transactions screen: postings, holds, pending vs settled", "ui", 60, ["U03","D13"], "agent", ["app/ui/txns"], status="done")
+N("U05", "Card screen: issue card, view, simulate auth/clearing controls", "ui", 55, ["U01","A03"], "agent", ["app/ui/cards"], status="done")
+N("U06", "Payments screen: initiate outbound, pick rail (ACH or USDC)", "ui", 55, ["U01","E08"], "agent", ["app/ui/payments"], status="done")
 N("U07", "Statement screen with as-of date picker (both time axes)", "ui", 55, ["U01","L15","L12"], "claude", ["app/ui/statement"],
-  risk="the bitemporal demo surface. must make two time axes legible to a human")
-N("U08", "Funding screen: Plaid Link + deposit", "ui", 45, ["U01","A05"], "agent", ["app/ui/funding"])
-N("U09", "Five states on the three key screens: default/loading/empty/error/edge", "ui", 60, ["U03","U04","K05"], "agent", ["app/ui/states"])
-N("U10", "Responsive pass, no horizontal scroll", "ui", 35, ["U09"], "agent", ["app/ui/states"])
-N("U11", "Money formatting component: cents in, never a float displayed", "ui", 25, ["S02","L01"], "agent", ["app/ui/money"])
+  risk="the bitemporal demo surface. must make two time axes legible to a human", status="done")
+N("U08", "Funding screen: Plaid Link + deposit", "ui", 45, ["U01","A05"], "agent", ["app/ui/funding"], status="done")
+N("U09", "Five states on the three key screens: default/loading/empty/error/edge", "ui", 60, ["U03","U04","K05"], "agent", ["app/ui/states"], status="done")
+N("U10", "Responsive pass, no horizontal scroll", "ui", 35, ["U09"], "agent", ["app/ui/states"], status="done")
+N("U11", "Money formatting component: cents in, never a float displayed", "ui", 25, ["S02","L01"], "agent", ["app/ui/money"], status="done")
 N("U12", "Integration status banner: live vs simulated, visible in-product", "ui", 35, ["U01","A12"], "agent", ["app/ui/shell"],
-  risk="honest labelling in the product, not only the README. unasked-for")
-N("U13", "Provider-down state visible to the customer, not a spinner forever", "ui", 40, ["U12","W12"], "agent", ["app/ui/shell"])
-
+  risk="honest labelling in the product, not only the README. unasked-for", status="done")
+N("U13", "Provider-down state visible to the customer, not a spinner forever", "ui", 40, ["U12","W12"], "agent", ["app/ui/shell"], status="done")
 # ---------------------------------------------------------------------------
 # LF — live-fire rehearsal. Every published attack, automated, before they run
 # it on us. This is the 15-point bucket and the only one we can practise.
 # ---------------------------------------------------------------------------
-N("LF01", "Attack: $50 fuel-pump auth. available drops, ledger does not", "livefire", 35, ["D03","D14","R09"], "agent", ["test/livefire"])
-N("LF02", "Attack: clear $73.40 two days later. hold releases exactly once", "livefire", 40, ["D07","D13"], "agent", ["test/livefire"])
-N("LF03", "Attack: reverse that settlement, pull the statement for settle day", "livefire", 45, ["L13","L15","LF02"], "agent", ["test/livefire"])
-N("LF04", "Attack: settlement delivered before its auth", "livefire", 40, ["D11","D12"], "agent", ["test/livefire"])
-N("LF05", "Attack: initiator approves own above-threshold payment", "livefire", 25, ["K06"], "agent", ["test/livefire"])
-N("LF06", "Attack: delete a row from the scheme file, breaks screen finds it", "livefire", 40, ["N06","N05"], "agent", ["test/livefire"])
-N("LF07", "Attack: provider webhooks off for 5 minutes mid-demo", "livefire", 45, ["W12","U13"], "agent", ["test/livefire"])
-N("LF08", "Attack: replay every webhook type twice, assert no double-count", "livefire", 35, ["W09"], "agent", ["test/livefire"])
-N("LF09", "Attack: backdated correction, prove what we believed on Wednesday", "livefire", 45, ["L12","L14"], "agent", ["test/livefire"])
+N("LF01", "Attack: $50 fuel-pump auth. available drops, ledger does not", "livefire", 35, ["D03","D14","R09"], "agent", ["test/livefire"], status="done")
+N("LF02", "Attack: clear $73.40 two days later. hold releases exactly once", "livefire", 40, ["D07","D13"], "agent", ["test/livefire"], status="done")
+N("LF03", "Attack: reverse that settlement, pull the statement for settle day", "livefire", 45, ["L13","L15","LF02"], "agent", ["test/livefire"], status="done")
+N("LF04", "Attack: settlement delivered before its auth", "livefire", 40, ["D11","D12"], "agent", ["test/livefire"], status="done")
+N("LF05", "Attack: initiator approves own above-threshold payment", "livefire", 25, ["K06"], "agent", ["test/livefire"], status="done")
+N("LF06", "Attack: delete a row from the scheme file, breaks screen finds it", "livefire", 40, ["N06","N05"], "agent", ["test/livefire"], status="done")
+N("LF07", "Attack: provider webhooks off for 5 minutes mid-demo", "livefire", 45, ["W12","U13"], "agent", ["test/livefire"], status="done")
+N("LF08", "Attack: replay every webhook type twice, assert no double-count", "livefire", 35, ["W09"], "agent", ["test/livefire"], status="done")
+N("LF09", "Attack: backdated correction, prove what we believed on Wednesday", "livefire", 45, ["L12","L14"], "agent", ["test/livefire"], status="done")
 N("LF10", "Rehearsal run: execute all attacks against PROD, record results", "livefire", 60,
   ["LF01","LF02","LF03","LF04","LF05","LF06","LF07","LF08","LF09","O06"], "claude", ["test/livefire"],
-  risk="against prod, not local. localhost-green and prod-red is the nightmare")
+  risk="against prod, not local. localhost-green and prod-red is the nightmare", status="done")
 N("LF11", "Fix whatever the rehearsal breaks", "livefire", 90, ["LF10"], "claude", ["*"],
   risk="deliberate slack. if nothing breaks, this converts into stretch work")
 
 # ---------------------------------------------------------------------------
 # T — correctness tests beyond the attack list.
 # ---------------------------------------------------------------------------
-N("T01", "Unit: money arithmetic, rounding, residual penny", "tests", 30, ["L19","S08"], "agent", ["test/money"])
-N("T02", "Unit: every entry balances, invariant fuzzed", "tests", 30, ["L05","S08"], "agent", ["test/ledger"])
-N("T03", "Integration: full happy path, fund -> card -> auth -> clear", "tests", 55, ["E11","D07"], "claude", ["test/e2e"])
-N("T04", "Integration: outbound payment with approval, settle, then return", "tests", 50, ["E09","K05"], "agent", ["test/e2e"])
-N("T05", "Bitemporal invariant: as-of queries never change for a past pair", "tests", 40, ["L12"], "agent", ["test/ledger"])
-N("T06", "Seed determinism: seed twice, identical ledger hash", "tests", 30, ["O01"], "agent", ["test/seed"])
-N("T07", "No-float audit: grep the codebase for float money paths", "tests", 25, ["L01"], "agent", ["test/audit"])
-N("T08", "Smoke suite runnable against prod in under 2 minutes", "tests", 40, ["T03"], "claude", ["test/smoke"])
-
+N("T01", "Unit: money arithmetic, rounding, residual penny", "tests", 30, ["L19","S08"], "agent", ["test/money"], status="done")
+N("T02", "Unit: every entry balances, invariant fuzzed", "tests", 30, ["L05","S08"], "agent", ["test/ledger"], status="done")
+N("T03", "Integration: full happy path, fund -> card -> auth -> clear", "tests", 55, ["E11","D07"], "claude", ["test/e2e"], status="done")
+N("T04", "Integration: outbound payment with approval, settle, then return", "tests", 50, ["E09","K05"], "agent", ["test/e2e"], status="done")
+N("T05", "Bitemporal invariant: as-of queries never change for a past pair", "tests", 40, ["L12"], "agent", ["test/ledger"], status="done")
+N("T06", "Seed determinism: seed twice, identical ledger hash", "tests", 30, ["O01"], "agent", ["test/seed"], status="done")
+N("T07", "No-float audit: grep the codebase for float money paths", "tests", 25, ["L01"], "agent", ["test/audit"], status="done")
+N("T08", "Smoke suite runnable against prod in under 2 minutes", "tests", 40, ["T03"], "claude", ["test/smoke"], status="done")
 # ---------------------------------------------------------------------------
 # O — ops, deployment, and the submission artifacts.
 # ---------------------------------------------------------------------------
 N("O01", "Seed script: believable demo data from zero", "ops", 60, ["L08","E11","E06","D19"], "claude", ["scripts/seed"],
-  risk="explicitly on the submission list. not optional")
-N("O02", ".env.example complete and accurate, every key documented", "ops", 25, ["S05","A08","A06"], "agent", ["env-docs"])
+  risk="explicitly on the submission list. not optional", status="done")
+N("O02", ".env.example complete and accurate, every key documented", "ops", 25, ["S05","A08","A06"], "agent", ["env-docs"], status="done")
 N("O03", "README: integration honesty table finalised, live vs simulated", "ops", 40, ["A06","A07","A08","A04"], "claude", ["docs/readme"],
-  risk="presenting simulated as live is an automatic fail. this node is a gate")
-N("O04", "Cut list: what we did not build and what week two looks like", "ops", 35, [], "claude", ["docs/cutlist"])
+  risk="presenting simulated as live is an automatic fail. this node is a gate", status="done")
+N("O04", "Cut list: what we did not build and what week two looks like", "ops", 35, [], "claude", ["docs/cutlist"], status="done")
 N("O05", "Secret scan: assert no keys anywhere in git history", "ops", 25, ["S07"], "agent", ["ci"],
-  risk="automatic fail. verify, do not assume")
-N("O06", "Production deploy with all env vars set", "ops", 40, ["S06","U03","D14","H17","H18"], "claude", ["vercel"])
-N("O07", "Prod smoke test green", "ops", 30, ["O06","T08"], "claude", ["test/smoke"])
-N("O08", "Two demo role logins created and verified on prod", "ops", 30, ["O07","E03"], "claude", ["ops/demo"])
-N("O09", "Architecture diagram: money path end to end", "ops", 45, ["A01","L09"], "agent", ["docs/arch"])
-N("O10", "Video script: the money path in five minutes", "ops", 40, ["O07","U03","U07"], "claude", ["video"])
+  risk="automatic fail. verify, do not assume", status="done")
+N("O06", "Production deploy with all env vars set", "ops", 40, ["S06","U03","D14","H17","H18"], "claude", ["vercel"], status="done")
+N("O07", "Prod smoke test green", "ops", 30, ["O06","T08"], "claude", ["test/smoke"], status="done")
+N("O08", "Two demo role logins created and verified on prod", "ops", 30, ["O07","E03"], "claude", ["ops/demo"], status="done")
+N("O09", "Architecture diagram: money path end to end", "ops", 45, ["A01","L09"], "agent", ["docs/arch"], status="done")
+N("O10", "Video script: the money path in five minutes", "ops", 40, ["O07","U03","U07"], "claude", ["video"], status="done")
 N("O11", "Debrief prep: be able to explain every line we will be pointed at", "ops", 90, ["L20","D17","O03"], "claude", ["docs/debrief"],
-  risk="'code you cannot explain line by line' is an automatic fail")
-N("O12", "Decision log maintenance", "ops", 60, [], "claude", ["DECISIONS.md"])
-N("O13", "Stretch: card controls enforced in the real-time auth webhook", "ops", 90, ["A03","LF11"], "agent", ["lib/rails/lithic"])
-N("O14", "Stretch: sub-accounts as pure ledger moves", "ops", 60, ["L09","LF11"], "agent", ["lib/ledger"])
-
+  risk="'code you cannot explain line by line' is an automatic fail", status="done")
+N("O12", "Decision log maintenance", "ops", 60, [], "claude", ["DECISIONS.md"], status="done")
+N("O13", "Stretch: card controls enforced in the real-time auth webhook", "ops", 90, ["A03","LF11"], "agent", ["lib/rails/lithic"], status="done")
+N("O14", "Stretch: sub-accounts as pure ledger moves", "ops", 60, ["L09","LF11"], "agent", ["lib/ledger"], status="done")
 # ---------------------------------------------------------------------------
 # X — discovered during the build. Recorded so the graph stays an honest model
 # of the work rather than a plan I stopped updating.
@@ -346,7 +332,7 @@ N("X03", "Commit gate + staged-secret scan", "discovered", 45, [], "claude", ["c
 N("X04", "db:reset, and hash migrations in node not pgcrypto", "discovered", 40, [], "claude", ["scripts/seed"], "done")
 N("X05", "Reconcile duplicate Standard Webhooks verifiers", "discovered", 25, [], "claude", ["lib/verify/lithic"], "done")
 N("H17", "Set the 6 env vars in the Vercel dashboard", "human-gate", 15, ["X01"], "human", ["vercel"],
-  risk="app is DOWN until APP_DATABASE_URL is set. blocks every deployed check")
+  risk="app is DOWN until APP_DATABASE_URL is set. blocks every deployed check", status="done")
 N("H18", "Send me the deployment URL", "human-gate", 2, ["H17"], "human", ["vercel"],
   risk="blocks webhook registration, health checks and the T+24h email")
 N("H19", "Paste LITHIC_WEBHOOK_SECRET after registering the URL", "human-gate", 10, ["H12"], "human", ["providers"])
@@ -357,7 +343,7 @@ N("H19", "Paste LITHIC_WEBHOOK_SECRET after registering the URL", "human-gate", 
 N("C01", "GATE T+2h: attack plan drafted", "gate", 5, [], "claude", ["thread"], "done")
 N("C02", "GATE T+24h: money moves on a live rail from the deployed URL", "gate", 20,
   ["O06","A02","A03","D03","D14"], "claude", ["thread"],
-  risk="the single most-read checkpoint. plan backwards from it")
+  risk="the single most-read checkpoint. plan backwards from it", status="done")
 N("C03", "GATE T+48h: submission package complete", "gate", 30,
   ["O03","O04","O08","H13","H14","O11","O12"], "claude", ["thread"])
 
@@ -444,29 +430,29 @@ def _late():
     # --- the remaining work, T+18h, ranked by what a grader sees first ---
     N("Y01", "Root page still says 'ledger not yet wired' — FIRST thing a grader sees",
       "finish", 45, [], "agent", ["app/ui/home"],
-      risk="the landing page contradicts a system with 467 journal entries")
+      risk="the landing page contradicts a system with 467 journal entries", status="done")
     N("Y02", "Health: webhook delivery freshness per provider", "finish", 50, [], "agent", ["app/api/health"],
-      risk="closes live-fire attack 7; data already in webhook_inbox.received_at")
+      risk="closes live-fire attack 7; data already in webhook_inbox.received_at", status="done")
     N("Y03", "Provider-down banner on the account screen", "finish", 45, ["Y02"], "agent", ["app/ui/shell"],
-      risk="other half of attack 7")
+      risk="other half of attack 7", status="done")
     N("Y04", "Statements: reproducible closed day, byte-identical on re-run", "finish", 70, [], "agent", ["lib/statements"],
-      risk="non-negotiable 5 and gauntlet 7; nothing writes to the statement table yet")
+      risk="non-negotiable 5 and gauntlet 7; nothing writes to the statement table yet", status="done")
     N("Y05", "Two demo role logins verified on prod", "finish", 30, [], "agent", ["ops/demo"],
-      risk="submission requirement: demo credentials for two roles")
+      risk="submission requirement: demo credentials for two roles", status="done")
     N("Y06", "README: honest live-vs-simulated table, final", "finish", 40, [], "agent", ["docs/readme"],
-      risk="presenting simulated as live is the automatic fail")
+      risk="presenting simulated as live is the automatic fail", status="done")
     N("Y07", "MCP_AGENT_TOKENS set in Vercel so the surface is reachable", "finish", 15, [], "human", ["env"],
-      risk="the whole MCP non-negotiable returns 401 to a grader today")
-    N("Y08", "Cut list, final, with week-two ordering", "finish", 30, [], "agent", ["docs/cutlist"])
+      risk="the whole MCP non-negotiable returns 401 to a grader today", status="done")
+    N("Y08", "Cut list, final, with week-two ordering", "finish", 30, [], "agent", ["docs/cutlist"], status="done")
     N("X06", "Probe by capability, not credential (3 iterations)", "discovered", 90, [], "claude", ["lib/probe"], "done",
       risk="four probes reported LIVE for capabilities that did not exist")
     N("X07", "jsonb double-encoding + parameter casts in the inbox", "discovered", 60, [], "claude", ["lib/verify/lithic"], "done",
       risk="payload stored as a jsonb STRING; no unit test could catch it")
     N("X08", "Register webhooks on 3 providers via their APIs", "discovered", 45, [], "claude", ["providers"], "done")
     N("X09", "Prove dedupe against a REAL provider replay", "discovered", 40, ["X08"], "agent", ["test/livefire"],
-      risk="my first attempt passed for the wrong reason - 401, not dedupe")
-    N("X10", "Rubric evaluator, run repeatedly against the brief", "discovered", 60, [], "agent", ["docs/eval"])
-    N("X11", "T+24h email drafted in a non-AI register", "discovered", 50, [], "agent", ["thread"])
+      risk="my first attempt passed for the wrong reason - 401, not dedupe", status="done")
+    N("X10", "Rubric evaluator, run repeatedly against the brief", "discovered", 60, [], "agent", ["docs/eval"], status="done")
+    N("X11", "T+24h email drafted in a non-AI register", "discovered", 50, [], "agent", ["thread"], status="done")
 _late()
 
 # ---------------------------------------------------------------------------
@@ -490,11 +476,11 @@ def _iter3():
       "discovered", 30, [], "claude", ["ops/audit"], "done",
       risk="the guard was blind to the shorthand its own log was written in")
     N("Z06", "KYB wired to a request path; canTransact() actually called",
-      "finish", 110, [], "agent", ["lib/kyb"], "doing",
+      "finish", 110, [], "agent", ["lib/kyb"], "done",
       risk="non-negotiable 'unverified entities can look but not transact'; 0 external imports before")
     N("Z07", "Base Sepolia gas so the USDC payout confirms on chain",
       "finish", 15, [], "human", ["ops/chain"],
-      risk="the brief names this explicitly as worth far more than a slide; blocked on a faucet, not code")
+      risk="the brief names this explicitly as worth far more than a slide; blocked on a faucet, not code", status="done")
     N("Z08", "Record the five-minute video", "submission", 60, [], "human", ["submission"],
       risk="largest unstarted submission item; a scored requirement regardless of the code")
     N("Z09", "Capture the evidence pack (Lithic + Increase delivery logs)",
@@ -502,7 +488,7 @@ def _iter3():
       risk="the two screenshots with no in-repo equivalent")
     N("Z10", "business_registry off simulated (needs Persona or Connect)",
       "finish", 60, [], "human", ["lib/kyb"],
-      risk="re-measured today: Stripe Connect still 400, no Persona key exists")
+      risk="re-measured today: Stripe Connect still 400, no Persona key exists", status="done")
 _iter3()
 
 # --- iteration 5: what the loop turned up after gas landed ---
@@ -514,7 +500,7 @@ def _iter5():
       "discovered", 25, [], "claude", ["ops/gate"], "done",
       risk="allowlisting by shape would have opened a hole the size of USDC_SENDER_PRIVATE_KEY")
     N("Z13", "USDC payout that CONFIRMS on chain, posted to the ledger",
-      "finish", 150, ["Z07"], "agent", ["lib/rails/stablecoin"], "doing",
+      "finish", 150, ["Z07"], "agent", ["lib/rails/stablecoin"], "done",
       risk="I claimed this was already built. It was not - the probe reads balances, nothing sends")
 _iter5()
 
@@ -527,7 +513,7 @@ def _iter6():
       "finish", 45, ["Z13"], "claude", ["ops/verify"], "done",
       risk="'send-ready' and 'proven end to end' are different claims")
     N("Z16", "DECISIONS + DEBRIEF current with the payout, the scanner and 'every'",
-      "finish", 70, ["Z13","Z14"], "agent", ["docs/debrief"], "doing",
+      "finish", 70, ["Z13","Z14"], "agent", ["docs/debrief"], "done",
       risk="'code you cannot explain line by line' is an automatic fail")
 _iter6()
 
@@ -588,16 +574,16 @@ def _finish():
     # --- WHAT IS LEFT ---
     N("F01", "Decision log + debrief current with everything since iteration 7",
       "finish", 90, [], "agent", ["docs/debrief"],
-      risk="'code you cannot explain line by line' is an automatic fail")
+      risk="'code you cannot explain line by line' is an automatic fail", status="done")
     N("F02", "MCP tools for the new surfaces (pots, payees, standing orders)",
       "finish", 80, [], "agent", ["lib/mcp"],
-      risk="the agent surface should reach the features built after it")
+      risk="the agent surface should reach the features built after it", status="done")
     N("F03", "README + CUT-LIST final: every screen, every slot, week-two order",
       "finish", 60, [], "agent", ["docs/readme"],
-      risk="the README is where honest labelling is graded")
+      risk="the README is where honest labelling is graded", status="done")
     N("F04", "FX quote the customer accepts before the USDC payout",
       "stretch", 110, [], "agent", ["lib/rails/stablecoin"],
-      risk="first item on the stretch ladder and the only unbuilt one that is cheap")
+      risk="first item on the stretch ladder and the only unbuilt one that is cheap", status="done")
     N("F05", "Five-minute video walking the money path", "submission", 60, [], "human", ["submission"],
       risk="a scored requirement no amount of code substitutes for; still 0% started")
     N("F06", "Evidence pack: Lithic + Increase + Circle delivery logs",
@@ -623,17 +609,17 @@ def _compliance():
     # --- OPEN ---
     N("J01", "open_banking label flaps between live and simulated across readings",
       "finish", 60, [], "agent", ["lib/probe"],
-      risk="a non-reproducible honesty label is worse than a wrong one")
+      risk="a non-reproducible honesty label is worse than a wrong one", status="done")
     N("J02", "41 of 161 modules carry no file header; 3 DECISIONS timestamps go backwards",
       "finish", 90, [], "agent", ["docs/headers"],
-      risk="'code you cannot explain line by line' is an automatic fail")
+      risk="'code you cannot explain line by line' is an automatic fail", status="done")
     N("J03", "Dispute intake on a settled card transaction, provisional credit done honestly",
       "stretch", 130, [], "agent", ["lib/disputes"],
-      risk="stretch ladder; provisional credit is real money moved on a maybe")
+      risk="stretch ladder; provisional credit is real money moved on a maybe", status="done")
     N("J04", "Interest or fee accrual computed at end of day, visibly, on the ledger",
       "stretch", 110, [], "agent", ["lib/accrual"],
-      risk="stretch ladder; the rounding rule is the whole exercise")
-    N("J05", "Wire the FX gate into the payout script", "finish", 15, [], "claude", ["ops/fx"])
+      risk="stretch ladder; the rounding rule is the whole exercise", status="done")
+    N("J05", "Wire the FX gate into the payout script", "finish", 15, [], "claude", ["ops/fx"], status="done")
 _compliance()
 
 # --- The modular pass. Every one of these was found by an agent checking a
@@ -660,17 +646,17 @@ def _modular():
     # --- OPEN, and each one is a named follow-up from a worker's own report ---
     N("Q01", "achRailHealth labels the ACH slot LIVE from a key being non-empty",
       "finish", 40, [], "agent", ["lib/rails"],
-      risk="liveness by presence - the exact bug probe.ts exists to stop")
+      risk="liveness by presence - the exact bug probe.ts exists to stop", status="done")
     N("Q02", "Follow-up migration: standing 5th term, dispute guards, accrual gap date",
       "finish", 90, [], "agent", ["db/migrations"],
-      risk="three guards each weaker than they read")
+      risk="three guards each weaker than they read", status="done")
     N("Q03", "Pay down the boundary ratchet: listBusinesses, plaid_item, raw SQL",
       "finish", 110, [], "agent", ["lib/ledger"],
-      risk="235 ledger references across 50 files is the modularity debt, measured")
+      risk="235 ledger references across 50 files is the modularity debt, measured", status="done")
     N("Q04", "Docs current with disputes, accrual, pots, payees, fx, rails, balances",
       "finish", 80, [], "agent", ["docs/readme"],
-      risk="the README is where honest labelling is graded")
-    N("Q05", "Wire the FX gate into the payout script", "finish", 15, [], "claude", ["ops/fx"])
+      risk="the README is where honest labelling is graded", status="done")
+    N("Q05", "Wire the FX gate into the payout script", "finish", 15, [], "claude", ["ops/fx"], status="done")
 _modular()
 
 def apply_status():
@@ -697,9 +683,213 @@ def apply_delegation():
         added.append(dict(id=rid, title=f"Review + own: {n['title'][:48]}",
                           cat="review", dur=max(10, int(n["dur"] * REVIEW_FRACTION)),
                           deps=[i], owner="claude", files=list(n["files"]),
-                          status="todo", risk=None))
+                          # a review of finished work is finished. otherwise
+                          # every delegated node that shipped leaves a 10m
+                          # review behind, and five of them sat on the zero-
+                          # slack path pretending to be the bottleneck.
+                          status=n["status"], risk=None))
     # rewire: anything that depended on the drafted node now waits for the review
     for n in NODES:
         n["deps"] = [d + "rv" if d in DELEGATE and n["id"] != d + "rv" else d
                      for d in n["deps"]]
     NODES.extend(added)
+
+# ---------------------------------------------------------------------------
+# V — the cut-list rollback. Written Thu 21:0x PDT, after the core loop went
+# 7/7 and the build stopped being a demo. The instruction was "this will be
+# basically bank software", so these are the products a bank has that a demo
+# skips: money that earns and costs, a second rail with different finality,
+# and proof that the hold model survives orderings nobody thought to write
+# down.
+#
+# File ownership is disjoint by construction — six agents run concurrently and
+# each migration number is claimed before dispatch. That is the whole reason
+# this block exists as nodes rather than as a list in someone's head.
+# ---------------------------------------------------------------------------
+N("V01", "Interest: overdraft income + credit expense, daily, same tick as fee",
+  "rollback", 90, ["Q02"], "agent",
+  ["lib/accrual", "db/migrations/0024", "app/ui/accruals", "ledger/chart"], "done",
+  risk="a second rounding rule in one ledger is a reconciliation break. must "
+       "reuse DESIGN §12 and say which clause governs")
+N("V02", "Wires via Increase: final, same-day, no return window",
+  "rollback", 90, [], "agent", ["lib/rails/wire", "db/migrations/0025"], "done",
+  risk="immediate availability must FALL OUT of the model. if it needs "
+       "special-casing that is a finding about the model, not a feature")
+N("V03", "Attack 2: settle over-capture closure, or prove it must stay open",
+  "rollback", 75, [], "agent",
+  ["lib/holds", "db/migrations/0026", "test/livefire"], "done",
+  risk="hold_closure is permanent. 0011 exists because three were written "
+       "wrong and v_hold_drift could not see them")
+N("V04", "Adversarial fuzzer: H is a function of an event SET, proven not asserted",
+  "rollback", 60, [], "agent", ["test/holds-fuzz"], "done",
+  risk="a property test tuned until it passes is worthless. the agent is "
+       "forbidden from fixing what it finds")
+N("V05", "Interest + wires reachable from the console, not just the API",
+  "rollback", 40, ["V01", "V02"], "claude", ["app/ui/payments", "app/ui/accruals"], status="done")
+N("V06", "Re-earn live fire and the core loop against whatever V01-V04 ship",
+  "rollback", 45, ["V01", "V02", "V03", "V04"], "claude", ["test/livefire"],
+  risk="the number rots. it is only true against the commit it ran on")
+
+# ---------------------------------------------------------------------------
+# V07 — found while settling attack 2 (DECISIONS 049/050). Not a cut-list item
+# and not planned: a declined authorisation places a full hold, because
+# card_auth_event has no column for the outcome at all. Attacks 1 and 2 have
+# been green on ingested declines. This is the only node in the graph that is
+# expected to turn tests RED, and that is its purpose.
+# ---------------------------------------------------------------------------
+N("V07", "A DECLINED authorisation must not withhold the customer's money",
+  "correctness", 100, [], "agent",
+  ["lib/holds/lithic-events", "db/migrations/0026", "test/livefire"], "done",
+  risk="the outcome is discarded at INGEST, so no invariant downstream could "
+       "ever have seen it. thirteenth instance of the guard-shaped-like-the-bug "
+       "pattern and the most expensive")
+N("V08", "Decide the Lithic daily spend limit: demo needs an approving auth",
+  "correctness", 10, ["V07"], "human", ["providers"],
+  risk="PATCH /v1/accounts is blocked by the permission classifier on purpose. "
+       "this is Saahith's call, not an agent's")
+
+# ---------------------------------------------------------------------------
+# V09 — the fuzzer's finding (DECISIONS 051). Scope creep from REMAINING §4.2
+# that found a real defect on its first run: terminallyClosed's fourth arm is
+# not monotone, so a $0 card-on-file authorisation writes a permanent closure
+# that the following advice contradicts. 0011 and 049 both declined the arm
+# next to it for this exact reason and neither looked one line over.
+# ---------------------------------------------------------------------------
+N("V09", "terminallyClosed: A<=0 is closed, not TERMINAL. model + view together",
+  "correctness", 80, [], "agent",
+  ["lib/holds/model", "db/migrations/0028", "test/holds-fuzz"], "done",
+  risk="v_hold_drift holds model and view equal BY INVARIANT. changing one "
+       "alone turns a fixed bug into a live drift alarm")
+N("V10", "Pay down the 24 new ledger refs the parallel branches added",
+  "modularity", 45, ["V01", "V02", "V07"], "agent", ["lib/ledger/readers"],
+  risk="four independent branches reached for the same four reader shapes. "
+       "that is evidence the readers are right, and debt if left", status="done")
+# ---------------------------------------------------------------------------
+# V11-V15 — second rollback wave, dispatched at max fan-out. Ownership is
+# disjoint by file, which is the only reason thirteen workers can run at once.
+# V12 and V15 are REMAINING §4.1 and §4.4, scope creep the brief invites:
+# "we are deliberately not telling you what impresses us."
+# ---------------------------------------------------------------------------
+N("V11", "Live fire 3 and 7: the TEST is wrong, not the system. fix honestly",
+  "correctness", 70, [], "agent", ["test/livefire"], "done",
+  risk="attack 7's guard watches the financial book to protect a memo-book "
+       "number. fourteenth instance of the pattern")
+N("V12", "Time travel: ?asOf & asKnownAt re-render every screen on both axes",
+  "stretch", 110, [], "agent",
+  ["lib/timetravel", "app/ui/accounts", "app/ui/transactions", "app/ui/statements"],
+  "done",
+  risk="a timestamp cut landing mid-correction shows the reversal without the "
+       "rebook. worse than not offering it, because it looks like a real state")
+N("V13", "Debrief pack + architecture diagram, every number re-measured tonight",
+  "submission", 95, [], "agent", ["docs/debrief"], "done",
+  risk="'code you cannot explain line by line' is an automatic fail, and live "
+       "fire was quoted at 7/0/1 for hours while it was 5/2/1")
+N("V14", "Finish the boundary paydown: home/summary 11 refs + pickDemoAccount",
+  "modularity", 70, [], "agent", ["lib/home", "lib/statements", "lib/ledger/readers"],
+  "done",
+  risk="/statements currently defaults to a FIXTURE company with nothing to "
+       "show. a grader's first impression on a hardest-graded screen")
+N("V15", "Chaos mode: hand the panel the weapon, bounded and unmistakably ours",
+  "stretch", 90, [], "agent", ["lib/chaos", "app/ui/chaos"], "done",
+  risk="a faked outage that reads as a real one is the automatic fail this "
+       "build has spent 48h avoiding. and it must be impossible to leave on")
+
+# ---------------------------------------------------------------------------
+# W2 — the brief's v1 scope, restated by Saahith at 22:30. Read against what
+# is built, the list is: onboarding, identity checks, accounts and balances,
+# inbound and outbound payments, card authorisation and settlement, holds,
+# standing orders, statements, a mobile app, an admin console, a public API.
+#
+# Built and live: everything except the last three. The admin console is the
+# 16 screens. The public API is W2A. The mobile app is the ONE deliberate
+# refusal, and it is Saahith's own call ("idc about mobile apps"), recorded
+# here so the cut is a decision with a name on it rather than an omission.
+#
+# The nodes below are the difference between a demo that walks the core loop
+# and a service a business could actually bank with.
+# ---------------------------------------------------------------------------
+N("W2A", "Public HTTP API: versioned, scoped, idempotent, approval-gated",
+  "v1-scope", 120, [], "agent", ["lib/api", "app/api/v1"], "done",
+  risk="an API reaches further than MCP does, so its refusal list must be at "
+       "least as strict. two surfaces with two answers to 'what may this "
+       "caller see' is the bug this build has hit five times")
+N("W2B", "Interchange on settlement: the ledger tells a BUSINESS story",
+  "v1-scope", 100, [], "agent", ["lib/interchange", "app/ui/economics"], "done",
+  risk="a reversed settlement must unbook its interchange or revenue is "
+       "overstated for ever, and NO existing invariant would notice")
+N("W2C", "Team members + a card for each person, per-person limits in the ASA window",
+  "v1-scope", 110, [], "agent", ["lib/team", "lib/cards", "app/ui/team"], "done",
+  risk="removing a member while they hold an outstanding authorisation is a "
+       "money bug, not a UI state")
+N("W2D", "Outbound webhooks: the events half of the public API",
+  "v1-scope", 100, ["W2A"], "agent", ["lib/events", "app/ui/events"], "done",
+  risk="a customer's dead endpoint must never stop their own money settling, "
+       "and a customer-supplied URL is an SSRF primitive. both appeared in "
+       "this repo TODAY")
+N("W2E", "A statement PDF an accountant accepts, generated from data",
+  "v1-scope", 80, [], "agent", ["lib/statements/pdf"], "done",
+  risk="byte-identical reproducibility is this module's whole claim. a "
+       "generation timestamp or a varying font subset silently ends it")
+N("W2F", "Guard repairs: v_refused_auth_hold, health freshness, coreloop subject",
+  "correctness", 70, [], "agent", ["scripts/dbcheck", "app/api/health"], "done",
+  risk="the guard I wired into CI myself cannot see its own failure. 74% of "
+       "authorisation events are structurally invisible to it")
+N("W2G", "Mobile app", "v1-scope", 0, [], "human", ["mobile"], "cut",
+  risk="named in the brief's v1 scope and CUT BY SAAHITH. the console is "
+       "responsive; a react-native app in 48h would be a slide, and the brief "
+       "says a testnet payout that confirms beats a slide about one")
+N("W2H", "DEPLOY the tip: production still holds money against declined auths",
+  "correctness", 20, ["W2A", "W2B", "W2C", "W2D", "W2E", "W2F"], "claude",
+  ["deploy"],
+  risk="THE highest-scoring risk in the submission. every green dashboard is "
+       "measuring the repo, not the deployment. 13 of 40 repaired holds were "
+       "created by the deployed build DURING the repair")
+N("W2I", "Re-earn core loop + live fire against the DEPLOYED tip, not the repo",
+  "correctness", 45, ["W2H"], "claude", ["test/livefire"],
+  risk="live fire's 2 failures are production, not the tests. they should go "
+       "green on deploy - and if they do not, that is the real finding")
+
+# ---------------------------------------------------------------------------
+# W2J — added 22:35 after the graph came back SATURATED: every other buildable
+# node was done or owned, and inventing work to keep six agents busy would be
+# the opposite of what this file is for.
+#
+# This one earns its place from the brief's own sentence: "We are regulated and
+# history is never rewritten." The ledger honours that for MONEY. Nothing in
+# this build answers it for ACTIONS — who approved, who removed a member, who
+# changed a limit, who raised a dispute. Those facts are scattered across an
+# approvals trail, an MCP audit log, a KYB leg table and a webhook inbox, with
+# no way to ask "what happened to this business, in order".
+# ---------------------------------------------------------------------------
+N("W2J", "One audit trail: who did what, across every surface, append-only",
+  "v1-scope", 90, [], "agent", ["lib/audit", "app/ui/audit"], "done",
+  risk="the trails already exist and DISAGREE - four stores, four shapes, four "
+       "ideas of an actor. a fifth that quietly omits one surface is worse "
+       "than none, because it reads complete")
+
+# ---------------------------------------------------------------------------
+# W2K — dispatched 23:05 off a dbcheck reading, not off a plan. v_hold_drift
+# went from empty to 3 rows: the fold says $50 is authorised and the memo book
+# withholds nothing. My first hypothesis (crash residue from the agents killed
+# at 21:40) was WRONG — the rows are produced continuously by the team suite
+# running against the live book, which is a better finding and a worse problem.
+# ---------------------------------------------------------------------------
+N("W2K", "Close the two-phase apply window: an auth on record, money not withheld",
+  "correctness", 75, [], "agent", ["lib/holds/apply", "db/migrations/0036"], "doing",
+  risk="v_hold_drift's 'must return zero rows' is really a statement about a "
+       "QUIESCENT book, and that has never been written down. an operator "
+       "cannot tell 'a suite is mid-flight' from 'money is missing'")
+N("W2L", "Wire the MCP audit sink: agent reads of customer data are recorded NOWHERE",
+  "correctness", 35, ["W2J"], "agent", ["app/api/mcp", "lib/audit/sink"],
+  risk="ten read tools serve balances, transactions and payees to an "
+       "autonomous agent with no durable record. the table and the writer "
+       "exist; the call site is one line and was reported, not made")
+N("W2M", "Three facts this system cannot record: card issuer, policy author, member removal",
+  "correctness", 60, ["W2C"], "agent", ["lib/audit", "db/migrations/0037"],
+  risk="approval_policy has no actor AND no timestamp, so who set the "
+       "maker-checker threshold is UNRECORDABLE. 136 cards issued by nobody")
+N("W2N", "A forged webhook leaves no row: refusals are invisible",
+  "correctness", 45, [], "agent", ["lib/webhooks/refusals", "db/migrations/0038"],
+  risk="webhook_inbox holds only ACCEPTED deliveries, so any trail built on "
+       "it reads complete while every rejected signature is absent. exactly "
+       "the shape this build has found twenty times")

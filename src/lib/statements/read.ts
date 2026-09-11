@@ -35,7 +35,16 @@
  * `server-only`, and reaching a real connection means going through it.
  */
 
-import type { Sql } from "@/lib/ledger/queries";
+import {
+  countPostingsForDays,
+  currentBookingWatermark as currentLedgerWatermark,
+  findDepositAccount,
+  highestBookingSeqAffecting,
+  listEntriesAboveWatermark,
+  NoSuchAccountError,
+  readAccountPeriod,
+  type Sql,
+} from "@/lib/ledger/queries";
 
 import { foldClosing, sortLines, withRunningBalances } from "./render";
 import type {
@@ -77,43 +86,27 @@ export interface StatementAccount {
  * book inherits the same watermark from it. So every read here starts by
  * resolving one to the other rather than letting a caller pass an entity that
  * does not own the account.
+ *
+ * THIS USED TO CARRY ITS OWN COPY of `findDepositAccount`'s query, predicate
+ * for predicate — `code = '2100' AND book = 'financial' AND business_id IS NOT
+ * NULL`, which is the ledger's definition of "a customer's money" and was
+ * therefore written down twice. It asks the ledger now. The only thing this
+ * function adds is the `entity_id`, which is what `book_day` is keyed by.
  */
 export async function readStatementAccount(
   accountId: string,
   conn: Sql,
 ): Promise<StatementAccount | null> {
-  const rows = await conn<
-    {
-      account_id: string;
-      entity_id: string;
-      business_id: string;
-      account_name: string;
-      legal_name: string;
-      currency: string;
-    }[]
-  >`
-    SELECT a.id          AS account_id,
-           a.entity_id   AS entity_id,
-           a.business_id AS business_id,
-           a.name        AS account_name,
-           b.legal_name  AS legal_name,
-           a.currency    AS currency
-      FROM account a
-      JOIN business b ON b.id = a.business_id
-     WHERE a.id = ${accountId}::uuid
-       AND a.code = '2100'
-       AND a.book = 'financial'
-       AND a.business_id IS NOT NULL`;
+  const account = await findDepositAccount(accountId, conn);
+  if (account === null) return null;
 
-  const row = rows[0];
-  if (row === undefined) return null;
   return {
-    accountId: row.account_id,
-    entityId: row.entity_id,
-    businessId: row.business_id,
-    accountName: row.account_name,
-    legalName: row.legal_name,
-    currency: row.currency,
+    accountId: account.accountId,
+    entityId: account.entityId,
+    businessId: account.businessId,
+    accountName: account.accountName,
+    legalName: account.legalName,
+    currency: account.currency,
   };
 }
 
@@ -207,14 +200,16 @@ export async function listStatementDays(
   conn: Sql,
 ): Promise<readonly StatementDay[]> {
   const limit = args.limit ?? 90;
-  const rows = await conn<
+
+  // The closes and the published versions: `book_day` and `statement` are this
+  // module's own tables and this query stays here. What it no longer does is
+  // reach into `journal_line` for the two counts — see below.
+  const days = await conn<
     {
       business_date: string;
       closed_at: Date;
       booking_watermark: bigint;
       version_count: number;
-      line_count: number;
-      late_posting_count: number;
     }[]
   >`
     SELECT to_char(bd.business_date, 'YYYY-MM-DD') AS business_date,
@@ -223,34 +218,46 @@ export async function listStatementDays(
            (SELECT count(*)::int FROM statement s
              WHERE s.account_id   = ${args.accountId}::uuid
                AND s.period_start = bd.business_date
-               AND s.period_end   = bd.business_date)          AS version_count,
-           (SELECT count(*)::int FROM journal_line l
-             WHERE l.account_id = ${args.accountId}::uuid
-               AND l.value_date = bd.business_date)            AS line_count,
-           (SELECT count(*)::int FROM journal_line l
-             WHERE l.account_id  = ${args.accountId}::uuid
-               AND l.value_date  = bd.business_date
-               AND l.booking_seq > bd.booking_watermark)       AS late_posting_count
+               AND s.period_end   = bd.business_date)          AS version_count
       FROM book_day bd
      WHERE bd.entity_id = ${args.entityId}::uuid
-       AND (EXISTS (SELECT 1 FROM statement s
-                     WHERE s.account_id   = ${args.accountId}::uuid
-                       AND s.period_start = bd.business_date
-                       AND s.period_end   = bd.business_date)
-            OR EXISTS (SELECT 1 FROM journal_line l
-                        WHERE l.account_id = ${args.accountId}::uuid
-                          AND l.value_date = bd.business_date))
-     ORDER BY bd.business_date DESC
-     LIMIT ${limit}`;
+     ORDER BY bd.business_date DESC`;
 
-  return rows.map((row) => ({
-    businessDate: row.business_date,
-    closedAt: row.closed_at.toISOString(),
-    bookingWatermark: row.booking_watermark,
-    versionCount: row.version_count,
-    lineCount: row.line_count,
-    latePostingCount: row.late_posting_count,
-  }));
+  // Then ask the LEDGER how much this account did on each of those days, and
+  // how much of it arrived after the close. Two round trips where there was
+  // one; the same two counts, from the same two predicates, asked of the
+  // module that owns `journal_line`.
+  //
+  // The LIMIT moved from SQL to here on purpose and the result is identical:
+  // filtering an already-descending list and then taking the first `limit`
+  // yields exactly the rows `ORDER BY … DESC LIMIT n` yielded after the same
+  // filter. What changes is how many `book_day` rows cross the wire, and a
+  // book with a nightly close has one row per day per entity.
+  const activity = await countPostingsForDays(
+    args.accountId,
+    days.map((d) => ({ valueDate: d.business_date, bookingWatermark: d.booking_watermark })),
+    conn,
+  );
+
+  const out: StatementDay[] = [];
+  for (const day of days) {
+    const counts = activity.get(day.business_date);
+    const lineCount = counts?.lineCount ?? 0;
+    // "Something to show for": a published statement OR at least one posting.
+    // A day the entity closed on which this customer did nothing is excluded,
+    // exactly as the `EXISTS … OR EXISTS …` did.
+    if (day.version_count === 0 && lineCount === 0) continue;
+    out.push({
+      businessDate: day.business_date,
+      closedAt: day.closed_at.toISOString(),
+      bookingWatermark: day.booking_watermark,
+      versionCount: day.version_count,
+      lineCount,
+      latePostingCount: counts?.latePostingCount ?? 0,
+    });
+    if (out.length === limit) break;
+  }
+  return out;
 }
 
 /**
@@ -261,9 +268,7 @@ export async function listStatementDays(
  * watermark does not. That asymmetry is the whole design.
  */
 export async function currentWatermark(conn: Sql): Promise<bigint> {
-  const rows = await conn<{ watermark: bigint }[]>`
-    SELECT COALESCE(MAX(booking_seq), 0)::bigint AS watermark FROM journal_entry`;
-  return rows[0]?.watermark ?? 0n;
+  return currentLedgerWatermark(conn);
 }
 
 /**
@@ -298,12 +303,10 @@ export async function contentWatermark(
   args: { readonly accountId: string; readonly periodEnd: BusinessDate },
   conn: Sql,
 ): Promise<bigint> {
-  const rows = await conn<{ watermark: bigint }[]>`
-    SELECT COALESCE(MAX(l.booking_seq), 0)::bigint AS watermark
-      FROM journal_line l
-     WHERE l.account_id = ${args.accountId}::uuid
-       AND l.value_date <= ${args.periodEnd}::date`;
-  return rows[0]?.watermark ?? 0n;
+  return highestBookingSeqAffecting(
+    { accountId: args.accountId, throughValueDate: args.periodEnd },
+    conn,
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -345,72 +348,45 @@ export async function renderStatement(
 ): Promise<StatementDocument> {
   const watermark = request.bookingWatermark;
 
-  const [openingRows, lineRows] = await Promise.all([
-    conn<{ opening_cents: bigint }[]>`
-      SELECT COALESCE(SUM(l.amount_cents), 0)::bigint * a.normal_side AS opening_cents
-        FROM account a
-        LEFT JOIN journal_line l
-               ON l.account_id  = a.id
-              AND l.value_date  < ${request.periodStart}::date
-              AND l.booking_seq <= ${watermark}
-       WHERE a.id = ${request.accountId}::uuid
-       GROUP BY a.normal_side`,
-
-    conn<
+  // THE TWO RECTANGLES ARE THE LEDGER'S TO DRAW. `readAccountPeriod` is the
+  // same two queries this function used to carry, moved into the module that
+  // owns `journal_line` — including the deliberate asymmetry where the line
+  // query asserts `book = 'financial'` and the opening query does not, which
+  // is a covering-index choice and is documented at the reader.
+  let period;
+  try {
+    period = await readAccountPeriod(
       {
-        entry_id: string;
-        value_date: string;
-        booking_seq: bigint;
-        ordinal: number;
-        entry_type: EntryType;
-        description: string;
-        external_ref: string | null;
-        rail: string | null;
-        reverses_entry_id: string | null;
-        correction_group_id: string | null;
-        signed_cents: bigint;
-      }[]
-    >`
-      SELECT e.id                                       AS entry_id,
-             to_char(l.value_date, 'YYYY-MM-DD')        AS value_date,
-             l.booking_seq                              AS booking_seq,
-             l.ordinal                                  AS ordinal,
-             e.entry_type::text                         AS entry_type,
-             e.description                              AS description,
-             e.external_ref                             AS external_ref,
-             e.rail::text                               AS rail,
-             e.reverses_entry_id                        AS reverses_entry_id,
-             e.correction_group_id                      AS correction_group_id,
-             (l.amount_cents * a.normal_side)::bigint   AS signed_cents
-        FROM journal_line  l
-        JOIN journal_entry e ON e.id = l.entry_id
-        JOIN account       a ON a.id = l.account_id
-       WHERE l.account_id  = ${request.accountId}::uuid
-         AND l.value_date BETWEEN ${request.periodStart}::date AND ${request.periodEnd}::date
-         AND l.booking_seq <= ${watermark}
-         AND e.book = 'financial'
-       ORDER BY l.value_date, l.booking_seq, l.ordinal`,
-  ]);
-
-  if (openingRows[0] === undefined) {
-    // GROUP BY on a LEFT JOIN from `account` returns one row for an account
-    // with no lines at all, so no row means no such account.
-    throw new UnknownAccountError(request.accountId);
+        accountId: request.accountId,
+        from: request.periodStart,
+        to: request.periodEnd,
+        bookingWatermark: watermark,
+      },
+      conn,
+    );
+  } catch (error) {
+    // The ledger says "no such account"; a statement says so in its own
+    // vocabulary, because `UnknownAccountError` is what the screen and the
+    // publish path both catch and neither should have to know the ledger's
+    // error type.
+    if (error instanceof NoSuchAccountError) throw new UnknownAccountError(request.accountId);
+    throw error;
   }
-  const openingBalanceCents = openingRows[0].opening_cents;
 
-  const bare = lineRows.map((row): Omit<StatementLine, "runningBalanceCents"> => ({
-    entryId: row.entry_id,
-    valueDate: row.value_date,
-    bookingSeq: row.booking_seq,
+  const openingBalanceCents = period.openingBalanceCents;
+
+  const bare = period.lines.map((row): Omit<StatementLine, "runningBalanceCents"> => ({
+    entryId: row.entryId,
+    valueDate: row.valueDate,
+    bookingSeq: row.bookingSeq,
     ordinal: row.ordinal,
-    entryType: row.entry_type,
+    entryType: row.entryType as EntryType,
     description: row.description,
-    externalRef: row.external_ref,
+    externalRef: row.externalRef,
     rail: row.rail,
-    reversesEntryId: row.reverses_entry_id,
-    correctionGroupId: row.correction_group_id,
-    signedCents: row.signed_cents,
+    reversesEntryId: row.reversesEntryId,
+    correctionGroupId: row.correctionGroupId,
+    signedCents: row.signedCents,
   }));
 
   const lines = sortLines(withRunningBalances(openingBalanceCents, bare));
@@ -456,56 +432,31 @@ export async function listLatePostings(
   },
   conn: Sql,
 ): Promise<readonly LatePosting[]> {
-  const rows = await conn<
+  const entries = await listEntriesAboveWatermark(
     {
-      entry_id: string;
-      value_date: string;
-      booking_seq: bigint;
-      booking_time: Date;
-      entry_type: EntryType;
-      description: string;
-      external_ref: string | null;
-      reverses_entry_id: string | null;
-      correction_group_id: string | null;
-      signed_cents: bigint;
-    }[]
-  >`
-    SELECT e.id                                          AS entry_id,
-           to_char(e.value_date, 'YYYY-MM-DD')           AS value_date,
-           e.booking_seq                                 AS booking_seq,
-           e.booking_time                                AS booking_time,
-           e.entry_type::text                            AS entry_type,
-           e.description                                 AS description,
-           e.external_ref                                AS external_ref,
-           e.reverses_entry_id                           AS reverses_entry_id,
-           e.correction_group_id                         AS correction_group_id,
-           SUM(l.amount_cents * a.normal_side)::bigint   AS signed_cents
-      FROM journal_line  l
-      JOIN journal_entry e ON e.id = l.entry_id
-      JOIN account       a ON a.id = l.account_id
-     WHERE l.account_id  = ${args.accountId}::uuid
-       AND l.value_date <= ${args.periodEnd}::date
-       AND l.booking_seq > ${args.sinceWatermark}
-       AND e.book = 'financial'
-     GROUP BY e.id, e.value_date, e.booking_seq, e.booking_time, e.entry_type,
-              e.description, e.external_ref, e.reverses_entry_id, e.correction_group_id
-     ORDER BY e.booking_seq`;
+      accountId: args.accountId,
+      throughValueDate: args.periodEnd,
+      sinceWatermark: args.sinceWatermark,
+    },
+    conn,
+  );
 
-  return rows.map((row) => ({
-    entryId: row.entry_id,
-    valueDate: row.value_date,
-    bookingSeq: row.booking_seq,
-    bookingTime: row.booking_time.toISOString(),
-    entryType: row.entry_type,
+  return entries.map((row) => ({
+    entryId: row.entryId,
+    valueDate: row.valueDate,
+    bookingSeq: row.bookingSeq,
+    bookingTime: row.bookingTime.toISOString(),
+    entryType: row.entryType as EntryType,
     description: row.description,
-    externalRef: row.external_ref,
-    reversesEntryId: row.reverses_entry_id,
-    correctionGroupId: row.correction_group_id,
-    signedCents: row.signed_cents,
+    externalRef: row.externalRef,
+    reversesEntryId: row.reversesEntryId,
+    correctionGroupId: row.correctionGroupId,
+    signedCents: row.signedCents,
     // Before the period, so it moved the OPENING balance rather than adding a
     // line. Same effect on the closing figure; a completely different thing to
-    // read on a screen.
-    affectsOpening: row.value_date < args.periodStart,
+    // read on a screen. The ledger cannot decide this — it does not know where
+    // the period starts, only where it ends.
+    affectsOpening: row.valueDate < args.periodStart,
   }));
 }
 

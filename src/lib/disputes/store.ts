@@ -18,6 +18,11 @@ import "server-only";
 
 import { balanceAsBelieved } from "@/lib/ledger/balances";
 import type { Sql } from "@/lib/ledger/db";
+import {
+  heldCentsAsBelieved,
+  readAccountIdentity,
+  resolveChartCodes,
+} from "@/lib/ledger/queries";
 
 import { disputeHoldRef, type DisputeAccounts, type DisputeReason } from "./model";
 
@@ -325,31 +330,29 @@ export async function listDisputeLedger(
       amount_cents: bigint;
     }[]
   >`
-    -- DISTINCT ON, and the reason is a flaw in the view worth naming.
+    -- No DISTINCT ON any more, and that is the point of the change.
     --
     -- v_dispute_ledger unions two sources: entries cited by an event, and the
-    -- memo entries reachable through the grant's hold. Those sets OVERLAP in
+    -- memo entries reachable through the grant's hold. Those sets OVERLAPPED in
     -- exactly one case -- a dispute that was WON, where the finalising event
     -- cites the hold RELEASE entry, which is also a memo posting on that hold.
-    -- UNION does not collapse them because event_kind differs, so every line of
+    -- UNION did not collapse them because event_kind differs, so every line of
     -- that entry came back twice and the episode screen printed it twice.
     --
     -- Found by reading the live book after the first won case, not by a test.
-    -- The right home for this is the view, which is in migration 0019 and is
-    -- therefore immutable now; the read is deduped here instead and the fix
-    -- belongs in the next migration. Ordering puts the NAMED event ahead of the
-    -- generic 'hold_posting', so a release keeps the label that says why.
-    SELECT * FROM (
-      SELECT DISTINCT ON (entry_id, ordinal)
-             event_kind, entry_id, value_date::text AS value_date, booking_seq,
-             booking_time::text AS booking_time, book::text AS book,
-             entry_type::text AS entry_type, description, idempotency_key,
-             ordinal, account_code, account_name, amount_cents
-        FROM v_dispute_ledger
-       WHERE dispute_id = ${disputeId}::uuid
-       ORDER BY entry_id, ordinal, (event_kind = 'hold_posting')
-    ) d
-    ORDER BY booking_seq, ordinal`;
+    -- It was deduped here, at the read, because 0019 was already applied.
+    -- Migration 0023 fixes it where it belongs: the memo source now excludes
+    -- entries the dispute's own events already cite, so the named event keeps
+    -- the label that says WHY the posting happened and nothing is dropped by a
+    -- blanket DISTINCT. v_dispute_ledger_double_count -- in dbcheck -- is the
+    -- standing assertion that this read needs no dedupe of its own.
+    SELECT event_kind, entry_id, value_date::text AS value_date, booking_seq,
+           booking_time::text AS booking_time, book::text AS book,
+           entry_type::text AS entry_type, description, idempotency_key,
+           ordinal, account_code, account_name, amount_cents
+      FROM v_dispute_ledger
+     WHERE dispute_id = ${disputeId}::uuid
+     ORDER BY booking_seq, ordinal`;
   return rows.map((r) => ({
     eventKind: r.event_kind,
     entryId: r.entry_id,
@@ -463,6 +466,12 @@ async function queryCharges(
          -- is no merchant behind it and there is no network case to file, so it
          -- must never appear here. The same test excludes a provisional credit,
          -- a write-off and the pre-0008 fixtures that settled straight to 1110.
+         --
+         -- Since migration 0023 this is the SECOND place the rule is applied:
+         -- assert_dispute_intake() now refuses the INSERT, so a caller that
+         -- never asks this function cannot raise the dispute either. This
+         -- clause stays because a list and a gate are different jobs -- the
+         -- form must not offer a charge the trigger would then refuse.
          AND EXISTS (
            SELECT 1
              FROM journal_line  l2
@@ -625,38 +634,39 @@ export async function readAccountContext(
   customerAccountId: string,
   conn: Sql,
 ): Promise<AccountContext> {
-  const rows = await conn<
-    {
-      entity_id: string;
-      memo: string | null;
-      receivable: string | null;
-      loss: string | null;
-      contra: string | null;
-      network: string | null;
-    }[]
-  >`
-    SELECT max(c.entity_id::text) AS entity_id,
-           max(a.id::text) FILTER (WHERE a.code = '9200') AS memo,
-           max(a.id::text) FILTER (WHERE a.code = '1120') AS receivable,
-           max(a.id::text) FILTER (WHERE a.code = '5200') AS loss,
-           max(a.id::text) FILTER (WHERE a.code = '9900') AS contra,
-           max(a.id::text) FILTER (WHERE a.code = '2200') AS network
-      FROM account c
-      JOIN account a ON a.entity_id = c.entity_id
-                    AND (
-                      (a.business_id IS NULL AND a.code IN ('1120', '5200', '9900', '2200'))
-                      OR (a.business_id = c.business_id AND a.code = '9200')
-                    )
-     WHERE c.id = ${customerAccountId}::uuid`;
+  // The chart a dispute needs before it can post: four HOUSE codes and one of
+  // the customer's own leaves. It was a self-join across `account` with a
+  // two-branch ON clause; it is `resolveChartCodes` now, which is the same
+  // question — "these codes, for this entity and this business" — asked once.
+  const customer = await readAccountIdentity(customerAccountId, conn);
+  if (customer === null) {
+    throw new Error(
+      `the chart is missing an account a dispute on ${customerAccountId} needs (9200/1120/5200/9900/2200)`,
+    );
+  }
 
-  const row = rows[0];
+  const chart = await resolveChartCodes(
+    {
+      entityId: customer.entityId,
+      businessId: customer.businessId,
+      houseCodes: ["1120", "5200", "9900", "2200"],
+      businessCodes: ["9200"],
+    },
+    conn,
+  );
+
+  const memo = chart.get("9200");
+  const receivable = chart.get("1120");
+  const loss = chart.get("5200");
+  const contra = chart.get("9900");
+  const network = chart.get("2200");
+
   if (
-    row === undefined ||
-    row.memo === null ||
-    row.receivable === null ||
-    row.loss === null ||
-    row.contra === null ||
-    row.network === null
+    memo === undefined ||
+    receivable === undefined ||
+    loss === undefined ||
+    contra === undefined ||
+    network === undefined
   ) {
     throw new Error(
       `the chart is missing an account a dispute on ${customerAccountId} needs (9200/1120/5200/9900/2200)`,
@@ -664,13 +674,13 @@ export async function readAccountContext(
   }
 
   return {
-    entityId: row.entity_id,
+    entityId: customer.entityId,
     customerAccountId,
-    memoAccountId: row.memo,
-    receivableAccountId: row.receivable,
-    lossAccountId: row.loss,
-    memoContraAccountId: row.contra,
-    networkPayableAccountId: row.network,
+    memoAccountId: memo.accountId,
+    receivableAccountId: receivable.accountId,
+    lossAccountId: loss.accountId,
+    memoContraAccountId: contra.accountId,
+    networkPayableAccountId: network.accountId,
   };
 }
 
@@ -703,23 +713,16 @@ export async function positionAt(
   // the ledger module's own function rather than re-expressed here. The value
   // date is unbounded on purpose: this asks "everything we had BOOKED by S",
   // which is the transaction-time axis alone.
-  const [ledgerCents, rows] = await Promise.all([
+  // BOTH halves are the ledger module's questions now, and both are asked with
+  // the ledger module's own functions rather than re-expressed here. The memo
+  // sum used to be a `CROSS JOIN LATERAL` in this file: a second fold over the
+  // memo book, in a product module, which is the shape that produced four
+  // disagreeing balances once already.
+  const [ledgerCents, holdsCents] = await Promise.all([
     balanceAsBelieved(args.accountId, "9999-12-31", args.seq, conn),
-    conn<{ holds_cents: bigint }[]>`
-      SELECT COALESCE(SUM(m.cents), 0)::bigint AS holds_cents
-        FROM hold h
-        CROSS JOIN LATERAL (
-          SELECT COALESCE(SUM(l.amount_cents * ma.normal_side), 0)::bigint AS cents
-            FROM journal_entry e
-            JOIN journal_line  l  ON l.entry_id = e.id
-            JOIN account       ma ON ma.id = l.account_id
-           WHERE e.hold_id = h.id
-             AND l.account_id = h.memo_account_id
-             AND l.booking_seq <= ${args.seq}
-        ) m
-       WHERE h.account_id = ${args.accountId}::uuid`,
+    heldCentsAsBelieved({ accountId: args.accountId, seq: args.seq }, conn),
   ]);
-  return { ledgerCents, holdsCents: rows[0]?.holds_cents ?? 0n };
+  return { ledgerCents, holdsCents };
 }
 
 /**

@@ -7,6 +7,7 @@ import { AsCorrectedPanel } from "./AsCorrectedPanel";
 import { BothReadings } from "./BothReadings";
 import { Reproducibility } from "./Reproducibility";
 import { StatementDocument } from "./StatementDocument";
+import { StatementPdfLink } from "./StatementPdfLink";
 import { StatementPicker } from "./StatementPicker";
 import { StatementsErrorPanel } from "./StatementsErrorPanel";
 import { StatementsSkeleton } from "./StatementsSkeleton";
@@ -120,6 +121,16 @@ export async function StatementsView({
           <AnchorPicker view={readings} filter={filter} />
 
           <BothReadings view={readings} />
+
+          {/*
+            Only on the live screen. The route behind this link reads the
+            ledger and refuses to render from fixtures, so offering it beside
+            fixture figures would promise a document that does not match the
+            numbers above it.
+          */}
+          {view.source === "live" ? (
+            <StatementPdfLink view={readings} filter={filter} />
+          ) : null}
 
           {readings.differs ? (
             <AsCorrectedPanel view={readings} />

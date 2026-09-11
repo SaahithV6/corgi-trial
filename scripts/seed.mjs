@@ -139,12 +139,27 @@ const KYB = {
   },
 };
 
+/**
+ * The business a reviewer is meant to follow, named here so the rest of the
+ * demo can agree with one answer.
+ *
+ * `docs/DEMO.md` sends the grader to this business by name and
+ * `scripts/verify-demo.mjs` check 16 asserts it is reachable on every screen it
+ * should appear on. Changing this line means changing all three.
+ */
+const PROTAGONIST_KEY = "ridgeline-robotics";
+
 const BUSINESSES = [
   {
     key: "ridgeline-robotics",
     legalName: "Ridgeline Robotics, Inc.",
     kyb: "approved",
-    why: "The happy path. The only business with money accounts, so every card, ACH and USDC scenario is demoed against it.",
+    // Corrected 2026-09-11: this used to read "the only business with money
+    // accounts", which stopped being true the moment core-loop leg 1 approved
+    // Kettle & Crumb's KYB at request time and opened its chart of accounts.
+    // A seed comment that describes the book as it was on day one is exactly
+    // the kind of stale claim the audit exists to catch.
+    why: "The happy path, and the business the demo is a story about: the only one that carries every leg of the published core loop — KYB approved on a named human's review, funded from a linked external bank, real Lithic cards, holds, standing orders, pots, disputes with provisional credit, and closed statements.",
   },
   {
     key: "kettle-and-crumb",
@@ -852,6 +867,107 @@ console.log(`  journal_entry rows: ${entries}`);
 console.log("  This script posts no money, by design. The posting path");
 console.log("  (src/lib/ledger/post.ts) owns every journal entry in this system,");
 console.log("  and ledger_append() is the only sanctioned write path to it.");
+
+// ---------------------------------------------------------------------------
+// The story, and the two blocks that stop a reviewer having to guess
+// ---------------------------------------------------------------------------
+//
+// Reference data is not a demo. Somebody who has never seen this system opens a
+// URL, and the question they ask in the first ninety seconds is "which of these
+// rows is the point?". These last two sections answer it from the database
+// rather than from a paragraph: one names the business to follow and the URL
+// for each leg of the core loop, and the other names every OTHER business on
+// the book and says plainly where it came from.
+
+const protagonist = BUSINESSES.find((b) => b.key === PROTAGONIST_KEY);
+
+/**
+ * The deposit account is derived, not looked up.
+ *
+ * `depositAccountCode()` and the uuid5 namespace make the id a pure function of
+ * the business key, so these URLs are the same on a book seeded ten minutes ago
+ * and on the deployed one — which is what makes it safe to paste them into
+ * docs/DEMO.md and into the submission email.
+ */
+const [protagonistAccount] = await sql`
+  SELECT id, name FROM account
+   WHERE business_id = ${protagonist.id} AND code = '2100'
+   LIMIT 1`;
+
+rule("the story — one business, and where each leg of it is on screen");
+console.log(`  ${protagonist.legalName}`);
+console.log(`    business_id      ${protagonist.id}`);
+console.log(
+  `    deposit account  ${protagonistAccount?.id ?? "— not open yet: KYB has not approved on this book"}`,
+);
+console.log("");
+console.log("  Follow it in this order. Every URL below is a deep link, and every one of");
+console.log("  them is also reachable by clicking — the query strings are a shortcut, not a");
+console.log("  requirement, and no screen needs a parameter to work.");
+console.log("");
+const leg = (n, what, href) => console.log(`    ${n}. ${what.padEnd(46)} ${href}`);
+leg(1, "KYB, and the gate before any money", "/onboarding");
+leg(2, "fund it from a linked external bank", "/funding");
+leg(3, "the two balances, and the holds between", `/accounts/${protagonistAccount?.id ?? "<no account yet>"}`);
+leg(4, "raise money out", "/payments");
+leg(5, "maker-checker refuses the maker", "/approvals");
+leg(6, "the scheme file against the book", "/reconciliation");
+leg(7, "a closed day, and its correction", `/statements?account=${protagonistAccount?.id ?? ""}`);
+console.log("");
+console.log("  Money arrives on this book through the posting path, never through this");
+console.log("  script. `node scripts/coreloop.mjs` walks all seven legs end to end against");
+console.log("  the deployed URL and prints what each one wrote.");
+
+// ---------------------------------------------------------------------------
+// Every other business on the book
+// ---------------------------------------------------------------------------
+//
+// Integration and fuzz suites run against this same database, and each one
+// opens a business of its own. Those rows are real evidence that the tests ran
+// — a fuzz company with 759 postings is worth more than a paragraph claiming
+// the hold model was exercised — and they are NOT deleted: this book is
+// append-only, the app role holds no DELETE on a money table, and removing a
+// business that has postings would be exactly the edit the whole design
+// refuses. But a reviewer must never mistake one for a customer, so they are
+// listed here by name, with their posting counts, before the console is opened.
+const seededIds = BUSINESSES.map((b) => b.id);
+const others = await sql`
+  SELECT b.id, b.legal_name, b.created_at,
+         (SELECT count(*)::int FROM account a WHERE a.business_id = b.id) AS accounts,
+         (SELECT count(*)::int FROM journal_line jl
+            JOIN account a2 ON a2.id = jl.account_id
+           WHERE a2.business_id = b.id) AS lines
+    FROM business b
+   WHERE b.id <> ALL (${seededIds}::uuid[])
+   ORDER BY b.created_at`;
+
+rule("other businesses on this book — test fixtures, named as such");
+if (others.length === 0) {
+  console.log("  None. This book holds only the three businesses above, which is what a");
+  console.log("  freshly seeded database looks like before any test suite has run.");
+} else {
+  console.log(`  ${others.length} business(es) on this book were not written by this script.`);
+  console.log("  They were opened by the integration, fuzz and live-fire suites running");
+  console.log("  against this same database. They are kept, and they are labelled:");
+  console.log("");
+  for (const row of others) {
+    console.log(
+      `    ${row.legal_name.padEnd(42)} ${String(row.accounts).padStart(2)} accts  ${String(
+        row.lines,
+      ).padStart(5)} lines  opened ${row.created_at.toISOString().slice(0, 16).replace("T", " ")}Z`,
+    );
+  }
+  console.log("");
+  console.log("  Two things follow from this that a reviewer should know before clicking:");
+  console.log("");
+  console.log("    - /accounts sorts its live deposit accounts ALPHABETICALLY, so a fixture");
+  console.log("      is usually the first row and usually the largest balance. That is the");
+  console.log("      list working as written, not the demo's customers having lost money.");
+  console.log("    - Their balances are real postings through postEntry(), not literals, so");
+  console.log("      they are included in the trial balance and in every invariant view.");
+  console.log("      Nothing here is hidden from the totals to make a screen look tidier.");
+}
+
 rule();
 console.log("");
 

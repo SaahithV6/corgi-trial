@@ -113,7 +113,22 @@ export const INTEGRATION_SLOTS = {
   card_issuing: { keys: ["LITHIC_API_KEY"], mustBeLive: true, provider: "Lithic sandbox" },
   card_webhooks: { keys: ["LITHIC_WEBHOOK_SECRET"], mustBeLive: false, provider: "Lithic" },
   director_kyc: { keys: [], mustBeLive: true, provider: "Persona sandbox, or Stripe Identity" },
-  business_registry: { keys: ["STRIPE_SECRET_KEY"], mustBeLive: false, provider: "Stripe Connect (gated) — simulated" },
+  // GLEIF, and no key at all.
+  //
+  // This read "Stripe Connect (gated) — simulated" with `keys:
+  // ["STRIPE_SECRET_KEY"]`, and both halves were false. The registry leg has
+  // run on the GLEIF LEI register since the Stripe and Persona routes were
+  // measured to be gated behind sales; GLEIF is a public API and needs no
+  // credential. The verdict for this slot is computed as `live` and proven in
+  // the database.
+  //
+  // The front door renders `provider` and the verdict ADJACENT, so the row read
+  // "simulated" and "LIVE" at once — /api/health contradicting itself on one
+  // line, on the endpoint this build declares authoritative and audits every
+  // document against. The direction happened to be understating, which is the
+  // safe direction and the reason it was not an automatic fail. It was still a
+  // false label on the one surface that must never carry one.
+  business_registry: { keys: [], mustBeLive: false, provider: "GLEIF LEI register" },
   open_banking: { keys: ["PLAID_CLIENT_ID", "PLAID_SECRET"], mustBeLive: false, provider: "Plaid sandbox" },
   ach_rail: { keys: ["INCREASE_API_KEY"], mustBeLive: false, provider: "Increase sandbox" },
   stablecoin: {
@@ -132,6 +147,27 @@ export interface SlotReport {
   readonly status: SlotStatus;
   readonly mustBeLive: boolean;
   readonly missing: readonly string[];
+  /**
+   * This slot declares NO credential, so `status` here is not a measurement.
+   *
+   * `status` is computed as "nothing is missing", and for a keyless slot
+   * nothing can ever be missing — so it reads `live` unconditionally. That is
+   * liveness from the ABSENCE of requirements, which is the same shape as the
+   * ACH slot that once read LIVE because a key string was non-empty, and the
+   * registry slot that read LIVE because a changed 400 message fell through an
+   * `else`. Each was caught by measuring rather than by anything here.
+   *
+   * The honest position: the environment can only ever establish that a
+   * credential is PRESENT and well-formed. It cannot establish that a
+   * capability works. For `business_registry` (GLEIF, a public API needing no
+   * key) and `director_kyc` (Persona or Stripe Identity, whichever branch is
+   * taken) the verdict comes from `src/lib/integrations/probe.ts`, which makes
+   * a real call — and `/api/health` is authoritative over this.
+   *
+   * So this flag exists to stop a reader mistaking "no credential was required"
+   * for "a credential was checked". Do not delete it to make a union tidier.
+   */
+  readonly credentialless: boolean;
 }
 
 /**
@@ -167,6 +203,7 @@ export function reportIntegrations(e: Partial<Env>): readonly SlotReport[] {
       status: missing.length === 0 ? ("live" as const) : ("simulated" as const),
       mustBeLive: spec.mustBeLive,
       missing,
+      credentialless: spec.keys.length === 0,
     };
   });
 }
@@ -176,7 +213,17 @@ export function reportIntegrations(e: Partial<Env>): readonly SlotReport[] {
  * read cannot label a rejected credential "live". Kept deliberately narrow —
  * it encodes only the rules that make a value UNUSABLE, not merely unusual.
  */
-function isUsable(key: keyof Env, value: string): boolean {
+/**
+ * Exported so it can be asserted directly.
+ *
+ * The rule it enforces — a value the schema would REJECT never counts towards
+ * "live" — is the thing standing between a lenient /api/health and an unusable
+ * credential being presented as a working integration. That is one of the six
+ * automatic fails, so the rule is worth a test of its own rather than only
+ * being observed through whichever slot happens to declare the key today.
+ * A slot's key list changes; this does not.
+ */
+export function isUsable(key: keyof Env, value: string): boolean {
   switch (key) {
     case "STRIPE_SECRET_KEY":
       // A live key is refused at boot. It is not a working test integration.

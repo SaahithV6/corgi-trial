@@ -45,7 +45,7 @@ import type {
   StatementsQuery,
   StatementsView,
 } from "@/components/statements/data-contract";
-import type { Sql } from "@/lib/ledger/queries";
+import { listBusinesses, type Sql } from "@/lib/ledger/queries";
 import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
 
 import { compareStatement, explainsDelta, groupLatePostings } from "./compare";
@@ -150,43 +150,106 @@ function toDayOption(day: StatementDay): DayOption {
 interface AccountRow extends AccountOption {
   /** Newest period this account has a published statement for, or `null`. */
   readonly newestStatementPeriod: string | null;
+  /**
+   * The same, restricted to statements that have LINES ON THEM.
+   *
+   * A statement with no lines is a real and correct document — it says this
+   * customer did nothing that day — but it is the wrong thing to open a screen
+   * on, and `pickAccount` ranks on this column first for that reason. See the
+   * note there.
+   */
+  readonly newestStatedPeriodWithLines: string | null;
 }
 
+/**
+ * The picker's accounts: the ledger's list of who has money, decorated with
+ * this module's own `statement` table.
+ *
+ * The join used to be one query and it re-stated the ledger's definition of a
+ * customer deposit account — `2100`, financial book, non-null business, not
+ * closed — which is four predicates that must agree with `listDepositAccounts`
+ * and had no mechanism making them. `listBusinesses()` is that mechanism.
+ *
+ * ORDER comes back from Postgres as `legal_name, id`; the accounts are then
+ * re-keyed by deposit account and the newest published period attached. The
+ * original ordered by `legal_name, a.name`, and a business has exactly one
+ * `2100` leaf, so within a legal name there is exactly one row and the two
+ * orders are the same list.
+ */
 async function listAccounts(conn: Sql): Promise<readonly AccountRow[]> {
-  const rows = await conn<
+  const businesses = (await listBusinesses(conn)).filter(
+    (b) => b.depositOpen && b.depositAccountId !== null,
+  );
+  if (businesses.length === 0) return [];
+
+  const newest = await conn<
     {
       account_id: string;
-      legal_name: string;
-      account_name: string;
       newest_statement: string | null;
+      newest_with_lines: string | null;
     }[]
   >`
-    SELECT a.id AS account_id, b.legal_name, a.name AS account_name,
-           (SELECT to_char(MAX(s.period_end), 'YYYY-MM-DD')
-              FROM statement s WHERE s.account_id = a.id) AS newest_statement
-      FROM account a
-      JOIN business b ON b.id = a.business_id
-     WHERE a.code = '2100'
-       AND a.book = 'financial'
-       AND a.business_id IS NOT NULL
-       AND a.closed_at IS NULL
-     ORDER BY b.legal_name, a.name`;
-  return rows.map((r) => ({
-    accountId: r.account_id,
-    legalName: r.legal_name,
-    accountName: r.account_name,
-    newestStatementPeriod: r.newest_statement,
-  }));
+    SELECT s.account_id,
+           to_char(MAX(s.period_end), 'YYYY-MM-DD') AS newest_statement,
+           to_char(MAX(s.period_end) FILTER (WHERE s.line_count > 0), 'YYYY-MM-DD')
+             AS newest_with_lines
+      FROM statement s
+     WHERE s.account_id = ANY(${businesses.map((b) => b.depositAccountId as string)}::uuid[])
+     GROUP BY s.account_id`;
+  const byAccount = new Map(newest.map((r) => [r.account_id, r]));
+
+  return businesses.map((b) => {
+    const row = byAccount.get(b.depositAccountId as string);
+    return {
+      accountId: b.depositAccountId as string,
+      legalName: b.legalName,
+      accountName: b.depositAccountName as string,
+      newestStatementPeriod: row?.newest_statement ?? null,
+      newestStatedPeriodWithLines: row?.newest_with_lines ?? null,
+    };
+  });
 }
 
 /**
  * Which account to open on, when the URL does not say.
  *
- * The one with the most recently STATED business day, not the first
- * alphabetically. Ordering the picker alphabetically and defaulting to its
- * head landed the live screen on a suite's own fixture company whose newest
- * statement was for a synthetic day in 2011 — a real document, correctly
- * rendered, and the wrong thing to open a statements screen on.
+ * ---------------------------------------------------------------------------
+ * The most recently stated day THAT HAS TRANSACTIONS ON IT
+ * ---------------------------------------------------------------------------
+ *
+ * Two versions of this rule have now been wrong, and both were wrong the same
+ * way — they ranked on something that correlated with "worth opening" until it
+ * stopped.
+ *
+ *   v1: first alphabetically. Landed on a suite's fixture company whose newest
+ *       statement was for a synthetic day in 2011. A real document, correctly
+ *       rendered, and the wrong thing to open a statements screen on.
+ *   v2: the most recently STATED business day. Better, and it held right up
+ *       until a fixture company acquired a statement for the demo day with
+ *       ZERO LINES on it — see `pickDemoAccount` for how it got one — at which
+ *       point it tied with the real customer on the date and won on the
+ *       alphabet. The screen's default state became a blank document.
+ *
+ * A statement with no lines is not a bug and is not hidden: it is the correct
+ * document for a day on which a customer did nothing, and a customer who wants
+ * it can select it. It is simply never the right thing to LAND on, because the
+ * first thing the screen has to demonstrate is that a day can be published,
+ * corrected and still reconcile — and nothing demonstrates that on an empty
+ * page.
+ *
+ * So the keys are:
+ *
+ *   1. newest published period with at least one line on it
+ *   2. newest published period at all              (an account may only have
+ *                                                   empty ones; still rankable)
+ *   3. legal name                                  (deterministic)
+ *
+ * Note that this cannot be fixed by deleting the empty statements. The
+ * `statement` table is append-only like everything else that records what a
+ * customer was told, and those three versions genuinely were issued. The fix
+ * has to be in what the screen chooses to open, which is a judgement, which is
+ * why it is here in code with an argument attached rather than in a WHERE
+ * clause.
  *
  * Accounts with no published statement sort last but are still LISTED. Hiding
  * them would be the wrong fix: "this customer has no statements" is an answer
@@ -201,11 +264,23 @@ function pickAccount(
     if (named !== undefined) return named;
   }
   return [...accounts].sort((a, b) => {
-    const left = a.newestStatementPeriod ?? "";
-    const right = b.newestStatementPeriod ?? "";
-    if (left !== right) return left < right ? 1 : -1;
+    const byLines = descending(
+      a.newestStatedPeriodWithLines,
+      b.newestStatedPeriodWithLines,
+    );
+    if (byLines !== 0) return byLines;
+    const byAny = descending(a.newestStatementPeriod, b.newestStatementPeriod);
+    if (byAny !== 0) return byAny;
     return a.legalName < b.legalName ? -1 : a.legalName > b.legalName ? 1 : 0;
   })[0];
+}
+
+/** Newest first, with `null` (never stated) sorting last. */
+function descending(left: string | null, right: string | null): number {
+  const l = left ?? "";
+  const r = right ?? "";
+  if (l === r) return 0;
+  return l < r ? 1 : -1;
 }
 
 /** Strip the ordering hint before the row crosses the contract. */

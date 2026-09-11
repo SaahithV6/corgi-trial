@@ -12,6 +12,7 @@
  * failure mode for each, is docs/AGENT-LIMITS.md.
  */
 
+import { durableAuditSink, type AuditPersistResult } from "@/lib/audit/sink";
 import { liveGateway } from "@/lib/mcp/gateway";
 import {
   ActorVerificationCache,
@@ -20,6 +21,7 @@ import {
   createMcpServer,
   loggerAuditSink,
   parseTokenConfig,
+  teeAuditSink,
   type TokenConfig,
 } from "@/lib/mcp";
 import { logger, newRequestId, requestIdFrom } from "@/lib/log";
@@ -66,17 +68,86 @@ function config(): TokenConfig {
   return tokenConfig;
 }
 
+/**
+ * THE AUDIT TRAIL IS WRITTEN HERE, AND THE RESPONSE WAITS FOR IT.
+ *
+ * `src/lib/mcp/audit.ts` builds one complete record per call — the tool, the
+ * business scope, the redacted arguments, the outcome, and every REFUSAL,
+ * which is the half that matters after an incident. Until this line it went to
+ * a single JSON line on stdout and nowhere else, while ten read tools served a
+ * customer's balances, transactions, payees, pots, standing orders, card
+ * controls, accruals, disputes and reconciliation breaks to an autonomous
+ * agent with no durable record that any of it happened.
+ *
+ * TWO SINKS, IN THIS ORDER, AND THE ORDER IS THE DESIGN. `loggerAuditSink`
+ * first, because it does not touch Postgres: if the database is gone the
+ * record still exists, degraded from durable to a log retention window rather
+ * than to nothing. `durableAuditSink` second, writing `mcp_audit` — append-only
+ * by privilege and by trigger, the same four layers the money tables have.
+ *
+ * WHICH WAY AN AUDIT FAILURE FAILS: open for the call, closed for the claim.
+ * The tool call is served; the claim that it is on the trail is withdrawn out
+ * loud. The full argument is the header of `src/lib/audit/sink.ts`; the short
+ * version is that `handlePost` builds the audit record in a `finally`, after
+ * dispatch, so refusing here would withhold an answer the database has already
+ * produced — a gate that runs after the thing it gates. It would buy a serving
+ * outage and no reduction in exposure. What it must never do instead is
+ * succeed silently, so:
+ *
+ *   - `settle()` is AWAITED. The obvious shape, `void insert().catch(log)`, is
+ *     the trap: a serverless instance is frozen the moment the response is
+ *     returned, and a detached insert is dropped along with its own catch
+ *     handler — no row, no error line, no gap anybody can see.
+ *   - a failure gets an error-level `mcp.audit.persist_failed` line, AND
+ *   - `x-corgi-audit: degraded` on the response, so the caller learns that
+ *     this call is not on the trail and not only the operator does.
+ */
 export async function POST(request: Request): Promise<Response> {
   const at = new Date();
+  const log = logger({ requestId: requestIdFrom(request.headers) });
+  const trail = durableAuditSink({ log });
+
   const server = createMcpServer({
     gateway: liveGateway(),
     config: config(),
-    audit: loggerAuditSink(logger({ requestId: requestIdFrom(request.headers) })),
+    audit: teeAuditSink(loggerAuditSink(log), trail.sink),
     limiter,
     cache,
     now: () => at,
   });
-  return server.handlePost(request);
+
+  try {
+    const response = await server.handlePost(request);
+    return stamp(response, await trail.settle());
+  } catch (error) {
+    // Not a bare catch and not a swallow: `handlePost` has its own catch-all,
+    // so arriving here means the failure was in this file. Records already
+    // handed to the sink are facts, and losing them to a later bug is the
+    // exact shape of gap this table exists to close — so settle, then rethrow
+    // and let the platform answer 500.
+    const persistence = await trail.settle();
+    log.error("mcp.route.unhandled", { error, audit: persistence.state });
+    throw error;
+  }
+}
+
+/**
+ * Say on the response whether this call is on the trail.
+ *
+ * A header and not a JSON-RPC error: the answer in the body is correct and the
+ * client is entitled to it. What the client is not entitled to is the belief
+ * that the call was recorded when it was not. `failures` stays out of the
+ * response — a database error message is an internals leak, and it is already
+ * in the log line the header points at.
+ */
+function stamp(response: Response, persistence: AuditPersistResult): Response {
+  const headers = new Headers(response.headers);
+  headers.set("x-corgi-audit", persistence.state);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 /**

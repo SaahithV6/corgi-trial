@@ -638,6 +638,48 @@ export async function acceptQuote(
 }
 
 /* -------------------------------------------------------------------------- */
+/* Rate provenance, on its own                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Write one rate reading and return its id.
+ *
+ * `createQuote()` writes the observation the quote is priced FROM, inside the
+ * quote's own transaction. This writes the observation a payout is SETTLED
+ * against, which is a different reading taken at a different time and is the
+ * one `fx_quote_settlement.settlement_observation_id` points at.
+ *
+ * Storing it matters for the same reason storing the quote-time reading
+ * matters: `variance_cents` is only auditable if the rate it was computed from
+ * is on file with its source, its literal and the status code of the call. A
+ * variance derived from a number that exists only in a script's memory is a
+ * number nobody can check.
+ */
+export async function recordRateObservation(
+  observation: RateObservation,
+  conn: Sql = sql,
+): Promise<string> {
+  const rows = await conn<{ id: string }[]>`
+    INSERT INTO fx_rate_observation
+      (source, evidence, base_currency, quote_currency,
+       rate_scaled, rate_scale, rate_literal, rate_date, http_status)
+    VALUES
+      (${observation.source},
+       ${observation.evidence}::fx_rate_evidence,
+       ${observation.baseCurrency},
+       ${observation.quoteCurrency},
+       ${observation.rateScaled},
+       ${observation.rateScale},
+       ${observation.literal},
+       ${observation.rateDate}::date,
+       ${observation.httpStatus})
+    RETURNING id`;
+  const id = rows[0]?.id;
+  if (id === undefined) throw new Error("the rate observation insert returned no id");
+  return id;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Settle                                                                     */
 /* -------------------------------------------------------------------------- */
 

@@ -12,9 +12,28 @@ node scripts/verify-demo.mjs --base-url http://localhost:3000
 ```
 
 It makes no writes. Every request is a GET except one POST whose only effect is
-a `Set-Cookie` on the response it returns. Last run — **13 PASS, 0 FAIL, 1 SKIP**
-of 14 checks; the full output is at the bottom of this file, and §5 explains the
-skip.
+a `Set-Cookie` on the response it returns. Last run, 2026-09-11T05:02:48Z —
+**13 PASS, 5 FAIL, 1 SKIP** of 19 checks, exit code 1. The full output is in §5.
+
+**Read that number in the right direction.** It got worse on purpose. The
+previous version of this checker reported 11 PASS / 2 FAIL / 1 SKIP of 14, and
+this document said of those two failures: *"neither of which is a broken
+screen"*. That was true of the two it reported and false about the system. Both
+failures were a stale parser — it read the availability table by taking its
+first four money figures after the table had grown to five rows — and because
+the check **threw on the first account in the list, it never opened the last
+one, which does not render at all.** A checker that cries wolf does not merely
+waste a reader's time; it gives the real wolf somewhere to stand. The parser now
+reads the table by its own row labels and fails by name if a row it does not
+recognise appears, the account walk collects a verdict per account instead of
+stopping at the first, and five checks were added for things a stranger does in
+the first ninety seconds that nothing was measuring.
+
+So: two of the old failures were the checker and are fixed. **Five failures
+remain and every one of them is a real defect a grader will see**, each named
+with the file that has to change, none of them in this script. The worst is
+§5.1: the account screen for **Ridgeline Robotics, Inc.** — the business this
+whole document is a story about — renders an error card.
 
 If you would rather watch the money move than click, that is one command:
 
@@ -24,8 +43,13 @@ node scripts/coreloop.mjs
 ```
 
 Seven legs of the published core loop, in one run, against this deployed URL,
-driving the real server actions. PASS 7, FAIL 0, SKIP 0, invariants 14/14. See
-[`CORE-LOOP.md`](./CORE-LOOP.md).
+driving the real server actions. PASS 7, FAIL 0, SKIP 0, invariants 25/25
+— run at 2026-09-11T04:03Z. It runs on **Kettle & Crumb Bakery LLC**, which is
+deliberately not the business every screenshot in this repo is of: it held zero
+accounts, zero journal lines and zero payments until a KYB approval opened its
+chart of accounts at request time. The run prints the deployed gate's answer for
+every business on the book before leg 1, so you see the refusal and the allowance
+side by side. See [`CORE-LOOP.md`](./CORE-LOOP.md).
 
 ---
 
@@ -46,6 +70,78 @@ two roles are two different seeded database actors.**
 
 Both are seeded by `scripts/seed.mjs`. Neither is scoped to a customer: they are
 Corgi staff, `business_id IS NULL`.
+
+### The literal instructions, for the submission email
+
+Copy this block verbatim. Every sentence in it is asserted against the deployed
+URL by `verify-demo.mjs` checks 7 to 11 — including that the switch works from
+the landing page itself, before any navigation, because that is the only page a
+stranger is guaranteed to be standing on.
+
+> **Demo URL** — https://corgi-trial-psi.vercel.app
+>
+> There is no login. The console is open, and the two roles are a switch in the
+> top-right of every page, labelled **Acting as**.
+>
+> **Role 1 — Staff.** Do nothing. With no cookie the console acts as **Priya
+> Raman**, an operations analyst who can read every balance and prepare money
+> movement and cannot approve any of it. Open `/approvals` and every approve
+> and reject control is disabled, with the reason printed beside it.
+>
+> **Role 2 — Approver.** Click **Approver** in the *Acting as* control. The
+> console reloads as **Dana Okonkwo**, a controller who can approve. The same
+> queue now offers approve on payments somebody else raised — and still refuses
+> the ones she raised herself, marked *"that is you"*. Click **Staff** to go
+> back; it is not one-way.
+>
+> The switch is a plain HTML form and a server action, so it works with
+> JavaScript disabled. If you would rather script it, every console URL accepts
+> `curl -b 'corgi_demo_role=approver'`. The cookie chooses which seeded person
+> you are acting as; it grants nothing — see §1 of `docs/DEMO.md`.
+
+### 1.1 Before you click: what is actually on this book
+
+Seven businesses, and **three of them are the demo**. The other four are test
+fixtures, and you will meet them first, so they are named here rather than
+discovered.
+
+| Business | What it is | Where it shows up |
+| --- | --- | --- |
+| **Ridgeline Robotics, Inc.** | **The one to follow.** KYB approved on a named human's review, funded from a linked external bank, real Lithic cards, holds, standing orders, pots, disputes with provisional credit, closed statements. Every leg of the core loop is on this one business. | everywhere |
+| Kettle & Crumb Bakery LLC | KYB pending at seed time; `coreloop.mjs` approves it at request time and opens its chart of accounts while you watch. Deliberately not the business the screenshots are of. | `/onboarding`, `/accounts` |
+| Silverline Freight Co. | KYB rejected. Has no deposit account and never will, which is the point: a rejected business cannot be credited by accident. | `/onboarding` only |
+| *Holds Integration Fixture Co.* | Opened by the holds integration suite. 1,215 journal lines. | `/accounts` and every customer picker |
+| *Hold Fuzzer Fixture Co.* | Opened by the hold-model fuzzer. | as above |
+| *Pots Integration Fixture Co.* | Opened by the pots integration suite. | as above |
+| *Live Fire — attack 7 (provider outage)* | Opened by `livefire.mjs` attack 7 while this document was being written. | as above |
+
+**Why the fixtures are still here, and why they are not hidden.** They are the
+residue of test suites run against this same database, and they are evidence
+that those suites ran — a fuzz company with hundreds of postings is worth more
+than a paragraph claiming the hold model was exercised. They are not deleted
+because this book is append-only: the application role holds no `DELETE` on a
+money table, and removing a business that has postings is precisely the edit the
+entire design refuses. Their balances are real entries through `postEntry()`,
+they are inside the trial balance, and nothing is excluded from a total to make
+a screen look tidier.
+
+**What they do to the demo, and what to do about it.** `/accounts` sorts its
+live deposit accounts **alphabetically**, so *Hold Fuzzer Fixture Co.* is the
+first row and the largest balance on the book, and the customer pickers on
+`/payments`, `/payouts`, `/statements` and `/accruals` default to whichever
+fixture sorts first. That is the sort order working as written, not the demo's
+customers having lost their money. Two consequences:
+
+- **Every deep link in §4 names Ridgeline explicitly.** You never have to find
+  it in a list.
+- `scripts/seed.mjs` prints this same list, from the database, at the end of
+  every run, so it cannot go stale the way a paragraph can. `verify-demo.mjs`
+  check 17 asserts that at least one real customer is still visible among them
+  and that every fixture is nameable as one from its own row.
+
+This is the honest version. The dishonest versions available were filtering
+fixtures out of the console — which would make a screen look better than the
+book is — or deleting them, which is the automatic fail.
 
 ### How the switch actually works
 
@@ -146,7 +242,7 @@ deliberately, and is refused.
 
 ---
 
-## 3. Eleven screens, five states, all in the URL
+## 3. Fourteen screens, five states, all in the URL
 
 Every screen takes the same query parameter, so any state is a link you can
 paste or bookmark:
@@ -156,8 +252,22 @@ paste or bookmark:
 ```
 
 `/` · `/onboarding` · `/accounts` · `/pots` · `/funding` · `/payments` ·
-`/payees` · `/approvals` · `/standing-orders` · `/reconciliation` ·
-`/statements`
+`/payees` · `/payouts` · `/approvals` · `/standing-orders` · `/accruals` ·
+`/disputes` · `/reconciliation` · `/statements`
+
+The trial's wording is *"the three screens that matter show default, loading,
+empty, error and one edge state"*. All fourteen do, and this is no longer a
+claim made by a one-off measurement in a document: **`verify-demo.mjs` check 4
+is that sweep.** It fetches all seventy renders on every run and asserts two
+things — every one answers 200, and for each screen the five renders are five
+*distinct* documents, so a screen that silently ignored the parameter is caught
+and so is one that answers 200 with nothing in it. Measured 2026-09-11T05:02Z
+against the deployed URL: **70/70, and 14 screens × 5 distinct documents.**
+(Pass `--quick` to skip it; it is the slow check, because `?state=loading` holds
+a real read open for six seconds on purpose.)
+
+Do not read a 200 as a working screen. It is not one, and §5.1 is a screen that
+answers 200 with an error card on it. The status code says the process replied.
 
 **Which are live and which are fixtures is printed on the page itself.**
 `default` is a real read of the real book everywhere. `loading` is not a mock of
@@ -215,12 +325,65 @@ an unverified business is refused before an instruction can be written. Core-loo
 leg 1 proves it from the outside — a pending business is refused with
 `KYB_PENDING` and **zero rows** are written.
 
+**One sentence on this screen is out of date and you will notice it.** The panel
+headed *"Every seeded business misses the registry, and that is the correct
+answer"* says *"The three businesses on this book are fictional"*. Count the rows
+underneath and there are seven — the four extra are the test fixtures in §1.1,
+which the panel predates. The panel's actual argument is sound and worth reading
+(a GLEIF miss is evidence of nothing, so a miss can never be an approval, and
+`Ask the registry` below it runs the same live adapter against anything you
+type); it is the census in its first line that has gone stale. Reported, not
+fixed: this worker does not write `src/**`.
+
 ### 1:00 — `/accounts`, the two balances and everything between them
 
 Two tables, and the split is the point. **Deposit accounts** are read from the
 journal at request time — ledger and available are both folds over journal lines,
 and no balance is stored in the schema. **Demo accounts** are fixtures behind the
 five URL states, and the header says so.
+
+Three things on this screen will confuse you if nobody says them first, so here
+they are in the order you will hit them.
+
+1. **The context bar at the top of every console page reads "Blue Ridge Coffee
+   Roasters LLC · Delaware LLC · EIN ••-•••4417".** No business by that name
+   exists on the book. It is a hard-coded placeholder in
+   `src/components/app-shell/AppHeader.tsx`, left over from when the console
+   showed one business, and it now sits above tables listing seven other
+   companies. **Ignore it.** It is a known defect, listed in §5.2.
+2. **The first row of *Deposit accounts* is a test fixture**, and so are three
+   of the six rows. The list sorts alphabetically and *Hold Fuzzer Fixture Co.*
+   wins. §1.1 is the roster; nothing has gone wrong.
+3. **Kettle & Crumb Bakery LLC shows a negative available balance** against a
+   positive ledger balance. That is correct and it is the model working: an ACH
+   credit that has landed but not cleared is withheld under an
+   `uncleared_credit` hold, and available is never clamped at zero, because the
+   customer really is in that position. Open the row and the derivation prints
+   the subtraction.
+
+**Go straight to the business the demo is about:**
+
+```
+/accounts/a0c41a37-2be1-5c30-bfe9-03455f048fac      Ridgeline Robotics, Inc.
+```
+
+That account id is not a magic number — it is a UUIDv5 of
+`account:corgi-bank:2100:ridgeline-robotics`, derived by `scripts/seed.mjs` from
+a fixed namespace, so it is the same id on a book seeded ten minutes ago and on
+this one. The seed script prints it, and every other leg's URL, at the end of
+every run.
+
+> **This link is currently broken, and it is the most important defect in this
+> document.** It answers 200 with *"Balances could not be loaded ·
+> `LEDGER_READ_FAILED` · listHolds failed: Invalid time value"*. Ridgeline is
+> the only business with disputes, a dispute's provisional credit is a hold
+> whose `available_at` is `'infinity'`, and one unguarded `.toISOString()` takes
+> the whole screen down. Full diagnosis and the one-line fix are in §5.1. The
+> other five account screens render correctly, and Ridgeline's balances are
+> right everywhere else — `/accounts` itself, `/disputes`, `/statements` — so
+> this is a presentation bug on one page and not a ledger error. It is not
+> hidden here because a demo document that routes around its own broken screen
+> is worth nothing.
 
 Note the **Operating ••4417** row before you click it:
 
@@ -362,6 +525,22 @@ decision. And **runs are immutable**, so re-running appends a new run and never
 revises the old one; breaks themselves are a *view*, so a break corrected ten
 minutes ago reads as corrected without anything having to repair a row.
 
+**A third thing, which looks like a bug and is not.** The header reads
+`file livefire-MTWHF7RX-tonight.csv · business date Dec 07, 2027`, while the
+same header's *read* clock says Sep 11, 2026 — a settlement file dated fifteen
+months in the future. Both are true, and the date is chosen on purpose —
+`src/test/livefire/attack-06-planted-break.test.ts:85-103` gives two reasons.
+**Unique:** money tables are append-only and the attack has no teardown, so the
+file takes a business date no other file, run or journal entry shares, and the
+run leaves no break standing on a real business day. **Forward-dated:** the
+breaks screen entry point orders runs by business date first — *"the most recent
+run"* means last night's **file**, not whichever file was re-run most recently —
+so a backdated attack file would be unreachable from the screen however recently
+it ran. A forward-dated file is a case the aging ladder already handles (a
+warehoused ACH effective date). The screen prints the file's own date rather
+than one it would prefer, which is right; it just does not explain the gap, so
+it is explained here.
+
 **`/statements`** closes the loop the brief opens with. A closed day's statement
 is reproducible forever, corrections included, and the screen shows **both
 readings at once** — what the book believed at the pre-correction watermark and
@@ -388,122 +567,311 @@ pnpm db:check
 
 Connects as `corgi_app` — the role the application actually uses — and attempts
 `UPDATE`, `DELETE` and `TRUNCATE` on `journal_entry` and `journal_line`. A
-success is a failure. It reports 14 passed, 0 failed, and the first six lines are
-`permission denied for table journal_entry` / `journal_line`.
+success is a failure. Measured 2026-09-11 it reports **30 passed, 0 failed**:
+fifteen that attempt the forbidden or pin a grant — the first six lines are
+`permission denied for table journal_entry` / `journal_line` — and **fifteen
+invariant views that must each return zero rows**, including the two that hold
+the daily accrual's residual-penny arithmetic exact and
+`v_balance_definition_drift`, which migration 0022 declares must be empty and
+which nothing was querying until today. (The count grows as workers land
+invariants; it was 25 earlier tonight and 28 an hour ago. The number that
+matters is the second one.)
+
+Ask about that second block rather than the first. Two of those views were empty
+for the wrong reason and had been quoted as evidence anyway — see the README's
+*The commands that prove things*. A zero-row invariant proves nothing until
+somebody has watched it return a row.
 
 ---
 
 ## 5. `scripts/verify-demo.mjs` — output
 
-Run at 2026-09-11T00:54Z against the deployed URL. Exit code 0.
+Run at 2026-09-11T05:02:48Z against the deployed URL. **13 PASS, 5 FAIL, 1 SKIP
+of 19.** Exit code 1, because a checker that exits 0 with five failing
+assertions is a checker nobody should believe.
+
+Every failure below names the file that has to change, and **none of them is
+this script**. That is the standard the previous run did not meet: it reported
+two failures, both of which were this script, and in doing so it stopped walking
+before it reached the one screen that is genuinely broken.
 
 ```
 ------------------------------------------------------------------------------
 VERIFY DEMO — docs/DEMO.md, walked against the deployed system
 base url   https://corgi-trial-psi.vercel.app
-started    2026-09-11T00:54:07.182Z
+started    2026-09-11T05:02:48.332Z
 ------------------------------------------------------------------------------
 
    1. PASS  /api/health answers, the database is reachable, and it reports its slots
-        status ok · commit 2310fd7 · db 140ms · 7 live of 7
+        status ok · commit 4c682e1 · db 13ms · 7 live of 7
         LIVE      card_issuing       GET /v1/cards -> 200
-        LIVE      card_webhooks      GET /v1/event_subscriptions -> 200, GET /v1/event_subscriptions/ep_3J8yb9xommtOdKee1FzpUA4GBrW/attempts -> 200: subscription enabled at https://corgi-trial-psi.vercel.app/api/webhooks/lithic; latest delivery SUCCESS, our endpoint answered HTTP 202
+        LIVE      card_webhooks      GET /v1/event_subscriptions -> 200, then /attempts -> 200:
+                                     subscription enabled at .../api/webhooks/lithic; latest
+                                     delivery SUCCESS, our endpoint answered HTTP 202
         LIVE      director_kyc       Stripe Identity enabled (Persona not configured)
-        LIVE      business_registry  GET api.gleif.org /v1/lei-records/{lei} -> 200 (Apple Inc.); GLEIF is a substitution for Middesk / Persona KYB / Sumsub KYB, all gated
+        LIVE      business_registry  GET api.gleif.org /v1/lei-records/{lei} -> 200 (Apple Inc.)
         LIVE      open_banking       POST /institutions/get -> 200
         LIVE      ach_rail           GET /accounts -> 200
-        LIVE      stablecoin         18.50 USDC and 69212360086576 wei gas — a transfer is fundable
-   2. PASS  no nested webhook slot contradicts the authoritative live/simulated table
-        5 webhook providers checked, every nested slot agrees
-        must-be-live slots: card_issuing=live, director_kyc=live
-   3. PASS  every screen in the click path answers 200
-        GET /                200   154136 bytes
-        GET /accounts        200   942930 bytes
-        GET /approvals       200   708551 bytes
-        GET /reconciliation  200    62197 bytes
-   4. PASS  with no cookie the console acts as Staff, and Staff cannot approve
-        actor: "Priya Raman" · badge: "cannot approve"
-        gate reason present: "Acting as Priya Raman, who holds no approval rights."
-   5. PASS  the Approver button submits the real server action and sets the role
-        POST /accounts with $ACTION_ID_401fb0b176c8a… and role=approver -> 200
-        set-cookie: corgi_demo_role=approver; HttpOnly; SameSite=lax
-   6. PASS  the Staff button switches back, so the control is not one-way
-        set-cookie: corgi_demo_role=staff
-   7. PASS  Approver resolves to a different actor, who does hold approval rights
-        actor: "Dana Okonkwo" · badge: "can approve"
-        the not_an_approver reason is absent, so the switch changed the server's answer and not just a label
-   8. PASS  the queue refuses self-approval, and says so before the button is pressed
-        a queue row raised by Dana Okonkwo is marked "that is you"
-        gate reason: "You raised this payment, so you cannot approve it. The initiator is never the checker…"
-        the reason names assert_maker_checker() and SQLSTATE 42501, and the approve control is disabled
-   9. SKIP  the database-level refusal is not asserted over HTTP
-        the approvals form is a client component, so its server action carries no no-JavaScript
-        action id in the HTML and a hand-assembled POST cannot reach the trigger from this script.
-        The DATABASE refusal is proven by:  node scripts/livefire.mjs --only 5
-          (raw INSERT, no application code in the call stack, asserts SQLSTATE 42501)
-  10. PASS  a $50.00 authorisation moves AVAILABLE and does not move the LEDGER
-        before (/accounts row)     ledger $48,215.60                        available $33,715.60
-        after  (?auth=pending)     ledger $48,215.60  holds $2,050.00  available $33,665.60
+        LIVE      stablecoin         15.03 USDC and 68659903703189 wei gas — a transfer is fundable
+   2. FAIL  nothing inside /api/health contradicts anything else inside it
+        business_registry: verdict "live" but provider reads "Stripe Connect (gated) — simulated"
+   3. PASS  every one of the console's screens answers 200
+        14 screens, all 200
+   4. PASS  every screen answers in all five demo states, and the five are five different documents
+        70 renders (14 screens × 5 states), every one 200
+        every screen produced 5 distinct documents, so none ignores ?state=
+   5. FAIL  the landing page leads to every screen the console serves
+        7 of 13 screens are not linked from it and / carries no nav:
+          /pots  /funding  /payees  /payouts  /standing-orders  /accruals  /disputes
+   6. FAIL  the landing page's prose agrees with /api/health, which outranks it
+        "The two SIMULATED rows" — health reports 7 live of 7 and the table on the same page
+        prints "0 are simulated"
+        "the registry leg is simulated" — health reports business_registry=live
+   7. PASS  with no cookie the console acts as Staff, and Staff cannot approve
+   8. PASS  the Approver button on the LANDING page submits the real server action
+   9. PASS  the Staff button switches back, so the control is not one-way
+  10. PASS  Approver resolves to a different actor, who does hold approval rights
+  11. PASS  the queue refuses self-approval, and says so before the button is pressed
+  12. SKIP  the database-level refusal is not asserted by THIS script
+        proven by  node scripts/livefire.mjs --only 5   and   node scripts/coreloop.mjs leg 5
+  13. PASS  a $50.00 authorisation moves AVAILABLE and does not move the LEDGER
+        before (/accounts row)     ledger $48,215.60   available $33,715.60
+        after  (?auth=pending)     $48,215.60 − $2,050.00 − $12,500.00 − $0.00 = $33,665.60
         ledger delta $0.00 · available delta -$50.00
-        annotated on screen: "unchanged by the authorisation" / "down 50 dollars" / "SHELL OIL 1247"
-  11. PASS  the demo authorisation is labelled a fixture, and the live account is labelled live
-        fixture view: badge "fixture" + "nothing here was written to the database"
-        live view:    badge "live ledger"
-  12. PASS  on the LIVE account, available == ledger - holds - uncleared, exactly, in cents
-        66fdc0f8…  $104,018.90 - $1,934.00 - $1,250.00 = $100,834.90
-        b86fb38f…  $25,000.00 - $0.00 - $0.00 = $25,000.00
-        a0c41a37…  $49,689.53 - $411.00 - $17,503.00 = $31,775.53
-  13. PASS  the breaks screen renders a reconciliation run and its break categories
-        three break categories rendered, no more and no fewer
-        matched 3 / 3 file rows paired by reference
-        1 open break(s) on the most recent run
-        business date Dec 02, 2027
-  14. PASS  a break carries a reference, an amount, an age and a severity
-        break reference on screen: LF6-MTVRTYAB-3
-        severity: Open
-        aging is stated as day closes, not hours
+  14. PASS  the demo authorisation is labelled a fixture, and the live account is labelled live
+  15. FAIL  every live account screen opens, and available == ledger − holds − uncleared − committed
+        1 of 6 live account screens do not work:
+        ok    61eb  Hold Fuzzer Fixture Co.        $512,691.69 − $3,816.60 − $5,000.00 − $0.00 = $503,875.09
+        ok    0f00  Holds Integration Fixture Co.  $145,320.15 − $2,489.00 − $1,250.00 − $0.00 = $141,581.15
+        ok    108b  Kettle & Crumb Bakery LLC      $30,850.35 − $300.00 − $37,250.00 − $0.00 = -$6,699.65
+        ok    34fa  Live Fire — attack 7           $0.00 − $200.00 − $0.00 − $0.00 = -$200.00
+        ok    9911  Pots Integration Fixture Co.   $25,000.92 − $0.00 − $0.00 − $0.00 = $25,000.92
+        FAIL  8fac  Ridgeline Robotics, Inc.       BROKEN — LEDGER_READ_FAILED: listHolds failed:
+                                                   Invalid time value
+  16. FAIL  a stranger can follow one business — Ridgeline Robotics, Inc. — through the whole loop
+        /accounts/a0c41a37-… — the protagonist's own account screen — renders LEDGER_READ_FAILED
+        /onboarding            names Ridgeline Robotics, Inc. with its KYB evidence
+        /accounts              row ••8fac is Ridgeline Robotics, Inc.
+        /statements?account=…  a closed day for Ridgeline Robotics, Inc.
+        /disputes              Ridgeline Robotics, Inc. has cases with provisional credit
+  17. PASS  test fixture companies on the live book are distinguishable from customers
+        6 deposit accounts: 2 customer, 4 test fixture
+        the list sorts alphabetically, so Hold Fuzzer Fixture Co. is the first row a grader sees
+  18. PASS  the breaks screen renders a reconciliation run and its break categories
+  19. PASS  a break carries a reference, an amount, an age and a severity
 
 ------------------------------------------------------------------------------
-  13 PASS   0 FAIL   1 SKIP   of 14 checks
+  13 PASS   5 FAIL   1 SKIP   of 19 checks
   a skip is not a pass; each one names the command that does prove it
-  finished   2026-09-11T00:54:20.534Z
+  every FAIL above names the file that has to change; none of them is this script
+  finished   2026-09-11T05:02:39.231Z
 ------------------------------------------------------------------------------
 ```
 
-*(Check 1's `card_webhooks` evidence string is reproduced above with the
-subscription id abbreviated for width; the endpoint prints it in full.)*
+### 5.1 Check 15 and 16 — a broken screen, and the stale parser that was hiding it
 
-### The one skip, and why it is a skip rather than a pass
+**This is the important one.**
 
-Check 9 wanted to prove the maker-checker refusal *at the database* by POSTing
-the approvals form by hand from this script, the way check 5 proves the role
-switch by POSTing the switcher form by hand. It cannot. `DecisionForm` is a
-client component driven by `useActionState`, so its server action does not emit
-a no-JavaScript `$ACTION_ID_…` field into the HTML, and there is nothing for
-*this script's* matcher to submit to.
+`https://corgi-trial-psi.vercel.app/accounts/a0c41a37-2be1-5c30-bfe9-03455f048fac`
+— the deposit account of **Ridgeline Robotics, Inc.**, the business this
+document, the seed script and every screenshot in the repo are about — answers
+HTTP 200 and renders:
 
-That is a limitation of this checker, not a gap in the control, and the
-distinction matters enough to print rather than quietly fold into the pass count.
-Two other things do prove it. `node scripts/livefire.mjs --only 5` asserts the
-refusal against the live database with a raw `INSERT` and no application code in
-the call stack. And `scripts/coreloop.mjs` leg 5 reaches the same trigger *over
-HTTP*: a `useActionState` action emits React's **bound** progressive-enhancement
-fields (`$ACTION_REF_…`, `$ACTION_<n>:0`) rather than the unbound `$ACTION_ID_…`
-this checker looks for, and the core loop scrapes and posts those instead —
-getting `NOT_AN_APPROVER` and `SELF_APPROVAL` refusals with zero approved events
-written. Fixing check 9 is a matcher change, and it is small.
+```
+Balances could not be loaded
+This is a read failure. No money moved, no posting was written, and no hold changed.
+Code     LEDGER_READ_FAILED
+Message  listHolds failed: Invalid time value
+```
 
----
+**Diagnosis.** `hold.available_at` is a `timestamptz`, and `timestamptz` has two
+values that are not instants: `infinity` and `-infinity`. `src/lib/disputes/store.ts:866`
+writes the first one deliberately — a dispute's provisional credit is an
+`uncleared_credit` hold released by a person deciding the case, never by a clock,
+and "no release instant" is exactly what `infinity` means. The `postgres` driver
+parses it into a `Date` whose time value is `NaN`. Neither `=== null` nor a
+truthiness check sees that.
+
+`src/components/account/live-data-source.ts:108-114`:
+
+```js
+function toInstant(value: Date): Instant {
+  return value.toISOString();                       // RangeError on an invalid Date
+}
+function toInstantOrNull(value: Date | null): Instant | null {
+  return value === null ? null : value.toISOString();
+}
+```
+
+`toHold()` (same file, line 265) calls both for `placedAt`, `expiresAt` and
+`availableAt`. One `infinity` row throws `RangeError: Invalid time value`, the
+throw is caught by `listHolds`'s own catch at line 504, and the whole account
+view becomes `LEDGER_READ_FAILED`. Ridgeline has 22 dispute cases and therefore
+twenty-odd such holds; the other five accounts have none, which is exactly why
+only this one screen is down.
+
+**This bug has already been found and fixed once, somewhere else.**
+`src/app/(app)/funding/live-source.ts:156-176` carries a capitalised header —
+*"`available_at` CAN BE `infinity`, AND THAT USED TO TAKE THE WHOLE SCREEN
+DOWN"* — describing the identical failure on `/funding`, measured on
+2026-09-10, on the same nine Ridgeline rows. That file grew an `isInstant()`
+guard. The account screen did not. The fix is to use the same guard in the two
+functions above.
+
+**Why it went unnoticed.** The old check 12 walked the account list and threw on
+the first account it could not parse. Its parser was stale — it read the
+availability table by taking the first four money figures after that table had
+grown to five rows — so it threw on account #1, and accounts #2 through #6 were
+never opened. The broken one was #6. The document you are reading said of that
+failure *"neither of which is a broken screen"* and was wrong, not because the
+diagnosis of the parser was wrong (it was right) but because the diagnosis
+stopped at the first thing that explained the output.
+
+Both halves are fixed in the checker. `derivation()` now parses the table by its
+own row labels and **fails by name** if a row it does not recognise appears —
+so the next time a component is added, the failure says *"the derivation table
+has a row this checker does not know about: 'Committed outflows'"* rather than
+quietly reading the wrong number. And check 15 collects a verdict per account
+instead of throwing, so one bad row can never again hide five others, in either
+direction.
+
+The arithmetic assertion itself — `available == ledger − holds − uncleared −
+committed`, exactly, in cents — now passes on every account that renders, and is
+separately proven by `node scripts/coreloop.mjs` (legs 2 and 4) and by
+`pnpm db:check`, whose `v_balance_definition_drift` is the invariant that the
+Postgres function and the view cannot disagree.
+
+### 5.2 Check 5 — the front door does not lead to half the build
+
+`/` is the only URL in the submission email, and it has **no navigation bar**.
+Its map of the product is `src/components/home/ScreenLinks.tsx`, which lists six
+screens under a heading that reads *"Every screen in this build"* and a sentence
+that reads *"Six screens and the JSON endpoint behind the integration table.
+Everything built in this trial is reachable from here."*
+
+The console serves thirteen. Seven of them — `/pots`, `/funding`, `/payees`,
+`/payouts`, `/standing-orders`, `/accruals`, `/disputes` — are linked from
+nowhere a stranger standing on `/` can see. They are one click away *once you
+have clicked one of the six*, because the console shell has the full nav; but
+the front door's own claim about itself is false, and the seven include
+`/funding`, which is leg two of the published core loop.
+
+`src/components/home/ScreenLinks.test.ts` asserts that every link in the list
+resolves to a route, and never that every route appears in the list. It also
+pins the list to exactly seven entries by name, so adding a screen cannot fail
+the suite — the test locks the gap in rather than catching it. That is the same
+shape as every other guard this build has had to fix: it watches the half that
+was already right.
+
+Check 5 reads the route list off the **deployed console's own nav** rather than
+from a literal in the checker, so it cannot go stale when a screen is added.
+
+### 5.3 Check 6 — two sentences on the front door that /api/health contradicts
+
+`/api/health` is authoritative. Two pieces of prose on `/` disagree with it, and
+both are visible above the fold:
+
+- **`src/components/home/WhatToLookAt.tsx`**, the item keyed `simulated`, tells
+  the reader to look at *"The two SIMULATED rows"* and explains what demoted
+  them. Health reports **7 live of 7**, and the integrations table lower down
+  **the same page** prints *"0 are simulated"*. A grader who follows the
+  instruction finds nothing and has caught the build contradicting itself on its
+  own landing page.
+- **`src/components/home/ScreenLinks.tsx`**, the `/onboarding` entry, says *"the
+  registry leg is simulated"*. Health reports `business_registry = live` with the
+  evidence `GET api.gleif.org /v1/lei-records/{lei} -> 200`.
+
+`scripts/audit-claims.mjs` enforces the health-is-authoritative rule and is the
+right tool for this — but it reads `*.md` only. The screens, which are what a
+grader reads **first**, were audited by nothing. Check 6 closes that for the
+landing page's two specific claims.
+
+### 5.4 Check 2 — one row of the integrations table says LIVE and simulated at once
+
+`src/lib/env.schema.ts:116` declares the `business_registry` slot with
+`provider: "Stripe Connect (gated) — simulated"`. The verdict is computed
+separately, by an authenticated round trip, and comes back `live` via GLEIF. The
+integrations table on `/` renders provider and verdict in adjacent columns, so
+the row a grader reads is:
+
+```
+business_registry   Stripe Connect (gated) — simulated   LIVE   GET api.gleif.org … -> 200 (Apple Inc.)
+```
+
+Three answers in one row, and the provider named is not the provider probed.
+(The same line's `keys: ["STRIPE_SECRET_KEY"]` is stale for the same reason:
+GLEIF needs no key.) The verdict and the evidence are both correct; the label
+beside them is left over from an earlier design. This is the only check that
+fails inside the authoritative document itself, which is why it is check 2 and
+not a screen check.
+
+### 5.5 A failure you may see that is the system working
+
+If you run this within about fifteen minutes of `scripts/livefire.mjs`, check 1
+will also fail with `status is "degraded", expected "ok"`. That is the
+webhook-freshness alarm doing its job: live fire induces a real 180-second
+issuing-provider silence, `/api/health` moves lithic to `stale` inside its own
+180–900 s band and escalates the top-level status, and the band expires on its
+own at 900 s. It is a band, not a latch. §4's *0:00* entry has the reasoning.
+
+### 5.6 The one skip, and why it is a skip rather than a pass
+
+Check 12 wanted to prove the maker-checker refusal *at the database* by POSTing
+the approvals form by hand, the way check 8 proves the role switch by POSTing the
+switcher form by hand. It does not. `DecisionForm` is a client component driven
+by `useActionState`, so React emits its **bound** progressive-enhancement fields
+(`$ACTION_REF_…`, `$ACTION_<n>:0`) rather than the unbound `$ACTION_ID_…` this
+script's matcher submits.
+
+The previous wording of this skip said a hand-assembled POST *"cannot reach the
+trigger from this script"*. That was too strong and is corrected: it can, and
+`scripts/coreloop.mjs` does exactly that — it scrapes the bound fields and posts
+them, getting `NOT_AN_APPROVER` and `SELF_APPROVAL` refusals with zero approved
+events written. The honest reason this is a skip is that reimplementing React's
+bound-action scraping here would be a second copy of working code, and a skip
+that names the command is better than a duplicate that can rot.
+
+Two things prove it, and neither is this file:
+
+```bash
+node scripts/livefire.mjs --only 5   # raw INSERT, no application code in the call stack,
+                                     # SQLSTATE 42501 from assert_maker_checker(), then a
+                                     # DIFFERENT human approving the same instruction
+node scripts/coreloop.mjs            # leg 5, over HTTP, through the real server action
+```
+
+The second half of the livefire assertion matters as much as the first: without
+it, "it refused" would also be satisfied by a system that refuses everything.
+
+### 5.7 What is NOT wrong
+
+None of the five failures is a ledger error, and it is worth saying which
+assertions held while they were failing:
+
+- **Every account screen that renders is exact in cents.** Five of six, no
+  rounding, no clamp, including one legitimately negative available balance.
+- **Seventy renders, seventy 200s, fourteen × five distinct documents.** No
+  screen ignores `?state=`.
+- **Both roles resolve to two different seeded actors**, from the landing page,
+  with the maker-checker refusal stated before the button is pressed.
+- **`pnpm db:check` is 30 passed, 0 failed** — fourteen attempts at the
+  forbidden, each refused, and sixteen invariant views that must each return
+  zero rows.
+- **The demo authorisation labels itself a fixture** and the live accounts label
+  themselves live, which is the labelling rule this build is graded on.
+
 
 ## 6. If you would rather drive the API than the console
 
 `POST /api/mcp` is a Model Context Protocol server over Streamable HTTP. Ask it
-what it has rather than taking this document's word for it: `tools/list` on the
-deployed endpoint answered with exactly four at 2026-09-11T01:18Z — `get_balance`,
-`list_transactions` and `list_recon_breaks` read, `initiate_payment` queues a
-payment request a person has to work through. More reads exist in the working
-tree and are not deployed yet; the live `tools/list` is the authority. It refuses every call without a bearer token and there is no development
-bypass, so it needs a grant in `MCP_AGENT_TOKENS`. [`MCP.md`](./MCP.md) has the
+what it has rather than taking this document's word for it — **the deployed
+`tools/list` is the authority, not the file tree, and this paragraph has been
+wrong in both directions already**. Measured at 2026-09-11T03:39Z it answered
+with **eight**: `get_balance`, `list_pots`, `list_transactions`, `list_payees`,
+`list_standing_orders`, `list_card_controls` and `list_recon_breaks` read, and
+`initiate_payment` queues a payment request a person has to work through. It
+refuses every call without a bearer token and there is no development bypass, so
+it needs a grant in `MCP_AGENT_TOKENS`. [`MCP.md`](./MCP.md) has the
 configuration, a full `curl` transcript and the transport details;
 [`AGENT-LIMITS.md`](./AGENT-LIMITS.md) is the list of operations deliberately
 absent from that surface, with the failure mode for each.

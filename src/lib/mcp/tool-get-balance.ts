@@ -119,8 +119,20 @@ const outputSchema: JsonSchemaObject = {
           items: {
             type: "object",
             properties: {
-              kind: { type: "string", enum: ["card_auth_holds", "uncleared_credits"] },
-              count: { type: "integer" },
+              kind: {
+                type: "string",
+                enum: [
+                  "card_auth_holds",
+                  "operator_holds",
+                  "uncleared_credits",
+                  "pending_outbound",
+                ],
+              },
+              count: {
+                type: "integer",
+                description:
+                  "How many holds make up this term. -1 where the term is derived from journal lines rather than hold rows and has no count.",
+              },
               amount: MONEY_SCHEMA,
               explanation: { type: "string" },
             },
@@ -187,13 +199,30 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
           watermark,
         );
 
+  // FOUR TERMS, and the middle two are here because they were once missing.
+  //
+  // This surface used to subtract card authorisations and uncleared credits
+  // and nothing else, which made the agent's available balance LARGER than the
+  // customer's own screen by exactly the operator holds plus the committed
+  // outbound debits. Both now come from `ledger_availability()` — the one
+  // definition — and both are itemised rather than folded into a total,
+  // because an agent that can say WHICH term is withholding the money can tell
+  // a customer something true, and one that can only say "available is less
+  // than ledger" invites the customer to ask why and get a guess.
   const items = [
     {
       kind: "card_auth_holds" as const,
       count: snapshot.cardHoldCount,
-      amount: money(-snapshot.holdsCents),
+      amount: money(-snapshot.cardAuthHoldsCents),
       explanation:
         "Card authorisations that are still open. The merchant has the customer's promise; the money has not left the ledger and cannot be spent twice.",
+    },
+    {
+      kind: "operator_holds" as const,
+      count: -1,
+      amount: money(-snapshot.otherHoldsCents),
+      explanation:
+        "Holds a person placed deliberately — a compliance review, a disputed credit, a fraud freeze. The reason for one is usually not in this system, so an agent should surface the amount and refer the customer to a person rather than speculate.",
     },
     {
       kind: "uncleared_credits" as const,
@@ -202,7 +231,14 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
       explanation:
         "Inbound credits booked but not yet released under the funds-availability policy. An ACH credit is returnable for days after it lands.",
     },
-  ];
+    {
+      kind: "pending_outbound" as const,
+      count: -1,
+      amount: money(-snapshot.pendingOutboundCents),
+      explanation:
+        "Debits already booked with a future value date: money committed to leave. It is still in the ledger balance and it is not spendable — a customer who spends it again before it settles has been overdrawn on their own behalf. Derived from journal lines, so it has no hold row and no count.",
+    },
+  ].filter((item) => item.amount.cents !== "0" || item.kind === "card_auth_holds");
 
   const data = {
     business: { id: ctx.grant.businessId, legal_name: ctx.grant.businessLegalName },
@@ -225,7 +261,7 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
       items,
     },
     formula:
-      "available = ledger - open card authorisation holds - uncleared credits. Every term is a SUM over immutable journal lines at query time; no balance is stored anywhere in this schema.",
+      "available = ledger - active holds (card authorisations AND operator holds) - uncleared credits - debits already booked to leave on a future value date. Every term is a SUM over immutable rows at query time; no balance is stored anywhere in this schema. This is ledger_availability() in the database — the same function the customer's own screens use, so this figure can never be more permissive than what the customer is shown.",
   };
 
   const asOfPhrase =
@@ -238,11 +274,20 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
   const summary =
     `${ctx.grant.businessLegalName}, account ${account.code} (${account.name}), ${asOfPhrase}: ` +
     `ledger balance ${data.ledger_balance.display}, available ${data.available_balance.display}. ` +
-    (snapshot.holdsCents === 0n && snapshot.unclearedCents === 0n
+    (snapshot.holdsCents === 0n &&
+    snapshot.unclearedCents === 0n &&
+    snapshot.pendingOutboundCents === 0n
       ? "Nothing is encumbered, so the two agree."
       : `The ${money(snapshot.availableCents - snapshot.ledgerCents).display} difference is ` +
-        `${snapshot.cardHoldCount} open card authorisation hold(s) totalling ${money(snapshot.holdsCents).display} ` +
-        `and ${snapshot.unclearedHoldCount} uncleared credit(s) totalling ${money(snapshot.unclearedCents).display}.`);
+        `${snapshot.cardHoldCount} open card authorisation hold(s) totalling ${money(snapshot.cardAuthHoldsCents).display}` +
+        (snapshot.otherHoldsCents === 0n
+          ? ""
+          : `, ${money(snapshot.otherHoldsCents).display} of operator holds a person placed deliberately`) +
+        `, ${snapshot.unclearedHoldCount} uncleared credit(s) totalling ${money(snapshot.unclearedCents).display}` +
+        (snapshot.pendingOutboundCents === 0n
+          ? ""
+          : `, and ${money(snapshot.pendingOutboundCents).display} already booked to leave on a future value date`) +
+        `.`);
 
   return { summary, data };
 }

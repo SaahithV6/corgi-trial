@@ -305,14 +305,24 @@ describe("closed vs terminallyClosed — the bug the live suite found", () => {
     expect(state.terminallyClosed).toBe(false);
   });
 
-  it("a genuine full reversal IS terminal, because there was something to reverse", () => {
+  it("a genuine full reversal is CLOSED, but not terminal — an incremental can still land", () => {
+    // This used to assert `terminallyClosed`, and that was the bug. The fuzzer
+    // shrank a counterexample to exactly this event set plus one more event:
+    // a later incremental authorisation reopens the hold, and a `hold_closure`
+    // written here is PERMANENT and now contradicted. Migration 0028 moved the
+    // `A <= 0` arm out of `terminallyClosed` and into `closed`.
+    //
+    // The two assertions below `closed` are the whole point of the change: the
+    // money does not move. H is already 0 either way. All that changed is
+    // whether we write an irreversible row saying it can never be anything else.
     const state = holdState(
       [ev("authorization", 10000n), ev("authorization_reversal", 10000n)],
       OPEN,
     );
     expect(state.sawAuthorisation).toBe(true);
     expect(state.closed).toBe(true);
-    expect(state.terminallyClosed).toBe(true);
+    expect(state.holdCents).toBe(0n);
+    expect(state.terminallyClosed).toBe(false);
   });
 
   it("a reversal that beats its authorisation is not terminal either", () => {
@@ -320,12 +330,17 @@ describe("closed vs terminallyClosed — the bug the live suite found", () => {
     expect(early.authorisedCents).toBe(-10000n);
     expect(early.closed).toBe(true);
     expect(early.terminallyClosed).toBe(false);
-    // ...and once the authorisation lands, A nets to zero and it IS terminal.
+    // ...and once the authorisation lands, A nets to zero, so it is CLOSED and
+    // withholds nothing — but still not terminal. Order does not rescue it:
+    // `holdState` is a function of the event SET, so this is the same set as
+    // the case above and must give the same answer. That equality is asserted
+    // across 5.1M orderings in fuzz.test.ts.
     const settled = holdState(
       [ev("authorization_reversal", 10000n, { id: "r" }), ev("authorization", 10000n, { id: "a" })],
       OPEN,
     );
-    expect(settled.terminallyClosed).toBe(true);
+    expect(settled.closed).toBe(true);
+    expect(settled.terminallyClosed).toBe(false);
     expect(settled.holdCents).toBe(0n);
   });
 

@@ -21,7 +21,7 @@ export const DEMO_STATE_LABELS: Record<DemoState, string> = {
   loading: "Loading",
   empty: "Empty",
   error: "Error",
-  edge: "Edge · the day the residual penny lands",
+  edge: "Edge · the day the price changes under the same account",
 };
 
 export const DEMO_STATE_HINTS: Record<DemoState, string> = {
@@ -30,15 +30,17 @@ export const DEMO_STATE_HINTS: Record<DemoState, string> = {
   empty: "Nobody is enrolled in a daily-accrued charge. Nothing to show, nothing wrong.",
   error: "The accrual query failed. Nothing accrued; retry is live.",
   edge:
-    "The day the residual penny appears. $25.00 over 30 days is 83¢ with 10¢ left over, so days 1–10 accrue 84¢ and days 11–30 accrue 83¢ — the month sums to exactly $25.00 and neither the customer nor the bank is a cent out.",
+    "Two edges, both a one-cent step under one account on adjacent days, for two different reasons. THE FEE: $25.00 over 30 days is 83¢ with 10¢ left over, so days 1–10 accrue 84¢ and day 11 accrues 83¢ — §12.3 placing the last residual penny. THE INTEREST: the rate card was cut from 1.50% to 1.25% overnight, so the same balance accrues 8¢ and then 7¢ — and the balance went UP between the two days, so nothing but the rate explains it. One ledger, two clauses of DESIGN §12, and the screen says which is which.",
 };
 
 export type AccrualFilter = {
   readonly state: DemoState;
   /** `null` means every schedule. */
   readonly scheduleId: string | null;
-  /** The day drilled into. */
+  /** The fee day drilled into. */
   readonly accrualDayId: string | null;
+  /** The interest day drilled into. Separate from the fee's: different arithmetic. */
+  readonly interestDayId: string | null;
 };
 
 function first(value: string | string[] | undefined): string | undefined {
@@ -71,6 +73,7 @@ export function parseAccrualFilter(
     state: isDemoState(rawState) ? rawState : "default",
     scheduleId: asId(first(searchParams["schedule"])),
     accrualDayId: asId(first(searchParams["day"])),
+    interestDayId: asId(first(searchParams["interest"])),
   };
 }
 
@@ -91,6 +94,9 @@ export function accrualQuery(filter: Partial<AccrualFilter>): string {
   }
   if (filter.accrualDayId !== undefined && filter.accrualDayId !== null) {
     parts.push(`day=${encodeURIComponent(filter.accrualDayId)}`);
+  }
+  if (filter.interestDayId !== undefined && filter.interestDayId !== null) {
+    parts.push(`interest=${encodeURIComponent(filter.interestDayId)}`);
   }
   return parts.length === 0 ? "" : `?${parts.join("&")}`;
 }

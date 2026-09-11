@@ -56,17 +56,33 @@
  *   3. The correction did NOT post as an ordinary entry at its own date: the
  *      idempotency key it would have used does not exist.
  *   4. The statement for settlement day, rendered by the real renderer, gives
- *      two different answers at two booking watermarks, differing by exactly
- *      the settled amount. Both are true at once.
+ *      two different answers at two booking watermarks, and the line the
+ *      correction added to the later one is dated settlement day and carries
+ *      exactly minus the settled amount, while the entry it corrects reads
+ *      identically in both. Both are true at once. The two whole-day figures
+ *      are asserted to differ by exactly the settled amount when nothing else
+ *      was booked to that day inside the window, and reported with the
+ *      interfering lines named when something was — see `addedBetween`.
+ *   4b. And the correction put NOTHING on the day we learned: no entry under
+ *      the key such a posting would carry, no financial entry of this
+ *      transaction or its correction group dated anywhere but settlement day,
+ *      and not one line of ours on that day's rendered statement. What that
+ *      day carries otherwise is other people's traffic and is not this
+ *      attack's to assert about.
  *   5. Nothing was edited: the original row is byte-identical afterwards and
  *      the database refuses an UPDATE to it.
  *   6. The financial book still nets to zero and `v_hold_drift` /
  *      `v_hold_release_drift` are still empty — the hold model and the SQL
  *      view are held equal by invariant and a correction moved neither.
  *
- * ISOLATION. Money tables are append-only, so there is no teardown. Every run
- * creates its own Lithic card and its own transactions, and every assertion is
- * a delta on one account between two watermarks this run captured.
+ * ISOLATION. Money tables are append-only, so there is no teardown. This
+ * attack opens its OWN business (deterministic id, idempotent, owner role) and
+ * mints its own Lithic card and its own transactions, so nothing it measures
+ * can be moved by another attack, another suite or another agent — see
+ * `openOwnBusiness`. That is belt as well as braces: every assertion is ALSO
+ * attributed to entries this run created, because a shared database is the
+ * normal case in this build and an attack that needs a quiet one is not
+ * measuring what it claims.
  */
 import { createHmac, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -159,6 +175,10 @@ async function simulateReturnReversal(
   });
 }
 
+/** What the real renderer returns, and one of its lines. Named, not re-declared. */
+type StatementDoc = Awaited<ReturnType<typeof StatementRead.renderStatement>>;
+type StatementRow = StatementDoc["lines"][number];
+
 interface EntryRow {
   id: string;
   value_date: string;
@@ -181,8 +201,107 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
   const tag = Date.now().toString(36).toUpperCase();
   let businessId = "";
   let accountId = "";
+  let isolation = "";
   let pan = "";
   let cardToken = "";
+
+  /**
+   * THE BUSINESS THIS ATTACK OWNS.
+   *
+   * ======================================================================
+   * WHY THIS IS NOT `ORDER BY business_id LIMIT 1` ANY MORE.
+   *
+   * Every attack in this suite used to reach for the same row — the lowest
+   * business id carrying a 2100/9100 pair — and then measure that one
+   * customer's whole position, or one of its days, across a window. So
+   * attacks 1, 2, 3 and 7 measured the SAME customer at the same time as
+   * each other, as the database-backed integration suites, as the demo
+   * scripts, and as anything else running against this shared Neon branch.
+   *
+   * That is not flakiness, it is a measurement error: a global quantity
+   * under concurrent writers is not the quantity being claimed. This
+   * attack's own headline figure failed twice for it — nine Plaid funding
+   * credits on the day it demanded be empty — and attacks 1 and 2 failed
+   * by exactly 5000 on another agent's $50 hold landing in their window.
+   * DECISIONS 028 recorded the vulnerability and left it because the tests
+   * were passing; a green result produced by the weakness is not evidence
+   * against the weakness.
+   *
+   * So the attack opens its own business and its own leaves, once,
+   * idempotently, with a deterministic id — the pattern
+   * `src/lib/holds/holds.integration.test.ts` already uses for the same
+   * reason. Its card and its transactions were already per-run. The id
+   * sorts ABOVE every seeded business deliberately, so the attacks that
+   * still say `ORDER BY business_id LIMIT 1` cannot start picking it up.
+   *
+   * Type, book and parent come FROM THE HOUSE ROLLUP so the fixture cannot
+   * drift from `src/lib/ledger/chart.ts`; `normal_side` is generated from
+   * the type. Opening an account needs the OWNER role, because `corgi_app`
+   * holds SELECT on `account` and nothing else — which is the point of
+   * running this suite as `corgi_app`. Without an owner URL the attack
+   * falls back to the shared seeded business and says so in its evidence:
+   * every assertion here is attributed to rows this run created either
+   * way, which is the other half of this fix.
+   * ======================================================================
+   */
+  const OWN_BUSINESS_ID = "f1e1fa3e-0000-4000-8000-000000000003";
+  const OWN_BUSINESS_NAME = "Live Fire — attack 3 (bitemporal correction)";
+
+  async function openOwnBusiness(): Promise<{
+    businessId: string;
+    accountId: string;
+    isolation: string;
+  }> {
+    const ownerUrl = process.env["DIRECT_URL"] ?? process.env["DATABASE_URL"] ?? "";
+    if (ownerUrl !== "") {
+      const { default: postgres } = await import("postgres");
+      const owner = postgres(ownerUrl, { max: 1, onnotice: () => {} });
+      try {
+        await owner`
+          INSERT INTO business (id, entity_id, legal_name, ein)
+          SELECT ${OWN_BUSINESS_ID}::uuid, e.id, ${OWN_BUSINESS_NAME}, '00-0000003'
+            FROM book_entity e LIMIT 1
+          ON CONFLICT DO NOTHING`;
+        for (const code of ["2100", "9100", "9200"] as const) {
+          await owner`
+            INSERT INTO account (entity_id, code, name, parent_id, type, book,
+                                 currency, business_id, is_postable)
+            SELECT p.entity_id, p.code, ${OWN_BUSINESS_NAME} || ' — ' || p.name,
+                   p.id, p.type, p.book, 'USD', ${OWN_BUSINESS_ID}::uuid, true
+              FROM account p
+             WHERE p.code = ${code} AND p.business_id IS NULL
+            ON CONFLICT DO NOTHING`;
+        }
+      } finally {
+        await owner.end();
+      }
+      const [own] = await sql<{ business_id: string; account_id: string }[]>`
+        SELECT dep.business_id, dep.id AS account_id
+          FROM account dep
+          JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
+         WHERE dep.code = '2100' AND dep.business_id = ${OWN_BUSINESS_ID}::uuid`;
+      if (own) {
+        return {
+          businessId: own.business_id,
+          accountId: own.account_id,
+          isolation: `this attack's OWN business ${OWN_BUSINESS_ID} (${OWN_BUSINESS_NAME}), opened idempotently — no other attack, suite or process writes to it`,
+        };
+      }
+    }
+
+    const [shared] = await sql<{ business_id: string; account_id: string }[]>`
+      SELECT dep.business_id, dep.id AS account_id
+        FROM account dep
+        JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
+       WHERE dep.code = '2100' AND dep.business_id IS NOT NULL
+       ORDER BY dep.business_id LIMIT 1`;
+    if (!shared) throw new Error("no business has a 2100/9100 pair: run node scripts/seed.mjs");
+    return {
+      businessId: shared.business_id,
+      accountId: shared.account_id,
+      isolation: `the SHARED seeded business ${shared.business_id} — no owner URL (DIRECT_URL) was configured, so this attack could not open its own; every figure below is attributed to this run's own entries rather than isolated by construction`,
+    };
+  }
 
   beforeAll(async () => {
     ({ sql } = await import("@/lib/ledger/db"));
@@ -191,17 +310,12 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     lithic = await import("@/lib/rails/lithic/client");
     statements = await import("@/lib/statements/read");
 
-    // A customer with both leaves of the chart. Which one is not interesting;
-    // that it is ONE and every figure below is a delta on it, is.
-    const [customer] = await sql<{ business_id: string; account_id: string }[]>`
-      SELECT dep.business_id, dep.id AS account_id
-        FROM account dep
-        JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
-       WHERE dep.code = '2100' AND dep.business_id IS NOT NULL
-       ORDER BY dep.business_id LIMIT 1`;
-    if (!customer) throw new Error("no business has a 2100/9100 pair: run node scripts/seed.mjs");
-    businessId = customer.business_id;
-    accountId = customer.account_id;
+    // THE CUSTOMER THIS ATTACK OWNS. See `openOwnBusiness` below for why it
+    // is no longer whichever customer sorts first.
+    const chosen = await openOwnBusiness();
+    businessId = chosen.businessId;
+    accountId = chosen.accountId;
+    isolation = chosen.isolation;
 
     const card = await lithic.createCard({
       type: "VIRTUAL",
@@ -306,13 +420,44 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
    * The statement for one business day, at one point in transaction time,
    * through the REAL renderer — the same `renderStatement` the /statements
    * screen and `publishStatement` use. Not a hand-rolled SUM.
+   *
+   * The whole document is kept, not just its closing figure, because every
+   * assertion below is about the LINES THIS ATTACK PUT THERE. See
+   * `addedBetween`.
    */
-  async function statementFor(day: string, at: bigint): Promise<{ closing: bigint; lines: number }> {
-    const doc = await statements.renderStatement(
+  async function statementFor(day: string, at: bigint): Promise<StatementDoc> {
+    return statements.renderStatement(
       { accountId, periodStart: day, periodEnd: day, bookingWatermark: at },
       sql,
     );
-    return { closing: doc.closingBalanceCents, lines: doc.lineCount };
+  }
+
+  /**
+   * The lines that appeared on one day between two watermarks.
+   *
+   * ------------------------------------------------------------------------
+   * WHY THIS EXISTS, AND WHAT IT REPLACED.
+   *
+   * Every figure this attack reads is a delta on ONE DAY of ONE ACCOUNT
+   * between two watermarks this run captured, which was sound when the book
+   * was small and is not a property of the correction. This deployment's
+   * demo account takes Plaid funding credits, released ACH payments, card
+   * clearings and an interest accrual all day, from the rest of the build and
+   * from whoever else is running against the shared Neon branch.
+   *
+   * So "the day gained exactly one line" and "the day's closing figure moved
+   * by exactly 7340" are claims about the whole book. The claim the ATTACK
+   * makes is about the correction: it lands on settlement day, for minus the
+   * settled amount, and it puts nothing on the day we learned. That is a
+   * claim about rows this run created, so it is asserted on those rows — and
+   * the whole-day figures are asserted too, but only when nothing else wrote
+   * to the day in the window, and REPORTED with the interfering lines named
+   * when something did.
+   * ------------------------------------------------------------------------
+   */
+  function addedBetween(before: StatementDoc, after: StatementDoc): readonly StatementRow[] {
+    const already = new Set(before.lines.map((l) => l.entryId));
+    return after.lines.filter((l) => !already.has(l.entryId));
   }
 
   /**
@@ -432,8 +577,33 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     const originalSigned = await signedOnAccount(original.id);
     expect(originalSigned).toBe(SETTLED_CENTS); // a refund credits the customer
     const asCorrected = await statementFor(settlementDay, await watermark());
-    expect(asCorrected.closing - asBelieved.closing).toBe(-originalSigned);
-    expect(asCorrected.lines).toBe(asBelieved.lines + 1);
+
+    // ASSERTED ON THE LINE THE CORRECTION ADDED. The as-believed rendering
+    // does not carry the repair; the as-corrected one does, once, dated
+    // settlement day, for exactly minus the refund. Both renderings still
+    // carry the original, with the same signed amount: two answers, neither
+    // overwriting the other.
+    const addedA = addedBetween(asBelieved, asCorrected);
+    const mineA = addedA.filter((l) => l.entryId === repair.id);
+    expect(mineA.map((l) => l.entryId)).toEqual([repair.id]);
+    expect(mineA[0]?.valueDate).toBe(settlementDay);
+    expect(mineA[0]?.signedCents).toBe(-originalSigned);
+    expect(asBelieved.lines.some((l) => l.entryId === repair.id)).toBe(false);
+    const originalBefore = asBelieved.lines.find((l) => l.entryId === original.id);
+    const originalAfter = asCorrected.lines.find((l) => l.entryId === original.id);
+    expect(originalBefore?.signedCents).toBe(originalSigned);
+    expect(originalAfter?.signedCents).toBe(originalSigned);
+
+    // AND ON THE WHOLE DAY when the day was otherwise idle in the window —
+    // the headline figure, asserted when it is ours to assert and reported,
+    // with the interfering lines named, when the shared database moved the
+    // same day underneath the measurement.
+    const foreignA = addedA.filter((l) => l.entryId !== repair.id);
+    const quietA = foreignA.length === 0 && asCorrected.openingBalanceCents === asBelieved.openingBalanceCents;
+    if (quietA) {
+      expect(asCorrected.closingBalanceCents - asBelieved.closingBalanceCents).toBe(-originalSigned);
+      expect(asCorrected.lineCount).toBe(asBelieved.lineCount + 1);
+    }
 
     // (5) Nothing was edited.
     const [after] = await sql<{ description: string; entry_type: string }[]>`
@@ -448,11 +618,15 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
 
     record(
       "evidence",
-      `PART A — NOTHING SYNTHESISED. Lithic transaction ${txn} on card ${cardToken}: ` +
+      `PART A — NOTHING SYNTHESISED. Measured on ${isolation}. Lithic transaction ${txn} on card ${cardToken}: ` +
         `/v1/simulate/return 201 posted entry ${original.id} (${original.idempotency_key}) at value date ${settlementDay} from webhook inbox row ${original.inbox_id}; ` +
         `/v1/simulate/return_reversal 201 produced RETURN_REVERSAL ${correctionEvent.provider_event_id}, which the consumer routed through reverseAndRebook to entry ${repair.id} — entry_type=reversal, reverses ${original.id}, correction group ${repair.correction_group_id}, VALUE DATE ${repair.value_date} (the original's), booking_seq ${original.booking_seq} -> ${repair.booking_seq}. ` +
         `No entry exists at key card:force_post:${correctionEvent.provider_event_id}: the correction did not post at its own date. ` +
-        `Statement for ${settlementDay} via renderStatement(): as-believed@seq${beforeCorrection} closing ${asBelieved.closing} over ${asBelieved.lines} lines; as-corrected closing ${asCorrected.closing} over ${asCorrected.lines} lines; difference ${asCorrected.closing - asBelieved.closing} = minus the original entry's ${originalSigned} on the customer's leaf — the refund taken back, on the day it was booked. Trial balance 0; v_hold_drift 0; v_hold_release_drift 0.`,
+        `Statement for ${settlementDay} via renderStatement(): as-believed@seq${beforeCorrection} closing ${asBelieved.closingBalanceCents} over ${asBelieved.lineCount} lines; as-corrected closing ${asCorrected.closingBalanceCents} over ${asCorrected.lineCount} lines. THE LINE THE CORRECTION ADDED: entry ${repair.id}, value date ${mineA[0]?.valueDate}, signed ${mineA[0]?.signedCents} = minus the original entry's ${originalSigned} on the customer's leaf — the refund taken back, on the day it was booked — and the original still reads ${originalAfter?.signedCents} in both renderings. ` +
+        (quietA
+          ? `Nothing else was booked to ${settlementDay} in the window, so the whole day's move was asserted too: ${asCorrected.closingBalanceCents - asBelieved.closingBalanceCents}.`
+          : `${foreignA.length} other line(s) were booked to ${settlementDay} by another process inside the window (${foreignA.map((l) => l.entryId.slice(0, 8)).join(", ")}), so the whole-day figures are REPORTED rather than asserted: closing moved ${asCorrected.closingBalanceCents - asBelieved.closingBalanceCents} over ${asCorrected.lineCount - asBelieved.lineCount} new lines. The line-level assertion above is unaffected — it names our entry.`) +
+        ` Trial balance 0; v_hold_drift 0; v_hold_release_drift 0.`,
     );
   }, 240_000);
 
@@ -603,22 +777,99 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     expect(repair.correction_group_id).toBe(clearing.correction_group_id);
     expect(repair.booking_seq > clearing.booking_seq).toBe(true);
 
-    // (3) Nothing landed on the day we learned.
-    const [strayRefund] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM journal_entry
-       WHERE idempotency_key = ${`card:refund:${correctionToken}`}`;
-    expect(strayRefund?.n, "the correction ALSO posted at its own date").toBe(0);
-    const nextDayStatement = await statementFor(fact?.value_date ?? "", await watermark());
-    expect(nextDayStatement.lines, "the correction grew a line on the day we learned").toBe(0);
+    // (3) THE CORRECTION PUT NOTHING ON THE DAY WE LEARNED.
+    //
+    // ------------------------------------------------------------------
+    // THIS ASSERTION USED TO READ `statementFor(learnedDay).lines === 0`,
+    // and it failed, twice, at 9. The nine were Plaid funding credits and
+    // released ACH payments booked to that day by the rest of the build —
+    // measured: value date 2026-09-11 on the demo account carried nine
+    // entries at booking_seq 1395…1931 before this attack ran, and not one
+    // of them was ours. The correction itself contributed nothing.
+    //
+    // So the old assertion tested "nobody else used the account that day",
+    // which was true when the book was small and is not the property the
+    // attack is about. It is not loosened here — it is pointed at the
+    // entries this run created, from three directions, any one of which
+    // would catch a correction that posted a second line at its own date:
+    //
+    //   (a) the key such a posting would carry — `card:<kind>:<event id>`
+    //       for THIS correction event, whatever kind it was read as;
+    //   (b) every financial row the correction produced, reached by
+    //       external_ref and by correction group: all dated settlement day;
+    //   (c) the rendered statement for the learning day: not one of its
+    //       lines belongs to this run.
+    // ------------------------------------------------------------------
+    const learnedDay = fact?.value_date ?? "";
+    // (a)
+    const [strayKeyed] = await sql<{ n: number; keys: string | null }[]>`
+      SELECT count(*)::int AS n, string_agg(idempotency_key, ', ') AS keys
+        FROM journal_entry
+       WHERE idempotency_key LIKE ${`card:%:${correctionToken}`}`;
+    expect(
+      strayKeyed?.n,
+      `the correction ALSO posted at its own date: ${strayKeyed?.keys ?? ""}`,
+    ).toBe(0);
+    // (b) Every entry this transaction and this correction group produced,
+    //     memo book included, with the day each landed on.
+    const produced = await sql<{ id: string; book: string; value_date: string; key: string }[]>`
+      SELECT id, book::text AS book, value_date::text AS value_date, idempotency_key AS key
+        FROM journal_entry
+       WHERE external_ref = ${txn}
+          OR correction_group_id = ${clearing.correction_group_id}::uuid
+          OR reverses_entry_id = ${clearing.id}::uuid
+       ORDER BY booking_seq`;
+    //     Asserted over the FINANCIAL book, which is what a statement renders
+    //     (`readAccountPeriod` filters on it); the memo book is carried in the
+    //     evidence because a hold movement is not a statement line and dating
+    //     one at the correction's own instant would be correct.
+    const producedFinancial = produced.filter((r) => r.book === "financial");
+    expect(producedFinancial.length).toBeGreaterThan(0);
+    expect(
+      producedFinancial
+        .filter((r) => r.value_date !== settlementDay)
+        .map((r) => `${r.key}@${r.value_date}`),
+      "a financial entry of this correction's own is dated off settlement day",
+    ).toEqual([]);
+    // (c) The same claim as the statement renders it. Other people's traffic
+    //     on that day is not asserted about, ours is.
+    const learnedBefore = await statementFor(learnedDay, beforeCorrection);
+    const learnedAfter = await statementFor(learnedDay, await watermark());
+    const oursEverywhere = new Set(produced.map((r) => r.id));
+    const learnedLinesOfOurs = learnedAfter.lines.filter((l) => oursEverywhere.has(l.entryId));
+    expect(
+      learnedLinesOfOurs.map((l) => l.entryId),
+      "the correction grew a line on the day we learned",
+    ).toEqual([]);
+    const learnedForeign = addedBetween(learnedBefore, learnedAfter);
 
     // (4) Settlement day, both axes, from the real renderer. The clearing took
     //     $73.40 off the customer, so undoing it puts exactly that back — on
-    //     SETTLEMENT DAY, not on the day the correction arrived.
+    //     SETTLEMENT DAY, not on the day the correction arrived. Asserted on
+    //     the line the correction added, for the reason given at
+    //     `addedBetween`; the whole-day figures follow when the day was
+    //     otherwise idle in the window.
     const clearingSigned = await signedOnAccount(clearing.id);
     expect(clearingSigned).toBe(-SETTLED_CENTS); // a capture debits the customer
     const asCorrected = await statementFor(settlementDay, await watermark());
-    expect(asCorrected.closing - asBelieved.closing).toBe(-clearingSigned);
-    expect(asCorrected.lines).toBe(asBelieved.lines + 1);
+    const addedB = addedBetween(asBelieved, asCorrected);
+    const mineB = addedB.filter((l) => l.entryId === repair.id);
+    expect(mineB.map((l) => l.entryId)).toEqual([repair.id]);
+    expect(mineB[0]?.valueDate).toBe(settlementDay);
+    expect(mineB[0]?.signedCents).toBe(-clearingSigned);
+    expect(asBelieved.lines.some((l) => l.entryId === repair.id)).toBe(false);
+    const clearingBefore = asBelieved.lines.find((l) => l.entryId === clearing.id);
+    const clearingAfter = asCorrected.lines.find((l) => l.entryId === clearing.id);
+    expect(clearingBefore?.signedCents).toBe(clearingSigned);
+    expect(clearingAfter?.signedCents).toBe(clearingSigned);
+    const foreignB = addedB.filter((l) => l.entryId !== repair.id);
+    const quietB =
+      foreignB.length === 0 &&
+      asCorrected.openingBalanceCents === asBelieved.openingBalanceCents;
+    if (quietB) {
+      expect(asCorrected.closingBalanceCents - asBelieved.closingBalanceCents).toBe(-clearingSigned);
+      expect(asCorrected.lineCount).toBe(asBelieved.lineCount + 1);
+    }
 
     // (5) Nothing was edited.
     const [after] = await sql<{ description: string; entry_type: string }[]>`
@@ -649,13 +900,18 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
 
     record(
       "evidence",
-      `PART B — ONE STEP SYNTHESISED, NAMED. Real Lithic transaction ${txn} on card ${cardToken}: ` +
+      `PART B — ONE STEP SYNTHESISED, NAMED. Measured on ${isolation}. Real Lithic transaction ${txn} on card ${cardToken}: ` +
         `/v1/simulate/authorize 201 ($50.00 fuel pump, MCC 5542) then /v1/simulate/clearing 201 ($73.40) posted entry ${clearing.id} (${clearing.idempotency_key}) at settlement day ${settlementDay} from webhook inbox row ${clearing.inbox_id}. ` +
         `Lithic CANNOT reverse it: POST /v1/simulate/return_reversal {token: ${txn}} -> ${refusal.detail}. ` +
         `SYNTHESISED: one CORRECTION_CREDIT step (token ${correctionToken}, created ${correctionCreated} — the next day), appended to the REAL transaction beside its real events. ` +
         `NOT synthesised: the signature (HMAC-SHA256 over "${webhookId}.<ts>.<body>" with LITHIC_WEBHOOK_SECRET), the transport (POST ${BASE_URL}/api/webhooks/lithic -> HTTP ${delivered.status}), verification (a one-character signature change -> HTTP ${tampered.status} ${tamperedBody.error?.code}), the inbox row ${String(deliveredBody["inboxId"])}, the drain, the rail_event_semantics lookup, or the posting. ` +
         `RESULT: the fact is dated ${fact?.value_date} (the day we learned) and the MONEY was repaired at ${repair.value_date} (settlement day) as entry ${repair.id}, entry_type=reversal, reverses ${clearing.id}, correction group ${repair.correction_group_id}. ` +
-        `Statement for ${settlementDay} via renderStatement(): as-believed@seq${beforeCorrection} closing ${asBelieved.closing} over ${asBelieved.lines} lines; as-corrected closing ${asCorrected.closing} over ${asCorrected.lines} lines; difference ${asCorrected.closing - asBelieved.closing}. Statement for ${fact?.value_date}: ${nextDayStatement.lines} lines — the correction grew no second line on the day it arrived. Redelivery of the same signed bytes -> HTTP ${replay.status}, entries unchanged at ${afterReplay.length}. Trial balance 0; v_hold_drift 0; v_hold_release_drift 0.`,
+        `Statement for ${settlementDay} via renderStatement(): as-believed@seq${beforeCorrection} closing ${asBelieved.closingBalanceCents} over ${asBelieved.lineCount} lines; as-corrected closing ${asCorrected.closingBalanceCents} over ${asCorrected.lineCount} lines. THE LINE THE CORRECTION ADDED: entry ${repair.id} at value date ${mineB[0]?.valueDate}, signed ${mineB[0]?.signedCents} = minus the clearing's ${clearingSigned}, and the clearing itself still reads ${clearingAfter?.signedCents} in both renderings. ` +
+        (quietB
+          ? `Nothing else was booked to ${settlementDay} in the window, so the whole day's move was asserted too: ${asCorrected.closingBalanceCents - asBelieved.closingBalanceCents} over ${asCorrected.lineCount - asBelieved.lineCount} new line(s).`
+          : `${foreignB.length} other line(s) reached ${settlementDay} from another process inside the window (${foreignB.map((l) => l.entryId.slice(0, 8)).join(", ")}), so the whole-day figures are REPORTED not asserted: closing moved ${asCorrected.closingBalanceCents - asBelieved.closingBalanceCents} over ${asCorrected.lineCount - asBelieved.lineCount} new lines.`) +
+        ` THE DAY WE LEARNED (${learnedDay}): of the ${producedFinancial.length} financial entr${producedFinancial.length === 1 ? "y" : "ies"} this transaction and its correction group produced, ${producedFinancial.filter((r) => r.value_date === settlementDay).length} are dated settlement day and NONE is dated ${learnedDay}; no entry exists under key card:%:${correctionToken}; and of the ${learnedAfter.lineCount} lines that day's statement carries, 0 are ours (${learnedForeign.length} appeared during the window, all of them other people's traffic on a shared demo account — this assertion used to demand the whole day be EMPTY and failed at 9 for exactly that reason). ` +
+        `Redelivery of the same signed bytes -> HTTP ${replay.status}, entries unchanged at ${afterReplay.length}. Trial balance 0; v_hold_drift 0; v_hold_release_drift 0.`,
     );
   }, 240_000);
 

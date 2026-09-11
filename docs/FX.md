@@ -567,3 +567,230 @@ curl -sS -w '\n%{http_code}\n' \
 real and then re-derives the stored integer from the characters the source
 printed, by hand, in the test — which is the whole no-floats claim, checked
 against a live response rather than a fixture.
+
+---
+
+## 11. The gate, wired — and where the residual landed
+
+*Appended after the wiring. §5 and §6 above describe the design; this section
+records what was built, with the real numbers from the run that proved it.*
+
+### The one line, and where it actually sits
+
+`scripts/payout-usdc.mjs` now refuses to sign without an accepted, unexpired,
+unspent quote:
+
+```js
+const refusal = await requireAcceptedQuote({
+  quoteRef: QUOTE, amountUnits: AMOUNT_UNITS, toAddress: RECIPIENT, businessId: business.id,
+});
+if (refusal !== null) { /* print code + message */ process.exit(1); }
+```
+
+It runs **before** `sendUsdcPayout()`, so a refusal happens before the wallet
+key is used rather than after. `businessId` is resolved from `--business`
+*before* the gate rather than taken off the quote, so the "whose money is this"
+check compares two independently-sourced facts instead of asking whether the
+quote's own customer equals itself.
+
+A transfer that is genuinely not a conversion — a customer's own dollars to
+their own wallet — says so with `--domestic`, which is the caller deciding, as
+`gate.ts`'s header requires. The flag is printed in the output, because "we
+skipped the price gate" is not something that should happen quietly.
+
+### The amount is derived from the commitment, not typed
+
+What leaves the wallet is `deliveryCostUnits()`: what buying the committed
+`buy_minor` costs at the **settlement** mid, to the rail's own six decimals.
+`--amount` on a quoted payout is a cross-check — supply it and it must equal
+the derived figure or the payout is refused with that figure in the message.
+An operator sizing a settlement by hand is not settling a commitment; it is a
+transfer that cites one.
+
+The one exception is `--settle`, where the transfer has already confirmed and
+`--amount` states what the **chain** says left. That is a fact, not a size.
+
+### The settlement entry, posted
+
+`4300 FX quote settlement variance` now exists in `src/lib/ledger/chart.ts`
+with the `why` §6 asked for, so the entry §6 specified posts — through
+`postEntry()`, with one line §6 did not have:
+
+```
+DR  2100/<business>   sell_cents             the committed price
+CR  4200              fee_cents              our disclosed fee
+CR  1140              wallet cents           the whole cents the wallet parted with
+CR  2900              1                      the sub-cent conversion residual
+CR/DR 4300            variance_cents         the market move, and our spread
+```
+
+Line order is the **§12.5 template**, not reading order: the house's own
+income line leads (4300 when there is a variance, 4200 otherwise) so that
+§12.4's ordinal tiebreak assigns any residual penny to us. This entry has no
+N-way allocation and therefore nothing for the tiebreak to decide — the same
+observation `docs/ACCRUAL.md` makes about the daily fee entry — but the
+ordering is the rule, not "the rule except where it does not currently matter".
+
+### Which §12 clause governs the conversion residual, and why
+
+**There are two residuals and only one of them is a ledger amount.**
+
+**The delivery floor** — the fraction of a centavo lost when `buyMinorUnits()`
+floors — is *not* a ledger amount and no §12 clause reaches it. The ledger is
+USD in cents; the destination currency never enters the books. It is disclosed
+instead, as `PricedQuote.deliveryResidualTenThousandths`, on the quote, before
+acceptance, priced into what the customer agreed. On the run below it was
+**8,977 / 10,000 of one centavo**.
+
+**The sub-cent dust on the USDC leg** is the ledger amount, and **§12.6 is the
+clause**:
+
+* not **§12.2** (half-to-even on one value → one cent). Every rounding
+  direction on this path is already chosen by *who bears the risk* — §4 above
+  fixes all four and prints them on the screen — and half-to-even would round
+  the customer's delivery **up** half the time, committing us to money we did
+  not buy.
+* not **§12.3** (largest remainder across N shares). Nothing is being split.
+  One amount, one beneficiary, one wallet; a rule for apportioning a sum across
+  lines has nothing to apportion.
+* **§12.6**, which describes this exact situation in these exact words: *"USDC
+  has six decimals, so a 1.234567 USDC receipt is 123.4567 cents … posts the
+  rounded cents to the customer and the remainder to `2900 Rounding residual
+  clearing` **as a real journal line**, so the entry still sums to zero and the
+  dust is a balance we can see, age, and periodically sweep to `5900`/`4200`."*
+
+So 1140 is credited the whole cents the wallet actually parted with, and the
+remainder is carried to **2900** as one cent with the true fraction in the line
+memo — the same convention `payoutAllocation()` already applies to an unquoted
+USDC transfer one directory over.
+
+**The dust is never folded into 4300.** 4300's own `why` in the chart says it
+is a real P&L position "and not a rounding artefact", and a rounding artefact
+hidden inside a market-move account is precisely the residual nobody owns.
+Fold it in and "what did our rate commitments cost us this month" becomes a
+number contaminated by four decimal places of USDC.
+
+### The run
+
+```
+node scripts/payout-usdc.mjs --quote-new --currency MXN --usd 3.00
+node scripts/payout-usdc.mjs --quote-accept FXQ-XYRJF6AJ
+node scripts/payout-usdc.mjs --quote FXQ-XYRJF6AJ
+```
+
+| | |
+| --- | --- |
+| mid, live from frankfurter.dev for 2026-09-10 | 16.9435 MXN/USD |
+| customer rate, mid less 50bp | 16.8587825 |
+| sells / fee / net | $3.00 / $1.01 / $1.99 |
+| delivers | 33.54 MXN (floor residual 8,977/10,000 of a centavo) |
+| costs at the settlement mid | **1.979521 USDC** |
+| tx | `0x0acfad50d866e99ce4db08f3c09a2c8ca1d2771fd00ebcb6b0678fb75777d79e` |
+| block | 46666112, status `0x1`, 2026-09-11T04:21:52Z |
+| entry | `027255d5-ee38-4eed-ac50-9771ba8d589a`, value date 2026-09-11, booking_seq 2270 |
+
+```
+CR 4300                        1 USD   FX quote settlement variance
+CR 4200                      101 USD   Fee income
+DR 2100/e274546d…            300 USD   Ridgeline Robotics, Inc. — business current account
+CR 1140                      197 USD   USDC omnibus wallet — Base Sepolia
+CR 2900                        1 USD   Rounding residual clearing
+   balance                     0
+```
+
+197.9521 cents of USDC left the wallet. 197 went to 1140, **9,521 / 10,000 of a
+cent went to 2900**, `settlement_cost_cents` is 198, and the variance — our
+spread, since the mid had not moved between quote and settlement — is 1 cent to
+4300. The entry balances to the cent with nothing unowned.
+
+### Both clocks read correctly
+
+`value_date` is the **block's** day in book time; the booking axis is
+`ledger_append`'s. The accepted rate and the acceptance instant ride on the
+entry's description and on the customer's own line memo, and
+`fx_quote_settlement.entry_id` joins the two books:
+
+> Cross-border payout FXQ-XYRJF6AJ — 33.54 MXN to Off-ramp partner — testnet
+> demo **at an accepted rate of 16.8587825 MXN/USD (mid 16.9435 less 50bp),
+> accepted 2026-09-11T04:21:42.728Z**, settled against a mid of 16.9435 —
+> base.usdc block 46666112, gas 269058000000 wei
+
+So a quote accepted Tuesday and settled Thursday reads correctly from either
+end: Wednesday's statement shows nothing, because nothing had moved; Thursday's
+shows the movement **and** the Tuesday price, without a join.
+
+### The refusals, each with a real row behind it
+
+| Attempt | Code | Nothing signed? |
+| --- | --- | --- |
+| `--quote` omitted | `FX_QUOTE_REQUIRED` | yes |
+| `FXQ-XYRJF6AJ` while still an open offer | `FX_QUOTE_NOT_ACCEPTED` | yes |
+| accepting `FXQ-RCNKNJNY`, already expired | `FX_QUOTE_EXPIRED` (from the trigger) | nothing written |
+| `FXQ-G21TBSD0`, **accepted** at 04:24:34 with a 60s window, attempted 04:26:24 | `FX_QUOTE_COMMITMENT_LAPSED` | yes |
+| `FXQ-XYRJF6AJ` a second time | `FX_QUOTE_ALREADY_SETTLED` | yes |
+
+The fourth is the one worth pausing on, and it is the reason the schema's
+minimum `settlement_window_seconds` is 60 rather than 0: **a quote that was
+accepted is still refused once its window closes.** The window is the product.
+It was proved by accepting a real quote, waiting out a real minute and
+attempting a real payout — not by asserting it.
+
+### One thing the live run found, and the fix
+
+The first attempt at the lapse demo was run too early, cleared the gate, and
+broadcast 1.482518 USDC. Base Sepolia returned a receipt whose `blockHash` was
+zero at the tip; the adapter's canonicality re-check compared that against the
+chain's real hash, called it `reorged` and — correctly — posted nothing. By the
+time the transaction was confirmed by hand, the 60-second window had closed.
+
+The recovery run (`--settle`) then hit **the gate**, which refused it. That was
+wrong, and it is a control manufacturing a reconciliation break: 1.48 USDC had
+already left, and refusing to post it only made the ledger disagree with the
+chain.
+
+**The gate now does not run on `--settle`.** It exists to stop value leaving;
+on a recovery the value has already left. What still runs is the database's own
+check at the point the commitment is *consumed* — `fx_quote_settlement`'s
+trigger refused the lapsed quote, so the entry is posted and the quote is not
+marked settled:
+
+```
+entry 4e69213f-aa6d-4d58-b79a-ed061f7976ca   tx 0x1984a32d…ce7fe   block 46666139
+CR 4200  101 · DR 2100/e274546d… 250 · CR 1140 148 · CR 2900 1   balance 0
+commitment consumed:  REFUSED  FX_QUOTE_COMMITMENT_LAPSED
+```
+
+That is the right shape: **the ledger tells the truth about the money and the
+quote book tells the truth about the commitment**, and the disagreement between
+them is a visible break rather than a lie in either.
+
+### Is the gate in the right place? Mostly — but the binding is in the wrong table
+
+The gate at the send is right *as a last line*. It is the point where value
+actually leaves, it fails closed, and it costs a database round trip that the
+rail adapter deliberately cannot afford.
+
+**It should not be the only place, and today it is.** Two consequences:
+
+1. **The approver never sees the price.** `payment_instruction.content_hash` is
+   sha256 over *(account, rail, amount, counterparty, value_date)* and an
+   approval must cite that hash, which is exactly the right mechanism — and the
+   quote is not in it. So on a cross-border payout above threshold, the second
+   human approves an amount and a beneficiary but **not the rate**, which is
+   the one term of a cross-border payment a checker is uniquely placed to
+   question. The fix is small and it is in the money-out path, not here: an
+   `fx_quote_id` column on `payment_instruction`, folded into `content_hash`,
+   so that changing the quote invalidates the approval the same way changing
+   the amount does.
+
+2. **An accepted quote moves no available balance.** §6 already names this —
+   acceptance should place a memo hold (`9300`) for `sell_cents` so the
+   customer's available balance reflects the commitment they made. Until it
+   does, a customer can accept five quotes against one balance and the gate
+   will clear all five.
+
+So: keep this gate exactly where it is, and **add the binding one level up**.
+Acceptance should attach to the payment request, the request should carry the
+quote into the approval, and the send script's gate should degrade from *the*
+control to defence in depth. That is a schema change in a directory this work
+does not own, which is why it is written down rather than done.

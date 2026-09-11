@@ -48,6 +48,7 @@ import {
   readFileRow,
 } from "./diff";
 import { listRejects } from "./ingest";
+import { readRunById } from "./explain-read";
 import { listRuns } from "./run";
 import type { ReconBreak } from "./types";
 
@@ -152,10 +153,33 @@ export async function loadReconView(
 
     // The most recent run across every file, unless a run was named.
     const recent = await listRuns({ limit: 50 });
-    const run =
+    let run =
       query.runId === undefined
         ? recent[0]
         : recent.find((r) => r.runId === query.runId);
+
+    // A named run outside that first page is NOT "nothing reconciled".
+    //
+    // The find() above searches 50 rows ordered newest-first, so a deep link
+    // to an older run fell through to the empty return below and the screen
+    // said the run had reconciled nothing. That is a claim about the book
+    // derived from a pagination limit — the worst kind of wrong answer,
+    // because it is indistinguishable from a real empty result.
+    //
+    // Live-fire makes it reachable rather than theoretical: its synthetic runs
+    // carry 2027 dates and therefore sort above every real run, so a link to
+    // any genuine reconciliation can be pushed off the page by a test.
+    //
+    // Resolve by id, then re-list within that run's own file so the row has
+    // exactly the shape toRunRow() expects. Still bounded, still one extra
+    // query, and only on the path that was broken.
+    if (run === undefined && query.runId !== undefined) {
+      const named = await readRunById(query.runId);
+      if (named !== null) {
+        const sameFile = await listRuns({ fileId: named.fileId });
+        run = sameFile.find((r) => r.runId === query.runId);
+      }
+    }
 
     if (run === undefined) {
       return ok({

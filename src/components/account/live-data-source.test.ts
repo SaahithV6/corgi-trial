@@ -51,8 +51,11 @@ const SNAPSHOT_ROW: Row = {
   booking_watermark: 160n,
 };
 
+const ENTITY_ID = "3b8bd3e7-9af0-5c2c-9a5f-2b6d0f31a1c4";
+
 const ACCOUNT_ROW: Row = {
   account_id: ACCOUNT_ID,
+  entity_id: ENTITY_ID,
   business_id: "e274546d-6bdd-5266-b0fb-cc839a7811f9",
   account_name: "Ridgeline Robotics, Inc. — business current account",
   legal_name: "Ridgeline Robotics, Inc.",
@@ -61,12 +64,14 @@ const ACCOUNT_ROW: Row = {
 
 const ACCOUNT: {
   accountId: string;
+  entityId: string;
   businessId: string;
   accountName: string;
   legalName: string;
   currency: string;
 } = {
   accountId: ACCOUNT_ID,
+  entityId: ENTITY_ID,
   businessId: "e274546d-6bdd-5266-b0fb-cc839a7811f9",
   accountName: "Ridgeline Robotics, Inc. — business current account",
   legalName: "Ridgeline Robotics, Inc.",

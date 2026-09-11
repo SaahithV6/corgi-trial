@@ -65,6 +65,52 @@ async function ensureConsumers(): Promise<{ registered: string[]; missing: strin
       register: "registerLithicCardConsumer",
       export: "lithicCardConsumer",
     },
+    // ONE ENTRY PER PROVIDER, AND NOTHING IN dispatch.ts MOVED.
+    //
+    // Before these three lines existed, every delivery from every provider
+    // except Lithic was verified, stored, retried eight times and dead-lettered
+    // with "no consumer registered for provider X" — fourteen of them, two of
+    // which were Increase ACH events on a money rail. The pipeline was not
+    // broken; it was unfinished, and the difference was invisible because a
+    // drain with no consumer reports success.
+    {
+      name: "increase-ach",
+      specifier: "./consumers/increase-ach",
+      register: "registerIncreaseAchConsumer",
+      export: "increaseAchConsumer",
+    },
+    // ONE VENDOR, TWO RAILS, AND THIS ENTRY MUST COME AFTER increase-ach.
+    //
+    // `increase-wire` registers the ROUTER for provider 'increase': it sends a
+    // delivery to the wire adapter when `isWireDelivery(category)` says so and
+    // hands everything else to `increaseAchConsumer` unchanged. The registry is
+    // keyed on provider and takes `{ replace: true }`, so whichever of these
+    // two entries loads LAST is the one that serves 'increase' — and the order
+    // is the graceful degradation: if this module fails to import, the ACH-only
+    // consumer above is already registered and the ACH rail keeps draining.
+    //
+    // Before this entry existed, 13 signature-verified wire deliveries sat in
+    // `webhook_inbox` as pending with "no consumer registered for provider
+    // 'increase'", and a real Fedwire transfer that settled with an IMAD had no
+    // path into the book at all.
+    {
+      name: "increase-wire",
+      specifier: "./consumers/increase-wire",
+      register: "registerIncreaseWireConsumer",
+      export: "increaseWireConsumer",
+    },
+    {
+      name: "stripe-identity",
+      specifier: "./consumers/stripe-identity",
+      register: "registerStripeIdentityConsumer",
+      export: "stripeIdentityConsumer",
+    },
+    {
+      name: "plaid-item",
+      specifier: "./consumers/plaid-item",
+      register: "registerPlaidItemConsumer",
+      export: "plaidItemConsumer",
+    },
   ];
 
   for (const w of wanted) {

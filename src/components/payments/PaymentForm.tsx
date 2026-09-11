@@ -7,7 +7,12 @@ import { raisePaymentAction, type RaiseResult } from "@/app/(app)/payments/actio
 import { FOCUS_RING } from "@/components/ui/primitives";
 import { PAYOUT_RAILS, type PayoutRail } from "@/lib/approvals/types";
 
-import type { PolicyOptionView, Prefill, SourceAccountView } from "./data-contract";
+import type {
+  PolicyOptionView,
+  Prefill,
+  SourceAccountView,
+  WirePayeeOption,
+} from "./data-contract";
 
 /**
  * The form that raises a real payment instruction.
@@ -95,6 +100,22 @@ function effectivePolicy(
   return best;
 }
 
+/**
+ * Is this policy's threshold at the floor — every payment approved, no band?
+ *
+ * `thresholdDisplay` is a STRING and that is not an accident: this contract
+ * carries no cent count at all, because the browser has no correct use for one
+ * (see the head of `data-contract.ts`). So the question asked here is not "is
+ * the amount above the threshold" — the browser must never answer that, and
+ * `requestPayment()` answers it by comparing two `bigint`s inside Postgres.
+ * The question is whether the threshold is the zero the SERVER already
+ * formatted, which is a string comparison against the server's own output of
+ * `formatUsd(0n)` and involves no arithmetic on money whatsoever.
+ */
+function isFloorThreshold(policy: PolicyOptionView): boolean {
+  return policy.thresholdDisplay === "$0.00";
+}
+
 function Field({
   label,
   hint,
@@ -120,6 +141,8 @@ export type PaymentFormProps = {
   readonly policies: readonly PolicyOptionView[];
   readonly defaultValueDate: string;
   readonly prefill: Prefill | null;
+  /** The confirmed wire beneficiaries, per business. See `WirePayeeOption`. */
+  readonly wirePayeesByBusiness: Readonly<Record<string, readonly WirePayeeOption[]>>;
   /** False on the fixture demo states. Nothing is submitted from those. */
   readonly live: boolean;
 };
@@ -128,6 +151,7 @@ export function PaymentForm({
   accounts,
   policies,
   defaultValueDate,
+  wirePayeesByBusiness,
   prefill,
   live,
 }: PaymentFormProps) {
@@ -142,6 +166,7 @@ export function PaymentForm({
   const [accountId, setAccountId] = useState(prefill?.accountId ?? defaultAccount);
   const [rail, setRail] = useState<PayoutRail>(prefill?.rail ?? "ach");
   const [valueDate, setValueDate] = useState(defaultValueDate);
+  const [wirePayeeId, setWirePayeeId] = useState("");
 
   const accountFieldId = useId();
   const railFieldId = useId();
@@ -153,6 +178,12 @@ export function PaymentForm({
   const selected = accounts.find((account) => account.id === accountId) ?? null;
   const policy = effectivePolicy(policies, rail, valueDate);
   const otherAccounts = accounts.filter((account) => account.id !== accountId);
+
+  // Scoped to the SOURCE ACCOUNT'S business. The payee book is keyed by
+  // business, and a picker that offered another customer's beneficiaries would
+  // be a payee book with no boundary.
+  const wirePayees = selected === null ? [] : (wirePayeesByBusiness[selected.businessId] ?? []);
+  const wirePayee = wirePayees.find((payee) => payee.payeeId === wirePayeeId) ?? null;
 
   return (
     <form action={formAction} className="space-y-5 px-5 py-5">
@@ -312,43 +343,13 @@ export function PaymentForm({
         ) : null}
 
         {rail === "wire" ? (
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Beneficiary name">
-              <input
-                name="holderName"
-                type="text"
-                required
-                autoComplete="off"
-                defaultValue={prefill?.holderName ?? ""}
-                disabled={pending}
-                className={INPUT_CLASS}
-              />
-            </Field>
-            <Field label="BIC">
-              <input
-                name="bic"
-                type="text"
-                required
-                autoComplete="off"
-                placeholder="CHASUS33"
-                disabled={pending}
-                className={`${INPUT_CLASS} money`}
-              />
-            </Field>
-            <Field label="Account number — last four only">
-              <input
-                name="accountNumberLast4"
-                type="text"
-                required
-                inputMode="numeric"
-                pattern="\d{4}"
-                placeholder="9902"
-                defaultValue={prefill?.accountNumberLast4 ?? ""}
-                disabled={pending}
-                className={`${INPUT_CLASS} money`}
-              />
-            </Field>
-          </div>
+          <WireBranch
+            payees={wirePayees}
+            selectedId={wirePayeeId}
+            onSelect={setWirePayeeId}
+            payee={wirePayee}
+            pending={pending}
+          />
         ) : null}
 
         {rail === "usdc" ? (
@@ -436,6 +437,32 @@ export function PaymentForm({
                   Any amount on this rail needs{" "}
                   <span className="font-medium text-text">no approvals</span> under{" "}
                   <span className="font-mono text-text">{policy.version}</span>.
+                </>
+              ) : isFloorThreshold(policy) ? (
+                /*
+                 * THE THRESHOLD IS AT THE FLOOR, SO THERE IS NO BAND AND NO
+                 * "or more" TO QUOTE. Saying "$0.00 or more needs two
+                 * approvals, below that zero" is arithmetically true and reads
+                 * as nonsense next to a $42.00 wire, because there is nothing
+                 * below $0.00. It is also the wrong shape of claim: a
+                 * threshold PRICES A BAND in which a mistake is recoverable
+                 * unattended, and ACH can draw one at $2,500 only because an
+                 * ACH entry is recallable for two banking days. A wire has no
+                 * such mechanism at ANY amount, so there is no amount at which
+                 * the band can be drawn and the threshold sits at the floor.
+                 */
+                <>
+                  <span className="font-medium text-text">Every payment on this rail</span>, at any
+                  amount, needs{" "}
+                  <span className="font-medium text-text">
+                    {policy.requiredApprovals} approval
+                    {policy.requiredApprovals === 1 ? "" : "s"}
+                  </span>{" "}
+                  from distinct humans who did not raise it, under{" "}
+                  <span className="font-mono text-text">{policy.version}</span>. The threshold is{" "}
+                  <span className="money">{policy.thresholdDisplay}</span> — there is no band below
+                  it, because a threshold prices the amount under which a mistake is recoverable
+                  unattended, and on this rail nothing is recoverable at any amount.
                 </>
               ) : (
                 <>
@@ -550,6 +577,152 @@ export function PaymentForm({
 }
 
 /* -------------------------------------------------------------------------- */
+/* The wire branch — a picker, not a text field                               */
+/* -------------------------------------------------------------------------- */
+
+const FRESHNESS_NOTE: Record<string, string> = {
+  fresh: "checked in the last 30 days",
+  ageing: "checked in the last 90 days",
+  stale: "not checked for more than 90 days",
+  never: "never checked",
+};
+
+/**
+ * Pick a confirmed wire beneficiary, or be told why there is none.
+ *
+ * THE THREE FIELDS ARE HIDDEN INPUTS DERIVED FROM THE PICK, not typed. The
+ * form still POSTs `holderName`, `wireRoutingNumber` and `accountNumberLast4`
+ * exactly as the ACH branch POSTs its own — the server action is unchanged in
+ * shape and re-validates all three through `destinationSchema` regardless of
+ * what a hand-assembled POST claims. What the picker removes is the case where
+ * a clerk types a beneficiary this rail is going to refuse.
+ *
+ * IT IS NOT THE CONTROL, and it must not be mistaken for one. A POST with any
+ * beneficiary at all still reaches `gatePaymentOnPayee()` inside the write
+ * transaction, and a wire still reaches `resolveWireBeneficiary()` before
+ * anything is put on Fedwire. This is the same refusal, moved to the front,
+ * where it costs a clerk nothing instead of costing two approvers their time.
+ */
+function WireBranch({
+  payees,
+  selectedId,
+  onSelect,
+  payee,
+  pending,
+}: {
+  readonly payees: readonly WirePayeeOption[];
+  readonly selectedId: string;
+  readonly onSelect: (id: string) => void;
+  readonly payee: WirePayeeOption | null;
+  readonly pending: boolean;
+}) {
+  return (
+    <div className="space-y-4">
+      <Field
+        label="Beneficiary — from the confirmed payee book"
+        hint="A wire cannot be recalled, so this rail will not address a beneficiary nobody has checked. originateApprovedWire() refuses one that is not on this business's book — with a free-text field that refusal arrives after two approvals and a ledger entry, so the choice is made here instead."
+      >
+        <select
+          name="wirePayeeId"
+          required
+          value={selectedId}
+          onChange={(event) => onSelect(event.target.value)}
+          disabled={pending || payees.length === 0}
+          className={INPUT_CLASS}
+        >
+          <option value="">
+            {payees.length === 0
+              ? "No confirmed wire payee on this business's book"
+              : "Choose a beneficiary…"}
+          </option>
+          {payees.map((option) => (
+            <option key={option.payeeId} value={option.payeeId}>
+              {option.displayName} — {option.wireRoutingNumber} ••{option.accountNumberLast4}
+              {option.gateRefusalCode === null ? "" : " (warning unsigned)"}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      {payees.length === 0 ? (
+        <p className="max-w-prose text-[11px] leading-relaxed text-muted">
+          Nothing on this business&rsquo;s payee book is addressable by Fedwire. A beneficiary
+          qualifies when it is on the book for the <span className="font-mono">wire</span> rail,
+          is not archived, and carries a 9-digit routing number that passes the check digit — a
+          BIC does not qualify, because Fedwire does not route on one. Add the payee on{" "}
+          <Link href="/payees" className="underline">
+            /payees
+          </Link>
+          , let the routing number be checked, then raise the payment.
+        </p>
+      ) : null}
+
+      {payee === null ? null : (
+        <>
+          {/*
+            The destination, assembled from the pick. `wireRoutingNumber` is the
+            WIRE variant of the ABA — a different number from the same bank's
+            ACH variant, which is the substitution this rail actually suffers
+            and the reason the field is not called `routingNumber`.
+          */}
+          <input type="hidden" name="holderName" value={payee.holderName} />
+          <input type="hidden" name="wireRoutingNumber" value={payee.wireRoutingNumber} />
+          <input type="hidden" name="accountNumberLast4" value={payee.accountNumberLast4} />
+
+          <div className="rounded-md border border-border bg-surface-raised px-4 py-3">
+            <p className="text-xs font-semibold">What will be on the Fedwire message</p>
+            <dl className="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-[11rem_1fr]">
+              <dt className={LABEL_CLASS}>Creditor name</dt>
+              <dd>{payee.holderName}</dd>
+              <dt className={LABEL_CLASS}>Wire routing number</dt>
+              <dd className="money">
+                {payee.wireRoutingNumber}
+                {payee.institutionName === null ? null : (
+                  <span className="ml-2 text-muted">{payee.institutionName}</span>
+                )}
+              </dd>
+              <dt className={LABEL_CLASS}>Account</dt>
+              <dd className="money">
+                &bull;&bull;{payee.accountNumberLast4}
+                <span className="ml-2 text-muted">
+                  the book holds four digits and never the whole number
+                </span>
+              </dd>
+              <dt className={LABEL_CLASS}>Last check</dt>
+              <dd>
+                <span className="font-mono">{payee.outcome ?? "never checked"}</span>
+                <span className="ml-2 text-muted">
+                  {FRESHNESS_NOTE[payee.freshness] ?? payee.freshness}
+                  {payee.acknowledged ? ", warning signed for" : ""}
+                </span>
+              </dd>
+            </dl>
+          </div>
+
+          {payee.gateRefusalCode === null ? null : (
+            <div className="rounded-md border border-negative/50 px-4 py-3">
+              <p className="text-xs font-semibold text-negative">
+                This payment will be refused —{" "}
+                <span className="font-mono">{payee.gateRefusalCode}</span>
+              </p>
+              <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
+                The last check on this beneficiary raised a warning and nobody has signed for it.
+                The warning is not the block — it is overridable by anybody, in one step. What is
+                refused is letting the override be <em>implicit</em>: open the payee, read what the
+                check found, and record why it is right to pay this account. The button below stays
+                live, and the refusal arrives from{" "}
+                <span className="font-mono">gatePaymentOnPayee()</span> inside the write
+                transaction rather than from this stylesheet.
+              </p>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Outcomes                                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -630,17 +803,31 @@ function ReceiptPanel({
 
         <dt className={LABEL_CLASS}>Approvals required</dt>
         <dd>
-          {receipt.needsApproval ? (
-            <>
-              <span className="money font-medium">{receipt.approvalsRequired}</span> — this amount
-              reached the {receipt.thresholdDisplay} threshold on {receipt.rail}, so it cannot be
-              released until that many distinct humans, none of them you, approve it.
-            </>
-          ) : (
+          {!receipt.needsApproval ? (
             <>
               <span className="money font-medium">0</span> — below the{" "}
               {receipt.thresholdDisplay} threshold on {receipt.rail}. The same release path still
               runs, with a required count of zero, and a person still has to press Release.
+            </>
+          ) : receipt.thresholdIsFloor ? (
+            /*
+             * NOT "reached the threshold". The threshold is $0.00, so nothing
+             * was reached and there is no band this payment climbed into. See
+             * `Receipt.thresholdIsFloor` for why the reason is the rail's
+             * irrevocability and not the payment's size.
+             */
+            <>
+              <span className="money font-medium">{receipt.approvalsRequired}</span> — every{" "}
+              {receipt.rail} payment needs {receipt.approvalsRequired} distinct human approvers, at
+              any amount, none of them you. The threshold is {receipt.thresholdDisplay}: there is
+              no band below it, because a threshold prices the amount under which a mistake is
+              recoverable unattended and a {receipt.rail} has no recall at any amount.
+            </>
+          ) : (
+            <>
+              <span className="money font-medium">{receipt.approvalsRequired}</span> — this amount
+              reached the {receipt.thresholdDisplay} threshold on {receipt.rail}, so it cannot be
+              released until that many distinct humans, none of them you, approve it.
             </>
           )}
         </dd>

@@ -31,6 +31,44 @@
  * On recovery nothing is lost and nothing is double-counted: the held delivery
  * posts exactly once however many times it arrives.
  *
+ * ============================================================================
+ * HOW THE MONEY CLAIM IS MEASURED, AND THE TWO WAYS IT USED TO BE MEASURED
+ * WRONG. Both were fixed by the same idea and both are worth reading, because
+ * this file is the fourteenth instance of the pattern this build keeps finding.
+ *
+ *   1. IT WAITED FOR THE WRONG ROW. `src/lib/holds/apply.ts` splits one event
+ *      into two transactions on purpose — the facts and the closure commit
+ *      first, the memo posting second — so `card_authorization` exists before
+ *      the money is withheld. This test polled for the authorisation and then
+ *      read `available`, and on the suite run it landed in the gap: measured,
+ *      the hold row committed at 03:45:45.251Z and the opening posting at
+ *      03:45:45.581Z, and available read the same figure at both ends of a
+ *      window that had genuinely moved by $50. It now waits for the POSTING,
+ *      which is the thing the claim is about.
+ *
+ *   2. ITS QUIET-WINDOW GUARD WATCHED THE WRONG BOOK, and then the wrong
+ *      dimension entirely. It counted `journal_entry WHERE book = 'financial'`
+ *      before asserting a delta on `available` — a quantity moved by the MEMO
+ *      book, since that is where a hold lives. Every card hold in the suite
+ *      walked through it. And `available` also moves with the CLOCK alone:
+ *      `ledger_availability` matures uncleared credits at `available_at`,
+ *      expires card holds at `expires_at`, and brings a warehoused ACH credit
+ *      into the ledger term when `book_date()` reaches its value date —
+ *      measured on this deployment as a multi-million-cent step at 00:00
+ *      America/New_York with no entry booked at all.
+ *
+ * The fix for both is not a better guard, because a guard is an exclusion and
+ * an exclusion shaped like the failure is how this keeps happening. The delta
+ * is now ISOLATED instead: the app's own `accountAvailability` is asked the
+ * same question at ONE instant and TWO watermarks, the pair either side of
+ * this run's own opening posting. Every other writer's rows are in both
+ * readings and cancel; the clock is identical on both sides and cancels; what
+ * is left is this attack's own $50 and nothing else. Cross-attack and
+ * cross-process interference is prevented by construction rather than detected
+ * after the fact. The whole-business figures are still reported, and still
+ * asserted when the episode really was quiet in BOTH books.
+ * ============================================================================
+ *
  * THE TWO VISIBILITY CLAIMS are now testable, and are INDUCED rather than
  * waited for. `/api/health` publishes `integrations.webhookHealth` — a
  * per-provider last-delivery instant, a lag in seconds and a verdict — and the
@@ -228,15 +266,192 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     };
   }
 
-  it("invents no money while the feed is dark, and loses none when it comes back", async (ctx) => {
-    const [customer] = await sql<{ business_id: string }[]>`
+  /**
+   * THE BUSINESS THIS ATTACK OWNS.
+   *
+   * ========================================================================
+   * WHY THIS IS NOT `ORDER BY business_id LIMIT 1` ANY MORE.
+   *
+   * Every attack in this suite used to reach for the same row — the lowest
+   * business id with a 2100/9100 pair — and then measure that business's
+   * WHOLE POSITION across a window. Which means attacks 1, 2, 3 and 7 all
+   * measured the same customer at the same time as each other, as the
+   * database-backed integration suites, as the demo scripts, and as whoever
+   * else is running against this shared Neon branch.
+   *
+   * That is not a flakiness problem, it is a measurement problem: a global
+   * quantity under concurrent writers is not the quantity the attack claims
+   * to be reading. DECISIONS 028 named this as a latent vulnerability in
+   * attacks 1, 2 and 4 and left it there because they were passing — and
+   * then they failed, by exactly 5000, on another agent's $50 hold landing
+   * inside their window. A green result produced by the weakness is not
+   * evidence against the weakness.
+   *
+   * So this attack opens its OWN business and its own leaves, once,
+   * idempotently, with a deterministic id — the pattern
+   * `src/lib/holds/holds.integration.test.ts` already uses for the same
+   * reason. Its own card and its own transactions were already per-run. The
+   * id sorts ABOVE every seeded business on purpose: the attacks that still
+   * say `ORDER BY business_id LIMIT 1` must not start picking this one up.
+   *
+   * Type, book and parent all come FROM THE HOUSE ROLLUP, so the fixture
+   * cannot drift from `src/lib/ledger/chart.ts`, and `normal_side` is a
+   * generated column so it follows the type.
+   *
+   * Opening an account needs the OWNER role — `corgi_app` holds SELECT on
+   * `account` and nothing else, which is the point of running the suite as
+   * `corgi_app`. When no owner URL is configured the attack falls back to
+   * the shared seeded business and SAYS SO in its evidence; every assertion
+   * below is attributable either way, which is the other half of this fix.
+   * ========================================================================
+   */
+  const OWN_BUSINESS_ID = "f1e1fa7e-0000-4000-8000-000000000007";
+  const OWN_BUSINESS_NAME = "Live Fire — attack 7 (provider outage)";
+
+  async function businessUnderTest(): Promise<{ businessId: string; isolation: string }> {
+    const ownerUrl = process.env["DIRECT_URL"] ?? process.env["DATABASE_URL"] ?? "";
+    if (ownerUrl !== "") {
+      const { default: postgres } = await import("postgres");
+      const owner = postgres(ownerUrl, { max: 1, onnotice: () => {} });
+      try {
+        await owner`
+          INSERT INTO business (id, entity_id, legal_name, ein)
+          SELECT ${OWN_BUSINESS_ID}::uuid, e.id, ${OWN_BUSINESS_NAME}, '00-0000007'
+            FROM book_entity e LIMIT 1
+          ON CONFLICT DO NOTHING`;
+        for (const code of ["2100", "9100", "9200"] as const) {
+          await owner`
+            INSERT INTO account (entity_id, code, name, parent_id, type, book,
+                                 currency, business_id, is_postable)
+            SELECT p.entity_id, p.code, ${OWN_BUSINESS_NAME} || ' — ' || p.name,
+                   p.id, p.type, p.book, 'USD', ${OWN_BUSINESS_ID}::uuid, true
+              FROM account p
+             WHERE p.code = ${code} AND p.business_id IS NULL
+            ON CONFLICT DO NOTHING`;
+        }
+      } finally {
+        await owner.end();
+      }
+      // Read it back as the RESTRICTED role, because that is the connection
+      // every assertion below uses.
+      const [own] = await sql<{ business_id: string }[]>`
+        SELECT dep.business_id
+          FROM account dep
+          JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
+         WHERE dep.code = '2100' AND dep.business_id = ${OWN_BUSINESS_ID}::uuid`;
+      if (own) {
+        return {
+          businessId: own.business_id,
+          isolation: `this attack's OWN business ${OWN_BUSINESS_ID} (${OWN_BUSINESS_NAME}), opened idempotently for this run — no other attack, suite or process writes to it`,
+        };
+      }
+    }
+
+    const [shared] = await sql<{ business_id: string }[]>`
       SELECT dep.business_id
         FROM account dep
         JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
        WHERE dep.code = '2100' AND dep.business_id IS NOT NULL
        ORDER BY dep.business_id LIMIT 1`;
-    if (!customer) throw new Error("no business has a 2100/9100 pair: run node scripts/seed.mjs");
-    const businessId = customer.business_id;
+    if (!shared) throw new Error("no business has a 2100/9100 pair: run node scripts/seed.mjs");
+    return {
+      businessId: shared.business_id,
+      isolation: `the SHARED seeded business ${shared.business_id} — no owner URL (DIRECT_URL) was configured, so this attack could not open its own; the figures below are attributed rather than isolated by construction`,
+    };
+  }
+
+  /** The top of the booking axis: what a balance read now would include. */
+  async function watermark(): Promise<bigint> {
+    const [row] = await sql<{ seq: bigint }[]>`
+      SELECT COALESCE(MAX(booking_seq), 0)::bigint AS seq FROM journal_entry`;
+    return row?.seq ?? 0n;
+  }
+
+  /** The business's spendable leaf — the account availability is asked about. */
+  async function depositAccountOf(businessId: string): Promise<string> {
+    const id = await bal.mainDepositAccountId(businessId, sql);
+    if (id === null) throw new Error(`business ${businessId} has no 2100 deposit account`);
+    return id;
+  }
+
+  /**
+   * EVERYTHING THAT CAN MOVE THIS CUSTOMER'S AVAILABILITY SINCE A WATERMARK.
+   *
+   * Not "did anyone write to the database", which is both too wide (most
+   * writes are other customers') and too narrow (it counts rows, and this
+   * figure also moves on the clock alone). Exactly three things can move
+   * `accountAvailability(accountId)`:
+   *
+   *   * an entry with a line on this account, in the FINANCIAL book;
+   *   * an entry against one of this account's holds, in the MEMO book —
+   *     the commonest write in this system and the one the old guard, which
+   *     said `book = 'financial'`, could not see at all;
+   *   * the CLOCK: a hold reaching `expires_at`, an uncleared credit reaching
+   *     `available_at`, or `book_date()` rolling over and pulling a
+   *     future-dated credit into the ledger term.
+   *
+   * All three are counted, so that a whole-position assertion is made only
+   * when it is genuinely ours to make, and is reported with the reason when
+   * it is not.
+   */
+  async function movedSince(
+    accountId: string,
+    sinceWatermark: bigint,
+    sinceInstant: Date,
+  ): Promise<{ entries: number; clockEvents: number; rolledOver: boolean; quiet: boolean }> {
+    const [entries] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n
+        FROM journal_entry e
+       WHERE e.booking_seq > ${sinceWatermark}
+         AND (EXISTS (SELECT 1 FROM journal_line l
+                       WHERE l.entry_id = e.id AND l.account_id = ${accountId}::uuid)
+           OR EXISTS (SELECT 1 FROM hold h
+                       WHERE h.id = e.hold_id AND h.account_id = ${accountId}::uuid))`;
+    const [clock] = await sql<{ n: number; rolled: boolean }[]>`
+      SELECT (SELECT count(*)::int FROM hold h
+               WHERE h.account_id = ${accountId}::uuid
+                 AND ((h.expires_at   > ${sinceInstant} AND h.expires_at   <= clock_timestamp())
+                   OR (h.available_at > ${sinceInstant} AND h.available_at <= clock_timestamp()))) AS n,
+             book_date(${sinceInstant}) <> book_date(clock_timestamp()) AS rolled`;
+    const n = entries?.n ?? 0;
+    const c = clock?.n ?? 0;
+    const rolled = clock?.rolled ?? false;
+    return { entries: n, clockEvents: c, rolledOver: rolled, quiet: n === 0 && c === 0 && !rolled };
+  }
+
+  /**
+   * The SAME availability question asked at ONE instant and TWO watermarks.
+   *
+   * `accountAvailability` is the app's own function — `/api/health`, the
+   * console and `availableBalance()` all reach it — and it takes its snapshot
+   * as an argument: one wall-clock instant, one business date, one watermark.
+   * Holding the first two fixed and moving only the third isolates what a SET
+   * OF ENTRIES did to the published figure, with every clock-driven term
+   * (uncleared credits maturing, holds expiring, the business date rolling
+   * over) identical on both sides and therefore cancelled.
+   *
+   * This is how this attack stops needing a quiet database to measure its own
+   * effect: interference that is in both readings subtracts out.
+   */
+  async function availabilityAcross(
+    accountId: string,
+    fromWatermark: bigint,
+    toWatermark?: bigint,
+  ): Promise<{ before: Position; after: Position; at: Date }> {
+    const snapshot = await bal.readSnapshot(sql);
+    const read = async (seq: bigint): Promise<Position> => {
+      const a = await bal.accountAvailability(accountId, { ...snapshot, bookingWatermark: seq }, sql);
+      return { ledgerCents: a.ledgerCents, availableCents: a.availableCents, holdsCents: a.holdsCents };
+    };
+    return {
+      before: await read(fromWatermark),
+      after: await read(toWatermark ?? snapshot.bookingWatermark),
+      at: snapshot.asOf,
+    };
+  }
+
+  it("invents no money while the feed is dark, and loses none when it comes back", async (ctx) => {
+    const { businessId, isolation } = await businessUnderTest();
 
     // A registered card, and one real authorisation on it whose delivery we
     // keep as the template. Nothing about this leg is the outage; it is how a
@@ -302,10 +517,19 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     const missedBody = JSON.stringify({ ...payload, token: missedToken, events });
 
     // ---- THE DARK WINDOW -------------------------------------------------
+    const accountId = await depositAccountOf(businessId);
     const before = await positionOf(businessId);
     const trialBefore = await bal.trialBalanceCents();
     const startedAt = Date.now();
     const windowOpenedAt = new Date();
+    // The window is bounded by a WATERMARK rather than by a wall-clock
+    // instant, because a watermark is what a balance actually reads:
+    // `readSnapshot` takes `MAX(booking_seq)` with no time predicate at all,
+    // and `booking_time` is a second axis that an entry can carry a later
+    // value of than the sequence it committed under. `booking_time >= <then>`
+    // was therefore never quite the same set of rows as the one the figures
+    // being compared were folded from.
+    const openedWatermark = await watermark();
     await new Promise((r) => setTimeout(r, OUTAGE_SECONDS * 1_000));
 
     // NOTHING WAS INVENTED FROM AN EVENT WE WERE NEVER TOLD ABOUT.
@@ -337,12 +561,36 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // was not: a suite that reports another process's writes as our system
     // inventing money is worse than one that says which it could not tell
     // apart. The attribution above is unconditional either way.
+    //
+    // TWO WATERMARKS, ONE INSTANT. `positionOf` takes its own snapshot each
+    // time, so `before` and `during` are read at two different CLOCKS as well
+    // as at two different watermarks — and availability is a function of the
+    // clock as much as of the rows: `ledger_availability` releases an
+    // uncleared credit at `available_at`, expires a card hold at `expires_at`,
+    // and counts a future-dated credit only once `book_date()` reaches it.
+    // MEASURED on this deployment: the demo account's ledger term moves by
+    // millions of cents at 00:00 America/New_York with no entry booked at all,
+    // because that is when the day's warehoused ACH credits become current. A
+    // window straddling it would fail this freeze for the calendar.
+    //
+    // So the freeze is re-read at ONE instant and TWO watermarks — the
+    // window's opening watermark and the current one — through the same
+    // `accountAvailability` the app calls. Every clock-driven term is then
+    // identical on both sides and cancels, and the only thing that can make
+    // them differ is an entry booked inside the window. Which is exactly what
+    // the guard below counts: in EVERY book, because a hold moves `available`
+    // from the memo book and a guard that watched only the financial one would
+    // be blind to the commonest write on this database.
     const during = await positionOf(businessId);
-    const [foreign] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM journal_entry
-       WHERE booking_time >= ${windowOpenedAt}`;
-    const foreignWrites = foreign?.n ?? 0;
-    if (foreignWrites === 0) expect(during).toEqual(before);
+    const frozen = await availabilityAcross(accountId, openedWatermark);
+    const moved = await movedSince(accountId, openedWatermark, windowOpenedAt);
+    const foreignWrites = moved.entries;
+    // The watermark pair first: the clock is held still across it, so only an
+    // ENTRY against this customer can make the two readings differ.
+    if (moved.entries === 0) expect(frozen.after).toEqual(frozen.before);
+    // Then the two live readings, which were taken at two different clocks and
+    // so need the clock to have been uneventful as well.
+    if (moved.quiet) expect(during).toEqual(before);
 
     // And the system is still answering while its feed is dark.
     const health = (await (await fetch(`${BASE_URL}/api/health`, { cache: "no-store" })).json()) as {
@@ -383,6 +631,48 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       return;
     }
 
+    // ---- WAIT FOR THE POSTING, NOT FOR THE FACT --------------------------
+    //
+    // `card_authorization` is written by the FIRST of the two transactions
+    // `src/lib/holds/apply.ts` splits an event into (steps 1–5); the memo
+    // posting that actually withholds the money is the SECOND (steps 6–7).
+    // The split is deliberate — it is the crash-safety argument, and it is
+    // documented at the top of that file — so between the two commits the
+    // authorisation is on record and `available` has not moved yet.
+    //
+    // THIS IS HOW THIS TEST FAILED IN THE SUITE, and it was not another
+    // process's doing. MEASURED on the failing run: the hold row committed at
+    // 03:45:45.251Z, the loop above returned, the position was read, and the
+    // opening memo entry committed at 03:45:45.581Z — 330ms later. Available
+    // read -35270 both times and the test asserted -40270. Reconstructed
+    // afterwards at the two instants, the account's active holds were 40000
+    // at the start of the window and 45000 at the end of it: the ledger was
+    // right, the read was early.
+    //
+    // So the wait is for the entry whose absence was being measured. If the
+    // fact lands and the withholding never does, that is not an unprovable
+    // claim, it is a customer whose money was never withheld — a failure with
+    // its own message rather than a skip.
+    const opening = await until(async () => {
+      const [row] = await sql<{ entry_id: string; booking_seq: bigint; cents: bigint }[]>`
+        SELECT e.id AS entry_id, e.booking_seq, l.amount_cents AS cents
+          FROM journal_entry e
+          JOIN journal_line  l ON l.entry_id = e.id
+          JOIN hold          h ON h.id = e.hold_id
+         WHERE e.hold_id = ${recovered.hold_id}::uuid
+           AND e.book = 'memo'
+           AND l.account_id = h.memo_account_id
+         ORDER BY e.booking_seq
+         LIMIT 1`;
+      return row ?? null;
+    }, 60_000);
+
+    if (opening === null) {
+      throw new Error(
+        `the backlog produced authorisation ${missedToken} and hold ${recovered.hold_id}, but no memo posting withheld the money within 60s of it, so $${(AUTH_CENTS / 100).toFixed(2)} is authorised and not held and the customer can spend it twice. POST ${BASE_URL}/api/drain answered ${drainStatus}.`,
+      );
+    }
+
     // NOTHING LOST: the withheld $50.00 is now held, exactly once, and it is
     // memo-only. Measured on THE HOLD THE BACKLOG CREATED — every memo line
     // against that hold's own memo account — so the figure is ours by
@@ -407,10 +697,43 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     expect(financial?.n).toBe(0);
     expect(await bal.trialBalanceCents()).toBe(trialBefore);
 
-    const [foreignAfter] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM journal_entry
-       WHERE booking_time >= ${windowOpenedAt} AND book = 'financial'`;
-    const quietEpisode = (foreignAfter?.n ?? 0) === 0;
+    // AND THE PUBLISHED FIGURE MOVED BY EXACTLY THE $50, ATTRIBUTABLY.
+    //
+    // ------------------------------------------------------------------
+    // WHAT THIS REPLACED, AND WHY IT WAS THE WRONG SHAPE.
+    //
+    // This used to be `after.availableCents === before.availableCents −
+    // 5000` on the whole business, guarded by a count of financial entries
+    // booked since the window opened. Two things were wrong with that guard
+    // and both are the same mistake: WHAT IT EXCLUDED WAS SHAPED EXACTLY
+    // LIKE THE FAILURE IT EXISTED TO CATCH.
+    //
+    //   * it counted `book = 'financial'` while the quantity it protects —
+    //     `holds`, and through it `available` — is moved by the MEMO book.
+    //     Every card hold on this database walks straight through it;
+    //   * it counted ENTRIES at all, while `available` also moves on the
+    //     CLOCK with no entry anywhere (see the freeze above).
+    //
+    // The fix is not a better guard. It is to stop needing one: ask the
+    // app's own `accountAvailability` the same question at ONE instant and
+    // TWO watermarks — the one just below this run's own opening posting,
+    // and the one that includes it. Everything anybody else wrote is in
+    // BOTH readings and cancels; the difference is this attack's hold and
+    // nothing else. Cross-run interference is then prevented by
+    // construction rather than detected by a condition.
+    // ------------------------------------------------------------------
+    const isolated = await availabilityAcross(accountId, opening.booking_seq - 1n, opening.booking_seq);
+    expect(isolated.after.availableCents - isolated.before.availableCents).toBe(-BigInt(AUTH_CENTS));
+    expect(isolated.after.holdsCents - isolated.before.holdsCents).toBe(BigInt(AUTH_CENTS));
+    expect(isolated.after.ledgerCents).toBe(isolated.before.ledgerCents);
+
+    // The whole-business figures the app publishes are reported beside it,
+    // and asserted when nothing else was booked across the episode at all —
+    // in EITHER book this time.
+    const movedAcross = await movedSince(accountId, openedWatermark, windowOpenedAt);
+    // Our own opening posting is one of them, by construction.
+    const foreignAcross = Math.max(movedAcross.entries - 1, 0);
+    const quietEpisode = foreignAcross === 0 && movedAcross.clockEvents === 0 && !movedAcross.rolledOver;
     if (quietEpisode) {
       expect(after.availableCents).toBe(before.availableCents - BigInt(AUTH_CENTS));
       expect(after.holdsCents).toBe(before.holdsCents + BigInt(AUTH_CENTS));
@@ -430,11 +753,13 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
 
     record(
       "evidence",
-      `dark window ${Math.round((Date.now() - startedAt) / 1000)}s (LIVEFIRE_OUTAGE_SECONDS=${OUTAGE_SECONDS}): the swallowed event ${missedToken} produced 0 inbox rows and 0 authorisations; trial balance ${trialBefore} unchanged; /api/health answered with database reachable. ${foreignWrites === 0 ? `The window was quiet, so business ${businessId}\u0027s whole position was additionally asserted frozen at ledger ${before.ledgerCents} / available ${before.availableCents}.` : `${foreignWrites} journal entr${foreignWrites === 1 ? "y was" : "ies were"} booked against this shared database by another process during the window, so the position-freeze cross-check was NOT evaluated — it would have measured their writes, not ours. The attribution above is unaffected.`}`,
+      `measured on ${isolation}. dark window ${Math.round((Date.now() - startedAt) / 1000)}s (LIVEFIRE_OUTAGE_SECONDS=${OUTAGE_SECONDS}): the swallowed event ${missedToken} produced 0 inbox rows and 0 authorisations; trial balance ${trialBefore} unchanged; /api/health answered with database reachable. ${moved.quiet ? `The window was quiet, so business ${businessId}\u0027s whole position was additionally asserted frozen at ledger ${before.ledgerCents} / available ${before.availableCents} — and asserted a second way, at ONE instant (${frozen.at.toISOString()}) across the window's two watermarks (${openedWatermark} -> now), which holds the clock still so that a business-date rollover or a maturing uncleared credit cannot read as movement: available ${frozen.before.availableCents} at both.` : `the window was NOT quiet for this customer: ${foreignWrites} entr${foreignWrites === 1 ? "y" : "ies"} touching this account were booked by another process (counted in BOTH books — a card hold moves available from the memo book and the financial-only count this guard used to do walked straight past it), ${moved.clockEvents} hold(s) reached expires_at/available_at on the clock alone${moved.rolledOver ? ", and the business date rolled over mid-window" : ""}. The live position-freeze was therefore NOT evaluated: it would have measured their writes and the calendar, not ours.${moved.entries === 0 ? ` The watermark-pair freeze WAS evaluated and held, because it holds the clock still: available ${frozen.before.availableCents} at both.` : ""} The attribution above is unaffected.`}`,
     );
     record(
       "evidence",
-      `recovery: the backlog delivered twice (HTTP ${catchUp.join(" then ")}) produced 1 inbox row, 1 card_auth_event and 1 hold ${recovered.hold_id}, whose memo account carries exactly 1 entry of ${heldByUs?.cents} (the $${(AUTH_CENTS / 100).toFixed(2)} withheld once, not twice) and 0 financial entries; ${quietEpisode ? `the episode was quiet, so available ${before.availableCents} -> ${after.availableCents} (exactly -${AUTH_CENTS}) and ledger unchanged at ${after.ledgerCents} were asserted too` : `another process wrote to this shared database during the episode, so the whole-position deltas were reported rather than asserted: available ${before.availableCents} -> ${after.availableCents}, ledger ${before.ledgerCents} -> ${after.ledgerCents}`}; drain ${drainStatus}`,
+      `recovery: the backlog delivered twice (HTTP ${catchUp.join(" then ")}) produced 1 inbox row, 1 card_auth_event and 1 hold ${recovered.hold_id}, whose memo account carries exactly 1 entry of ${heldByUs?.cents} (the $${(AUTH_CENTS / 100).toFixed(2)} withheld once, not twice) and 0 financial entries. ` +
+        `ISOLATED, NOT GUARDED: the app\u0027s own accountAvailability() asked at ONE instant (${isolated.at.toISOString()}) at the two watermarks either side of this run\u0027s own opening posting (booking_seq ${opening.booking_seq - 1n} -> ${opening.booking_seq}) reads available ${isolated.before.availableCents} -> ${isolated.after.availableCents} (exactly -${AUTH_CENTS}), holds ${isolated.before.holdsCents} -> ${isolated.after.holdsCents} (exactly +${AUTH_CENTS}) and ledger unchanged at ${isolated.after.ledgerCents}. Every other write in the database is in BOTH readings and cancels, so no other attack and no other process can move this figure. ` +
+        `${quietEpisode ? `The episode was additionally quiet in both books, so the whole-business figures were asserted too: available ${before.availableCents} -> ${after.availableCents}, ledger unchanged at ${after.ledgerCents}` : `${foreignAcross} other entr${foreignAcross === 1 ? "y" : "ies"} touching this customer, ${movedAcross.clockEvents} clock-driven hold transition(s)${movedAcross.rolledOver ? " and a business-date rollover" : ""} landed across the episode, so the whole-business deltas are reported rather than asserted: available ${before.availableCents} -> ${after.availableCents}, ledger ${before.ledgerCents} -> ${after.ledgerCents}. The isolated figure above is unaffected — that is the point of it`}; drain ${drainStatus}`,
     );
   });
 

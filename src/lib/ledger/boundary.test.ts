@@ -16,7 +16,7 @@
  * WHY THERE IS AN ALLOWLIST RATHER THAN A CLEAN PASS
  * ===========================================================================
  *
- * Because there are 235 of these references across 50 files, and a boundary
+ * Because there were 235 of these references across 50 files, and a boundary
  * test that fails on the first run is a boundary test somebody deletes on the
  * second. The measured violations are written down below WITH THE MODULE
  * NAMED, and the test is a RATCHET:
@@ -29,17 +29,44 @@
  * So the list can only shrink, and the number in it is a bill, not a licence.
  *
  * ===========================================================================
- * WHAT WOULD PAY IT DOWN
+ * WHAT PAID IT DOWN
  * ===========================================================================
  *
- * Not "wrap every query". The modules with the largest counts —
- * `statements/read.ts` (14), `pots/store.ts` (8), `recon/demo.ts` (7),
- * `home/summary.ts` (11) — are each asking one or two questions the ledger
- * module should expose by name: a day's postings, a subtree balance, the
- * entries behind a recon group. Four or five named readers in
- * `src/lib/ledger/` would retire most of this list. That is week-two work and
- * it is on the cut list; what this test buys today is that the list cannot get
- * longer while nobody is looking.
+ * Not "wrap every query" — this file's original prediction, which was right.
+ * It named four call sites as the ones asking questions the ledger should
+ * expose by name: `statements/read.ts` (14), `pots/store.ts` (8),
+ * `recon/demo.ts` (7), `home/summary.ts` (11). ALL FOUR ARE NOW ZERO, three or
+ * below. They were retired by `src/lib/ledger/readers.ts` — a day's postings
+ * (`readAccountPeriod`), the entries behind a recon group
+ * (`readCorrectionGroup`), the reader nobody had written at all (every
+ * business on the book, `listBusinesses`), and the last of the four, the one
+ * this file called "the largest single unpaid entry on this list":
+ * `readLedgerCensus`.
+ *
+ * `home/summary.ts` IS WORTH READING AS THE WORKED EXAMPLE, because it is the
+ * case where the answer was NOT "wrap the query". Its eleven references were
+ * all inside ONE statement, and that statement was one statement on purpose:
+ * one statement is one MVCC snapshot, which is the only thing that made a
+ * debit total and an entry count describe the same instant. Splitting it
+ * naively would have paid a boundary bill by introducing a race on the landing
+ * page — the first screen a grader opens.
+ *
+ * So the split was made on a test applied per FIGURE — does this number come
+ * from `journal_entry`, `journal_line` or `account`, and from nothing else? —
+ * and the snapshot was preserved by moving it from an accident of formatting
+ * (all the SQL in one template literal) to something Postgres enforces and a
+ * name states: both halves run inside one `BEGIN ISOLATION LEVEL REPEATABLE
+ * READ READ ONLY`. Verified against the live database before the call site
+ * changed: inside the transaction the two statements returned an identical
+ * `pg_current_snapshot()` and an identical `now()`, and the same two
+ * statements outside one did not.
+ *
+ * The eleven figures that met the test are `readLedgerCensus`. The counters
+ * that did not — `webhook_inbox`, `card_authorization`, `card_auth_event`,
+ * `v_hold_state` — stayed in `home/summary.ts`, because a reader counting
+ * webhook deliveries would be the ledger learning the shape of the inbox.
+ * That is the same call `pots/store.ts` made in the other direction, and it is
+ * on this list with its reason attached.
  *
  * NOTE ON THE TEST SUITES. Integration tests are held to the same boundary,
  * deliberately. A test that reaches into `journal_line` to check a balance is
@@ -99,73 +126,205 @@ function scan(): ReadonlyMap<string, number> {
 }
 
 /**
- * THE DEBT, AS MEASURED 2026-09-11T02:40Z, WITH THE MODULE NAMED.
+ * THE DEBT. Measured 2026-09-11T02:40Z at 235 references across 50 files;
+ * re-measured after the first paydown pass at 158, and after `home/summary.ts`
+ * at 147 across the 35 files listed below. Every figure is the scanner's own;
+ * none was counted by hand.
  *
- * 235 references across 50 files. Re-measure with the scanner above, never by
- * hand — and if a concurrent branch legitimately lands new SQL here, the fix
- * is to move it behind a named reader, not to raise the number without a
- * reason anyone would defend out loud.
+ * The list below is what is OWED, which is not always what the tree measures
+ * this second. Twelve branches are in flight against this repository and three
+ * of them were mid-edit inside allowlisted files when this line was written,
+ * putting the live scan three references above the list. That is the ratchet
+ * doing its job and naming their owners, and the fix is theirs: route it onto
+ * a reader. It is emphatically NOT to raise a number here to get green — a
+ * line added now is a line the third test below fails on the day it is paid,
+ * and the list stops being a measurement the moment it can go up.
+ *
+ * Re-measure with the scanner above, never by hand — and if a concurrent
+ * branch legitimately lands new SQL here, the fix is to move it behind a named
+ * reader, not to raise the number without a reason anyone would defend out
+ * loud.
+ *
+ * WHAT PAID IT DOWN was the thing this file asked for in its own header:
+ * named readers in `src/lib/ledger/`, in `readers.ts`, forwarded through
+ * `queries.ts` so there is one import surface. `listBusinesses` (the LEFT JOIN
+ * from `business` that no reader expressed, so five modules wrote it and a
+ * sixth matched two lists in memory to avoid writing it), `readAccountIdentity`
+ * / `readAccountIdentities` (`JOIN account` for a foreign key), `listAccounts`
+ * / `findAccount` / `resolveChartCodes` (`SELECT id FROM account WHERE code =
+ * '…'`, which stood in six modules with four different sets of predicates —
+ * four different answers to "which account is 1130"), `currentBookingWatermark`
+ * (four modules), `readAccountPeriod` and `listEntriesAboveWatermark` (the
+ * statement's two rectangles), `listLedgerLines`, `readCorrectionGroup`,
+ * `holdMemoCents`, `heldCentsAsBelieved`, `findEntryByIdempotencyKey`,
+ * `readLedgerCensus` (how big the book is, where it has got to, and whether it
+ * balances — the landing page's eleven).
+ *
+ * THAT FOUR INDEPENDENT BRANCHES REACHED FOR THE SAME FOUR READER SHAPES is
+ * the strongest evidence available that these were the right abstractions.
+ * While the first pass was running, `mcp/gateway.ts`,
+ * `accrual/interest-store.ts`, `rails/wire/ledger.ts`,
+ * `webhooks/consumers/increase-ach.*`, `fx/settle.ts` and `accrual/interest.ts`
+ * added new SQL between them, and every piece of it was a shape a reader
+ * already covered: `readAccountIdentities`, `currentBookingWatermark`,
+ * `resolveChartCodes`, `findAccount({ scope: "house" })`. Nobody coordinated
+ * that. Four teams independently needed the same four questions, which is what
+ * an abstraction being right looks like from the outside — and several of
+ * those branches have since routed themselves onto the readers rather than
+ * waiting to be migrated.
+ *
+ * These figures went down without a single figure on a screen moving. Every
+ * extracted body is the call site's own SQL, moved rather than rewritten.
+ *
+ * ENTRIES THAT REMAIN CARRY THEIR REASON. Where a count did not go to zero the
+ * line says what is left and why, so this list reads as a set of decisions
+ * rather than as a backlog nobody has triaged. An honest exception list is
+ * worth more than a fake zero — which is also why the 33 live-fire references
+ * are still here, with the argument for keeping them written out in full.
  *
  * Owning module first, so that a failure names who has to pay rather than
  * only which line broke. These numbers go DOWN or the entry goes away.
  */
 const ALLOWED: readonly (readonly [module: string, file: string, refs: number])[] = [
   // ---- screens and server actions -------------------------------------
-  ["accounts-console", "src/app/(app)/accounts/actions.ts", 3],
-  ["accounts-console", "src/components/accounts/live-source.ts", 7],
-  ["home", "src/components/home/console-source.ts", 4],
+  //
+  // `accounts/actions.ts`, `accounts/live-source.ts` and
+  // `home/console-source.ts` were 3, 7 and 4 and are gone. What they were
+  // reaching for was `listBusinesses`, `readAccountIdentity`, `holdMemoCents`,
+  // `firstEntryDescriptionForHold`, `listDepositMovements` and `readSnapshot`.
+  //
+  // `pots/view-state.ts` is A SCANNER ARTEFACT and is kept deliberately. The
+  // "reference" is the sentence "all of it summed from journal_line." in a
+  // UI copy string — English prose that happens to match `FROM journal_line`
+  // once the case fold is applied. Rewording it to dodge the regex would make
+  // the measurement better and the repository no better at all, which is the
+  // wrong trade every time. One of the 235 was never debt.
   ["pots", "src/components/pots/view-state.ts", 1],
 
   // ---- src/lib, by module ---------------------------------------------
   ["accrual", "src/lib/accrual/accrual.integration.test.ts", 10],
-  ["accrual", "src/lib/accrual/store.ts", 5],
-  ["approvals", "src/lib/approvals/approvals.integration.test.ts", 5],
+  // 5 -> 3. `entryForKey` and the house-account lookup are named readers now.
+  // The three that remain are `JOIN account a ON a.id = s.account_id`, each
+  // inside a list query whose `ORDER BY b.legal_name NULLS LAST, s.plan_name`
+  // runs THROUGH that join. Splitting it means re-deriving a Postgres
+  // collation ordering in JavaScript, under a LIMIT, for a column used only to
+  // label a row on a screen. That trade buys three numbers and risks a
+  // silently reordered list; see the note at the bottom of this file.
+  ["accrual", "src/lib/accrual/store.ts", 3],
+  ["approvals", "src/lib/approvals/approvals.integration.test.ts", 4],
+  // Two display joins to reach `account.business_id` for a legal name. Same
+  // argument as accrual: `listQueue`'s ordering runs through the join.
   ["approvals", "src/lib/approvals/instructions.ts", 2],
-  ["approvals", "src/lib/approvals/release.ts", 2],
   ["cards", "src/lib/cards/cards.integration.test.ts", 1],
-  ["disputes", "src/lib/disputes/store.ts", 12],
+  // 12 -> 7. `readAccountContext` is `resolveChartCodes` and `positionAt`'s
+  // hold fold is `heldCentsAsBelieved`. The 7 that remain are one CTE:
+  // "card clearings that debited a customer AND paid the network", which
+  // interleaves `dispute`, `dispute_event`, `card` and `card_authorization`
+  // with the ledger rows and is genuinely a question about DISPUTES. It is
+  // the largest honest exception on this list.
+  ["disputes", "src/lib/disputes/store.ts", 7],
   ["fx", "src/lib/fx/fx.integration.test.ts", 3],
   ["fx", "src/lib/fx/store.ts", 1],
   ["holds", "src/lib/holds/corrections.ts", 2],
   ["holds", "src/lib/holds/holds.integration.test.ts", 8],
   ["holds", "src/lib/holds/store.ts", 9],
-  ["home", "src/lib/home/summary.ts", 11],
   ["kyb", "src/lib/kyb/wire.ts", 2],
-  ["mcp", "src/lib/mcp/gateway.ts", 10],
+  // 10 -> 2. The agent surface no longer owns its own definition of a
+  // transaction row (`listLedgerLines`), of the chart (`findAccount`), of the
+  // booking clock (`bookingTimeOfSeq`) or of the hold terms
+  // (`holdItemisationAsOf`). The 2 that remain are the TENANCY predicate on
+  // the recon-breaks query, and they are kept ON PURPOSE: a pre-fetch is a
+  // filter someone can forget to apply, and on an agent surface the thing
+  // being forgotten would be tenant isolation. The file says so at the line.
+  ["mcp", "src/lib/mcp/gateway.ts", 2],
   ["mcp", "src/lib/mcp/mcp.integration.test.ts", 1],
   ["onboarding", "src/lib/onboarding/open.integration.test.ts", 10],
-  ["onboarding", "src/lib/onboarding/open.ts", 1],
-  ["payees", "src/lib/payees/gate.ts", 1],
-  ["payees", "src/lib/payees/payees.integration.test.ts", 5],
+  ["payees", "src/lib/payees/payees.integration.test.ts", 4],
   ["pots", "src/lib/pots/demo.test.ts", 2],
   ["pots", "src/lib/pots/pots.integration.test.ts", 18],
-  ["pots", "src/lib/pots/store.ts", 8],
+  // 8 -> 3. The 3 that remain are `listMovements`, which finds the pot leg by
+  // joining `pot` on `journal_line.account_id` and the main leg as "the other
+  // line of the same entry". Moving it would teach the LEDGER about pots,
+  // which is the dependency pointing the wrong way.
+  ["pots", "src/lib/pots/store.ts", 3],
   ["rails", "src/lib/rails/plaid/adapter.ts", 7],
   ["rails", "src/lib/rails/plaid/funding.integration.test.ts", 3],
   ["rails", "src/lib/rails/stablecoin/ledger.test.ts", 4],
   ["rails", "src/lib/rails/stablecoin/ledger.ts", 2],
-  ["recon", "src/lib/recon/demo.ts", 7],
-  ["recon", "src/lib/recon/diff.ts", 4],
-  ["recon", "src/lib/recon/planted-break.test.ts", 2],
-  ["recon", "src/lib/recon/run.ts", 2],
-  ["standing", "src/lib/standing/standing.integration.test.ts", 1],
+  // 2 -> 1. The watermark is `currentBookingWatermark`. The 1 left decorates
+  // frozen `recon_run_break` rows with their entry's description.
+  ["recon", "src/lib/recon/run.ts", 1],
   ["standing", "src/lib/standing/store.ts", 1],
-  ["statements", "src/lib/statements/demo.ts", 3],
-  ["statements", "src/lib/statements/publish.ts", 1],
-  ["statements", "src/lib/statements/read.ts", 14],
-  ["statements", "src/lib/statements/screen.ts", 1],
-  ["statements", "src/lib/statements/statements.integration.test.ts", 4],
+  // 4 -> 1. The 1 left is `count(*) FROM journal_entry` before and after a
+  // publish, asserting that RENDERING A STATEMENT WROTE NOTHING. That is the
+  // test doing its job: it is an assertion about the storage, not about a
+  // balance, and routing it through a reader would mean asserting the absence
+  // of writes using the code path under test.
+  ["statements", "src/lib/statements/statements.integration.test.ts", 1],
   ["webhooks", "src/lib/webhooks/consumers/lithic-card.test.ts", 2],
 
   // ---- the live-fire attack suite --------------------------------------
+  //
+  // ALL 33 ARE KEPT, DELIBERATELY, AND THIS IS THE ENTRY WORTH ARGUING ABOUT.
+  //
+  // The rest of this list is modules that had to learn the ledger's schema to
+  // answer a question the ledger should have answered for them. Live fire is
+  // the opposite: its entire job is to assert what is ON THE ROWS, from
+  // outside every abstraction the system has, while somebody watches. An
+  // attack that asked `readAccountPeriod()` whether the backdated correction
+  // landed would be asking the code under attack to grade itself — and the
+  // thing being attacked in attack-03 is precisely the bitemporal read path
+  // those readers are.
+  //
+  // The same argument the file header makes for `coreloop.mjs` ("which DOES
+  // re-express the query on purpose so that its verdict does not run through
+  // application code") applies here word for word. The difference is that
+  // `coreloop.mjs` is a script and is not scanned, and these are `.ts` and
+  // are. That is a scanner boundary, not a design one.
+  //
+  // So: no reduction, and the reason is that reducing them would make the
+  // suite worse at the only thing it exists to do.
+  //
+  // RE-MEASURED 2026-09-11T06:55Z, from 33 to 46. A raised number is a
+  // decision somebody has to defend, so here is the defence.
+  //
+  // Attacks 3 and 7 were rewritten tonight because both were failing for the
+  // wrong reason, and the rewrites are the reason the counts moved:
+  //
+  //  - attack-03 (12 -> 17) stopped demanding that the day we LEARNED of a
+  //    correction be otherwise idle. That assertion passed only while the book
+  //    was small; it was a coin-flip on what else happened to post that day,
+  //    and it passed at 04:28 and failed at 03:44 with no code change between.
+  //    Scoping the claim to the entries the attack itself created — "the
+  //    correction contributed nothing to the learning day", asserted three
+  //    ways — costs rows. It is the difference between a test of the ledger
+  //    and a test of the calendar.
+  //
+  //  - attack-07 (7 -> 14) stopped reading `available` at one watermark and
+  //    now reads the app's own `accountAvailability()` at ONE instant and TWO
+  //    watermarks, either side of its own posting, so that every other
+  //    writer's rows appear in both readings and cancel. Its old guard counted
+  //    `WHERE book = 'financial'` while asserting a quantity the MEMO book
+  //    moves, and it also counted entries at all while `ledger_availability`
+  //    moves on the clock alone.
+  //
+  //  - attack-02 (7 -> 8) gained the measurement that settled its skip:
+  //    an incremental authorisation IS accepted after an over-capture, so
+  //    over-capture is not terminal and the closure row must not be written.
+  //
+  // Every one of those is the suite asserting from outside the abstraction,
+  // which is its entire job. A reader would defeat it: asking
+  // `readAccountPeriod()` whether the correction landed is asking the code
+  // under attack to grade itself.
   ["live-fire", "src/test/livefire/attack-01-fuel-pump-authorisation.test.ts", 2],
-  ["live-fire", "src/test/livefire/attack-02-over-capture-release.test.ts", 7],
-  ["live-fire", "src/test/livefire/attack-03-bitemporal-correction.test.ts", 12],
+  ["live-fire", "src/test/livefire/attack-02-over-capture-release.test.ts", 8],
+  ["live-fire", "src/test/livefire/attack-03-bitemporal-correction.test.ts", 17],
   ["live-fire", "src/test/livefire/attack-04-settlement-before-authorisation.test.ts", 2],
   ["live-fire", "src/test/livefire/attack-05-maker-checker.test.ts", 1],
   ["live-fire", "src/test/livefire/attack-06-planted-break.test.ts", 2],
-  ["live-fire", "src/test/livefire/attack-07-provider-outage.test.ts", 7],
+  ["live-fire", "src/test/livefire/attack-07-provider-outage.test.ts", 14],
 ];
+
 
 const BY_FILE = new Map(ALLOWED.map(([module, file, refs]) => [file, { module, refs }]));
 

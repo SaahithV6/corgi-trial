@@ -30,6 +30,56 @@
  * reproduces Lithic's own numbers (400, 100, and 0 on over-capture) from the
  * events alone.
  *
+ * WHY THERE IS NO `C >= A` ARM. This is the question the file gets asked most,
+ * so the answer lives next to the arithmetic rather than only in a document.
+ * An over-capture -- A = 5000, C = 7340 -- satisfies none of the four closure
+ * conditions: Lithic's CLEARING carries no last-capture flag so `sawFinal` is
+ * false, nothing closed or expired, and A > 0. So `closed` is FALSE and H is 0
+ * by the `max`, not by the closure, and no `hold_closure` row is written.
+ *
+ * A fifth arm on `C >= A` is arithmetically a NO-OP for H -- max(A - C, 0) is
+ * already 0 once C reaches A. Its only effects are the APPEND-ONLY closure row
+ * and `v_hold_state.is_released`, which forces the hold to 0 regardless of the
+ * memo balance. Both are claims about what happens NEXT, so the arm is safe
+ * only if over-capture is terminal.
+ *
+ * [MEASURED] It is not terminal. Lithic sandbox transaction
+ * faae9502-16fe-4020-8374-40b54f47bd70: authorize 5000 -> clearing 7340
+ * (status SETTLED, amounts.hold 0) -> POST /v1/simulate/authorization_advice
+ * 9000 answers 201 and appends AUTHORIZATION_ADVICE 9000 result APPROVED ->
+ * clearing 1660 result APPROVED, settlement -9000. A rises to 9000 against
+ * C = 7340, so H REOPENS at 1660 -- and the network then captures exactly that
+ * 1660. A closure row written one event earlier would have freed money that was
+ * still authorised, which is the $60 failure migration 0011 exists to clean up.
+ *
+ * DESIGN Sec 8.3 row 2 is not the row that applies here: its arrival order says
+ * `clearing 73.40 FINAL`, so it closes on `sawFinal`. Rows 5 and 12 -- captures
+ * never flagged final -- both say `closed: n`, which is what this computes.
+ * Live-fire attack 2 re-takes the measurement above on every run and skips
+ * loudly if Lithic ever refuses the incremental; docs/HOLDS.md has the argument
+ * and the condition that would flip the decision.
+ *
+ * AND THE SAME ARGUMENT, ONE LINE OVER (migration 0028). The paragraphs above
+ * were written twice -- once in migration 0011, once in DECISIONS 049 -- about
+ * `C >= A`, and both times the conclusion was "a permanent row may not be
+ * written on a condition a later incremental can undo". `A <= 0` IS such a
+ * condition, it sat in the next disjunct, and neither pass looked at it. The
+ * fuzzer did: 6.25M orderings, zero disagreements about `H`, and one
+ * counterexample to the permanence of the closure row.
+ *
+ *     E1 = { authorization 0 }                     -> terminal, row written
+ *     E2 = E1 + { incremental_authorization 1 }    -> not terminal, H = 1
+ *
+ * A $0 authorisation is card-on-file verification: Lithic sends AUTHORIZATION
+ * amount 0 and then an advice carrying the real figure. One payload, harmless.
+ * Two deliveries -- the ordinary case, and the one the brief names -- and the
+ * first delivery closes the hold for ever. So `A <= 0` now belongs to `closed`
+ * and NOT to `terminallyClosed`, which is the distinction this file already
+ * drew and simply mis-assigned. No number moves: H is 0 on that arm either way,
+ * `v_card_auth_hold.is_closed` keeps the arm and so availability still
+ * withholds nothing. All that changes is that the APPEND-ONLY row is no longer
+ * written on a reversible condition.
+ *
  * This module must stay in exact agreement with `v_card_auth_hold` in
  * migration 0001, because `v_hold_drift` compares the memo book against that
  * view and must return zero rows. Same four closure conditions, same two sums,
@@ -49,7 +99,22 @@ export type CardEventKind =
   | "force_post"
   | "refund"
   | "expiry"
-  | "close";
+  | "close"
+  /**
+   * The network REFUSED this authorisation.
+   *
+   * It is a real fact and it belongs in the event log — a customer looking at a
+   * declined transaction should see that it happened — but it must contribute
+   * to nothing. Before migration 0026 the verdict was discarded at ingest and a
+   * refusal was indistinguishable from an approval, so the ledger withheld
+   * $4,451.00 that the network had never authorised.
+   *
+   * It appears in NO contributing set below, and that is deliberate: both folds
+   * select by membership (four `Set`s here, `FILTER (WHERE kind IN ...)` in
+   * SQL), so a kind in neither list is neutral in both BY CONSTRUCTION. There
+   * is no arm to keep in sync and therefore nothing that can drift.
+   */
+  | "declined";
 
 /**
  * One fact the network told us. `amountCents` is a MAGNITUDE (>= 0); the
@@ -91,21 +156,42 @@ export interface HoldState {
   /**
    * `closed(E)` AND the closure cannot be undone by a later event.
    *
-   * The difference is one case and it is a real one, found by running the
-   * out-of-order scenario against the database rather than by reading the
-   * model. A settlement that arrives before its authorisation creates an
-   * identity whose event set is `{clearing 3000}`: `A = 0`, which satisfies
-   * `A <= 0`, which makes `closed` TRUE. That is harmless for `H` — it is 0
-   * either way, because `max(0 − 3000, 0)` is also 0 — but `hold_closure` is
-   * APPEND-ONLY with `PRIMARY KEY (hold_id)`, so writing a closure row on the
-   * strength of it would permanently free a hold that the late authorisation
-   * is about to open. Availability reads the closure row, so the customer
-   * would spend 5000 they no longer have.
+   * This is the predicate that licenses the APPEND-ONLY `hold_closure` row, so
+   * it carries an obligation `closed` does not: it must be MONOTONE. True on a
+   * subset means true on every superset, because `PRIMARY KEY (hold_id)` and
+   * fifty lines of migration 0011 say that row cannot be unwritten. A
+   * non-monotone arm here permanently frees a hold that the next delivery
+   * re-opens.
    *
-   * `A <= 0` is only terminal once there is something to have reversed. A
-   * clearing-first identity has `A = 0` because nothing has authorised
-   * anything yet, not because everything was reversed — and telling those two
-   * apart is exactly what `sawAuthorisation` is for.
+   * So it is the intersection of `closed` with the arms that are monotone by
+   * construction, and there are exactly three:
+   *
+   *     sawFinal   ∃ over a growing set — an ∃ never un-fires
+   *     sawClose   likewise
+   *     expired    does not read the set at all, and the clock runs one way
+   *
+   * `A <= 0` is NOT one of them and that is the whole content of migration
+   * 0028. `A` is a running total that can go back up: a $0 card-on-file
+   * authorisation, or a genuine full reversal, is `A <= 0` today and `A = 1`
+   * the moment an incremental lands. Both shapes are real Lithic traffic and
+   * both are pinned as witnesses in `fuzz.test.ts`. Dropping the arm costs
+   * nothing, because `closed` keeps it: `H` is already 0 there by
+   * `max(A − C, 0)`, `v_card_auth_hold.is_closed` still reads TRUE, and
+   * `v_hold_state.is_released` therefore still frees the money on the
+   * customer's screen — reversibly, from the fold, which is what it should
+   * always have been doing.
+   *
+   * Two shapes this used to get wrong, kept here because they are the ones
+   * that will be asked about:
+   *
+   *   - a clearing-first identity, `{clearing 3000}`: `A = 0` because nothing
+   *     authorised anything yet. `closed`, never terminal. That was migration
+   *     0011's bug, and `sawAuthorisation` was the narrowing written for it —
+   *     it is no longer load-bearing here, and the field stays because it is
+   *     the honest name for what the set contains.
+   *   - an over-capture, `A = 5000, C = 7340`: `closed` is FALSE and `H` is 0
+   *     by the `max`. Measured non-terminal (DECISIONS 049), so no arm, and no
+   *     closure row. See the header.
    */
   readonly terminallyClosed: boolean;
   /** H(E), always >= 0. */
@@ -185,10 +271,11 @@ export function holdState(
   // has A = 0, and that is OPEN-with-nothing-held, not CLOSED.
   const closed = sawFinal || sawClose || expired || (count > 0 && authorised <= 0n);
 
-  // Same four conditions, with the reversal one narrowed to the case a later
-  // event cannot undo. See the note on `terminallyClosed`.
-  const terminallyClosed =
-    sawFinal || sawClose || expired || (sawAuthorisation && authorised <= 0n);
+  // The same conditions MINUS the one a later event can undo. `A <= 0` is a
+  // predicate on a running total that can go back up, and this flag is what
+  // writes an append-only row. Three arms, all monotone, nothing else. See the
+  // note on `terminallyClosed` and migration 0028.
+  const terminallyClosed = sawFinal || sawClose || expired;
 
   const remainder = authorised - captured;
   const holdCents = closed ? 0n : remainder > 0n ? remainder : 0n;

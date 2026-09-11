@@ -41,6 +41,7 @@ import type * as IngestModule from "./ingest";
 import type { renderSchemeFile as RenderSchemeFile, RenderRow } from "./parse";
 import type * as RunModule from "./run";
 import type { ReconBreak } from "./types";
+import { findAccount } from "@/lib/ledger/queries";
 
 const RUN = typeof process.env.APP_DATABASE_URL === "string";
 const d = RUN ? describe : describe.skip;
@@ -160,18 +161,22 @@ d("the planted break, against the live database", () => {
     const [entity] = await sql<{ id: string }[]>`SELECT id FROM book_entity ORDER BY code LIMIT 1`;
     const [actor] = await sql<{ id: string }[]>`
       SELECT id FROM actor WHERE kind = 'system' ORDER BY display_name LIMIT 1`;
-    const [deposit] = await sql<{ id: string }[]>`
-      SELECT id FROM account WHERE code = '2100' AND business_id IS NOT NULL AND is_postable
-       ORDER BY name LIMIT 1`;
-    const [receivable] = await sql<{ id: string }[]>`
-      SELECT id FROM account WHERE code = '1130' AND business_id IS NULL LIMIT 1`;
+    // The chart, through the ledger's own filter. A test that resolves an
+    // account by writing `SELECT id FROM account WHERE code = …` is a test
+    // carrying its own definition of the chart, which is the same failure the
+    // boundary exists to stop — one that happens to be in a test file.
+    const deposit = await findAccount(
+      { code: "2100", scope: "customer", isPostable: true, orderBy: "name" },
+      sql,
+    );
+    const receivable = await findAccount({ code: "1130", scope: "house" }, sql);
     if (!entity || !actor || !deposit || !receivable) {
       throw new Error("seed the chart of accounts first: node scripts/seed.mjs");
     }
     entityId = entity.id;
     actorId = actor.id;
-    depositAccountId = deposit.id;
-    achReceivableId = receivable.id;
+    depositAccountId = deposit.accountId;
+    achReceivableId = receivable.accountId;
 
     for (const row of baseRows) {
       const id = await book(row);

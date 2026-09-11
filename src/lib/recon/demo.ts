@@ -45,6 +45,11 @@ import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { postEntry, reverseAndRebook } from "@/lib/ledger/post";
+import {
+  currentBookingWatermark,
+  findAccount,
+  listRailControlEntries,
+} from "@/lib/ledger/queries";
 import { createAchRail, hours, type AchSimTransferRecord } from "@/lib/rails/achsim";
 import { SEC_CODE_BY_AUTHORIZATION } from "@/lib/rails/increase/client";
 
@@ -431,11 +436,15 @@ async function correctSettlement(
  */
 async function closeDays(conn: Sql, refs: Refs, today: string, count: number): Promise<void> {
   const dates = Array.from({ length: count }, (_, i) => shiftDate(today, -(i + 1)));
+  // Where the book has got to, asked of the ledger by name. It was a scalar
+  // subquery inside the INSERT before, which is the same `MAX(booking_seq)`
+  // three other modules were each writing out for themselves.
+  const watermark = await currentBookingWatermark(conn);
   await conn`
     INSERT INTO book_day (entity_id, business_date, booking_watermark, closed_by)
     SELECT ${refs.entityId}::uuid,
            d::date,
-           (SELECT COALESCE(MAX(booking_seq), 0) FROM journal_entry),
+           ${watermark}::bigint,
            ${refs.actorId}::uuid
       FROM unnest(${dates}::text[]) AS d
     ON CONFLICT DO NOTHING`;
@@ -465,42 +474,66 @@ async function carryForwardRows(
   businessDate: string,
   exclude: readonly string[],
 ): Promise<readonly RenderRow[]> {
-  const rows = await conn<{ external_ref: string; booked_cents: bigint }[]>`
-    WITH entry_rail AS (
-      SELECT e.id,
-             e.external_ref,
-             e.correction_group_id,
-             e.booking_seq,
-             SUM(l.amount_cents)::bigint AS rail_cents
-        FROM journal_entry e
-        JOIN journal_line  l ON l.entry_id = e.id
-        JOIN account       a ON a.id = l.account_id AND a.rail_control = 'ach'
-       WHERE e.rail       = 'ach'
-         AND e.value_date = ${businessDate}::date
-         AND e.book       = 'financial'
-         AND e.external_ref IS NOT NULL
-         AND NOT (e.external_ref = ANY(${[...exclude]}::text[]))
-       GROUP BY e.id
-    ),
-    grouped AS (
-      SELECT external_ref,
-             MIN(booking_seq)                                      AS anchor_seq,
-             -- The ANCHOR's amount, not the group's net. The diff pairs a file
-             -- row against what we booked FIRST, so a carried-forward row
-             -- carrying the net would show up as an amount mismatch against a
-             -- correction group -- inventing exactly the break this function
-             -- exists to stop inventing.
-             (ARRAY_AGG(rail_cents ORDER BY booking_seq))[1]       AS booked_cents,
-             SUM(rail_cents)::bigint                               AS net_cents
-        FROM entry_rail
-       GROUP BY external_ref, correction_group_id
-    )
-    SELECT DISTINCT ON (external_ref) external_ref, booked_cents
-      FROM grouped
-     -- A correction group that nets to zero was booked and un-booked; a file
-     -- row for nothing is not a thing a provider would send.
-     WHERE net_cents <> 0
-     ORDER BY external_ref, anchor_seq`;
+  // The ledger half — "ACH entries value-dated today, rolled up to what they
+  // moved on the rail-control account" — is `listRailControlEntries`. The
+  // grouping below is this seed's own policy and stays here, spelled out
+  // rather than buried in a CTE:
+  //
+  //   * group by (external_ref, correction_group_id), as the SQL did;
+  //   * a group that NETS TO ZERO was booked and un-booked, and a file row for
+  //     nothing is not a thing a provider would send, so it is dropped;
+  //   * the amount carried is the ANCHOR's, not the net — the diff pairs a
+  //     file row against what we booked FIRST, so carrying the net would show
+  //     up as an amount mismatch against a correction group, inventing exactly
+  //     the break this function exists to stop inventing;
+  //   * one row per reference, the group with the lowest anchor winning, which
+  //     is `DISTINCT ON (external_ref) … ORDER BY external_ref, anchor_seq`.
+  const entries = await listRailControlEntries(
+    {
+      rail: "ach",
+      valueDate: businessDate,
+      book: "financial",
+      excludeExternalRefs: exclude,
+    },
+    conn,
+  );
+
+  const groups = new Map<
+    string,
+    { externalRef: string; anchorSeq: bigint; bookedCents: bigint; netCents: bigint }
+  >();
+  // `listRailControlEntries` returns ORDER BY booking_seq, so the first entry
+  // seen for a group IS its anchor and no second sort is needed.
+  for (const entry of entries) {
+    const key = `${entry.externalRef}\u0000${entry.correctionGroupId ?? ""}`;
+    const group = groups.get(key);
+    if (group === undefined) {
+      groups.set(key, {
+        externalRef: entry.externalRef,
+        anchorSeq: entry.bookingSeq,
+        bookedCents: entry.railCents,
+        netCents: entry.railCents,
+      });
+    } else {
+      group.netCents += entry.railCents;
+    }
+  }
+
+  const byRef = new Map<string, { anchorSeq: bigint; bookedCents: bigint }>();
+  for (const group of groups.values()) {
+    if (group.netCents === 0n) continue;
+    const winner = byRef.get(group.externalRef);
+    if (winner === undefined || group.anchorSeq < winner.anchorSeq) {
+      byRef.set(group.externalRef, {
+        anchorSeq: group.anchorSeq,
+        bookedCents: group.bookedCents,
+      });
+    }
+  }
+
+  const rows = [...byRef.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([external_ref, g]) => ({ external_ref, booked_cents: g.bookedCents }));
 
   return rows.map((r) => ({
     externalRef: r.external_ref,
@@ -598,14 +631,16 @@ async function loadRefs(conn: Sql): Promise<Refs> {
   const [entity] = await conn<{ id: string }[]>`SELECT id FROM book_entity ORDER BY code LIMIT 1`;
   const [actor] = await conn<{ id: string }[]>`
     SELECT id FROM actor WHERE kind = 'system' ORDER BY display_name LIMIT 1`;
-  const [deposit] = await conn<{ id: string }[]>`
-    SELECT id FROM account
-     WHERE code = '2100' AND business_id IS NOT NULL AND is_postable
-     ORDER BY name LIMIT 1`;
-  const [receivable] = await conn<{ id: string }[]>`
-    SELECT id FROM account WHERE code = '1130' AND business_id IS NULL LIMIT 1`;
-  const [payable] = await conn<{ id: string }[]>`
-    SELECT id FROM account WHERE code = '2300' AND business_id IS NULL LIMIT 1`;
+  // The chart, by code, through the ledger's own filter rather than three
+  // hand-written `SELECT id FROM account WHERE code = …` — the shape that
+  // appeared in six modules with four different sets of predicates, which is
+  // four different answers to "which account is 1130".
+  const deposit = await findAccount(
+    { code: "2100", scope: "customer", isPostable: true, orderBy: "name" },
+    conn,
+  );
+  const receivable = await findAccount({ code: "1130", scope: "house" }, conn);
+  const payable = await findAccount({ code: "2300", scope: "house" }, conn);
 
   if (!entity || !actor || !deposit || !receivable || !payable) {
     throw new Error("reconciliation demo needs the seeded chart of accounts: node scripts/seed.mjs");
@@ -613,8 +648,8 @@ async function loadRefs(conn: Sql): Promise<Refs> {
   return {
     entityId: entity.id,
     actorId: actor.id,
-    depositAccountId: deposit.id,
-    achReceivableId: receivable.id,
-    achPayableId: payable.id,
+    depositAccountId: deposit.accountId,
+    achReceivableId: receivable.accountId,
+    achPayableId: payable.accountId,
   };
 }

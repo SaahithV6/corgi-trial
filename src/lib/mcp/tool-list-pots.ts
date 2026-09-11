@@ -96,7 +96,16 @@ const outputSchema: JsonSchemaObject = {
         ledger_balance: MONEY_SCHEMA,
         available_balance: MONEY_SCHEMA,
         card_authorisation_holds: MONEY_SCHEMA,
+        operator_holds: {
+          allOf: [MONEY_SCHEMA],
+          description: "Holds a person placed deliberately. Withheld from available.",
+        },
         uncleared_credits: MONEY_SCHEMA,
+        pending_outbound: {
+          allOf: [MONEY_SCHEMA],
+          description:
+            "Debits already booked to leave on a future value date. In the ledger balance, not spendable.",
+        },
       },
       required: [
         "code",
@@ -104,7 +113,9 @@ const outputSchema: JsonSchemaObject = {
         "ledger_balance",
         "available_balance",
         "card_authorisation_holds",
+        "operator_holds",
         "uncleared_credits",
+        "pending_outbound",
       ],
       additionalProperties: false,
     },
@@ -228,8 +239,10 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
       name: account.name,
       ledger_balance: money(balance.ledgerCents),
       available_balance: money(balance.availableCents),
-      card_authorisation_holds: money(balance.holdsCents),
+      card_authorisation_holds: money(balance.cardAuthHoldsCents),
+      operator_holds: money(balance.otherHoldsCents),
       uncleared_credits: money(balance.unclearedCents),
+      pending_outbound: money(balance.pendingOutboundCents),
     },
     pots,
     totals: {

@@ -98,6 +98,7 @@ import type * as PublishModule from "./publish";
 import type * as ReadModule from "./read";
 import type * as RenderModule from "./render";
 import type * as DemoModule from "./demo";
+import { houseAccountId, listDepositAccounts } from "@/lib/ledger/queries";
 
 const READY =
   process.env["RUN_DB_TESTS"] === "1" &&
@@ -161,13 +162,14 @@ d("statements, against the live database", () => {
     // the one correction the demo exists to show under a pile of test
     // scaffolding. Separating the accounts keeps both stories legible.
     const demoAccountId = await demo.pickDemoAccount(sql);
-    const [other] = await sql<{ id: string }[]>`
-      SELECT a.id FROM account a
-       WHERE a.code = '2100' AND a.book = 'financial'
-         AND a.business_id IS NOT NULL AND a.closed_at IS NULL
-         AND a.id <> ${demoAccountId}::uuid
-       ORDER BY a.id LIMIT 1`;
-    accountId = other?.id ?? demoAccountId;
+    // "Any open customer deposit account other than the demo's." The ledger
+    // already answers "every account with money in it" by name; picking a
+    // different one out of that list is this suite's business and the four
+    // predicates that define the list are not.
+    const others = (await listDepositAccounts(sql))
+      .filter((a) => a.accountId !== demoAccountId)
+      .sort((x, y) => (x.accountId < y.accountId ? -1 : x.accountId > y.accountId ? 1 : 0));
+    accountId = others[0]?.accountId ?? demoAccountId;
 
     const account = await read.readStatementAccount(accountId, sql);
     if (account === null) throw new Error("the live database is not seeded: node scripts/seed.mjs");
@@ -175,14 +177,12 @@ d("statements, against the live database", () => {
 
     const [actor] = await sql<{ id: string }[]>`
       SELECT id FROM actor WHERE kind = 'human' AND can_approve = true ORDER BY id LIMIT 1`;
-    const [ach] = await sql<{ id: string }[]>`
-      SELECT id FROM account WHERE code = '1130' AND business_id IS NULL LIMIT 1`;
-    const [card] = await sql<{ id: string }[]>`
-      SELECT id FROM account WHERE code = '2200' AND business_id IS NULL LIMIT 1`;
+    const ach = await houseAccountId("1130", sql);
+    const card = await houseAccountId("2200", sql);
     if (!actor || !ach || !card) throw new Error("seed first: node scripts/seed.mjs");
     actorId = actor.id;
-    achReceivableId = ach.id;
-    cardPayableId = card.id;
+    achReceivableId = ach;
+    cardPayableId = card;
   });
 
   it("reproduces a closed day's statement byte-for-byte, across a backdated correction", async () => {
@@ -541,4 +541,104 @@ d("statements, against the live database", () => {
       ].join("\n"),
     );
   });
+
+  /**
+   * THE PDF, THROUGH THE SCREEN'S OWN LOADER, TWICE.
+   *
+   * `pdf.test.ts` proves the renderer is a pure function of its input. That is
+   * necessary and it is not the claim anybody cares about, which is this one:
+   *
+   *     pressing the button twice on the live book produces the same file
+   *
+   * So this calls `statementPdfAction` — the exact entry point the button on
+   * `/statements` calls, resolving the exact same account, value date and
+   * anchor through `loadStatementsScreen` — with no arguments, which is what
+   * the screen does when the URL names nothing. Two calls, and the bytes are
+   * compared as bytes.
+   *
+   * It also checks the figures on the page against `compareStatement`, so the
+   * document cannot drift from the screen: a PDF that reproduced perfectly and
+   * printed a different closing balance from the one on the page would pass a
+   * determinism test and fail a reader.
+   */
+  it("generates the same statement PDF twice, byte for byte, on the live book", async () => {
+    const actions = await import("@/app/(app)/statements/actions");
+    const { documentFingerprint } = await import("./pdf");
+
+    const first = await actions.statementPdfAction({});
+    if (!first.ok) throw new Error(`the document did not render: ${first.message}`);
+
+    const second = await actions.statementPdfAction({});
+    if (!second.ok) throw new Error(`the second render failed: ${second.message}`);
+
+    // The as-corrected column is read at the CURRENT watermark, so a booking
+    // that lands between the two calls legitimately produces a different
+    // document. This suite is gated and runs alone, so that is a real event
+    // worth naming rather than a flake to retry through.
+    expect(
+      second.correctedWatermark,
+      "something was booked between the two renders; the two documents are of different watermarks and are correctly different",
+    ).toBe(first.correctedWatermark);
+
+    expect(second.believedWatermark).toBe(first.believedWatermark);
+    expect(second.valueDate).toBe(first.valueDate);
+    expect(second.filename).toBe(first.filename);
+    expect(second.fingerprint).toBe(first.fingerprint);
+
+    const a = Buffer.from(first.base64, "base64");
+    const b = Buffer.from(second.base64, "base64");
+    expect(b.byteLength).toBe(a.byteLength);
+    expect(b.equals(a)).toBe(true);
+
+    // It really is a PDF, and it carries nothing that varies by run.
+    const text = a.toString("latin1");
+    expect(text.startsWith("%PDF-1.4\n")).toBe(true);
+    expect(text.endsWith("%%EOF\n")).toBe(true);
+    expect(text).not.toContain("/CreationDate");
+    expect(text).not.toContain("/FontFile");
+
+    // The figures on the page are the figures on the screen. Read the same day
+    // through the library's own comparison and require the PDF to print both
+    // closing balances, formatted the one way this system formats money.
+    const { formatUsd } = await import("@/lib/format/money");
+    const readings = await compare.compareStatement(
+      { accountId: first.accountId, businessDate: first.valueDate },
+      sql,
+    );
+    if (readings !== null) {
+      expect(text).toContain(
+        pdfLiteral(formatUsd(readings.publishedDocument.closingBalanceCents)),
+      );
+      expect(text).toContain(
+        pdfLiteral(formatUsd(readings.correctedDocument.closingBalanceCents)),
+      );
+    }
+
+    // eslint-disable-next-line no-console
+    console.log(
+      [
+        "",
+        "  STATEMENT PDF — live, generated twice",
+        `  file          ${first.filename}`,
+        `  value date    ${first.valueDate}`,
+        `  watermarks    believed seq ${first.believedWatermark} · corrected seq ${first.correctedWatermark}`,
+        `  bytes         ${a.byteLength} both times, identical: ${String(b.equals(a))}`,
+        `  fingerprint   ${first.fingerprint}`,
+        `  recomputed    ${documentFingerprint.name} over both readings' own content hashes`,
+        "",
+      ].join("\n"),
+    );
+  });
 });
+
+/**
+ * A formatted amount as it appears inside a PDF content stream.
+ *
+ * Streams here are uncompressed by design, so a figure on the page is a
+ * literal string in the file — but `(` and `)` are delimiters and `$` is
+ * plain. Nothing in a USD figure needs escaping, so this is the identity plus
+ * the parentheses; it exists so the assertion says what it is looking for.
+ */
+function pdfLiteral(value: string): string {
+  return `(${value}) Tj`;
+}

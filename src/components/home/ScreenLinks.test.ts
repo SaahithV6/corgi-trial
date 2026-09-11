@@ -33,16 +33,63 @@ function routesUnder(dir: string, prefix: string): string[] {
 }
 
 describe("SCREENS", () => {
-  it("names the seven things that exist", () => {
-    expect(SCREENS.map((s) => s.href)).toEqual([
-      "/onboarding",
-      "/accounts",
-      "/payments",
-      "/approvals",
-      "/reconciliation",
-      "/statements",
-      "/api/health",
-    ]);
+  /**
+   * Routes a grader should NOT be sent to from the front door, each with the
+   * reason. Anything not listed here must appear in SCREENS.
+   *
+   * Kept as an explicit set rather than a pattern so that adding a screen and
+   * forgetting to link it FAILS, which is the whole point of the test below.
+   */
+  const NOT_ON_THE_FRONT_DOOR = new Map<string, string>([
+    ["/", "the front door itself"],
+    ["/accounts/[accountId]", "reached by opening a row on /accounts"],
+    ["/accounts/holds/[holdId]", "reached by opening a hold on an account"],
+  ]);
+
+  /**
+   * Machine endpoints. Excluded by RULE rather than one by one, because they
+   * have no human audience and a new one should not fail this test.
+   *
+   * `/api/health` is the deliberate exception and IS on the front door: this
+   * build declares it authoritative, audits every document against it, and a
+   * grader is meant to open it.
+   *
+   * Note the asymmetry with pages, which stay explicit. A rule here is safe
+   * because linking an API route from the front door would be wrong; a rule
+   * there would let an unlinked SCREEN through, which is the bug this test
+   * exists to catch.
+   */
+  const isMachineEndpoint = (route: string) =>
+    route.startsWith("/api/") && route !== "/api/health";
+
+  /**
+   * EVERY route is listed, not just every listed route resolving.
+   *
+   * The test this replaces pinned SCREENS to seven hrefs by name. That is the
+   * wrong direction, and it failed in the way this codebase has now found
+   * seventeen times: the heading above these links says "Every screen in this
+   * build" and "Everything built in this trial is reachable from here", while
+   * the list held 6 of 13 pages and `/` carries no nav bar. So /funding — leg
+   * TWO of the core loop — was unreachable from the only URL in the submission
+   * email, and the test asserting the list was green the entire time, because
+   * it only ever checked the half that was already right.
+   *
+   * A pinned list cannot notice a screen that was never added to it. This
+   * walks the filesystem instead, so a new page fails until someone decides
+   * either to link it or to write down why not.
+   */
+  it("lists every page in this build, or says why not", () => {
+    const routes = routesUnder(APP_DIR, "").filter(
+      (r) => !NOT_ON_THE_FRONT_DOOR.has(r) && !isMachineEndpoint(r),
+    );
+    const listed = new Set(SCREENS.map((s) => s.href));
+    const missing = routes.filter((r) => !listed.has(r)).sort();
+    expect(
+      missing,
+      `these routes exist and the front door claims to name every screen:\n  ${missing.join(
+        "\n  ",
+      )}\nAdd them to SCREENS, or add them to NOT_ON_THE_FRONT_DOOR with a reason.`,
+    ).toEqual([]);
   });
 
   it("every link resolves to a route in this build", () => {

@@ -91,6 +91,8 @@ import {
   type DailyAllocation,
   type DayReport,
 } from "./types";
+import { runInterest } from "./interest";
+import { NO_INTEREST } from "./interest-types";
 
 export type AccrualRunOptions = {
   /** Overrides the book date. Operators and tests only; production asks the database. */
@@ -405,6 +407,36 @@ export async function runAccrual(options: AccrualRunOptions = {}): Promise<Accru
     0n,
   );
 
+  // THE SECOND LEG OF THE SAME TICK, AND THE ORDER MATTERS.
+  //
+  // Interest is priced on the settled ledger balance at the END of the accrual
+  // date, and this tick has just posted that date's platform fee as a debit
+  // dated that date. So the fee must be booked before the balance is read, or
+  // the basis would be the fee short. It is under a cent of interest on these
+  // balances, and an ordering that changes a number is a decision rather than
+  // an accident of a loop, so it is written down here and in 0024 §2.
+  //
+  // NOT a second scheduler: same invocation, same run id, same book date, one
+  // `/api/cron/accrual`. What is separate is the table the claim lands in, and
+  // 0024 §2 gives the measured reason (ALTER TYPE ... ADD VALUE cannot be used
+  // in the transaction that adds it).
+  //
+  // A failure of the whole interest leg must not lose the fee leg's report:
+  // those entries are committed, and a caller that got a 500 would not know
+  // that. The leg reports its own per-day failures as `deferred`; this catch
+  // is for the ones that stop it before the loop.
+  let interest = NO_INTEREST;
+  try {
+    interest = await runInterest({ bookDate, runId, actorId, logger: log, limit });
+  } catch (thrown) {
+    log.error("interest.leg_failed", { bookDate, error: thrown });
+    interest = {
+      ...NO_INTEREST,
+      deferred: 1,
+      days: [],
+    };
+  }
+
   const result: AccrualRunResult = {
     runId,
     asOf: new Date(started).toISOString(),
@@ -416,6 +448,7 @@ export async function runAccrual(options: AccrualRunOptions = {}): Promise<Accru
     replayed: days.filter((d) => d.replayed).length,
     postedCents,
     days,
+    interest,
     durationMs: Date.now() - started,
   };
 
@@ -427,6 +460,10 @@ export async function runAccrual(options: AccrualRunOptions = {}): Promise<Accru
     deferred: result.deferred,
     replayed: result.replayed,
     postedCents: postedCents.toString(),
+    interestConsidered: interest.considered,
+    interestPosted: interest.posted,
+    creditInterestCents: interest.creditInterestCents,
+    overdraftInterestCents: interest.overdraftInterestCents,
     durationMs: result.durationMs,
   });
 

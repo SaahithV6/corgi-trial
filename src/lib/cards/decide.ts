@@ -36,13 +36,39 @@
  *   2  card_not_under_control           this book has never seen the token
  *   3  balance_inquiry_not_a_purchase   status BALANCE_INQUIRY
  *   4  credit_not_a_purchase            status *CREDIT_AUTHORIZATION
- *   5  no_controls_configured           registered card, no control version
- *   6  card_frozen                      the switch is off
- *   7  mcc_blocked                      category on the block list
- *   8  per_transaction_limit_exceeded
- *   9  daily_limit_exceeded
- *  10  monthly_limit_exceeded
- *  11  within_controls                  approve
+ *   5  member_removed                   the holder is off the team
+ *   6  member_suspended                 the holder is suspended
+ *   7  card_frozen                      the switch is off
+ *   8  mcc_blocked                      category on the block list
+ *   9  per_transaction_limit_exceeded   the CARD's limits
+ *  10  daily_limit_exceeded
+ *  11  monthly_limit_exceeded
+ *  12  member_per_transaction_limit_exceeded   the PERSON's envelope
+ *  13  member_daily_limit_exceeded
+ *  14  member_monthly_limit_exceeded
+ *  15  no_controls_configured           no card controls AND no member
+ *  16  within_controls                  approve
+ *
+ * ─── TWO SCOPES, ONE DECISION, NO SECOND ROUND TRIP ─────────────────────────
+ *
+ * Rules 5, 6 and 12 to 14 are about the PERSON holding the card, and they cost
+ * nothing this path was not already paying. `readControlsAndSpend()` reads the
+ * member, their terms and their spend-to-date in the SAME single statement it
+ * already ran for the card, under the SAME 600 ms deadline. There is no second
+ * query, no second deadline and no new way to be slow.
+ *
+ * Which settles the question of what direction the new rules fail in: exactly
+ * the direction the old ones already did. If that one statement misses its
+ * deadline the lookup is `unavailable` and rule 1 DECLINES — and for a member
+ * check that is doubly right, because removing somebody is a REVOCATION, the
+ * same class of promise as freezing a card. A revocation that only holds while
+ * the database is reachable has not been made.
+ *
+ * The one deliberate fail-OPEN is unchanged and now has a sibling: a card that
+ * belongs to NO member is judged exactly as it was before this feature existed
+ * (every card in this book predates it). "We know the answer is no member" and
+ * "we do not know the answer" get opposite defaults, the same distinction rule
+ * 2 draws for the card itself.
  *
  * ─── Fail closed, and the argument for it ───────────────────────────────────
  *
@@ -90,6 +116,7 @@ import {
   type CardControls,
   type ControlLookup,
   type DecisionRule,
+  type MemberDecisionTerms,
   type SpendToDate,
   type Verdict,
 } from "./types";
@@ -104,12 +131,17 @@ export const RULE_ORDER: readonly DecisionRule[] = [
   "card_not_under_control",
   "balance_inquiry_not_a_purchase",
   "credit_not_a_purchase",
-  "no_controls_configured",
+  "member_removed",
+  "member_suspended",
   "card_frozen",
   "mcc_blocked",
   "per_transaction_limit_exceeded",
   "daily_limit_exceeded",
   "monthly_limit_exceeded",
+  "member_per_transaction_limit_exceeded",
+  "member_daily_limit_exceeded",
+  "member_monthly_limit_exceeded",
+  "no_controls_configured",
   "within_controls",
 ];
 
@@ -226,108 +258,282 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
     };
   }
 
-  /* --- 5. Registered, but nobody has set controls. ----------------------- */
-  if (controls === null) {
+  const member = lookup.member ?? null;
+
+  /* --- 5 & 6. The person this card belongs to. --------------------------- */
+  //
+  // BEFORE the card's own controls and BEFORE `no_controls_configured`, and
+  // the ordering is the whole of "removing a member stops their card". A
+  // removed person's card must decline whether or not anybody ever set a
+  // control on it, and `no_controls_configured` approves — so if these two
+  // rules sat after it, a removed member holding a card nobody had configured
+  // would keep spending. That is the bug this order exists to make
+  // unreachable, and `decide.test.ts` drives exactly that case.
+  //
+  // AFTER the two not-a-purchase rules, and that is deliberate in the other
+  // direction: a REFUND to a removed person's card is still approved. The
+  // money goes back to the BUSINESS's account — the card posts to their 2100,
+  // not to the individual — so declining it would leave the customer unable to
+  // receive their own money back because an employee left. A credit is not
+  // spend, and revoking somebody's ability to spend is not revoking the
+  // business's ability to be repaid.
+  if (member !== null && member.state !== "active") {
+    const removed = member.state === "removed";
+    return {
+      outcome: "decline",
+      result: "CARD_PAUSED",
+      rule: removed ? "member_removed" : "member_suspended",
+      reason: removed
+        ? `The person this card belongs to is no longer on this team, so the card no longer authorises. Any authorisation already outstanding still settles.`
+        : `The person this card belongs to is suspended, so the card is not authorising at the moment.`,
+      inputs: {
+        card_id: lookup.cardId,
+        member_id: member.memberId,
+        member_version: member.version,
+        member_state: member.state,
+        member_role: member.role,
+        amount_cents: cents(request.amountCents),
+        mcc: request.mcc,
+        request_status: request.requestStatus,
+        // The card's controls are NOT consulted, and this says so rather than
+        // leaving a reader to infer it from an absent field.
+        control_version: controls?.version ?? null,
+        controls_consulted: false,
+      },
+    };
+  }
+
+  /* --- 7 to 11. The card's own controls. --------------------------------- */
+  if (controls !== null) {
+    const base = {
+      card_id: lookup.cardId,
+      control_version: controls.version,
+      member_id: member?.memberId ?? null,
+      member_version: member?.version ?? null,
+      amount_cents: cents(request.amountCents),
+      mcc: request.mcc,
+      request_status: request.requestStatus,
+    } as const;
+
+    /* --- 7. The switch. -------------------------------------------------- */
+    if (controls.cardState === "frozen") {
+      return {
+        outcome: "decline",
+        result: "CARD_PAUSED",
+        rule: "card_frozen",
+        reason: `This card is frozen (control version ${controls.version}). No authorisation is approved while it is off.`,
+        inputs: { ...base, card_state: controls.cardState },
+      };
+    }
+
+    /* --- 8. Merchant category. ------------------------------------------- */
+    //
+    // A blocked list with no MCC on the request is NOT a block. The network
+    // sends an MCC on every card-present authorisation, but `parseAsaRequest`
+    // returns null for anything that is not four digits, and declining on the
+    // absence of evidence would decline a real purchase because a terminal sent
+    // a malformed field. Recorded as `mcc: null` on the approving row, so the
+    // gap is visible rather than assumed away.
+    if (request.mcc !== null && controls.blockedMccs.includes(request.mcc)) {
+      return {
+        outcome: "decline",
+        result: "UNAUTHORIZED_MERCHANT",
+        rule: "mcc_blocked",
+        reason: `Merchant category ${request.mcc} is blocked on this card (control version ${controls.version}).`,
+        inputs: {
+          ...base,
+          blocked_mccs: controls.blockedMccs.join(","),
+          matched_mcc: request.mcc,
+        },
+      };
+    }
+
+    /* --- 9. Per transaction. --------------------------------------------- */
+    const perTxn = controls.perTxnLimitCents;
+    if (perTxn !== null && request.amountCents > perTxn) {
+      return {
+        outcome: "decline",
+        result: "VELOCITY_EXCEEDED",
+        rule: "per_transaction_limit_exceeded",
+        reason: `This authorisation is over the per-transaction limit on this card (control version ${controls.version}).`,
+        inputs: {
+          ...base,
+          limit_cents: cents(perTxn),
+          over_by_cents: cents(request.amountCents - perTxn),
+        },
+      };
+    }
+
+    /* --- 10 & 11. Velocity. ----------------------------------------------- */
+    //
+    // The comparison is `spend + this amount > limit`, not `spend > limit`. A
+    // card with $10 of a $10 daily limit already spent has spent its limit and
+    // not exceeded it; the eleventh dollar is the one that is refused. Written
+    // out because the off-by-one here is the difference between a $10 limit that
+    // permits $10 and one that permits $19.99.
+    const day = velocity(request.amountCents, lookup.spend, controls, "day");
+    if (day !== null) return day;
+
+    const month = velocity(request.amountCents, lookup.spend, controls, "month");
+    if (month !== null) return month;
+  }
+
+  /* --- 12 to 14. The person's envelope, on top of the card's. ------------- */
+  //
+  // THE ORDER BETWEEN THE TWO SCOPES IS A CHOICE AND IT IS THIS WAY ROUND.
+  // First match wins, so whichever scope is checked first is the one whose
+  // reason the cardholder gets. The card is checked first because it is the
+  // narrower instrument and the thing an operator most recently touched on the
+  // card screen; the person is the OUTER envelope, and "you are inside every
+  // limit on this card but outside your own monthly allowance" is exactly the
+  // sentence that should come second. Both are recorded either way, and
+  // `member_*` and the card rules carry different names so a decision log can
+  // be grouped by which scope refused.
+  //
+  // THE PERSON'S SPEND IS ACROSS EVERY CARD THEY HOLD, not just this one. That
+  // is the point of a per-person limit: a $2,000 monthly allowance that reset
+  // every time somebody was given a second card would not be an allowance.
+  if (member !== null) {
+    const spend = lookup.memberSpend ?? { dayCents: 0n, monthCents: 0n };
+    const perTxn = member.perTxnLimitCents;
+    if (perTxn !== null && request.amountCents > perTxn) {
+      return {
+        outcome: "decline",
+        result: "VELOCITY_EXCEEDED",
+        rule: "member_per_transaction_limit_exceeded",
+        reason: `This authorisation is over ${member.displayName}'s own per-transaction limit (member terms version ${member.version}).`,
+        inputs: {
+          ...memberBase(request, lookup.cardId, controls, member),
+          scope: "member",
+          limit_cents: cents(perTxn),
+          over_by_cents: cents(request.amountCents - perTxn),
+        },
+      };
+    }
+
+    const day = memberVelocity(request, lookup.cardId, controls, member, spend, "day");
+    if (day !== null) return day;
+
+    const month = memberVelocity(request, lookup.cardId, controls, member, spend, "month");
+    if (month !== null) return month;
+  }
+
+  /* --- 15. Nothing to judge it against. ---------------------------------- */
+  //
+  // Unchanged in meaning and tightened in predicate: it now also requires that
+  // the card belongs to nobody. A card with no control version whose HOLDER has
+  // limits has been judged — by the block above — and saying "no controls have
+  // been set" about it would be false.
+  if (controls === null && member === null) {
     return {
       outcome: "approve",
       result: "APPROVED",
       rule: "no_controls_configured",
       reason:
-        "No controls have been set on this card. Approved. A card with no controls is not a card with a control that failed.",
+        "No controls have been set on this card and it belongs to no member. Approved. A card with no controls is not a card with a control that failed.",
       inputs: {
         card_id: lookup.cardId,
         amount_cents: cents(request.amountCents),
         mcc: request.mcc,
         control_version: null,
+        member_id: null,
       },
     };
   }
 
-  const base = {
-    card_id: lookup.cardId,
-    control_version: controls.version,
-    amount_cents: cents(request.amountCents),
-    mcc: request.mcc,
-    request_status: request.requestStatus,
-  } as const;
-
-  /* --- 6. The switch. ---------------------------------------------------- */
-  if (controls.cardState === "frozen") {
-    return {
-      outcome: "decline",
-      result: "CARD_PAUSED",
-      rule: "card_frozen",
-      reason: `This card is frozen (control version ${controls.version}). No authorisation is approved while it is off.`,
-      inputs: { ...base, card_state: controls.cardState },
-    };
-  }
-
-  /* --- 7. Merchant category. --------------------------------------------- */
-  //
-  // A blocked list with no MCC on the request is NOT a block. The network
-  // sends an MCC on every card-present authorisation, but `parseAsaRequest`
-  // returns null for anything that is not four digits, and declining on the
-  // absence of evidence would decline a real purchase because a terminal sent
-  // a malformed field. Recorded as `mcc: null` on the approving row, so the
-  // gap is visible rather than assumed away.
-  if (request.mcc !== null && controls.blockedMccs.includes(request.mcc)) {
-    return {
-      outcome: "decline",
-      result: "UNAUTHORIZED_MERCHANT",
-      rule: "mcc_blocked",
-      reason: `Merchant category ${request.mcc} is blocked on this card (control version ${controls.version}).`,
-      inputs: {
-        ...base,
-        blocked_mccs: controls.blockedMccs.join(","),
-        matched_mcc: request.mcc,
-      },
-    };
-  }
-
-  /* --- 8. Per transaction. ------------------------------------------------ */
-  const perTxn = controls.perTxnLimitCents;
-  if (perTxn !== null && request.amountCents > perTxn) {
-    return {
-      outcome: "decline",
-      result: "VELOCITY_EXCEEDED",
-      rule: "per_transaction_limit_exceeded",
-      reason: `This authorisation is over the per-transaction limit on this card (control version ${controls.version}).`,
-      inputs: {
-        ...base,
-        limit_cents: cents(perTxn),
-        over_by_cents: cents(request.amountCents - perTxn),
-      },
-    };
-  }
-
-  /* --- 9 & 10. Velocity. -------------------------------------------------- */
-  //
-  // The comparison is `spend + this amount > limit`, not `spend > limit`. A
-  // card with $10 of a $10 daily limit already spent has spent its limit and
-  // not exceeded it; the eleventh dollar is the one that is refused. Written
-  // out because the off-by-one here is the difference between a $10 limit that
-  // permits $10 and one that permits $19.99.
-  const day = velocity(request.amountCents, lookup.spend, controls, "day");
-  if (day !== null) return day;
-
-  const month = velocity(request.amountCents, lookup.spend, controls, "month");
-  if (month !== null) return month;
-
-  /* --- 11. Approve. ------------------------------------------------------- */
+  /* --- 16. Approve. ------------------------------------------------------- */
   return {
     outcome: "approve",
     result: "APPROVED",
     rule: "within_controls",
-    reason: `Within every control on this card (control version ${controls.version}).`,
+    reason:
+      member === null
+        ? `Within every control on this card (control version ${controls?.version ?? "none"}).`
+        : `Within every control on this card and every limit on ${member.displayName} (member terms version ${member.version}).`,
     inputs: {
-      ...base,
-      card_state: controls.cardState,
-      per_txn_limit_cents: cents(controls.perTxnLimitCents),
-      daily_limit_cents: cents(controls.dailyLimitCents),
+      card_id: lookup.cardId,
+      control_version: controls?.version ?? null,
+      amount_cents: cents(request.amountCents),
+      mcc: request.mcc,
+      request_status: request.requestStatus,
+      card_state: controls?.cardState ?? null,
+      per_txn_limit_cents: cents(controls?.perTxnLimitCents ?? null),
+      daily_limit_cents: cents(controls?.dailyLimitCents ?? null),
       daily_spend_cents: cents(lookup.spend.dayCents),
-      monthly_limit_cents: cents(controls.monthlyLimitCents),
+      monthly_limit_cents: cents(controls?.monthlyLimitCents ?? null),
       monthly_spend_cents: cents(lookup.spend.monthCents),
-      blocked_mcc_count: controls.blockedMccs.length,
+      blocked_mcc_count: controls?.blockedMccs.length ?? 0,
+      member_id: member?.memberId ?? null,
+      member_version: member?.version ?? null,
+      member_role: member?.role ?? null,
+      member_per_txn_limit_cents: cents(member?.perTxnLimitCents ?? null),
+      member_daily_limit_cents: cents(member?.dailyLimitCents ?? null),
+      member_daily_spend_cents: cents(lookup.memberSpend?.dayCents ?? null),
+      member_monthly_limit_cents: cents(member?.monthlyLimitCents ?? null),
+      member_monthly_spend_cents: cents(lookup.memberSpend?.monthCents ?? null),
+    },
+  };
+}
+
+/** The figures every member-scoped decline records. One place, so they agree. */
+function memberBase(
+  request: AuthRequest,
+  cardId: string | null,
+  controls: CardControls | null,
+  member: MemberDecisionTerms,
+): Readonly<Record<string, string | number | boolean | null>> {
+  return {
+    card_id: cardId,
+    control_version: controls?.version ?? null,
+    member_id: member.memberId,
+    member_version: member.version,
+    member_role: member.role,
+    amount_cents: cents(request.amountCents),
+    mcc: request.mcc,
+    request_status: request.requestStatus,
+  };
+}
+
+/**
+ * One velocity window, for the PERSON rather than the card.
+ *
+ * A separate function from `velocity()` below rather than a parameterised one,
+ * because the two record different `inputs` and cite different versions, and a
+ * shared function with a `scope` flag would be one function with two meanings on
+ * a path where the recorded figures are the evidence in a dispute.
+ */
+function memberVelocity(
+  request: AuthRequest,
+  cardId: string | null,
+  controls: CardControls | null,
+  member: MemberDecisionTerms,
+  spend: SpendToDate,
+  window: "day" | "month",
+): Verdict | null {
+  const limit = window === "day" ? member.dailyLimitCents : member.monthlyLimitCents;
+  if (limit === null) return null;
+
+  const already = window === "day" ? spend.dayCents : spend.monthCents;
+  const total = already + request.amountCents;
+  if (total <= limit) return null;
+
+  return {
+    outcome: "decline",
+    result: "VELOCITY_EXCEEDED",
+    rule: window === "day" ? "member_daily_limit_exceeded" : "member_monthly_limit_exceeded",
+    reason:
+      window === "day"
+        ? `This authorisation would take ${member.displayName} past their own daily limit (member terms version ${member.version}).`
+        : `This authorisation would take ${member.displayName} past their own monthly limit (member terms version ${member.version}).`,
+    inputs: {
+      ...memberBase(request, cardId, controls, member),
+      scope: "member",
+      window,
+      window_basis: "book_date (America/New_York)",
+      limit_cents: limit.toString(),
+      spend_cents: already.toString(),
+      would_total_cents: total.toString(),
+      over_by_cents: (total - limit).toString(),
     },
   };
 }

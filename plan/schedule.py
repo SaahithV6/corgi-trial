@@ -56,13 +56,25 @@ def validate():
     return errs, order
 
 # --------------------------------------------------------------------------- CPM
+def eff_dur(n):
+    """Remaining cost of a node.
+
+    A finished node costs nothing. Without this the critical path is computed
+    over work that already shipped, so it reports a tour of the first evening
+    of the trial and calls it the bottleneck -- confidently, and with a clean
+    validation line above it. `simulate()` has always honoured status; `cpm()`
+    did not, and the two disagreeing is worse than either being wrong alone,
+    because the disagreement is invisible in the output.
+    """
+    return 0 if n["status"] in ("done", "cut") else n["dur"]
+
 def cpm(order):
     """Earliest/latest start-finish with unlimited workers. Minutes from T0."""
     ES, EF = {}, {}
     for i in order:
         n = BY[i]
         ES[i] = max([EF[d] for d in n["deps"] if d in EF] or [0])
-        EF[i] = ES[i] + n["dur"]
+        EF[i] = ES[i] + eff_dur(n)
     horizon = max(EF.values())
     LF, LS = {}, {}
     kids = defaultdict(list)
@@ -72,8 +84,12 @@ def cpm(order):
     for i in reversed(order):
         n = BY[i]
         LF[i] = min([LS[k] for k in kids[i] if k in LS] or [horizon])
-        LS[i] = LF[i] - n["dur"]
+        LS[i] = LF[i] - eff_dur(n)
     slack = {i: LS[i] - ES[i] for i in order}
+    # a done node has zero duration and therefore zero slack; it would
+    # otherwise dominate the "zero slack" listing and hide the real path.
+    slack = {i: (10**6 if BY[i]["status"] in ("done", "cut") else slack[i])
+             for i in order}
     return ES, EF, LS, LF, slack, horizon
 
 # --------------------------------------------------------------------------- resources
@@ -203,8 +219,10 @@ def main():
 
     ES, EF, LS, LF, slack, horizon = cpm(order)
     budget = graph.FREEZE_HOURS * 60
-    total = sum(n["dur"] for n in graph.NODES if n["status"] != "cut")
-    print(f"\ntotal work            {total/60:6.1f} h across {len(graph.NODES)} nodes")
+    total = sum(eff_dur(n) for n in graph.NODES)
+    open_n = sum(1 for n in graph.NODES if n["status"] not in ("done", "cut"))
+    print(f"\nwork REMAINING        {total/60:6.1f} h across {open_n} open nodes "
+          f"({len(graph.NODES)} total, {len(graph.NODES) - open_n} done or cut)")
     print(f"critical path (inf)   {horizon/60:6.1f} h   <- floor, unlimited workers")
     print(f"budget to freeze      {budget/60:6.1f} h")
 

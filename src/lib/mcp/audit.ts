@@ -5,18 +5,28 @@
  * before they ran. A surface that only logs what it allowed cannot answer the
  * question people actually ask after an incident, which is "what did it try?"
  *
- * WHERE THIS LANDS. One JSON line per call through `@/lib/log`, event
- * `mcp.audit`, which is the same drain every other line in this system goes
- * to. There is no `mcp_audit` table because migrations are owned by another
- * worker in this build; the DDL I would add is at the bottom of this file so
- * it is a five-minute change rather than a design question.
+ * WHERE THIS LANDS. Two places, and the order is load-bearing.
  *
- * What is NOT missing in the meantime: the write tool's audit trail is already
- * in the database and already immutable. `payment_instruction` plus its
+ *   1. One JSON line per call through `@/lib/log`, event `mcp.audit`, the same
+ *      drain every other line in this system goes to. It touches no database,
+ *      so it survives the database being gone.
+ *   2. One row per call in `mcp_audit` — `db/migrations/0035_audit.sql` §2,
+ *      written by `src/lib/audit/sink.ts`, append-only by privilege and by
+ *      trigger exactly like `journal_entry`, and projected onto the actor
+ *      trail by `v_actor_action`.
+ *
+ * `src/app/api/mcp/route.ts` tees the two in that order and AWAITS the row
+ * before the response leaves, so an audit write that fails is a fact somebody
+ * learns rather than a detached promise a frozen lambda drops. Which way that
+ * failure falls, and why, is argued at length in the header of
+ * `src/lib/audit/sink.ts`: open for the call, closed for the claim.
+ *
+ * The write tool never depended on either. `payment_instruction` plus its
  * `requested` event in `payment_instruction_event` record the agent's actor
  * id, the exact amount, the destination, the value date and the content hash,
- * on tables `corgi_app` holds no UPDATE or DELETE on. The log line is the
- * complete record for reads and a convenience for writes.
+ * synchronously and transactionally, on tables `corgi_app` holds no UPDATE or
+ * DELETE on. These two sinks are the record of what the agent READ and what it
+ * was REFUSED — the half that had no durable home until the route was wired.
  *
  * ARGUMENTS ARE REDACTED BEFORE THEY ARE WRITTEN. An audit log that captures a
  * full bank account number becomes the most sensitive store in the system and
@@ -89,7 +99,18 @@ export class MemoryAuditSink implements AuditSink {
   }
 }
 
-/** Sinks that both receive every record. Used to add a table without losing the line. */
+/**
+ * Sinks that all receive every record, IN ARGUMENT ORDER.
+ *
+ * The order is not cosmetic and the route depends on it: `loggerAuditSink`
+ * goes first because it has no dependency that can be down, so the record
+ * exists before anything reaches for Postgres. A sink placed here must have a
+ * total `record()` — it may not throw — because this runs inside the server's
+ * `finally` and a throw there would replace a correct response with a 500.
+ * Both sinks in this repository satisfy that: the logger catches nothing
+ * because it can fail at nothing, and the durable sink converts every database
+ * failure into a logged line plus a rejected-nothing promise.
+ */
 export function teeAuditSink(...sinks: readonly AuditSink[]): AuditSink {
   return {
     record(entry) {
@@ -165,31 +186,17 @@ export function maskToLast4(value: string): string {
 }
 
 /*
- * TODO(migrations owned elsewhere) — the table this should also write to.
- * Append-only, same treatment as every other record of a fact in this schema:
+ * The table this also writes to now exists and is wired:
  *
- *   CREATE TABLE mcp_audit (
- *     id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
- *     at             timestamptz NOT NULL DEFAULT now(),
- *     request_id     text NOT NULL,
- *     method         text NOT NULL,
- *     tool           text,
- *     outcome        text NOT NULL,
- *     error_code     text,
- *     actor_id       uuid REFERENCES actor(id),
- *     business_id    uuid REFERENCES business(id),
- *     grant_label    text,
- *     token_fp       text,
- *     client_key     text NOT NULL,
- *     arguments      jsonb,          -- redacted by redactArguments() first
- *     result         jsonb,
- *     duration_ms    integer NOT NULL
- *   );
- *   CREATE INDEX mcp_audit_actor_idx ON mcp_audit (actor_id, at DESC);
- *   CREATE INDEX mcp_audit_outcome_idx ON mcp_audit (outcome, at DESC);
- *   GRANT INSERT ON mcp_audit TO corgi_app;
- *   -- and the same no_update_delete / no_truncate triggers as the money
- *   -- tables, since an audit row a process can edit is not an audit row.
+ *   DDL          db/migrations/0035_audit.sql §2  (privileges, BEFORE UPDATE
+ *                OR DELETE trigger, TRUNCATE trigger — four layers, the same
+ *                ones `journal_entry` has)
+ *   writer       src/lib/audit/sink.ts            (durableAuditSink)
+ *   call site    src/app/api/mcp/route.ts         (teeAuditSink, awaited)
+ *   registry     audit_source → projected, 0037_mcp_audit_wiring.sql
+ *   projection   v_actor_action, surface `agent`, one row per call
  *
- * It is a `teeAuditSink(loggerAuditSink(log), tableAuditSink(sql))` away.
+ * `grant_fp` in the table is `grantFingerprint` here, and neither is ever the
+ * token: four bytes of its sha256, enough to tell two grants sharing a label
+ * apart in an investigation and useless to anyone who steals the row.
  */

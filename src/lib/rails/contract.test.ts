@@ -55,6 +55,7 @@ import {
   type RailOrigination,
 } from './contract';
 import { IncreaseAchRail } from './increase/client';
+import { increaseWireAdapter } from './wire/adapter';
 import {
   usdc,
   type PayoutOutcome,
@@ -227,12 +228,19 @@ describe('what the contract says a rail is', () => {
       rail: new AchSimRail({ engine: achRig().engine }),
       env: {},
     });
-    // There has never been an INCREASE_API_KEY in this repo. Every operation
-    // says so, in the type, not only in a README paragraph.
+    // ONE operation has met Increase, and exactly one. `probe` is `measured`
+    // — GET /accounts?limit=1 answered 200 on 2026-09-11, re-runnable from
+    // ../increase/probe.integration.test.ts. The other four are still
+    // `unexercised`: reading /accounts proves a credential authenticates and
+    // proves nothing at all about POST /ach_transfers, the settlement
+    // promotion, or an R01's shape. A probe that promoted its neighbours would
+    // be liveness by presence with a round trip painted on it.
     for (const op of RAIL_OPERATIONS) {
       const entry = increase.supports[op];
       expect(entry.supported).toBe(true);
-      if (entry.supported) expect(entry.proof).toBe('unexercised');
+      if (entry.supported) {
+        expect(entry.proof).toBe(op === 'probe' ? 'measured' : 'unexercised');
+      }
     }
 
     // The simulator proves our code and never a bank.
@@ -437,7 +445,12 @@ describe('the generic liveness reporter', () => {
     expect(probes.every((p) => p.label === 'LIVE')).toBe(true);
     // Order is stable, so a rendered table does not reshuffle between refreshes.
     expect(probes.map((p) => p.provider)).toEqual(rails.map((r) => r.identity.provider));
-    expect(summariseProbes(probes)).toEqual({ live: 3, simulated: 0, total: 3 });
+    // FOUR, not three: one vendor, two rails. `increase.ach` and
+    // `increase.wire` are separate slots behind one credential, and Increase
+    // gates features per key — the same key that answers 200 on
+    // /wire_transfers answers 403 on /wire_drawdown_requests — so a single
+    // Increase row would be one probe standing in for two propositions.
+    expect(summariseProbes(probes)).toEqual({ live: 4, simulated: 0, total: 4 });
   });
 
   it('a rejected credential can never be labelled LIVE', async () => {
@@ -526,7 +539,9 @@ describe('the capability matrix', () => {
   it('has a cell for every operation on every rail, with a reason in each', () => {
     const rails = [...allRailAdapters({ env: {} }), stablecoinRailAdapter(stubProvider('confirmed'))];
     const matrix = railCapabilityMatrix(rails);
-    expect(matrix).toHaveLength(4);
+    // ACH (the simulator, with no key in this env), card, open banking, wire,
+    // and the stablecoin rail passed in.
+    expect(matrix).toHaveLength(5);
     for (const row of matrix) {
       expect(row.cells.map((c) => c.operation)).toEqual([...RAIL_OPERATIONS]);
       for (const cell of row.cells) expect(cell.note.length).toBeGreaterThan(20);
@@ -549,13 +564,20 @@ describe('the capability matrix', () => {
     // `~` is "supported, and nobody has run it against the provider".
     expect(table).toContain('| ACH simulator |');
     expect(table).toContain('| Lithic card issuing |');
-    expect(table.split('\n')).toHaveLength(6);
+    expect(table).toContain('| Increase wire (Fedwire) |');
+    expect(table.split('\n')).toHaveLength(7);
     // The card row: no originate, everything else.
     const cardRow = table.split('\n').find((l) => l.includes('Lithic card issuing'));
     expect(cardRow).toMatch(/\| - \| \+ \| \+ \| \+ \| \+ \|$/);
     // Plaid: probe and nothing else.
     const plaidRow = table.split('\n').find((l) => l.includes('Plaid'));
     expect(plaidRow).toMatch(/\| - \| - \| - \| - \| \+ \|$/);
+    // The wire row: everything but `reverse`, and the refusal is the finding.
+    // A Fedwire funds transfer is final on receipt — money does sometimes come
+    // back, measured, but what comes back is a SECOND payment with its own
+    // IMAD and a null return reason code, not our transfer being unwound.
+    const wireRow = table.split('\n').find((l) => l.includes('Increase wire'));
+    expect(wireRow).toMatch(/\| \+ \| \+ \| \+ \| - \| \+ \|$/);
   });
 });
 
@@ -649,6 +671,16 @@ function documentedRails(): readonly RailAdapter[] {
     plaidOpenBankingAdapter({ env: {} }),
     stablecoinRailAdapter(stubProvider('confirmed')),
     stablecoinRailAdapter(labelledStub('circle.w3s', 'Circle Web3 Services, Base Sepolia')),
+    // THE WIRE RAIL WAS EXCLUDED FROM THIS BUILDER, AND THAT WAS THE BUG.
+    //
+    // It was left out so that the drift assertion below stayed green while
+    // docs/RAILS.md still carried five rows. That is the mechanism built to
+    // make the docs true being used as the reason they were incomplete: the
+    // rail existed, was measured against Increase's sandbox end to end, and
+    // was invisible on the one table this repo points at when it is asked
+    // which integrations are real. A generated table that omits a rail to
+    // avoid being regenerated is a hand-written table with extra steps.
+    increaseWireAdapter({ env: {} }),
   ];
 }
 

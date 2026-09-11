@@ -23,6 +23,14 @@
     {
       "path": "/api/cron/accrual",
       "schedule": "41 6 * * *"
+    },
+    {
+      "path": "/api/cron/outbound",
+      "schedule": "53 7 * * *"
+    },
+    {
+      "path": "/api/cron/holds",
+      "schedule": "11 8 * * *"
     }
   ]
 }

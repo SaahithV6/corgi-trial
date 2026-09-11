@@ -1,17 +1,33 @@
 # Operations we do not hand an autonomous agent
 
-The MCP surface at `POST /api/mcp` has eight tools. Seven read —
+The MCP surface at `POST /api/mcp` has eleven tools. Ten read —
 `get_balance`, `list_pots`, `list_transactions`, `list_payees`,
-`list_standing_orders`, `list_card_controls`, `list_recon_breaks`. The eighth
-writes a request into a queue a person has to work through. That is the whole
-surface, and the interesting property is not what is on it — it is what is
-missing and why.
+`list_standing_orders`, `list_card_controls`, `list_accruals`,
+`list_disputes`, `list_recon_breaks`, `list_agent_limits`. The eleventh writes
+a request into a queue a person has to work through. That is the whole surface,
+and the interesting property is not what is on it — it is what is missing and
+why.
 
-The reads grew and the writes did not. Four features shipped after the first
-cut of this surface — pots, the payee book, standing orders, card controls —
-and each one brought an obvious write with it. Every one of those writes is
-refused below, with the reason, because "the agent can already see it" is not an
-argument for letting it act.
+The reads grew and the writes did not. Six features shipped after the first cut
+of this surface — pots, the payee book, standing orders, card controls,
+disputes, fee accrual — and each one brought an obvious write with it. Every one
+of those writes is refused below, with the reason, because "the agent can
+already see it" is not an argument for letting it act. **Reads went from three
+to ten and writes went from one to one.** That asymmetry is the design and not
+an accident of what happened to be ready.
+
+**One of the ten readers is this document.** `list_agent_limits` serves the
+list below through the protocol, generated from `src/lib/mcp/limits.ts` rather
+than transcribed from here. It exists because a written policy the agent cannot
+read is enforced only by refusals the agent cannot interpret: the honest answer
+to a model that tries `approve_payment` used to be
+`unknown tool "approve_payment"`, which is indistinguishable from a typo and
+invites it to guess `approve_instruction` next, then to invent a workaround,
+then to tell a customer our software is broken. The tool answers the guess with
+the argument, the enforcing constraint, and where the operation actually lives.
+`src/lib/mcp/limits.test.ts` fails the build if any tool this document claims is
+absent ever appears in the registry, so the policy and the surface cannot drift
+apart.
 
 This document is the list of what is missing. It is not a policy we intend to
 enforce in code later; every item below is already absent from the tool
@@ -28,9 +44,35 @@ through `@/lib/cards/store`, which also exports `setCardControls`;
 nothing became reachable — but "we did not import the write" is a fact about a
 diff, and a fact about a diff is not a control.
 `src/lib/mcp/no-write-imports.test.ts` makes it one: it reads every import
-statement in `src/lib/mcp/` and fails the build if any of twenty-two named
-write functions, or any of seven write-only modules, appears in one. The
+statement in `src/lib/mcp/` and fails the build if any of forty named
+write functions, or any of twelve write-only modules, appears in one. The
 failure message names the section of this document that argues the refusal.
+
+The disputes and accrual readers added a second SHAPE of that problem, which is
+worth naming because the first guard would not have caught it. `list_disputes`
+needs `listDisputeStates`, which lives in `@/lib/disputes/store` beside
+`insertDispute` — the familiar case. But `@/lib/disputes/index.ts` re-exports
+`./operations`, which imports `postEntry`; and `@/lib/accrual/index.ts`
+re-exports `./accrue`, which does the same. Importing a *barrel* for a read
+brings in one binding and makes nothing new callable, and it still puts the
+journal-writing module into this process's graph — which would quietly falsify
+the strongest sentence in this document. The gateway therefore reaches past
+both barrels, and both barrels are now forbidden modules, so that is a rule
+rather than a habit.
+
+**The agent surface also stopped defining a balance.** It used to compute
+available balance itself and the figure it produced was LARGER than the
+customer's own screen, by exactly the operator holds plus the debits already
+booked to leave — which made it the fifth definition in a system that had just
+spent migration 0022 collapsing four that differed by $30,662.10. It escaped
+`v_balance_definition_drift` because that view compares the definitions it knows
+about and this one was never registered with it. It is now deleted rather than
+registered: every money figure the surface returns comes from
+`ledger_availability()`. This mattered here more than it would elsewhere,
+because `initiate_payment` funds-checks against exactly that number — a
+permissive balance means an agent proposing a payment the customer cannot
+afford, and the entire safety argument for this surface is that an agent can
+only ever propose.
 
 **Read the last section of this file before the debrief.** It sorts every
 refusal into "the database will not represent it", "the capability is not in
@@ -636,6 +678,174 @@ survives the person who chose being replaced.
 
 ---
 
+# The refusals that came with disputes and accrual
+
+Sections 9-16 arrived with pots, payees, standing orders, card controls and
+KYB. These four arrived with the disputes and fee-accrual readers, and §17 is
+the closest call anywhere in this document — it is the one candidate write that
+passes the `initiate_payment` test and is refused anyway.
+
+## 17. Raising, withdrawing or progressing a dispute
+
+**Absent tools:** `raise_dispute`, `open_dispute`, `withdraw_dispute`,
+`submit_evidence`, `record_decision`.
+
+**The argument FOR this tool is the strongest in the document and I want it
+written down first.** Raising a dispute moves no money: the case opens at status
+`raised`, nothing is posted, and the only thing that exists is a claim. The
+money movement — provisional credit — needs a Corgi human approver who is not
+the raiser and who belongs to no customer business, enforced by
+`assert_dispute_lifecycle()` at SQLSTATE 42501. So on this document's own test —
+*if this call were wrong, would a person get to see it before the consequence?*
+— a `raise_dispute` tool **passes**, and it passes more convincingly than
+`initiate_payment` does, because a dispute needs two human steps before a cent
+moves and a payment needs one.
+
+It is refused on a different test, and the difference is worth the paragraph.
+
+**A payment instruction is a REQUEST. A dispute is an ASSERTION OF FACT.** An
+unapproved payment instruction simply expires; nothing happened, and the only
+cost was an approver's attention. A dispute is durable from the moment it is
+written, and it is durable in three ways at once. It starts the network's
+outside-date clock — `network_outside_date`, after which there is no case left
+to make, so a wrong case consumes a real deadline. It creates an obligation
+somebody has to work, on a queue that is not the payments queue. And because
+`dispute_event` is append-only, **a withdrawal is another event and not an
+erasure**: a claim of fraud that a model composed out of a customer's ambiguous
+sentence is permanent history attributed to that business, filed against a named
+merchant, in a record we would hand to a regulator. "The agent said the charge
+was fraudulent" is not a sentence that gets better with a withdrawal event after
+it.
+
+There is a second reason and it is structural rather than a judgement.
+`raiseDispute()` lives in `@/lib/disputes/operations`, and that module imports
+`postEntry` — it has to, because the grant, the clawback and the write-off are
+postings. Importing it would put `ledger/post.ts` into this process's module
+graph. Nothing would become callable, and the strongest sentence in this
+document would nonetheless stop being true. Splitting intake out of that module
+is a real and reasonable change; it is a change in a module this surface does
+not own, and "we restructured someone else's feature so we could have a tool" is
+not a thing to do at hour forty of a build.
+
+**What stops it structurally.** `@/lib/disputes/operations` is a forbidden
+module. `raiseDispute`, `submitEvidence` and `recordDecision` are forbidden
+imports — and so are `insertDispute` and `insertDisputeEvent`, which live in the
+read-only store the gateway *does* import, so the write cannot be hand-rolled
+out of the pieces. `assert_dispute_intake()` independently enforces the four
+intake rules under an advisory lock: only a settled card-rail entry in the
+financial book can be disputed, the claim cannot exceed what is unclaimed, and
+the two accounts must be the `2100` and `9200` leaves of the SAME business.
+
+**What the agent CAN do.** `list_disputes` returns every case, its status folded
+from its own event stream, what has been advanced, what is still held, what the
+case is waiting on and how many days are left before the network's deadline.
+"Your claim is with the network, $73.40 was advanced to you on the 8th and is
+held until the verdict, and the case has 48 days left" is a complete answer, and
+it ends with a person.
+
+**If this moved onto the surface**, the honest version is a `dispute_intake`
+proposal queue with its own screen — the same shape the payee book needs in
+§12 — where an operator converts a proposal into a case. That is a feature, not
+a tool. The tool without the queue is the part that looks like progress.
+
+## 18. Authorising, granting or recovering provisional credit
+
+**Absent tools:** `authorize_provisional_credit`, `grant_provisional_credit`,
+`decline_provisional_credit`, `claw_back_credit`, `write_off_credit`,
+`finalize_credit`.
+
+§2 wearing different clothes, with one clause that does not arise for payments
+and that is worth reading:
+
+> **The counterparty to the advance cannot authorise it.** Provisional credit is
+> the bank advancing its OWN money to this customer, so an approver belonging to
+> the disputing business would be approving a payment to themselves. The
+> authoriser must be a Corgi human approver — `business_id IS NULL` — who is not
+> the raiser.
+
+`assert_dispute_lifecycle()` enforces all of that: `kind = 'human'`,
+`can_approve`, `business_id IS NULL`, and `actor_id <> raised_by`, each with its
+own SQLSTATE 42501 message. `actor_only_humans_approve` on `actor` excludes
+every agent a second time, from a different direction. And
+`dispute_event_one_authorization_per_actor` is a UNIQUE INDEX that stops one
+approver writing two rows to satisfy a two-approver policy — the failure mode
+`count(*)` would have missed and `count(DISTINCT actor_id)` catches.
+
+**Guarantee: unrepresentable.** An agent-authorised provisional credit is not a
+row Postgres will store, from any connection, with or without our code in the
+path. The clawback and the write-off are the other end of the same decision —
+one takes the money back off the customer, the other absorbs it onto `5200` —
+and both are postings, so §8 refuses them as well.
+
+**What the agent CAN do.** `list_disputes` reports `needs_authorization`, how
+many authorisations are held, how many the policy requires, and the threshold.
+That is enough to tell a customer exactly what their case is waiting on without
+being able to be the thing it is waiting on.
+
+## 19. Enrolling, re-pricing or ending an accrual schedule
+
+**Absent tools:** `create_accrual_schedule`, `set_plan_price`,
+`end_accrual_schedule`.
+
+A schedule is a price and a date range. Writing one queues nothing: the daily
+entries that follow are posted by a cron with no human anywhere on the path, so
+a wrong `monthly_cents` is a wrong journal entry every day until somebody
+notices — and every one of those entries is individually *correct* against the
+schedule that was wrong, which is why nothing alarms. `accrual_posting_arithmetic`
+re-derives the allocation on every insert and would happily certify the
+arithmetic of the wrong price.
+
+This is §10's rule in its purest form — *an agent may write a request; it may
+not write a thing that writes requests* — and it is a step worse than §10,
+because a standing-order mandate produces INSTRUCTIONS that a person still
+approves, while an accrual schedule produces POSTINGS that nobody does.
+
+Pricing is also simply a commercial decision. "What does this customer pay us"
+is not a question with a correct answer an agent could compute; it is a question
+someone negotiated.
+
+**What stops it structurally.** `@/lib/accrual/accrue` is a forbidden module and
+`@/lib/accrual` re-exports it, so neither is imported; the gateway reads accrual
+through scoped SQL and `@/lib/accrual/types`, which is pure arithmetic with no
+database handle at all.
+
+**What the agent CAN do.** `list_accruals` returns the schedule, the price,
+every day's arithmetic and the month roll-up. A customer asking "why is this
+84¢ and yesterday 83¢" gets `$25.00 ÷ 30 = 83¢ with 10¢ left over; day 10 is one
+of the first 10, so it carries one` — which is the answer, not a deflection.
+
+## 20. Running the accrual tick or skipping a day
+
+**Absent tools:** `run_accrual`, `accrue_now`, `skip_accrual_day`,
+`backfill_accrual`.
+
+The tick posts to the journal, so §8 refuses it outright and there is nothing
+interesting to say about that half.
+
+**The skip is the interesting half.** A skipped day is a recorded decision that
+a fee did NOT accrue, with a reason, and it is the only place in this feature
+where money is knowingly not charged. An agent holding that tool could zero a
+customer's bill one defensible-looking day at a time, and every individual row
+would carry a plausible sentence — "customer was in dispute", "service was
+degraded" — that a person reading one row would accept. The month roll-up would
+show the shortfall, and that is exactly the point: the control is that a person
+has to answer for the gap, and an agent that can write the skip is an agent that
+can produce the gap without anybody being asked.
+
+Note the asymmetry with §14, which refuses firing a standing-order occurrence
+early. There, the damage is a real debit on a day nobody authorised. Here the
+damage is the absence of a debit, which alarms nothing and looks like nothing.
+Refusing both is the same rule applied to money moving and money not moving, and
+the second is the one that is easy to forget.
+
+**What the agent CAN do.** `list_accruals` returns `gap_days` — days a schedule
+owes that nothing has claimed. Persistently non-zero means the tick is not
+running and the customer is silently not being billed, which is the single
+failure a quiet accrual job otherwise hides. An agent that can SEE the gap and
+cannot CREATE one is exactly the right side of this line.
+
+---
+
 # Which of these cannot happen, and which we merely refuse
 
 The panel will ask, and the honest answer is not the same for every row.
@@ -656,6 +866,9 @@ The panel will ask, and the honest answer is not the same for every row.
 | Creating or amending a mandate (§10) | Capability-absent | `createStandingOrder`, `cancelStandingOrder` forbidden imports |
 | Firing an occurrence out of band (§14) | Capability-absent | `@/lib/standing/fire` forbidden module; one caller in the app, the cron route |
 | Moving money between pots (§15) | Capability-absent | `@/lib/pots/transfer` forbidden module |
+| Raising or progressing a dispute (§17) | Capability-absent | `@/lib/disputes/operations` forbidden module; `raiseDispute`, `insertDispute`, `insertDisputeEvent`, `submitEvidence`, `recordDecision` forbidden imports |
+| Enrolling or re-pricing an accrual schedule (§19) | Capability-absent | `@/lib/accrual/accrue` and the `@/lib/accrual` barrel are forbidden modules |
+| Running the accrual tick or skipping a day (§20) | Capability-absent | `runAccrual`, `claimDay`, `recordPosting` forbidden imports; the tick is a posting, so §8 applies |
 | Issuing, freezing, unfreezing a card (§7) | Capability-absent | no import, no tool, name-banned in `tools.test.ts` |
 | Resolving a recon break (§5) | Capability-absent | the gateway's recon methods read; no write path exists |
 | Closing a book day (§6) | Capability-absent | not imported |
@@ -676,14 +889,14 @@ that would make an agent-attributed row impossible in each.
 
 ---
 
-## The principle underneath all sixteen
+## The principle underneath all twenty
 
 Every refusal above is an instance of one rule:
 
 > **An agent may state an intention. It may not make a fact final, and it may
 > not change the rules that decide what is final.**
 
-The seven read tools observe facts. `initiate_payment` states an intention, in a
+The ten read tools observe facts. `initiate_payment` states an intention, in a
 row whose only consequence is that a person sees it. Everything on the list
 above is either the act of making something final (release, close, approve,
 adjust, post, sign, fire) or the act of moving the boundary of what needs a
@@ -824,3 +1037,132 @@ an agent act unattended. None of them is a claim that the operation is
 dangerous *in itself*, and none of them should be read as a reason not to build
 a good screen for a person to do it on. The list is about who holds the pen,
 not about whether the pen exists.
+
+---
+
+# Appendix: should an agent ever write a card control?
+
+This is the one I was asked to argue rather than assert, so here is the
+argument, including the half I do not act on.
+
+## The case FOR, made properly
+
+It is not weak. Card controls are the most operationally useful write in the
+product and the one customers ask for most, because the question arrives at the
+worst possible time: a card declines at a pump at 06:00 and the person who can
+change a control is asleep. Tightening is safe-direction — blocking a category
+or lowering a limit STOPS money, and the cost of being wrong is inconvenience
+while the cost of being slow is loss. An agent that notices six declines in four
+minutes across three states and tightens a card at 03:00 is doing something a
+good ops team would do. Refusing it costs real money and I am not going to
+pretend otherwise.
+
+## The timing argument, with the measured number
+
+`docs/CARD-CONTROLS.md` §2 measured Lithic's authorisation timeout rather than
+quoting it: an ASA responder that stalls returns `6.527 s` against a `0.334 s`
+baseline, so **the hard ceiling is 6000 ms, and on timeout Lithic DECLINES.** It
+does not approve, it does not retry into an approval; the transaction comes back
+`UNKNOWN_HOST_TIMEOUT` with `CUSTOMER_ASA_TIMEOUT` in `detailed_results`. Our own
+decision path runs at 40-150 ms, a fortieth of the ceiling and a twentieth of
+Lithic's 3000 ms recommendation, which is our actual SLO.
+
+The naive version of the timing objection is "a control write might not land
+before the authorisation arrives, so the agent's change would be ignored." That
+version is **wrong and I want to discard it explicitly**, because arguing
+against a weak form of the objection is how a bad decision gets made. A control
+write is a row in `card_control_version`; the decision path reads the current
+version at authorisation time. There is no cache to warm and no propagation
+delay to a third party. A write that commits before the ASA request arrives is
+seen; one that commits after is not. That is an ordinary race between two
+database transactions, and it is the same race a human clicking the same button
+runs.
+
+**The real timing argument is about the failure mode, not the latency.** The
+control write and the authorisation decision are on the same path, and the
+decision path has a 6000 ms ceiling with a DECLINE at the end of it. That means
+the cost of anything that slows or contends on `card_control_version` is not a
+stale answer — it is a declined transaction that would otherwise have been
+approved, attributed to nothing, at a pump. A human writes a control roughly
+never: a few times a card's life, from a screen, with a person waiting for the
+page to load. An agent writes controls on a schedule, in a retry loop, in
+response to events, possibly for many cards at once, possibly while a webhook
+storm is already loading the same rows. The difference is not correctness, it is
+**write frequency against a real-time read path whose timeout is a decline**.
+Every other write on this surface fails safe under load: a payment instruction
+that cannot be written is a payment that does not get queued, and someone
+notices. A control write that contends fails INTO a decline on a card somebody
+is standing in front of.
+
+That is the argument I would make to the panel, and I would concede immediately
+that it is an argument about operational prudence rather than a proof.
+
+## The argument I actually rest on
+
+Even granting perfect timing and infinite capacity, §13 stands on its own and
+would still refuse this:
+
+**A control change IS an authorisation decision, made in advance.** The values
+in `card_control_version` are not configuration that a human later acts on. They
+ARE the answer the card network receives, inside 6000 ms, with no person on the
+path. So an agent that unblocks MCC 5542 has not requested a payment and has not
+approved one — it has arranged for the next fuel-pump authorisation to be
+approved, and **there is no queue anywhere that will ever show that as a payment
+decision.** The money moves, the ledger records an ordinary card settlement, and
+the only trace of the decision is a control version row nobody had a reason to
+read.
+
+Test it against this document's own question — *if this call were wrong, would a
+person get to see it before the consequence?* For `initiate_payment` the answer
+is yes, by construction: an approver reads the row. For a control change the
+answer is **no, and it is no in a specific and nasty way** — the person who
+eventually sees the consequence sees a settled card transaction that looks
+exactly like every other settled card transaction. There is nothing to review,
+because the review step is the thing that was written.
+
+## Why "tighten-only" does not rescue it
+
+The obvious narrowing is to allow the safe direction and refuse the other. Three
+problems, in increasing order of how much they bother me.
+
+1. **Tightening a business's only card is not inconvenience at scale.** It is a
+   payroll card declining at a pump, or a supplier's card refused in front of a
+   customer. A false-positive rate that is fine for a consumer's tenth card is
+   not fine for the one card a small business runs on.
+2. **A tighten with no unwind path is a freeze with extra steps.** The agent
+   cannot loosen — that is the whole point of tighten-only — so every false
+   positive escalates to a human anyway, at 03:00, which is the hour the tool
+   existed to cover. The half-built version does not solve the problem it was
+   built for.
+3. **The direction is not actually well-defined.** Lowering `daily_limit_cents`
+   is tightening. Blocking an MCC is tightening. Adding an *allow* list is
+   tightening for every category except the ones on it, and a model asked to
+   "restrict this card to fuel and parking" would reach for exactly that. A
+   permission that depends on classifying a diff as safe-direction is a
+   permission whose boundary a model gets to argue about, and it will argue
+   correctly nine times and creatively once.
+
+## The verdict
+
+**Read-only, and that is what is built.** `list_card_controls` returns the
+controls, the current spend against each limit, the headroom, the real-time
+decisions, the rule that fired and the network result code — everything needed
+to say "your card declined because category 5542 is blocked on it under control
+version 3, set on the 8th by Priya; someone with access to the card console can
+change that." That answer is complete, it is actionable, and it ends with a
+person, which is the property the whole surface is built to preserve.
+
+**What would change my mind**, concretely, because "no" without that is just
+taste:
+
+* a `card_control_proposal` table with its own screen and an approval step, so
+  the write lands in a queue the way `initiate_payment` does — at which point
+  the agent is proposing again and §13 stops applying;
+* OR a freeze-only, one-card, mandatory-reason, auto-notifying tool with a human
+  review SLA measured in minutes and an automatic expiry that unwinds it if
+  nobody confirms — the expiry being the piece that fixes objection 2 above.
+
+Both are features with screens and SLAs attached. Neither is a tool. The version
+that is only a tool is the one that looks like progress and is not, and I would
+rather defend a surface that is honestly narrower than one that is quietly
+wider.

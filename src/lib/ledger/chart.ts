@@ -284,7 +284,7 @@ export const CHART: readonly ChartAccount[] = [
     book: "financial",
     parent: "4000",
     postable: true,
-    why: "Our share of the interchange on card spend, credited when the network's settlement figure is known — and, being a house line, placed at ordinal 0 in the allocation so the residual penny lands on us rather than on the customer (DESIGN §12.5).",
+    why: "Our share of the interchange on card spend, credited on the CLEARING and never on the authorisation — an authorisation moves the memo book only, so interchange booked there would be revenue on money that may never settle. Priced by an effective-dated rate card (db/migrations/0031_interchange.sql) as basis points of the settled amount plus a fixed per-transaction fee, which is ONE value from ONE input and therefore DESIGN §12.2, round half to even: the fixed component is already whole cents and is added after the percentage half has been rounded, so percent-plus-fixed needs no second rounding step and this ledger still has exactly two rounding rules. It is NOT §12.3 — largest remainder needs a source amount to distribute across shares, and nothing here is being divided between parties — so there is no residual penny on this path at all. Where 4100 IS a party to a genuine allocation, §12.5 still applies and places it at ordinal 0 so the residual lands on the house rather than on the customer. Debited when a settlement is reversed: the repair is a new entry at the ORIGINAL value date, and v_interchange_unreversed and v_interchange_drift exist because revenue booked on spend that did not happen balances perfectly and no other invariant on this book would notice.",
   },
   {
     code: "4200",
@@ -303,6 +303,15 @@ export const CHART: readonly ChartAccount[] = [
     parent: "4000",
     postable: true,
     why: "The difference between the rate a customer accepted and what the payout actually cost us by the time it settled. ONE signed account rather than a gain and a loss pair, because an FX variance is one fact with two signs and splitting it invites someone to report only the favourable half. It is not fee income — 4200 is what we charge, and netting variance into it would make a spread look like a price, which is exactly what 5100's own note forbids. It is not a credit loss either: nobody defaulted, the market moved. An accepted quote is a commitment we honour, so when it moves against us that is a real cost of having made a promise, and it belongs where someone can see the size of it.",
+  },
+  {
+    code: "4400",
+    name: "Interest income — overdraft",
+    type: "income",
+    book: "financial",
+    parent: "4000",
+    postable: true,
+    why: "Interest charged on a customer's debit deposit balance, accrued daily on the balance actually outstanding at the end of each business date. It is not 4200: a fee is a price for a SERVICE and interest is a price for TIME AND MONEY — Reg DD discloses the two differently, and an APR netted into fee income makes a rate look like a charge, which is the same error 4300's note forbids in the other direction. It is not 4300 either: nothing about a rate moved under us, we quoted this one. It is credit-normal and sits beside 5400, its mirror on the expense side, because the same account can be overdrawn one day and in credit the next and the two days must land in different places rather than net into one balance that hides both.",
   },
 
   // =========================================================================
@@ -343,6 +352,15 @@ export const CHART: readonly ChartAccount[] = [
     parent: "5000",
     postable: true,
     why: "Base Sepolia gas we burn sending USDC, debited from the confirmed receipt's actual gas used times effective gas price — our cost of moving the customer's money, so it is never charged to their deposit account.",
+  },
+  {
+    code: "5400",
+    name: "Interest expense — credit balances",
+    type: "expense",
+    book: "financial",
+    parent: "5000",
+    postable: true,
+    why: "Interest we pay customers for holding a credit balance with us, accrued daily on the settled balance at the end of each business date. It is not 5100: that is what the network, the sponsor bank and the ACH originator charge US, and netting what we owe customers into what providers charge us would hide the size of both. It is not 5900 either — nothing here is a residual or a rounding artefact; this is the quoted price of deposits and it is the largest cost a deposit-taking business has. Debit-normal, and the mirror of 4400: one enrolment prices both sides and the sign of the balance on the day decides which account the day lands in.",
   },
   {
     code: "5900",

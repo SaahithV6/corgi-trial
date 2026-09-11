@@ -49,6 +49,12 @@ import {
   type EnvBag,
 } from '@/lib/webhooks/route-handler';
 
+import {
+  processingUnavailable,
+  readWebhookProcessing,
+  webhookProcessingHealth,
+} from './processing';
+
 /**
  * Node runtime: this route opens a Postgres connection through `postgres`,
  * which is a TCP driver and needs `node:net`/`node:tls`. It also shares the
@@ -153,6 +159,27 @@ export async function GET(request: Request): Promise<Response> {
               ),
             )
           : readWebhookDeliveries(client(deliveryUrl));
+
+    // WHETHER ANYTHING WAS DONE WITH WHAT ARRIVED. Started here for the same
+    // reason as the read above — its wall time hides inside the probes' 4s —
+    // and it runs on the same single connection, so it costs one more warm
+    // round trip rather than a second connection.
+    //
+    // This exists because the field above was measuring the wrong thing and
+    // could not have measured otherwise: freshness is `MAX(received_at)`, so a
+    // rail that received 179 deliveries and processed none of them read
+    // `fresh` four minutes after the newest one was dead-lettered. See
+    // ./processing.ts for the measurement. Arrival is not health.
+    const processingRead =
+      deliveryUrl === undefined
+        ? Promise.resolve(processingUnavailable('APP_DATABASE_URL is not set'))
+        : !database.reachable
+          ? Promise.resolve(
+              processingUnavailable(
+                `database unreachable: ${database.error ?? 'no detail given'}`,
+              ),
+            )
+          : readWebhookProcessing(client(deliveryUrl));
 
     // The actual verdict, earned by a real authenticated call per provider.
     //
@@ -297,6 +324,14 @@ export async function GET(request: Request): Promise<Response> {
       new Date(),
     );
 
+    // The third question, folded in the same way and from the same read
+    // budget. It takes no liveness context at all, and that is deliberate:
+    // `degradesDeployment` on a dropped delivery must not be gated on a probe
+    // verdict, because a provider whose deliveries we are throwing away can be
+    // perfectly live — Increase was, with 179 dead letters behind it. See the
+    // argument in ./processing.ts.
+    const webhookProcessing = webhookProcessingHealth(await processingRead, new Date());
+
     // `not_configured` integrations do NOT make the deployment degraded: a
     // provider we have not wired is a scope decision, not an outage. An
     // unreachable database is, because nothing can be stored without it.
@@ -308,8 +343,19 @@ export async function GET(request: Request): Promise<Response> {
     // Anything looser and this endpoint reports degraded overnight because
     // nobody swiped a card, which trains its readers to ignore it — the same
     // mistake the 3s database budget above already made once.
+    //
+    // A DROPPED DELIVERY IS THE THIRD THING, and it needs none of those four
+    // conditions, because it is not silence. A dead letter is a delivery we
+    // accepted, verified, retried to exhaustion and abandoned; "nobody has
+    // used this integration" cannot produce one. Making loss wait for the
+    // silence guard's clauses would be the same blind spot again, one module
+    // further along.
     const status =
-      database.reachable && webhookHealth.degradedBy.length === 0 ? 'ok' : 'degraded';
+      database.reachable &&
+      webhookHealth.degradedBy.length === 0 &&
+      webhookProcessing.degradedBy.length === 0
+        ? 'ok'
+        : 'degraded';
 
     return healthResponse(requestId, {
       status,
@@ -338,6 +384,17 @@ export async function GET(request: Request): Promise<Response> {
         // are kept apart deliberately: "we have never heard from this
         // provider" and "this provider has gone quiet" are different facts.
         webhookHealth,
+        // Per-provider webhook PROCESSING: the newest delivery this system
+        // actually CONSUMED, the depth and age of what is parked, and the
+        // depth, age and stated reason of what has been dead-lettered.
+        //
+        // `webhookHealth` above answers "is the provider still talking to us";
+        // this answers "did we do anything with what it said". They are not
+        // the same question and the difference is not academic: measured at
+        // 05:20Z, Increase read `fresh` on 179 deliveries that were accepted,
+        // verified and then dropped with `no consumer registered`. A third
+        // disjoint vocabulary, so no reader has to resolve the three.
+        webhookProcessing,
         // Slots the brief requires to be genuinely live that currently are not.
         // Surfaced rather than buried so it cannot be forgotten before the
         // debrief: a simulated integration presented as live fails the trial.

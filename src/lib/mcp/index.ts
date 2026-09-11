@@ -27,6 +27,16 @@ export { CONTENT_HASH_VERSION, contentHash, contentPreimage } from "./approvals-
 export type { PaymentContent, PaymentQueuePort } from "./approvals-port";
 
 export { decodeMessage, failure, success } from "./jsonrpc";
+
+export {
+  DEBATABLE,
+  PRINCIPLE,
+  REFUSALS,
+  findRefusals,
+  refusalForTool,
+  refusedToolNames,
+} from "./limits";
+export type { Debatable, Guarantee, Refusal } from "./limits";
 export type { JsonRpcRequest, JsonRpcResponse } from "./jsonrpc";
 
 export {
@@ -56,8 +66,18 @@ export { addDays, bookDate, daysBetween, isIsoDate } from "./time";
 export { ToolError } from "./types";
 export type {
   AccountRef,
+  AccrualDayRow,
+  AccrualFilter,
+  AccrualInvariantCounts,
+  AccrualMonthRow,
+  AccrualPage,
+  AccrualScheduleRow,
   ApprovalPolicyRef,
   BalanceSnapshot,
+  DisputeEventProjection,
+  DisputeFilter,
+  DisputePage,
+  DisputeRowProjection,
   Gateway,
   Grant,
   QueuePaymentInput,

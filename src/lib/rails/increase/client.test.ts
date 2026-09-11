@@ -281,13 +281,19 @@ describe('return reasons', () => {
 });
 
 describe('parseEvent — the body is a pointer, not a payload', () => {
-  const eventBody = (category: string, objectId: string) =>
+  // `objectType` defaults to 'ach_transfer' but is a parameter, because the
+  // adapter dispatches on it. It used to be hardcoded here while only the id
+  // varied — so the "an inbound transfer is unmodelled" case below was passing
+  // on the id prefix, which was the thing that was broken: every sandbox id is
+  // `sandbox_ach_transfer_...`, so the real gate dropped the entire rail and
+  // this test still went green.
+  const eventBody = (category: string, objectId: string, objectType = 'ach_transfer') =>
     JSON.stringify({
       id: 'event_123abc',
       type: 'event',
       category,
       associated_object_id: objectId,
-      associated_object_type: 'ach_transfer',
+      associated_object_type: objectType,
       created_at: '2026-01-06T14:00:01Z',
     });
 
@@ -351,6 +357,22 @@ describe('parseEvent — the body is a pointer, not a payload', () => {
     expect(event.reason).toBe('no_state_change');
   });
 
+  it('accepts a SANDBOX transfer id, which the id-prefix gate silently dropped', async () => {
+    // Every id Increase's sandbox issues is `sandbox_ach_transfer_...`. The gate
+    // matched on `ach_transfer_` and therefore classified every settlement and
+    // every return we have ever generated as an event about something this
+    // adapter does not model — returning 200 and losing it. The whole rail,
+    // dropped by a string that was correct about production and wrong about the
+    // only environment anybody had run.
+    const { rail } = railWith(() => ({
+      body: transfer({ settlement: { settled_at: '2026-01-06T14:00:00Z' } }),
+    }));
+    const event = await rail.parseEvent(
+      eventBody('ach_transfer.updated', 'sandbox_ach_transfer_x5vdo5m7b6k924sszlms'),
+    );
+    expect(event.type).toBe('settled');
+  });
+
   it('NEVER THROWS on an unrecognised or unparseable body', async () => {
     const { rail, calls } = railWith(() => ({ body: transfer() }));
 
@@ -360,7 +382,9 @@ describe('parseEvent — the body is a pointer, not a payload', () => {
     const empty = await rail.parseEvent('{}');
     expect(empty.type).toBe('unknown');
 
-    const other = await rail.parseEvent(eventBody('inbound_ach_transfer.created', 'inbound_ach_transfer_9'));
+    const other = await rail.parseEvent(
+      eventBody('inbound_ach_transfer.created', 'inbound_ach_transfer_9', 'inbound_ach_transfer'),
+    );
     if (other.type !== 'unknown') throw new Error('expected unknown');
     expect(other.reason).toBe('unmodelled_event');
 

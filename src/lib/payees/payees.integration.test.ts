@@ -10,6 +10,7 @@ import type * as GateModule from "./gate";
 import type * as StoreModule from "./store";
 import type { PayeeCandidate } from "./types";
 import { verifyPayee } from "./verify";
+import { mainDepositAccountId } from "@/lib/ledger/queries";
 
 /**
  * The payee book against the REAL Neon database.
@@ -444,10 +445,9 @@ run("the payment gate — the one line that goes in requestPayment()", () => {
   let accountId: string;
 
   beforeAll(async () => {
-    const [account] = await sql<{ id: string }[]>`
-      SELECT id FROM account WHERE code = '2100' AND business_id = ${RIDGELINE}::uuid`;
-    if (account === undefined) throw new Error("the seeded Ridgeline deposit account is missing");
-    accountId = account.id;
+    const account = await mainDepositAccountId(RIDGELINE, sql);
+    if (account === null) throw new Error("the seeded Ridgeline deposit account is missing");
+    accountId = account;
   });
 
   it("refuses an impossible routing number, with no database read and no provider call", async () => {
@@ -516,6 +516,176 @@ run("the payment gate — the one line that goes in requestPayment()", () => {
       accountId,
       destination: { type: "usdc", chain: "base-sepolia", address: "0xdeadbeef" },
     });
+    expect(refusal).toBe(null);
+  });
+
+  /* ======================================================================== */
+  /* WIRES. The hole this gate had, and the rail it had it on.                */
+  /* ======================================================================== */
+
+  /**
+   * The gate opened with
+   *
+   *     destination.type === "ach" ? destination.routingNumber : null
+   *
+   * and then returned early when that was null — so a WIRE received neither
+   * the ABA check-digit arithmetic nor the standing-warning check, on the one
+   * rail where the money cannot be recovered. Everything below would have
+   * returned `null` before these tests existed.
+   */
+  function wireTo(
+    over: Partial<Extract<PaymentDestination, { type: "wire" }>> = {},
+  ): Extract<PaymentDestination, { type: "wire" }> {
+    return {
+      type: "wire",
+      holderName: "Ridgeline Coffee Roasters LLC",
+      wireRoutingNumber: "021000021",
+      accountNumberLast4: "4417",
+      ...over,
+    };
+  }
+
+  it("runs the check digit on a WIRE, which it used to skip entirely", async () => {
+    const refusal = await gate.gatePaymentOnPayee({
+      accountId,
+      // 021000021 is JPMorgan Chase's real wire ABA; 021000022 is not an ABA
+      // at all and never will be.
+      destination: wireTo({ wireRoutingNumber: "021000022" }),
+    });
+    expect(refusal?.code).toBe("PAYEE_ROUTING_NUMBER_IMPOSSIBLE");
+    expect(refusal?.message).toContain("check digit does not hold");
+  });
+
+  it("names the transposition on a wire, exactly as it does on ACH", async () => {
+    const refusal = await gate.gatePaymentOnPayee({
+      accountId,
+      destination: wireTo({ wireRoutingNumber: "012000021" }),
+    });
+    expect(refusal?.message).toContain("021000021");
+  });
+
+  it("refuses a wire that carries no wire routing number at all", async () => {
+    // The shape every wire instruction had before `wireRoutingNumber` existed:
+    // a BIC, which identifies a bank on the SWIFT network and which Fedwire
+    // does not read. With only that, both checks below are unrunnable.
+    const refusal = await gate.gatePaymentOnPayee({
+      accountId,
+      destination: { type: "wire", holderName: "Northwind", bic: "CHASUS33", accountNumberLast4: "0000" },
+    });
+    expect(refusal?.code).toBe("PAYEE_WIRE_ROUTING_NUMBER_MISSING");
+    expect(refusal?.message).toContain("BIC is not a substitute");
+  });
+
+  it("runs the STANDING-WARNING check on a wire, against the live payee book", async () => {
+    // Two wire payees, same beneficiary, different accounts: the second warns,
+    // exactly as the ACH case above does. The gate used to see neither.
+    await gate.confirmPayee({
+      // `accountType: null` is required, not tidiness: `payee_rail_fields`
+      // refuses a wire row that carries one — "a wire payee carrying a
+      // routing number is a row two readers will resolve two ways".
+      candidate: candidate("Wiregate", {
+        rail: "wire",
+        routingNumber: "021000021",
+        accountNumberLast4: "1212",
+        accountType: undefined,
+      }),
+      payeeKey: `${RUN_ID}-wiregate-1`,
+      actorId: ALEX,
+    });
+    const warned = await gate.confirmPayee({
+      candidate: candidate("Wiregate", {
+        rail: "wire",
+        routingNumber: "021000021",
+        accountNumberLast4: "3434",
+        accountType: undefined,
+      }),
+      payeeKey: `${RUN_ID}-wiregate-2`,
+      actorId: ALEX,
+    });
+    expect(warned.check.decision).toBe("warned");
+
+    const holderName = candidate("Wiregate").holderName;
+    const before = await gate.gatePaymentOnPayee({
+      accountId,
+      destination: wireTo({ holderName, accountNumberLast4: "3434" }),
+    });
+    expect(before?.code).toBe("PAYEE_WARNING_UNACKNOWLEDGED");
+
+    await store.acknowledgeWarning({
+      verificationId: warned.saved?.verificationId ?? "",
+      actorId: DANA,
+      reason: "Confirmed the second wire account out of band, on a number we already had.",
+    });
+
+    const after = await gate.gatePaymentOnPayee({
+      accountId,
+      destination: wireTo({ holderName, accountNumberLast4: "3434" }),
+    });
+    expect(after).toBe(null);
+  });
+
+  /* ======================================================================== */
+  /* FAIL CLOSED. A check that could not run is not a check that passed.      */
+  /* ======================================================================== */
+
+  /**
+   * The second defect: the whole standing-warning section was wrapped in
+   * `try { … } catch { return null }`, so a query error, a timeout or a
+   * malformed row was INDISTINGUISHABLE from "no warning found" and the
+   * payment proceeded. The condition the guard exists to catch was the
+   * condition that silently disabled it.
+   *
+   * The connection is the seam, so a connection that throws is the test.
+   */
+  function exploding(message: string): Parameters<typeof gate.gatePaymentOnPayee>[1] {
+    const tag = (): Promise<never> => Promise.reject(new Error(message));
+    return tag as never;
+  }
+
+  it("REFUSES when the payee-book lookup throws, naming the check that did not run", async () => {
+    const refusal = await gate.gatePaymentOnPayee(
+      { accountId, destination: destination() },
+      exploding("connection terminated unexpectedly"),
+    );
+    expect(refusal?.code).toBe("PAYEE_STANDING_CHECK_UNAVAILABLE");
+    // It has to say WHICH check, or an operator has nothing to act on.
+    expect(refusal?.message).toContain("could not be read");
+    expect(refusal?.message).toContain("Nothing was written");
+    // And never the driver's own text, which names internal ids and table
+    // structure and is rendered on a screen. The error's CLASS only.
+    expect(refusal?.message).not.toContain("connection terminated unexpectedly");
+    expect(refusal?.message).toContain("Error");
+  });
+
+  it("refuses the same way on a WIRE — the rail with no recall gets no exception", async () => {
+    const refusal = await gate.gatePaymentOnPayee(
+      { accountId, destination: wireTo() },
+      exploding("timeout"),
+    );
+    expect(refusal?.code).toBe("PAYEE_STANDING_CHECK_UNAVAILABLE");
+  });
+
+  it("still runs the arithmetic when the database is unreachable", async () => {
+    // The check digit needs no database, so a dead connection must not turn an
+    // impossible routing number into a different refusal. The block is
+    // arithmetic and it is the one that never depends on anything.
+    const refusal = await gate.gatePaymentOnPayee(
+      { accountId, destination: destination({ routingNumber: "011401534" }) },
+      exploding("connection terminated unexpectedly"),
+    );
+    expect(refusal?.code).toBe("PAYEE_ROUTING_NUMBER_IMPOSSIBLE");
+  });
+
+  it("still PROCEEDS for a rail with nothing to look up, database or no database", async () => {
+    // The one case that is an ANSWER rather than a failure: USDC has no ABA
+    // and no payee-book row, so the gate returns before it needs a connection.
+    const refusal = await gate.gatePaymentOnPayee(
+      {
+        accountId,
+        destination: { type: "usdc", chain: "base-sepolia", address: "0xdeadbeef" },
+      },
+      exploding("connection terminated unexpectedly"),
+    );
     expect(refusal).toBe(null);
   });
 });

@@ -105,12 +105,54 @@ function toCentsOrNull(value: bigint | null, field: string): Cents | null {
   return value === null ? null : toCents(value, field);
 }
 
+/**
+ * `timestamptz` has two values that are NOT instants: `infinity` and
+ * `-infinity`, and `postgres` parses them into a `Date` whose time value is
+ * `NaN`. Neither `=== null` nor a truthiness check sees that, so
+ * `toISOString()` throws `RangeError: Invalid time value` — which this file's
+ * own `getSnapshot` catch turns into `LEDGER_READ_FAILED` for the ENTIRE
+ * account screen.
+ *
+ * `src/lib/disputes/store.ts` writes `available_at = 'infinity'` deliberately:
+ * a dispute's provisional credit is released by a person deciding the case,
+ * never by a clock, and "no release instant" is exactly what infinity means.
+ *
+ * This is the SAME defect that took `/funding` down, fixed there on 2026-09-10
+ * with the guard below and a header explaining it — see
+ * `src/app/(app)/funding/live-source.ts`. The account screen never got it, so
+ * the nine such rows (all Ridgeline Robotics, all `external_ref = dispute:<id>`)
+ * left the protagonist's own page reading
+ * "Balances could not be loaded · LEDGER_READ_FAILED · listHolds failed:
+ * Invalid time value" while returning HTTP 200.
+ *
+ * Two lessons worth keeping. A fix applied at one call site is not applied to
+ * the class. And a screen that answers 200 with an error inside it is invisible
+ * to any check that only asserts a status code.
+ */
+function isInstant(value: Date): boolean {
+  return Number.isFinite(value.getTime());
+}
+
 function toInstant(value: Date): Instant {
+  // Kept strict on purpose. Every caller passes a column that is NOT NULL and
+  // genuinely an instant (`placed_at`, `occurred_at`, the snapshot clock). If
+  // one of those is ever infinite, that is a fact about the book worth failing
+  // loudly on, not one to paper over with a sentinel string.
   return value.toISOString();
 }
 
 function toInstantOrNull(value: Date | null): Instant | null {
-  return value === null ? null : value.toISOString();
+  if (value === null) return null;
+  // A hold that releases on no clock reports no release instant. That is the
+  // truthful answer and it renders correctly: `BalanceHeadline` already keys
+  // the release countdown on `availableAt !== null`, so this hold simply shows
+  // no countdown rather than an invented one.
+  //
+  // `/funding` carries the richer model — an explicit `neverReleases` flag that
+  // says WHY there is no instant. Bringing that across is the follow-up; it is
+  // a data-contract change and this screen being down is not.
+  if (!isInstant(value)) return null;
+  return value.toISOString();
 }
 
 /* -------------------------------------------------------------------------- */

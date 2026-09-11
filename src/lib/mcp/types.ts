@@ -187,6 +187,10 @@ export interface Gateway {
     filter: CardControlFilter,
   ): Promise<CardControlPage>;
 
+  listDisputes(businessId: string, filter: DisputeFilter): Promise<DisputePage>;
+
+  listAccruals(businessId: string, filter: AccrualFilter): Promise<AccrualPage>;
+
   /**
    * See `approvals-port.ts`. Delegates to `@/lib/approvals`'s `requestPayment`,
    * which lands a row in the same queue a person's request lands in and moves
@@ -214,10 +218,41 @@ export interface AccountRef {
   readonly isPostable: boolean;
 }
 
+/**
+ * Ledger balance, available balance, and every term in between.
+ *
+ * EVERY MONEY FIELD HERE COMES FROM `ledger_availability()` — the one
+ * definition of available balance in this system, the same one
+ * `v_available_balance` and `v_balance_definition_drift` are built on, and the
+ * same one the customer's own screen shows. This surface used to compute its
+ * own, which was larger than the customer's by exactly the manual holds and
+ * the future-dated debits; `gateway.ts` has the full entry on why that was the
+ * worst possible direction for the error and what changed.
+ *
+ *     available = ledger − holds − uncleared − pendingOutbound
+ *
+ * and `holds = cardAuthHolds + otherHolds`, where the split is description
+ * from the hold itemisation and the total is the authority's.
+ */
 export interface BalanceSnapshot {
   readonly ledgerCents: bigint;
+  /** Every active hold: card authorisations AND operator (`manual`) holds. */
   readonly holdsCents: bigint;
+  /** The card-authorisation share of `holdsCents`. Itemisation, not authority. */
+  readonly cardAuthHoldsCents: bigint;
+  /**
+   * The rest of `holdsCents` — operator holds. Named because it was the term
+   * this surface used to drop silently, handing an agent money an operator had
+   * deliberately withheld.
+   */
+  readonly otherHoldsCents: bigint;
   readonly unclearedCents: bigint;
+  /**
+   * Debits already booked with a future value date: money committed to leave.
+   * A customer who can spend it again before it settles is a customer we have
+   * overdrawn on their behalf. Also previously missing from this surface.
+   */
+  readonly pendingOutboundCents: bigint;
   readonly availableCents: bigint;
   readonly cardHoldCount: number;
   readonly unclearedHoldCount: number;
@@ -525,6 +560,177 @@ export interface CardDecisionRow {
 export interface CardControlPage {
   readonly cards: readonly CardControlRow[];
   readonly decisions: readonly CardDecisionRow[];
+}
+
+/* ---------------------------------------------------------------------
+ * Disputes
+ * ------------------------------------------------------------------ */
+
+export interface DisputeFilter {
+  readonly status: string | null;
+  /** Exclude cases in a closed status. The default view is live work. */
+  readonly openOnly: boolean;
+  readonly includeEvents: boolean;
+  readonly limit: number;
+}
+
+/**
+ * One transition on a case.
+ *
+ * `actorKind` is carried deliberately. A case timeline that reads
+ * "provisional credit authorised" without saying WHO is exactly the kind of
+ * sentence an agent repeats to a customer as if the bank had decided it; the
+ * whole point of `assert_dispute_lifecycle()` is that the authoriser is a
+ * named Corgi human who is not the raiser, and the timeline should show that
+ * rather than assert it.
+ */
+export interface DisputeEventProjection {
+  readonly kind: string;
+  readonly occurredAt: string;
+  readonly valueDate: string;
+  readonly actorName: string;
+  readonly actorKind: string;
+  readonly amountCents: bigint | null;
+  readonly entryId: string | null;
+  readonly detail: string | null;
+}
+
+/**
+ * A dispute as this surface returns it.
+ *
+ * A projection of `v_dispute_state`, which is a FOLD OF THE EVENT STREAM and
+ * not a status column. `advancedCents` and `heldCents` in particular are sums
+ * over the postings the case actually made, so a case that says it advanced
+ * $73.40 advanced $73.40 — there is no status field that could say one thing
+ * while the ledger said another.
+ */
+export interface DisputeRowProjection {
+  readonly disputeId: string;
+  readonly caseRef: string;
+  readonly disputedEntryId: string;
+  readonly reason: string;
+  readonly network: string;
+  readonly networkCode: string;
+  readonly narrative: string;
+  readonly amountCents: bigint;
+  readonly status: string;
+  readonly isClosed: boolean;
+  readonly raisedByName: string;
+  readonly raisedAt: string;
+  readonly valueDate: string;
+  readonly decidedOn: string | null;
+  /** The network's deadline. After it, there is no case left to make. */
+  readonly networkOutsideDate: string;
+  readonly daysToOutsideDate: number;
+  /** What has actually been advanced to the customer, summed from postings. */
+  readonly advancedCents: bigint;
+  /** How much of that advance is still encumbered by the dispute hold. */
+  readonly heldCents: bigint;
+  readonly holdReleased: boolean | null;
+  readonly needsAuthorization: boolean;
+  readonly authorizations: number;
+  readonly requiredApprovals: number;
+  readonly thresholdCents: bigint;
+  readonly events: readonly DisputeEventProjection[];
+}
+
+export interface DisputePage {
+  readonly cases: readonly DisputeRowProjection[];
+  /** Open and closed counts across EVERY case, not just the page. */
+  readonly openCount: number;
+  readonly closedCount: number;
+}
+
+/* ---------------------------------------------------------------------
+ * Accrual
+ * ------------------------------------------------------------------ */
+
+export interface AccrualFilter {
+  readonly scheduleLimit: number;
+  readonly monthLimit: number;
+  readonly dayLimit: number;
+  readonly includeSkipped: boolean;
+}
+
+export interface AccrualScheduleRow {
+  readonly scheduleId: string;
+  readonly planName: string;
+  readonly product: string;
+  readonly accountName: string;
+  readonly monthlyCents: bigint;
+  readonly currency: string;
+  readonly startDate: string;
+  readonly endDate: string | null;
+}
+
+/**
+ * One accrued day, WITH THE ARITHMETIC.
+ *
+ * Every field below is a column on `accrual_posting` that the database
+ * re-derived with `accrual_daily_share()` before it would store the row — the
+ * `accrual_posting_arithmetic` CHECK. So these are not a claim about the
+ * rounding rule, they are the rounding rule, verified by the thing that
+ * persisted them. An agent asked "why is Tuesday 84¢ and Wednesday 83¢" can
+ * answer from the row instead of guessing at a float.
+ */
+export interface AccrualDayRow {
+  readonly scheduleId: string;
+  readonly planName: string;
+  readonly accrualDate: string;
+  readonly disposition: "posted" | "skipped" | null;
+  readonly entryId: string | null;
+  readonly skipReason: string | null;
+  readonly monthlyCents: bigint | null;
+  readonly daysInMonth: number | null;
+  readonly dayOfMonth: number | null;
+  readonly baseShareCents: bigint | null;
+  readonly residualPennies: number | null;
+  readonly residualApplied: boolean | null;
+  readonly amountCents: bigint | null;
+  readonly cumulativeCents: bigint | null;
+  readonly claimedAt: string;
+  readonly decidedAt: string | null;
+}
+
+export interface AccrualMonthRow {
+  readonly scheduleId: string;
+  readonly planName: string;
+  readonly monthStart: string;
+  readonly daysInMonth: number;
+  readonly monthlyCents: bigint;
+  readonly residualPenniesInMonth: number;
+  readonly residualPenniesApplied: number;
+  readonly daysClaimed: number;
+  readonly daysDecided: number;
+  readonly daysPosted: number;
+  readonly daysSkipped: number;
+  readonly accruedCents: bigint;
+  readonly remainingCents: bigint;
+  readonly monthComplete: boolean;
+}
+
+/**
+ * The invariants, scoped to one business.
+ *
+ * `monthDrift` and `ledgerDrift` must be zero forever. `gapDays` is allowed to
+ * be non-zero — a schedule enrolled today owes days nothing has claimed — and
+ * persistently non-zero is the one failure a silent accrual job would hide,
+ * which is why an agent is shown it rather than a tidy "all good".
+ */
+export interface AccrualInvariantCounts {
+  readonly monthDrift: number;
+  readonly ledgerDrift: number;
+  readonly unresolved: number;
+  readonly gapDays: number;
+}
+
+export interface AccrualPage {
+  readonly schedules: readonly AccrualScheduleRow[];
+  readonly months: readonly AccrualMonthRow[];
+  readonly days: readonly AccrualDayRow[];
+  readonly invariants: AccrualInvariantCounts;
+  /** Σ of every posted day for this business, over all time. */
+  readonly accruedToDateCents: bigint;
 }
 
 export interface ApprovalPolicyRef {

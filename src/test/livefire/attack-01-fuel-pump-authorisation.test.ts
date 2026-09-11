@@ -22,6 +22,36 @@
  * creates its own Lithic card and asserts a DELTA on one business across the
  * authorisation, so nothing it leaves behind changes the meaning of the next
  * run.
+ *
+ * ─── WHAT MIGRATION 0026 CHANGED ABOUT THIS TEST ────────────────────────────
+ *
+ * This attack used to pass while proving nothing. `deriveCardEvents` never read
+ * `event.result`, so an authorisation the network DECLINED was ingested as an
+ * ordinary `authorization`, raised A(E) by its full amount, and moved AVAILABLE
+ * by exactly −5000 — which is the number this file asserts. The assertion went
+ * green on a purchase that never happened.
+ *
+ * That is not hypothetical here. The sandbox account carries a $5,000 rolling
+ * 24-hour spend limit and it is exhausted; live-fire attack 2's own
+ * authorisation, Lithic transaction 041d610c-a71a-432e-ad62-ca16b6d882b0,
+ * reads `AUTHORIZATION 5000 result DECLINED
+ * detailed_results ["ACCOUNT_DAILY_SPEND_LIMIT_EXCEEDED"]` — and the ledger
+ * placed the full $50.00 hold on it.
+ *
+ * So the test now READS THE PROVIDER'S VERDICT and asserts against that:
+ *
+ *   APPROVED  → the published attack, unchanged: available −5000, ledger flat.
+ *   REFUSED   → the invariant 0026 installs: available and the hold book must
+ *               not move AT ALL. Then the test FAILS, because the attack the
+ *               debrief asks to see — available dropping on a fuel-pump auth —
+ *               was not demonstrated. It is a red that names its own cause.
+ *
+ * A refusal is NOT skipped. A skip in this suite means "the pipeline did not
+ * run, so the claim is unproven", and it is never counted as a pass; this is a
+ * different thing — the pipeline ran perfectly and the demo could not be
+ * performed. Converting that into a skip would be exactly the tuning this file
+ * must not do, and the standing instruction is explicit: a red test telling the
+ * truth beats a green one that is not.
  */
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -181,7 +211,76 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
 
     const after = await bal.availableBalance(businessId);
 
-    // THE TWO ASSERTIONS THE ATTACK IS.
+    // ---- WHAT DID THE NETWORK ACTUALLY SAY? ------------------------------
+    //
+    // Asked of the provider, not of our own copy, because the whole class of
+    // bug this guards against is our copy having dropped the answer. The
+    // per-event verdict is the authoritative one; `txn.result` is the
+    // transaction-level restatement and is used only if the event carries
+    // none.
+    const settledTxn = await lithic.getTransaction(transactionToken);
+    const authEvent = (settledTxn.events ?? []).find((e) => e.type === "AUTHORIZATION");
+    const verdict: string = authEvent?.result ?? settledTxn.result;
+    const detail = (authEvent?.detailed_results ?? []).join(", ");
+
+    if (verdict !== "APPROVED") {
+      // ---- THE REFUSAL PATH ---------------------------------------------
+      //
+      // THE DIAGNOSIS IS RECORDED BEFORE ANYTHING IS ASSERTED. A failing
+      // `expect` throws, and a throw skips every line after it — so an
+      // assertion placed above the evidence leaves the operator reading a bare
+      // "expected 30000n to be 25000n" with nothing to attach it to. That is
+      // exactly what happened on the first run of this file. The panel is
+      // being asked to watch a diagnosis, so the diagnosis has to survive the
+      // failure it is diagnosing.
+      const detailText = detail === "" ? "" : ` detailed_results [${detail}]`;
+      const [refused] = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM v_refused_auth_hold`;
+
+      record(
+        "evidence",
+        `REFUSED BY THE NETWORK. Lithic transaction ${transactionToken}: AUTHORIZATION ` +
+          `${AUTH_CENTS} result ${verdict}${detailText}. The ledger's answer, read live: holds ` +
+          `${before.holdsCents} -> ${after.holdsCents} (must be UNCHANGED — a refused ` +
+          `authorisation withholds nothing), available ${before.availableCents} -> ` +
+          `${after.availableCents}, ledger ${before.ledgerCents} -> ${after.ledgerCents}, ` +
+          `v_refused_auth_hold ${refused?.n}. Hold ${authRow.hold_id}. drain ${drainStatus}.` +
+          (after.holdsCents === before.holdsCents
+            ? ` The hold was correctly NOT placed.`
+            : ` THE HOLD WAS PLACED ANYWAY: +${after.holdsCents - before.holdsCents} cents ` +
+              `withheld from a business for a purchase the network refused. That is the bug ` +
+              `migration 0026 fixes at ingest, and seeing it here means the code serving ` +
+              `${BASE_URL} predates 0026 — the fix is in the repository and has not been ` +
+              `deployed to the host that processed this delivery.`),
+      );
+
+      // The invariant migration 0026 installs: a refused authorisation must
+      // move nothing. If these fail, money is being withheld for nothing.
+      expect(after.holdsCents).toBe(before.holdsCents);
+      expect(after.availableCents).toBe(before.availableCents);
+      expect(after.ledgerCents).toBe(before.ledgerCents);
+      expect(await bal.trialBalanceCents()).toBe(trialBefore);
+      expect(refused?.n).toBe(0);
+
+      const reason =
+        `THE LEDGER IS RIGHT AND THE ATTACK IS UNDEMONSTRATED. Lithic REFUSED the $50.00 ` +
+        `authorisation: transaction ${transactionToken}, AUTHORIZATION ${AUTH_CENTS} result ` +
+        `${verdict}${detailText}. The ledger did exactly what it should — available stayed at ` +
+        `${after.availableCents}, holds at ${after.holdsCents}, ledger at ${after.ledgerCents}, ` +
+        `trial balance at ${trialBefore}, and v_refused_auth_hold is empty — but "AVAILABLE drops ` +
+        `by 5000 on a fuel-pump auth" cannot be shown with an authorisation that never happened. ` +
+        `CAUSE: the sandbox account's rolling 24-hour spend limit is exhausted — ` +
+        `GET /v1/accounts/{token}/spend_limits reads available_spend_limit.daily = 0 against ` +
+        `spend_limit.daily = 500000 with spend_velocity.daily = 760210. Raising it needs ` +
+        `PATCH /v1/accounts/{token}, which the permission classifier deliberately blocks, so this ` +
+        `red is a decision for a human and not something this test may tune away. ` +
+        `Before migration 0026 this same refusal produced a PASS, because the decline was ingested ` +
+        `as an approval and available really did drop by 5000. drain ${drainStatus}.`;
+      record("evidence", reason);
+      throw new Error(reason);
+    }
+
+    // ---- THE APPROVED PATH: the two assertions the attack is -------------
     expect(after.availableCents).toBe(before.availableCents - BigInt(AUTH_CENTS));
     expect(after.ledgerCents).toBe(before.ledgerCents);
 
@@ -193,6 +292,10 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // The hold is memo-only, so the financial book is untouched.
     expect(await bal.trialBalanceCents()).toBe(trialBefore);
 
+    record(
+      "evidence",
+      `Lithic transaction ${transactionToken}: AUTHORIZATION ${AUTH_CENTS} result ${verdict} — the hold below stands on an authorisation the network actually granted, checked against the provider rather than against our own copy of it (migration 0026)`,
+    );
     record(
       "evidence",
       `business ${businessId}: available ${before.availableCents} -> ${after.availableCents} (delta ${after.availableCents - before.availableCents}, expected -${AUTH_CENTS}); ledger ${before.ledgerCents} -> ${after.ledgerCents} (unchanged); card-auth holds +${after.holdsCents - before.holdsCents}; hold ${authRow.hold_id} origin ${authRow.origin} for Lithic transaction ${transactionToken}; drain ${drainStatus}; trial balance unchanged at ${trialBefore}`,

@@ -15,6 +15,16 @@
  * rounds is a control that silently fails open.
  */
 
+/**
+ * The ONE import in this file, and it is a pure one: `@/lib/team/roles` holds
+ * no database handle, no `server-only` and no provider client, so a decision
+ * function, a page and a test can all read it. The alternative — restating the
+ * four roles and the three member states here — is a second copy of a
+ * permission vocabulary, and a second copy is how a permission system becomes
+ * decorative.
+ */
+import type { MemberState, TeamRole } from "@/lib/team/roles";
+
 /* -------------------------------------------------------------------------- */
 /* 1. Controls                                                                */
 /* -------------------------------------------------------------------------- */
@@ -92,6 +102,43 @@ export type SpendToDate = {
 };
 
 export const NO_SPEND: SpendToDate = { dayCents: 0n, monthCents: 0n };
+
+/* -------------------------------------------------------------------------- */
+/* 2b. The person holding the card                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One member's terms, as the authorisation decision sees them.
+ *
+ * A DELIBERATELY SMALLER SHAPE than `@/lib/team/types`'s `MemberTerms`. This is
+ * on the hot path and it carries exactly what a rule compares, plus the version
+ * id to pin and the name to put in a sentence a cardholder can read. It does
+ * not carry the note, the join date or the capability flags, because no rule
+ * reads them and a wider row is a wider row on every authorisation.
+ *
+ * ─── WHY A PERSON HAS LIMITS AT ALL, WHEN THE CARD ALREADY DOES ─────────────
+ *
+ * A card limit is a property of an INSTRUMENT. Re-issuing a card is a new
+ * `card` row with a new provider token (migration 0008 says why), which means a
+ * per-card monthly limit silently RESETS when a card is replaced. A member
+ * limit is a property of a PERSON and survives that. It is also the limit an
+ * operator actually means: "Theo can spend $2,000 a month" is a sentence about
+ * Theo, not about a sixteen-digit number that may be replaced twice this year.
+ *
+ * The two are enforced in the same decision, card first and then person, and
+ * both are recorded. See `RULE_ORDER` in `./decide.ts`.
+ */
+export type MemberDecisionTerms = {
+  readonly memberId: string;
+  readonly memberVersionId: string;
+  readonly version: number;
+  readonly displayName: string;
+  readonly state: MemberState;
+  readonly role: TeamRole;
+  readonly perTxnLimitCents: bigint | null;
+  readonly dailyLimitCents: bigint | null;
+  readonly monthlyLimitCents: bigint | null;
+};
 
 /* -------------------------------------------------------------------------- */
 /* 3. The request, normalised                                                 */
@@ -202,12 +249,23 @@ export const DECISION_RULES = [
   "control_store_unavailable",
   /** This card token is not registered in this book. Out of scope: approve. */
   "card_not_under_control",
-  /** The card is registered but nobody has ever set controls on it. */
+  /** The card is registered but neither it nor its holder has any limits. */
   "no_controls_configured",
   /** A balance inquiry is not a purchase. */
   "balance_inquiry_not_a_purchase",
   /** A credit is money coming back. Limits gate spend, not refunds. */
   "credit_not_a_purchase",
+  /**
+   * The person this card belongs to has been removed from the team.
+   *
+   * Checked BEFORE the card's own controls, and before
+   * `no_controls_configured`, because a removed person's card must stop
+   * whether or not anybody ever set a control on it. That ordering is the
+   * whole of "removing a member must stop their card".
+   */
+  "member_removed",
+  /** The person this card belongs to is suspended. Reversible. */
+  "member_suspended",
   /** The customer turned the card off. */
   "card_frozen",
   /** The merchant's category is on this card's block list. */
@@ -215,6 +273,10 @@ export const DECISION_RULES = [
   "per_transaction_limit_exceeded",
   "daily_limit_exceeded",
   "monthly_limit_exceeded",
+  /** The person's own envelope, on top of the card's. */
+  "member_per_transaction_limit_exceeded",
+  "member_daily_limit_exceeded",
+  "member_monthly_limit_exceeded",
   /** Every rule passed. */
   "within_controls",
 ] as const;
@@ -256,6 +318,23 @@ export type ControlLookup =
       /** null when the card is registered but has no control version yet. */
       readonly controls: CardControls | null;
       readonly spend: SpendToDate;
+      /**
+       * The person holding this card, or null when it belongs to nobody.
+       *
+       * OPTIONAL ON THE TYPE, and that is not laziness. Every card issued
+       * before the team existed has no member, `null` and `undefined` mean the
+       * same thing to `decide()` — "this card is not a person's card" — and a
+       * caller that has no opinion about members (the forty-odd unit tests
+       * written before this feature) keeps type-checking and keeps asserting
+       * exactly what it asserted. A card with no member behaves EXACTLY as it
+       * did, which is the property that made this safe to add to a live path.
+       */
+      readonly member?: MemberDecisionTerms | null;
+      /**
+       * Spend already approved for the PERSON today and this book month,
+       * across every card they hold. Absent when there is no member.
+       */
+      readonly memberSpend?: SpendToDate;
     }
   | {
       readonly status: "unavailable";
@@ -288,4 +367,17 @@ export type DecisionRecord = {
   readonly inputs: Readonly<Record<string, unknown>>;
   readonly decisionLatencyUs: number;
   readonly source: DecisionSource;
+  /**
+   * Who this authorisation is attributable to. Null for a card with no member.
+   *
+   * OPTIONAL, for the same reason `ControlLookup.member` is: readers written
+   * before the team existed — the console panel's five fixture states among
+   * them — keep type-checking and keep meaning what they meant. A reader that
+   * wants the person asks for it and gets `undefined` where nobody knows, which
+   * is the same answer as `null` and is not a crash on a screen.
+   */
+  readonly memberId?: string | null;
+  readonly memberName?: string | null;
+  /** The member terms version this was judged under. Pinned, like the control version. */
+  readonly memberVersion?: number | null;
 };

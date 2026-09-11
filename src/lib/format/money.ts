@@ -30,6 +30,17 @@ export type MoneyFormatOptions = {
   readonly signed?: boolean;
   /** Include the `$`. Defaults to true; set false for bare figures in a column. */
   readonly symbol?: boolean;
+  /**
+   * Group thousands with commas. Defaults to true, which is right for anything
+   * a person reads and wrong for anything a machine parses back.
+   *
+   * A form pre-filled with `1,234.56` round-trips to a parse failure or, worse,
+   * to `1.00`. That is the exact pressure that pushes a component to reach for
+   * `(cents / 100).toFixed(2)` and reintroduce a float on the display path —
+   * which is how three of them appeared in the disputes forms. The need is
+   * real, so it belongs here next to the cents, not in each caller.
+   */
+  readonly group?: boolean;
 };
 
 /**
@@ -109,9 +120,10 @@ export function formatUsd(
   const sign = negative ? "-" : options.signed === true && cents > 0n ? "+" : "";
   const symbol = options.symbol === false ? "" : "$";
 
-  return `${sign}${symbol}${groupThousands(dollars.toString())}.${fraction
-    .toString()
-    .padStart(2, "0")}`;
+  const whole =
+    options.group === false ? dollars.toString() : groupThousands(dollars.toString());
+
+  return `${sign}${symbol}${whole}.${fraction.toString().padStart(2, "0")}`;
 }
 
 /**

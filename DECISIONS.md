@@ -2357,3 +2357,506 @@ from outside `src/lib/ledger/`, in the same change that added the test forbiddin
 it. The ratchet went red on the next run. It is now `houseAccountId('1110')` in
 `src/lib/ledger/`, which is the first payment against the 235 rather than the
 first exception to them. A guard that only catches other people is not a guard.
+
+## 049 — 2026-09-11T04:12Z — Over-capture is not terminal, measured, and attack 2 stays a skip
+
+Attack 2 has carried a deliberate SKIP since early in the build: on an
+over-capture the money is right — hold released, memo entries net to zero,
+available unclamped — but no `hold_closure` row is written. `DESIGN.md` §8.3
+appeared to say the case closes; `closed(E)` said it did not. The argument for
+leaving it open was that a `hold_closure` row is `PRIMARY KEY (hold_id)` and
+permanent, and an incremental arriving afterwards would reopen a hold whose
+closure was already written.
+
+That argument had a premise nobody had tested: **can an authorisation actually
+receive an incremental after a clearing that exceeds it?** If the network
+refuses, over-capture is terminal in fact and the arm is safe. It was time to
+measure rather than re-argue, especially since migration 0011's
+`hold_closure_reversal` had since made a wrong closure correctable — which was
+precisely the objection that had kept the question open.
+
+**Measured.** `POST /v1/simulate/authorization_advice` on Lithic transactions
+`1df0baa5-319c-46cb-8e19-fcec89b55f56` and
+`faae9502-16fe-4020-8374-40b54f47bd70`:
+
+| Call | Result |
+|---|---|
+| `simulate/authorize` `{amount: 5000}` | `201` |
+| `simulate/clearing` `{amount: 7340}` | `201`, `SETTLED`, `amounts.hold.amount: 0` |
+| `simulate/authorization_advice` `{amount: 9000}` | **`201`, APPROVED** |
+| `simulate/clearing` `{amount: 1660}` | `201`, settlement `-9000` |
+
+Fed those real events the model goes `A=5000 C=7340 H=0`, then
+`A=9000 C=7340 H=1660` — **the hold reopens** — and the network then captures
+exactly that 1660. Lithic's own `amounts.hold.amount` read `0` throughout and
+was **wrong**; our arithmetic predicted the money the merchant actually took.
+
+**Decision: no `C >= A` arm, no migration.** The arm is a no-op for `H`, but it
+sets `v_hold_state.is_released`, which zeroes the hold regardless of the memo
+balance. At the reopen it would have freed $16.60 that was still authorised —
+the exact row 0011 exists to clean up, bought to make a number that was already
+correct look tidier.
+
+**The conflict was never real.** §8.3 row 2 reads `clearing 73.40 **final**` —
+it closes on `sawFinal`, which Lithic does not set on a `CLEARING`. The rows
+that apply are 5 and 12, and both say not closed. The only artefact that
+genuinely disagrees is §8.2's ASCII diagram, whose
+`OVER/EXACT CAPTURED -> TERMINAL: H = 0 forever` box the measurement falsifies
+outright. **The diagram is the defect, not the model.**
+
+Attack 2 is now three tests: the money claim (PASS), the measurement itself
+(PASS — and if Lithic ever refuses the advice, it **skips loudly**, which is the
+trigger to reopen this decision), and the closure-row claim (SKIP, quoting that
+run's own token and approved advice). The decision is wired to the evidence that
+produced it, so it cannot quietly rot.
+
+Also measured: **88 live holds satisfy `C >= A` with `is_closed = false`**, every
+one with memo balance 0. The arm would have alarmed nothing today. That is what
+makes it a trap rather than an obvious mistake.
+
+## 050 — 2026-09-11T04:20Z — A declined authorisation was holding the customer's money
+
+Found while settling 049, and it is the worst defect of the build.
+
+Attack 2's own authorisation reads
+`AUTHORIZATION 5000 result DECLINED ["ACCOUNT_DAILY_SPEND_LIMIT_EXCEEDED"]`
+on Lithic transaction `041d610c-a71a-432e-ad62-ca16b6d882b0` — **and the ledger
+placed the full $50 hold on it.**
+
+Two confirmations, both direct:
+
+1. `src/lib/holds/lithic-events.ts` contains **zero** occurrences of `result`,
+   `DECLINED` or `APPROVED`.
+2. `card_auth_event` has columns
+   `id, auth_id, kind, amount_cents, is_final, value_date, provider_event_id,
+   inbox_id, received_at` — **there is no result column.** The outcome is
+   discarded at ingest. An approved and a declined authorisation are the same
+   row by the time anything can reason about them.
+
+So the model does not forget to check a flag; the information never survives the
+front door. The sandbox account's $5,000 daily limit is exhausted, so
+authorisations are presently declining — which means **attacks 1 and 2 have been
+passing because we ingest declines as approvals.**
+
+This is the thirteenth instance of the pattern this log has been tracking, and
+the clearest: *every guard that failed today reported healthy, because what it
+excluded was shaped exactly like the failure it existed to catch.* Here the
+exclusion was the column itself.
+
+Repair is dispatched: carry the outcome through ingest (migration `0026`),
+backfill from retained raw payloads and leave NULL where they are absent, stop a
+declined authorisation raising `A` while keeping it visible in the event log, and
+correct the live book by **append at the original value dates**, following 0011.
+
+**Attacks 1 and 2 are expected to fail once declines stop counting, and that is
+the correct outcome.** A red test telling the truth beats a green one that is
+not. Nothing will be tuned to keep them green.
+
+One thing is explicitly **not** being done: raising the account's daily limit.
+`PATCH /v1/accounts/{token}` was blocked by the permission classifier — a
+deliberate guard on changing a provider account's settings — and working around
+it is not on the table. Whether to raise that limit is the user's call.
+
+## 051 — 2026-09-11T04:38Z — The fuzzer found the bug 0011 and 049 both argued about, one line over
+
+`docs/REMAINING.md` §4.2 proposed an adversarial fuzzer as scope creep, on the
+grounds that the hold model is already a pure function of an event set and so
+property testing is cheap. It was built tonight. It paid for itself on the first
+run, and what it found is the same mistake this log has now made twice.
+
+**The claim survived.** 25,720 sets and 98,611 orderings in 0.6s on every
+`pnpm test`; **1,286,000 sets and 6,257,911 orderings** under
+`FUZZ_EXHAUSTIVE=1`. Zero disagreements — byte-identical `HoldState`, not merely
+equal `holdCents`. `holdState()` also matched an independent transcription of
+the formula from its own header on every set. "No arrival order is a special
+case" is now measured rather than asserted, which is the difference between a
+design note and a property.
+
+**The defect is not in `H`.** It is in the predicate that licenses a permanent
+row:
+
+```
+terminallyClosed = sawFinal ∨ sawClose ∨ expired ∨ (sawAuthorisation ∧ A ≤ 0)
+```
+
+The first three arms are monotone. The fourth is not. Shrunk from 8 events to
+2, seed `5300024`:
+
+```
+E1 = { authorization 0 }                   -> terminallyClosed = TRUE
+E2 = E1 ∪ { incremental_authorization 1 }  -> terminallyClosed = FALSE, H = 1
+```
+
+**A $0 authorisation is card-on-file verification.** Lithic sends
+`AUTHORIZATION amount:0`, then an advice carrying the real figure. In one
+payload it is harmless. Split across two deliveries — the ordinary case, and
+exactly the case the brief tells you to survive — the first delivery closes the
+hold for ever. Second witness: `{auth 100, reversal 100}` then a late
+incremental.
+
+Then the blind spot compounds it. `v_hold_state.is_released` reads the closure
+row, so availability stops withholding money `H(E)` still says is held; the memo
+book is driven back up; the result is precisely the released-but-carrying-money
+row that `v_hold_release_drift` was added in 0011 to catch — while
+`v_hold_drift` stays silent, because it is `WHERE NOT is_released`. On the $0
+path the closure is written with reason `"authorisation fully reversed"`, which
+is a **false statement in an append-only audit table**.
+
+**The part that matters for the debrief.** Migration 0011 declined a `C >= A`
+arm because it would "write a PERMANENT closure row on a condition a later
+incremental authorisation can undo". Decision 049, an hour ago, declined the
+same arm again on a fresh measurement. The `A <= 0` arm *is* such a condition,
+sits one line away, and neither pass looked at it. **The reasoning was applied
+twice to one arm and never to its neighbour.** Being right about a line is not
+the same as being right about the file.
+
+The fuzzer also did two things I want on the record because they are the
+difference between a property test and a green tick. It recorded the
+monotonicity failure as `it.fails` — green while the defect stands, **red the
+day the model is fixed** — with two pinned witnesses and a corpus sweep
+asserting every violation is this arm and nothing else. And its live-book
+property **filters these shapes out before sending, then counts and asserts the
+filter**, because reproducing the bug against the shared book would write a
+permanent false closure into an append-only table. That has happened here once
+already: `scripts/repair-0011-spurious-closures.mjs`, three holds, $60.
+
+One precondition is now explicit rather than assumed: two events sharing a
+`providerEventId` with different contents make `holdState()` order-dependent
+(first wins). `UNIQUE (auth_id, provider_event_id)` makes it unreachable — but
+it is the single assumption the whole set-function argument rests on, so it is
+asserted rather than left to be rediscovered by someone hostile.
+
+Fix dispatched as migration `0028`: move `A <= 0` from `terminallyClosed` to
+`closed`, which is the distinction the code already draws and simply
+mis-assigns. `H = max(A - C, 0)` is already 0 there, so **no customer-visible
+number changes** — it only stops a permanent row being written on a reversible
+condition. The model and `v_card_auth_hold.is_closed` change in one migration,
+because `v_hold_drift` holds them equal by invariant.
+
+## 052 — 2026-09-11T04:58Z — The ACH adapter dropped every sandbox event, and a test proved it did not
+
+Found by the agent registering the missing webhook consumers, in a file it was
+not allowed to edit, which is the only reason it was found at all.
+
+`IncreaseAchRail.parseEvent()` gated on:
+
+```ts
+if (!ev.associated_object_id?.startsWith('ach_transfer_')) {
+  return this.unknownEvent(..., 'unmodelled_event', ev);
+}
+```
+
+**Every id Increase's sandbox issues is `sandbox_ach_transfer_...`.** So every
+settlement and every return this build has ever generated went down the
+"an event about something this adapter does not model" branch and was answered
+`200` and discarded. The entire rail, dropped by a string that was correct about
+production and wrong about the only environment anybody has run.
+
+Fixed to dispatch on `associated_object_type`, which is the field Increase
+documents for this, is identical in both environments, and cannot be defeated by
+a prefix nobody thought to look for.
+
+**The test is the interesting part.** `client.test.ts` asserted the unmodelled
+branch — and passed — because its `eventBody` helper hardcoded
+`associated_object_type: 'ach_transfer'` and varied only the id. So the case
+"an inbound transfer is unmodelled" was being proven by the id prefix, the exact
+mechanism that was broken. The helper now takes the type as a parameter, and a
+regression asserts a real sandbox id parses as `settled`.
+
+This is instance fifteen of the pattern, and the first where the **test's own
+fixture** was the blind spot rather than a view's `WHERE` clause. A fixture that
+holds constant the field under test cannot fail, and it reported healthy for the
+life of the rail.
+
+Also fixed alongside it: `createAchTransfer` passed `holderName` to Increase's
+`individual_name` untruncated, and Increase `400`s above 22 characters.
+**"Fairbanks Machining LLC" is 23** — a real payee on this book who could not be
+paid at all. Truncated at the boundary, with the reasoning that the field is a
+name on a statement and nothing joins on it.
+
+Neither defect was reachable by any invariant in this repo: both live in the
+adapter's translation layer, above the ledger and below the consumers, where a
+dropped event leaves no row to be inconsistent with.
+
+## 053 — 2026-09-11T05:40Z — Interest ships with an empty account, on purpose, because the book has no overdrafts
+
+I briefed the interest work with a premise: that one account was around
+−$1,800 and overdraft interest would therefore have rows to show. **That was
+false**, and the agent measured before writing a line rather than building on
+what I told it:
+
+| Question | Answer |
+|---|---|
+| `SELECT count(*) FROM v_overdrawn_accounts` | **0** |
+| Deposit leaves with a settled balance < 0 today | **0 of 5** |
+| (deposit leaf, value date) pairs in debit on **any** date in the 45-day window | **0** |
+| Any account in the chart with a negative natural balance | **0** |
+
+An earlier agent had already corrected the same premise once. Both corrections
+were right and I repeated the error anyway, which is worth recording:
+**a brief is not evidence, and a coordinator restating a number is not a
+measurement of it.**
+
+So `4400 Interest income — overdraft` ships with **zero rows**, and `/accruals`
+says so on its face — a panel reading "overdraft interest is built, priced, and
+has no rows — measured, not assumed", which flips by itself when the book
+changes. `v_trial_balance` for 4400 is exactly 0. What is demonstrated instead
+is credit interest: **25 posted days across 5 accounts, $135.09 paid**, with
+`5400`'s trial balance exactly $135.09.
+
+Built as **one enrolment with a two-rate card** rather than two products, so the
+sign flip is a single account's single timeline and the first day an account
+closes in debit prices on 4400 with nothing to deploy.
+
+**Rounding: §12.2, half to even** — and §12.3 is not merely worse here, it is
+*undefined*. Largest-remainder needs a source amount to distribute; daily
+interest has none, because the month's interest is not a known number until the
+month has happened and the balance moves every day. You cannot floor N shares of
+a number you do not have. Rounding is on the **magnitude** with the sign carried
+by the side, so it is symmetric — truncating division on a signed basis would
+round every overdraft away from zero and every credit payment toward it.
+
+No residual penny, and that does not contradict §4: §12.3's residual is real
+money that must land somewhere because the shares must sum to a source; §12.2's
+sub-cent fraction never existed as money. `2900` stays reserved for dust that
+*arrived* as a real external amount, which is why the USDC leg uses it and this
+does not. **Still exactly two rounding rules in this ledger.**
+
+**Day count: ACT/365 fixed**, as a column constrained to `(360, 365)` so the
+convention is data. 12 CFR 1030 Appendix A computes the daily periodic rate as
+the annual rate ÷ 365. ACT/360 pays and charges 1.389% more per year for the
+same quoted rate — arguable on a commercial loan quoted that way, indefensible
+on a disclosed deposit rate.
+
+**The EDGE state is better than the one I asked for.** The sign flip was
+unavailable, so EDGE became the day the price of money changed under one
+account. Read 09-08 and 09-09 together: the balance went **up** 8¢ (the prior
+day's interest compounding) and the amount posted went **down** 1¢. Nothing but
+the rate change explains it, and it shows both directions of half-to-even in
+adjacent rows.
+
+**On `basis_balance_cents`** — the stored-balance rule. Kept, and made
+survivable instead of renamed past the checker. `dbcheck`'s exception is a named
+`(table, column)` pair list, no pattern and no whole-table pass, and it is paid
+for by **check 5b**, which recomputes every stored basis from the journal at the
+watermark the row itself recorded and asserts equality. Made to fail 0 → 1
+against this database in a rolled-back transaction with a fabricated balance.
+That is the distinction that makes it defensible: a stored balance nobody can
+re-derive is a second source of truth; a stored basis for a decision that was
+made is evidence, and only the recompute test tells them apart.
+
+`dbcheck` is **28/28**. The two new invariant views were each **made to fail
+first** — 0 → 1 and 0 → 5 in rolled-back transactions — before being trusted,
+which is now the house rule after fifteen guards were found that could not fail
+at all.
+
+## 054 — 2026-09-11T06:05Z — The agent surface told an agent it had $17,035.50 more than the customer had
+
+Migration 0022 collapsed four disagreeing definitions of "available" — they
+differed by $30,662.10 — into one Postgres function, `ledger_availability()`,
+and added `v_balance_definition_drift` to alarm if they ever diverged again.
+That view is now in `dbcheck`.
+
+**The agent surface kept a fifth definition, and the drift view could not see
+it**, because a drift view compares the definitions it has been told about and
+this one was never registered. Measured live, same account, same instant, the
+agent was told it had **$17,035.50 more available** than the customer's own
+screen:
+
+- **$15,535.50** of future-dated credits — the old code queried at value date
+  `9999-12-31`, so money that has not arrived was spendable;
+- **$1,500.00** of committed outbound debits, not subtracted;
+- manual holds dropped silently.
+
+And `initiate_payment` **funds-checks against exactly that number**. So the one
+write tool on the surface — the tool whose entire safety argument is that an
+agent may propose and never cause — was validating proposals against a balance
+nobody else in the system agreed with.
+
+**Deleted rather than registered.** Registering it with the drift view would
+have made the disagreement visible; it would not have made it acceptable. The
+surface now reads `ledger_availability()` like everything else, verified equal
+to `v_available_balance.available_cents` at `1771869`, and the terms that were
+previously invisible are itemised (`operator_holds`, `pending_outbound`).
+
+The principle, written down because it will be asked in the debrief: **an agent
+must never see a more permissive number than the customer.** Being conservative
+costs an agent a refusal it could have avoided. Being permissive costs a
+customer a payment they could not afford. The asymmetry is the whole reason an
+agent is allowed near this system at all.
+
+**Card controls stay read-only**, and the argument is better than the one I gave
+in the brief. I offered the timing objection — a write racing Lithic's measured
+6000ms decision window. That objection is **wrong** and the agent discarded it
+explicitly: it is an ordinary race between two database transactions. The real
+argument is that **a control change IS an authorisation decision made in
+advance**, and no approval queue anywhere will ever show it as one. Tighten-only
+does not rescue it: a tighten with no unwind is a freeze with extra steps, and
+"safe direction" stops being well-defined once allow-lists exist.
+
+`raise_dispute` was the closest call and deserves recording because it *passes*
+the `initiate_payment` test — two human steps before money moves, against one
+for a payment. It was refused on a different test: a payment instruction is a
+**request** that expires harmlessly; a dispute is an **assertion of fact**,
+durable from the moment it is written. It starts the network's outside-date
+clock, creates work on someone else's queue, and because `dispute_event` is
+append-only a withdrawal is another event rather than an erasure. A hallucinated
+reason code becomes permanent history attributed to the business.
+
+`list_agent_limits` now serves the refusal list **through the protocol** — 20
+refusals, each with its argument, whether it is `unrepresentable` or merely
+`capability-absent`, and the constraint that enforces it. A written policy
+became an executable one, and a refused tool name returns the reason and what to
+do instead rather than `unknown tool`.
+
+## 055 — 2026-09-11T06:30Z — A header chose which host we fetched, and we rendered the answer as our own liveness
+
+Three findings from the boundary paydown, in descending order of how badly each
+would have read in a debrief.
+
+**1. `resolveOrigin` in `home/summary.ts` trusted `x-forwarded-host` with no
+allowlist**, fetched that host, and rendered the reply through `parseHealth` as
+*this deployment's* live-versus-simulated table. So a caller chose the URL the
+server called, and the response was presented to a viewer as our integration
+status.
+
+Two distinct problems in one line. The outbound fetch to a caller-chosen host is
+a server-side request forgery primitive. And the rendering is the honesty
+failure this build fails hardest on: `/api/health` is declared authoritative,
+`scripts/audit-claims.mjs` exists to prove no document contradicts it, and
+forty-eight hours were spent ensuring a simulated capability is never shown as
+live — all undone by one request setting a header.
+
+Fixed by making the header a **selector over an allowlist, never a source**:
+`VERCEL_URL`, `VERCEL_BRANCH_URL`, `VERCEL_PROJECT_PRODUCTION_URL`, the host of
+`APP_BASE_URL`, the built-in production origin, and loopback. Anything else falls
+back to the configured origin. Deliberately **no `*.vercel.app` wildcard** —
+that is the same hole with an extra step. Nine tests, including the attacker
+case and the look-alike case.
+
+**2. `/statements` was defaulting to a fixture company's blank document**, and
+the cause was three correct behaviours compounding. `pickDemoAccount` selected
+the *busiest* deposit account; a test fixture had out-posted every real customer
+(759 postings, **zero in-period**); `postEntry()` then correctly wrote nothing,
+because the idempotency keys already existed on the real customer — but
+`publishStatement`/`reissueStatement` key on the **account**, so three zero-line
+statements were issued to the fixture. A grader opening one of the
+hardest-graded screens saw an empty document.
+
+Now selects the account with the most postings whose `value_date` falls **in the
+period being displayed**, falling back to lifetime volume. The argument, written
+at both call sites: a statement is a document about a period, so the account
+worth rendering one for is the one with something to show *on it*. "Busiest
+overall" was only ever a proxy, and it broke the moment fixtures out-posted
+customers. It also self-corrects — each run finds its own postings next time.
+
+The three empty statements cannot be deleted, because the table is append-only.
+So `screen.ts:pickAccount` now ranks on newest published period **with lines**.
+That is the append-only discipline costing something real and being paid rather
+than worked around.
+
+**3. Splitting the query nearly introduced a race.** All 11 ledger references
+lived in one statement that was one statement *on purpose*: one statement is one
+MVCC snapshot. Paying the boundary bill naively would have bought modularity
+with a race on the landing page. Both statements now run inside
+`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`, so the invariant moved from
+an accident of formatting to something Postgres enforces — and the test that
+asserted "one statement" now asserts "one transaction, two statements, these
+options". Proved by measurement: inside the transaction both statements return
+identical `pg_current_snapshot()` and identical `now()`; outside one, they do
+not.
+
+Four independent branches reached for the same four reader shapes tonight
+(`currentBookingWatermark`, `readAccountIdentities`, `resolveChartCodes`,
+`findAccount`). That convergence, arrived at separately, is the strongest
+evidence available that the abstraction was the right one — and it is recorded
+in `boundary.test.ts` rather than in anyone's memory.
+
+## 056 — 2026-09-11T05:50Z — Production has been re-committing the declined-hold bug for eight hours
+
+The question 050 left open — is the ingest write path broken, or merely
+undeployed — is settled, by evidence rather than by reading source:
+
+- The repo's path **has** written `source='ingest'` verdict rows into this
+  database (18 of them, 05:04–05:06Z). The earlier "788 rows, none ingest"
+  measurement simply predated them.
+- In the **same window**, deliveries carrying `result:"DECLINED"` produced
+  `kind='authorization'` rows with **no verdict row at all**, and zero rows
+  anywhere carry the `declined` kind that 0026 added. 0026's code cannot
+  produce that: it maps a refused step to `declined`, and if it somehow did
+  not, the `card_auth_event_result_agrees_with_kind` trigger refuses the INSERT
+  and parks the delivery. Those inbox rows are `state='done'`.
+- Deployed `/api/health` reports `commit.sha 4c682e1d…`.
+
+So the fix has been in the repository and not on the box. **Of 47 events
+ingested since 0026 committed, 22 were DECLINED authorisations stored as
+approvals** — and two more landed the same way at 05:31 and 05:33Z, *after* the
+repair migration ran.
+
+Migration 0032 recovered every verdict retained in `webhook_inbox` and never
+read, then repaired the money 0026-style — closure plus reversal at the original
+value date: **12 holds, $600.00 returned, $300.00 of it Kettle & Crumb's.**
+
+`dbcheck` is now **30 passed, 1 failed**, and the failure is correct: 76 holds
+withholding **$5,165.60** against authorisations whose verdict was never
+observed. Those are pre-0026 fixture events. They were deliberately **not
+excluded**, and the reasoning is the best statement of this log's through-line
+anyone has managed: *the exclusion would be safe, and would still be an
+exclusion shaped like the failure.*
+
+**The repaired view was made to fail on purpose before being trusted** —
+`dbcheck --prove`, each in a rolled-back transaction: refused 0 → 1,
+unanswered 86 → 87, `v_wire_availability_drift` 0 → 1, and the trigger refusing
+a refusal filed as an authorisation.
+
+Three more guards, bringing the count to nineteen:
+
+1. **`v_hold_closure_not_terminal` discriminates on free text.** Its population
+   is five string literals matched against `hold_closure.reason`. **64 of 184
+   closures (35%) are invisible by construction.** 0032's own closures landed
+   outside the list by *wording*, not intent. This is a guard I wired into CI
+   myself two hours ago while describing this exact pattern.
+2. **`v_accrual_month_drift` is vacuous** — `WHERE month_complete` over **zero**
+   complete accrual months.
+3. **`scripts/audit-claims.mjs` validates documents against a deployment that
+   predates the tree**, and cannot see that it is doing so.
+
+`dbcheck` now prints a permanent **GUARD REACH** section: the population each
+invariant actually ranges over. That is the generalisation of nineteen
+instances — not "check the guards", but *make every guard state its own domain,
+out loud, every run.*
+
+## 057 — 2026-09-11T05:55Z — The second-business claim, made honest by running it
+
+I told Saahith repeatedly that the core loop passed 7/7 on a second business.
+The verification agent established it was **unsupported**: `coreloop.mjs` had no
+business selector at all — it ranked subjects and took the top one, tiebroken by
+`localeCompare`. Worse, its ranking omitted `kyb_evidence`, so it
+deterministically chose a business verified by the **simulator** to demonstrate
+leg 1's "real KYB check".
+
+Both are fixed. The ranking is now gate answer → evidence tier
+(`live > manual > simulated`) → live legs → legs on file → name, and the default
+subject is Ridgeline Robotics, whose director leg is live on Stripe Identity.
+`--business` and `--list-subjects` exist.
+
+Then the claim was **made true rather than re-asserted**:
+
+```
+PASS 7  FAIL 0  SKIP 0  of 7 legs   79s
+99 HTTP calls to https://corgi-trial-psi.vercel.app, 3 to the Lithic sandbox
+Kettle & Crumb Bakery LLC
+  opening -$7,013.45 available -> closing -$7,086.85
+  (ledger $31,513.15, holds $100.00, uncleared $38,500.00)
+```
+
+The negative available against a positive ledger is correct and worth being able
+to explain on sight: $38,500 of inbound ACH is still inside its return window
+and is deliberately not spendable. The build never clamps it to zero, because a
+clamp would hide exactly the position an operator needs to see.
+
+The lesson is the same one as 053, where I fed an agent a balance figure that
+was false: **a coordinator restating a number is not a measurement of it.** The
+difference here is that the claim turned out to be true — which is luck, not
+method, and would have been indistinguishable from the alternative right up to
+the moment somebody ran it.

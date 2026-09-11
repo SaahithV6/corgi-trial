@@ -71,6 +71,27 @@ describe("formatUsd", () => {
     expect(formatUsd(4_821_560, { symbol: false })).toBe("48,215.60");
     expect(formatUsd(-7_340, { symbol: false })).toBe("-73.40");
   });
+
+  it("can drop the grouping for a value a machine parses back", () => {
+    // A form pre-filled with "48,215.60" round-trips to a parse failure, or to
+    // 48.00 if something is feeling helpful. This option exists so a component
+    // pre-filling an amount input never has a reason to compute cents / 100.
+    expect(formatUsd(4_821_560, { symbol: false, group: false })).toBe("48215.60");
+    expect(formatUsd(-7_340, { symbol: false, group: false })).toBe("-73.40");
+    expect(formatUsd(100, { symbol: false, group: false })).toBe("1.00");
+  });
+
+  it("round-trips an ungrouped rendering back through toCents", () => {
+    // The property that matters: what we put in the input is what comes back
+    // out of it. Cents in, the same cents out, with no float in between.
+    for (const cents of [0, 1, 99, 100, 7_340, 4_821_560, -7_340]) {
+      const rendered = formatUsd(cents, { symbol: false, group: false });
+      const [whole, frac] = rendered.replace("-", "").split(".");
+      const back =
+        BigInt(whole ?? "0") * 100n + BigInt(frac ?? "0");
+      expect(rendered.startsWith("-") ? -back : back).toBe(BigInt(cents));
+    }
+  });
 });
 
 describe("toCents", () => {

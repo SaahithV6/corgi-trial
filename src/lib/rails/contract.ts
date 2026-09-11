@@ -243,11 +243,15 @@ export interface RailProbe {
 /**
  * The one place the honest label is computed.
  *
- * Both halves, every time. `achRailHealth()` in ./achsim/factory.ts computes a
- * label from `INCREASE_API_KEY` being a non-empty string and nothing else,
- * which is exactly the failure probe.ts was written to stop; that function is
- * left alone here because changing it would change behaviour, and it is named
- * in docs/RAILS.md instead.
+ * Both halves, every time. It is now also the only place: `achRailHealth()`
+ * and `createAchRail()` in ./achsim/factory.ts used to compute a label from
+ * `INCREASE_API_KEY` being a non-empty string and nothing else — exactly the
+ * failure probe.ts was written to stop — and this comment used to say they
+ * were being left alone because fixing them would change behaviour. The
+ * behaviour being preserved was a false claim, so it was a bug and not a
+ * baseline. Both now report `liveness: 'unprobed'` for a configured-but-
+ * unproven slot and derive `label` from this function; `probeAchRailHealth()`
+ * is the async sibling that makes the call and can return LIVE.
  */
 export function railProbeLabel(evidence: Evidence, liveness: RailLiveness): 'LIVE' | 'SIMULATED' {
   return evidence === 'live' && liveness === 'live' ? 'LIVE' : 'SIMULATED';

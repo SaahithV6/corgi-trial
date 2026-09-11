@@ -16,7 +16,12 @@
 
 import { fail, ok } from "@/lib/result";
 
-import type { PaymentsDataSource, PaymentsSnapshot, PolicyOptionView } from "./data-contract";
+import type {
+  PaymentsDataSource,
+  PaymentsSnapshot,
+  PolicyOptionView,
+  WirePayeeOption,
+} from "./data-contract";
 import type { DemoState } from "./demo-state";
 
 /** Fixed, so ages and screenshots are reproducible. */
@@ -65,6 +70,39 @@ const POLICIES: readonly PolicyOptionView[] = [
   },
 ];
 
+/**
+ * Two confirmed wire beneficiaries for the fixture states, both of them shapes
+ * the live book actually holds: one clean, and one carrying a standing warning
+ * nobody has signed for. The second is there because a picker that only ever
+ * shows healthy rows teaches nothing about the control it exists to surface.
+ */
+const WIRE_PAYEES: readonly WirePayeeOption[] = [
+  {
+    payeeId: "1f8d9b2c-0000-4000-8000-00000000aa01",
+    displayName: "Northwind Industrial LLC",
+    holderName: "Northwind Industrial LLC",
+    wireRoutingNumber: "021000021",
+    accountNumberLast4: "3330",
+    institutionName: null,
+    outcome: "verified",
+    acknowledged: false,
+    freshness: "fresh",
+    gateRefusalCode: null,
+  },
+  {
+    payeeId: "1f8d9b2c-0000-4000-8000-00000000aa02",
+    displayName: "Northwind Industrial LLC (second account)",
+    holderName: "Northwind Industrial LLC",
+    wireRoutingNumber: "021000021",
+    accountNumberLast4: "0000",
+    institutionName: null,
+    outcome: "warned",
+    acknowledged: false,
+    freshness: "fresh",
+    gateRefusalCode: "PAYEE_WARNING_UNACKNOWLEDGED",
+  },
+];
+
 function snapshot(
   actor: PaymentsSnapshot["actor"],
   accounts: PaymentsSnapshot["accounts"],
@@ -73,6 +111,12 @@ function snapshot(
     actor,
     accounts,
     policies: POLICIES,
+    // Keyed by the businesses that are actually in `accounts`, so the empty
+    // state has an empty picker rather than beneficiaries with nothing to pay
+    // them from.
+    wirePayeesByBusiness: Object.fromEntries(
+      accounts.map((account) => [account.businessId, WIRE_PAYEES]),
+    ),
     defaultValueDate: DEMO_VALUE_DATE,
     asOf: DEMO_NOW,
   };

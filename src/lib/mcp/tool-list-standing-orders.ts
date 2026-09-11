@@ -141,7 +141,20 @@ function destinationOut(destination: PaymentDestination): Record<string, string>
       return {
         type: "wire",
         holder_name: destination.holderName,
-        bic: destination.bic,
+        // BOTH BANK IDENTIFIERS ARE OPTIONAL ON THE DESTINATION, and this
+        // return type is `Record<string, string>`, so neither can be spread in
+        // unconditionally. A domestic wire is routed on `wireRoutingNumber` —
+        // the WIRE variant of the ABA, a different number from the same bank's
+        // ACH one — and `bic` is the cross-border extra it replaced as the
+        // primary identifier. Emitting the wire ABA matches what this surface
+        // already does with `routing_number` on the ACH branch above; omitting
+        // it while emitting that one would be an inconsistency rather than a
+        // control. Absent keys are the pre-`wireRoutingNumber` mandates,
+        // which say so by their absence instead of printing "undefined".
+        ...(destination.wireRoutingNumber === undefined
+          ? {}
+          : { wire_routing_number: destination.wireRoutingNumber }),
+        ...(destination.bic === undefined ? {} : { bic: destination.bic }),
         account_number_last4: destination.accountNumberLast4,
       };
     case "usdc":

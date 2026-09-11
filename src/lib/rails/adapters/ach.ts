@@ -144,29 +144,46 @@ class AchRailAdapter implements ObservingRail, OriginatingRail<AchInstruction> {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Increase — live code, never once run                                       */
+/* Increase — one operation run, four still never run                         */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Every Increase operation is `unexercised`, and that is the honest word.
+ * Four of five Increase operations are `unexercised`, and that is still the
+ * honest word for them.
  *
- * There has never been an `INCREASE_API_KEY` in this repo. The adapter's wire
- * shapes come from `research/ach/NOTES.md`, where not one line is marked
- * `[MEASURED]`. The code is real, the reasoning behind the settlement
- * promotion is real, and none of it has met a bank. Putting that in the
- * support matrix rather than only in a README paragraph means the generated
- * table in docs/RAILS.md carries it too.
+ * WHAT CHANGED, AND EXACTLY HOW FAR IT GOES. A sandbox `INCREASE_API_KEY` now
+ * exists, and `probe` has been run with it: `GET /accounts?limit=1` answered
+ * **200 on 2026-09-11**, both from this adapter (see
+ * ../increase/probe.integration.test.ts, which anyone holding the credential
+ * can re-run) and from the deployed system on every `/api/health` request. So
+ * `probe` is `measured` and the matrix cell is `+`.
+ *
+ * NOTHING ELSE MOVES, and resisting that is the point. A read of `/accounts`
+ * proves the credential authenticates and the host answers. It does not prove
+ * that `POST /ach_transfers` maps a `TransferRequest` correctly, that the
+ * `submitted + settlement.settled_at -> settled` promotion fires, or that an
+ * R01 arrives shaped the way `research/ach/NOTES.md` guessed — not one line of
+ * which is marked `[MEASURED]`. Letting one earned cell promote its neighbours
+ * is liveness by presence wearing a round trip as a disguise.
+ *
+ * The sandbox account does hold one returned ACH transfer, and it was NOT made
+ * by this adapter: its `idempotency_key` is null, and `initiateCredit` always
+ * sends `Idempotency-Key: <clientReferenceId>` (../increase/client.ts). Two
+ * real Increase deliveries have also reached the deployed webhook endpoint and
+ * had their signatures verified — and both were dead-lettered, "no consumer
+ * registered for provider 'increase'", so `parseEvent` has still never seen a
+ * real delivery. `observe` stays `~`.
  */
 const INCREASE_SUPPORT: RailSupport = {
   originate: {
     supported: true,
     proof: 'unexercised',
-    evidence: 'POST /ach_transfers, both directions by sign. Shape from docs; no Increase key has ever existed in this repo.',
+    evidence: 'POST /ach_transfers, both directions by sign. Shape from docs; a key exists now but this call has never been sent — the one transfer in the sandbox carries no Idempotency-Key, so it did not come from here.',
   },
   observe: {
     supported: true,
     proof: 'unexercised',
-    evidence: 'Event body is a pointer; parseEvent reads the transfer back. Never run against a real delivery.',
+    evidence: 'Event body is a pointer; parseEvent reads the transfer back. Two real deliveries arrived and were dead-lettered — no consumer is registered for increase — so this has still never run against one.',
   },
   settle: {
     supported: true,
@@ -180,8 +197,8 @@ const INCREASE_SUPPORT: RailSupport = {
   },
   probe: {
     supported: true,
-    proof: 'unexercised',
-    evidence: 'GET /accounts?limit=1. Reachable, but no credential has ever been presented to it from here.',
+    proof: 'measured',
+    evidence: 'GET /accounts?limit=1 -> 200 against sandbox.increase.com, 2026-09-11. Re-run it with increase/probe.integration.test.ts; a wrong key answers 401 and reads unauthorised.',
   },
 };
 

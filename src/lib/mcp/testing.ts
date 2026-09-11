@@ -22,10 +22,15 @@ import { logger } from "@/lib/log";
 import { ToolError } from "./types";
 import type {
   AccountRef,
+  AccrualFilter,
+  AccrualPage,
   ApprovalPolicyRef,
   BalanceSnapshot,
   CardControlFilter,
   CardControlPage,
+  DisputeFilter,
+  DisputePage,
+  DisputeRowProjection,
   Gateway,
   PayeeFilter,
   PayeeRow,
@@ -63,6 +68,8 @@ export interface FakeState {
   payees: Map<string, PayeeRow[]>;
   standing: Map<string, StandingOrderPage>;
   cards: Map<string, CardControlPage>;
+  disputes: Map<string, DisputeRowProjection[]>;
+  accruals: Map<string, AccrualPage>;
   policies: ApprovalPolicyRef[];
   queued: QueuePaymentInput[];
   /** Keyed by idempotency key, so a replay returns the original. */
@@ -75,25 +82,43 @@ export function emptySnapshot(): BalanceSnapshot {
   return {
     ledgerCents: 0n,
     holdsCents: 0n,
+    cardAuthHoldsCents: 0n,
+    otherHoldsCents: 0n,
     unclearedCents: 0n,
+    pendingOutboundCents: 0n,
     availableCents: 0n,
     cardHoldCount: 0,
     unclearedHoldCount: 0,
   };
 }
 
+/**
+ * A balance for the tests.
+ *
+ * `holdsCents` is the AUTHORITATIVE hold total — card authorisations plus
+ * operator holds — and `cardAuthHoldsCents` is the card share of it, exactly
+ * as the live gateway now reports them. The two extra parameters exist so a
+ * test can express the case that used to be invisible: an operator hold, or a
+ * debit already booked to leave, either of which makes available smaller than
+ * a naive ledger-minus-card-holds sum.
+ */
 export function snapshotOf(
   ledgerCents: bigint,
   holdsCents = 0n,
   unclearedCents = 0n,
   cardHoldCount = 0,
   unclearedHoldCount = 0,
+  pendingOutboundCents = 0n,
+  otherHoldsCents = 0n,
 ): BalanceSnapshot {
   return {
     ledgerCents,
     holdsCents,
+    cardAuthHoldsCents: holdsCents - otherHoldsCents,
+    otherHoldsCents,
     unclearedCents,
-    availableCents: ledgerCents - holdsCents - unclearedCents,
+    pendingOutboundCents,
+    availableCents: ledgerCents - holdsCents - unclearedCents - pendingOutboundCents,
     cardHoldCount,
     unclearedHoldCount,
   };
@@ -176,6 +201,14 @@ export function defaultState(): FakeState {
     cards: new Map([
       [BUSINESS_A, defaultCards()],
       [BUSINESS_B, { cards: [], decisions: [] }],
+    ]),
+    disputes: new Map([
+      [BUSINESS_A, defaultDisputes()],
+      [BUSINESS_B, []],
+    ]),
+    accruals: new Map([
+      [BUSINESS_A, defaultAccruals()],
+      [BUSINESS_B, emptyAccruals()],
     ]),
     policies: [
       {
@@ -533,6 +566,191 @@ export function defaultCards(): CardControlPage {
   };
 }
 
+/**
+ * Two dispute cases, chosen to be the two an agent gets wrong.
+ *
+ * The first is LIVE with provisional credit granted: $73.40 advanced into the
+ * customer's ledger balance and held, which is the hold `get_balance` reports
+ * with no card behind it. The second is CLOSED and LOST with the advance
+ * clawed back, which is the pair of postings that looks like a duplicate
+ * charge in `list_transactions` and is not.
+ */
+export function defaultDisputes(): DisputeRowProjection[] {
+  return [
+    {
+      disputeId: "d1111111-0000-4000-8000-000000000001",
+      caseRef: "DSP-20260908-AB12CD",
+      disputedEntryId: "e0000000-0000-4000-8000-000000000001",
+      reason: "fraud",
+      network: "visa",
+      networkCode: "10.4",
+      narrative: "Card not present at the pump; the driver was in the workshop all morning.",
+      amountCents: 7_340n,
+      status: "provisional_credit_granted",
+      isClosed: false,
+      raisedByName: "Dana Whitfield",
+      raisedAt: "2026-09-08T15:04:00.000Z",
+      valueDate: "2026-09-08",
+      decidedOn: null,
+      networkOutsideDate: "2026-10-28",
+      daysToOutsideDate: 48,
+      advancedCents: 7_340n,
+      heldCents: 7_340n,
+      holdReleased: false,
+      needsAuthorization: false,
+      authorizations: 1,
+      requiredApprovals: 1,
+      thresholdCents: 5_000n,
+      events: [
+        {
+          kind: "raised",
+          occurredAt: "2026-09-08T15:04:00.000Z",
+          valueDate: "2026-09-08",
+          actorName: "Dana Whitfield",
+          actorKind: "human",
+          amountCents: 7_340n,
+          entryId: null,
+          detail: null,
+        },
+        {
+          kind: "provisional_credit_authorized",
+          occurredAt: "2026-09-08T16:20:00.000Z",
+          valueDate: "2026-09-08",
+          actorName: "Priya Raman",
+          actorKind: "human",
+          amountCents: 7_340n,
+          entryId: null,
+          detail: null,
+        },
+        {
+          kind: "provisional_credit_granted",
+          occurredAt: "2026-09-08T16:21:00.000Z",
+          valueDate: "2026-09-08",
+          actorName: "Priya Raman",
+          actorKind: "human",
+          amountCents: 7_340n,
+          entryId: "e0000000-0000-4000-8000-00000000000a",
+          detail: null,
+        },
+      ],
+    },
+    {
+      disputeId: "d1111111-0000-4000-8000-000000000002",
+      caseRef: "DSP-20260901-ZZ99YY",
+      disputedEntryId: "e0000000-0000-4000-8000-000000000002",
+      reason: "duplicate",
+      network: "visa",
+      networkCode: "12.6",
+      narrative: "Billed twice for one delivery.",
+      amountCents: 5_00n,
+      status: "closed_lost_recovered",
+      isClosed: true,
+      raisedByName: "Dana Whitfield",
+      raisedAt: "2026-09-01T09:00:00.000Z",
+      valueDate: "2026-09-01",
+      decidedOn: "2026-09-06",
+      networkOutsideDate: "2026-10-21",
+      daysToOutsideDate: 41,
+      advancedCents: 5_00n,
+      heldCents: 0n,
+      holdReleased: true,
+      needsAuthorization: false,
+      authorizations: 1,
+      requiredApprovals: 1,
+      thresholdCents: 5_000n,
+      events: [],
+    },
+  ];
+}
+
+export function emptyAccruals(): AccrualPage {
+  return {
+    schedules: [],
+    months: [],
+    days: [],
+    invariants: { monthDrift: 0, ledgerDrift: 0, unresolved: 0, gapDays: 0 },
+    accruedToDateCents: 0n,
+  };
+}
+
+/**
+ * A $25.00 plan in a 30-day month: 83¢ a day with 10¢ of residual, so the
+ * first ten days carry 84¢ and the rest carry 83¢. Day 10 and day 11 are both
+ * present deliberately — they are the adjacent pair that differs by a penny,
+ * which is the thing an agent reports as a bug.
+ */
+export function defaultAccruals(): AccrualPage {
+  const base = {
+    scheduleId: "ac111111-0000-4000-8000-000000000001",
+    planName: "Business Standard",
+    monthlyCents: 2_500n,
+    daysInMonth: 30,
+    baseShareCents: 83n,
+    residualPennies: 10,
+    skipReason: null,
+    decidedAt: "2026-09-11T04:05:00.000Z",
+  };
+
+  return {
+    schedules: [
+      {
+        scheduleId: base.scheduleId,
+        planName: "Business Standard",
+        product: "platform_fee",
+        accountName: "Ridgeline Robotics, Inc. — business current account",
+        monthlyCents: 2_500n,
+        currency: "USD",
+        startDate: "2026-09-01",
+        endDate: null,
+      },
+    ],
+    months: [
+      {
+        scheduleId: base.scheduleId,
+        planName: "Business Standard",
+        monthStart: "2026-09-01",
+        daysInMonth: 30,
+        monthlyCents: 2_500n,
+        residualPenniesInMonth: 10,
+        residualPenniesApplied: 10,
+        daysClaimed: 11,
+        daysDecided: 11,
+        daysPosted: 11,
+        daysSkipped: 0,
+        accruedCents: 923n,
+        remainingCents: 1_577n,
+        monthComplete: false,
+      },
+    ],
+    days: [
+      {
+        ...base,
+        accrualDate: "2026-09-11",
+        disposition: "posted",
+        entryId: "e0000000-0000-4000-8000-0000000000b1",
+        dayOfMonth: 11,
+        residualApplied: false,
+        amountCents: 83n,
+        cumulativeCents: 923n,
+        claimedAt: "2026-09-11T04:05:00.000Z",
+      },
+      {
+        ...base,
+        accrualDate: "2026-09-10",
+        disposition: "posted",
+        entryId: "e0000000-0000-4000-8000-0000000000b0",
+        dayOfMonth: 10,
+        residualApplied: true,
+        amountCents: 84n,
+        cumulativeCents: 840n,
+        claimedAt: "2026-09-10T04:05:00.000Z",
+      },
+    ],
+    invariants: { monthDrift: 0, ledgerDrift: 0, unresolved: 0, gapDays: 0 },
+    accruedToDateCents: 923n,
+  };
+}
+
 export function fakeGateway(state: FakeState = defaultState()): {
   gateway: Gateway;
   state: FakeState;
@@ -643,6 +861,40 @@ export function fakeGateway(state: FakeState = defaultState()): {
         filter.declinesOnly ? page.decisions.filter((d) => d.outcome === "decline") : page.decisions
       ).slice(0, filter.decisionLimit);
       return { cards: page.cards.slice(0, filter.limit), decisions };
+    },
+
+    async listDisputes(businessId, filter: DisputeFilter): Promise<DisputePage> {
+      const all = state.disputes.get(businessId) ?? [];
+      // Counted over every case and filtered afterwards, the same way the live
+      // gateway does it — so a test asserting "no open cases, eleven closed"
+      // exercises the same shape.
+      const openCount = all.filter((c) => !c.isClosed).length;
+      const matched = all.filter((c) => {
+        if (filter.status !== null) return c.status === filter.status;
+        if (filter.openOnly && c.isClosed) return false;
+        return true;
+      });
+      return {
+        cases: matched
+          .slice(0, filter.limit)
+          .map((c) => (filter.includeEvents ? c : { ...c, events: [] })),
+        openCount,
+        closedCount: all.length - openCount,
+      };
+    },
+
+    async listAccruals(businessId, filter: AccrualFilter): Promise<AccrualPage> {
+      const page = state.accruals.get(businessId) ?? emptyAccruals();
+      const days = page.days.filter(
+        (d) => filter.includeSkipped || d.disposition !== "skipped",
+      );
+      return {
+        schedules: page.schedules.slice(0, filter.scheduleLimit),
+        months: page.months.slice(0, filter.monthLimit),
+        days: days.slice(0, filter.dayLimit),
+        invariants: page.invariants,
+        accruedToDateCents: page.accruedToDateCents,
+      };
     },
 
     async queuePayment(input: QueuePaymentInput): Promise<QueuedPayment> {

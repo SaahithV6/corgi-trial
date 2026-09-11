@@ -168,7 +168,7 @@ describe("initialize", () => {
 });
 
 describe("tools/list", () => {
-  it("lists eight tools with schemas and annotations", async () => {
+  it("lists eleven tools with schemas and annotations", async () => {
     const h = harness();
     const body = (await (
       await h.post({ jsonrpc: "2.0", id: 2, method: "tools/list" })
@@ -181,7 +181,10 @@ describe("tools/list", () => {
       "list_payees",
       "list_standing_orders",
       "list_card_controls",
+      "list_accruals",
+      "list_disputes",
       "list_recon_breaks",
+      "list_agent_limits",
       "initiate_payment",
     ]);
     for (const tool of tools) {

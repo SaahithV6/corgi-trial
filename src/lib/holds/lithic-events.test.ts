@@ -14,10 +14,11 @@ import type {
   Transaction,
   TransactionEvent,
   TransactionEventType,
+  TransactionResult,
 } from "@/lib/rails/lithic/types";
 
-import { deriveCardEvents } from "./lithic-events";
-import { holdState } from "./model";
+import { APPROVED_RESULT, deriveCardEvents, isRefused } from "./lithic-events";
+import { holdState, movesFinancialBook } from "./model";
 
 const CARD = "56db7b80-a103-4adf-acdd-4cab460c2963";
 const TXN = "69d2f4f3-8101-4a08-9524-98ae5edd96c8";
@@ -25,7 +26,14 @@ const TXN = "69d2f4f3-8101-4a08-9524-98ae5edd96c8";
 function lithicEvent(
   type: TransactionEventType,
   amount: number,
-  opts: { token?: string; created?: string; polarity?: "CREDIT" | "DEBIT"; settlement?: number } = {},
+  opts: {
+    token?: string;
+    created?: string;
+    polarity?: "CREDIT" | "DEBIT";
+    settlement?: number;
+    /** The network's verdict. OMITTED means the payload carried none. */
+    result?: TransactionResult;
+  } = {},
 ): TransactionEvent {
   const event: TransactionEvent = {
     token: opts.token ?? `${type}-${amount}`,
@@ -39,9 +47,16 @@ function lithicEvent(
         opts.settlement === undefined ? null : { amount: opts.settlement, currency: "USD" },
     },
     ...(opts.polarity !== undefined ? { effective_polarity: opts.polarity } : {}),
+    ...(opts.result !== undefined ? { result: opts.result } : {}),
   };
   return event;
 }
+
+/** Seven days, matching `CARD_AUTH_EXPIRY_DAYS`, from the fixture's `created`. */
+const CLOCK = {
+  expiresAt: new Date("2026-09-17T16:23:11Z"),
+  now: new Date("2026-09-10T18:00:00Z"),
+};
 
 /**
  * A transaction whose TRAP FIELDS are deliberately set to lie, exactly as the
@@ -279,5 +294,250 @@ describe("deriveCardEvents — refusals", () => {
   it("refuses an event with no token, because it could not be deduplicated", () => {
     const bad = { ...lithicEvent("AUTHORIZATION", 5000), token: "" };
     expect(() => deriveCardEvents(txn([bad]))).toThrow(/cannot be deduplicated/);
+  });
+});
+
+/* ==========================================================================
+ * THE VERDICT — `event.result`, which this module used to throw away.
+ *
+ * Until migration 0026 `lithic-events.ts` contained zero occurrences of
+ * `result`, `APPROVED` or `DECLINED`, and `card_auth_event` had no column to
+ * put the answer in, so an authorisation the network REFUSED entered `E` as an
+ * ordinary `authorization` and withheld the customer's money until the
+ * seven-day expiry sweeper reached it. Measured in the live book: 60
+ * authorisations, $1,151.00 still withheld across three businesses.
+ *
+ * The fixtures below are the shapes that were actually sitting in
+ * `webhook_inbox` when that was found — including Lithic transaction
+ * 041d610c-a71a-432e-ad62-ca16b6d882b0, which is live-fire attack 2's own
+ * authorisation and reads `AUTHORIZATION 5000 result DECLINED
+ * detailed_results ["ACCOUNT_DAILY_SPEND_LIMIT_EXCEEDED"]`.
+ * ========================================================================== */
+
+describe("isRefused — silence is not a refusal", () => {
+  it("APPROVED is not a refusal", () => {
+    expect(isRefused(APPROVED_RESULT)).toBe(false);
+  });
+
+  it("every non-APPROVED result Lithic has actually sent us is a refusal", () => {
+    // All four are present in this database's retained payloads.
+    for (const result of [
+      "DECLINED",
+      "UNAUTHORIZED_MERCHANT",
+      "UNKNOWN_HOST_TIMEOUT",
+      "USER_TRANSACTION_LIMIT",
+    ]) {
+      expect(isRefused(result)).toBe(true);
+    }
+  });
+
+  it("an ABSENT verdict is not a refusal — being untold is not being told no", () => {
+    // `result` is optional on Lithic's `TransactionEvent`. If a payload shape
+    // ever stops carrying it, the system must keep placing holds rather than
+    // silently stop, so the default has to be "we were not told".
+    expect(isRefused(undefined)).toBe(false);
+    expect(isRefused(null)).toBe(false);
+    expect(isRefused("")).toBe(false);
+  });
+});
+
+describe("deriveCardEvents — a refused authorisation feeds no term of the model", () => {
+  it("AUTHORIZATION 5000 result DECLINED is recorded, and raises A by nothing", () => {
+    const derived = deriveCardEvents(
+      txn([lithicEvent("AUTHORIZATION", 5000, { result: "DECLINED" })], { hold: 0 }),
+    );
+
+    // THE FACT SURVIVES. Real amount, real value date, real provider token, so
+    // a redelivery still deduplicates and a customer looking at a declined
+    // transaction still sees that it happened.
+    expect(derived.events).toHaveLength(1);
+    const event = derived.events[0];
+    if (event === undefined) throw new Error("unreachable");
+    expect(event.kind).toBe("declined");
+    expect(event.amountCents).toBe(5000n);
+    expect(event.valueDate).toBe("2026-09-10");
+    expect(event.providerEventId).toBe("AUTHORIZATION-5000");
+
+    // A refusal is NOT the network saying "no further capture is coming". If
+    // it were flagged final it would close the hold, and transaction
+    // 041d610c shows a declined authorisation can still take a clearing.
+    expect(event.isFinal).toBe(false);
+
+    // THE MONEY DOES NOT.
+    const state = holdState(derived.events, CLOCK);
+    expect(state.authorisedCents).toBe(0n);
+    expect(state.capturedCents).toBe(0n);
+    expect(state.holdCents).toBe(0n);
+    // It is a member of E, so `count > 0`, so the `A <= 0` arm makes it
+    // `closed` — matching `v_card_auth_state`, whose `count(ev.id)` counts it
+    // too. But `sawAuthorisation` stays false, so nothing terminal is claimed
+    // and no `hold_closure` row will be written on it.
+    expect(state.eventCount).toBe(1);
+    expect(state.sawAuthorisation).toBe(false);
+    expect(state.closed).toBe(true);
+    expect(state.terminallyClosed).toBe(false);
+
+    // And it moves no financial book either. This is the same membership test
+    // the two folds use, so the kind is neutral everywhere at once.
+    expect(movesFinancialBook(event.kind)).toBe(false);
+  });
+
+  it("carries the verdict verbatim, and names what was refused", () => {
+    const derived = deriveCardEvents(
+      txn([lithicEvent("AUTHORIZATION", 5000, { result: "UNAUTHORIZED_MERCHANT" })]),
+    );
+    // Verbatim: Lithic's vocabulary is Lithic's, and translating it into a
+    // boolean would lose the only field that says WHY.
+    expect(derived.results.get("AUTHORIZATION-5000")).toBe("UNAUTHORIZED_MERCHANT");
+    expect(derived.refused).toEqual(["AUTHORIZATION-5000"]);
+    expect(derived.stepTypes.get("AUTHORIZATION-5000")).toBe("AUTHORIZATION");
+  });
+
+  it("a payload that carries no verdict at all is stored with none, not with APPROVED", () => {
+    const derived = deriveCardEvents(txn([lithicEvent("AUTHORIZATION", 5000)]));
+    expect(derived.events[0]?.kind).toBe("authorization");
+    expect(derived.results.has("AUTHORIZATION-5000")).toBe(false);
+    expect(derived.refused).toEqual([]);
+  });
+
+  it("result APPROVED behaves exactly as an absent result did", () => {
+    const withVerdict = deriveCardEvents(
+      txn([lithicEvent("AUTHORIZATION", 5000, { result: "APPROVED" })]),
+    );
+    const without = deriveCardEvents(txn([lithicEvent("AUTHORIZATION", 5000)]));
+    expect(withVerdict.events).toEqual(without.events);
+    expect(holdState(withVerdict.events, CLOCK).holdCents).toBe(5000n);
+  });
+
+  it("origin is still `authorization` — the transaction opened with one, refused or not", () => {
+    const derived = deriveCardEvents(
+      txn([lithicEvent("AUTHORIZATION", 5000, { result: "DECLINED" })]),
+    );
+    // `card_authorization.origin` is CHECK-constrained to three values and
+    // answers "how did we first hear of this", which is a question about the
+    // message. Calling it `clearing_first` would be a different lie from the
+    // one just fixed.
+    expect(derived.origin).toBe("authorization");
+  });
+});
+
+describe("deriveCardEvents — transaction 041d610c: declined, then cleared anyway", () => {
+  /**
+   * The real sequence out of `webhook_inbox`, and the reason a refusal must
+   * not be flagged final: Lithic's sandbox accepted a CLEARING against an
+   * authorisation it had itself DECLINED, and drove the transaction to
+   * SETTLED. A system that closed the hold on the decline would then have no
+   * hold to reconcile the capture against.
+   */
+  const SEQUENCE = [
+    lithicEvent("AUTHORIZATION", 5000, { result: "DECLINED", token: "auth-declined" }),
+    lithicEvent("CLEARING", 7340, {
+      result: "APPROVED",
+      token: "clearing-approved",
+      settlement: 7340,
+    }),
+  ];
+
+  it("the capture posts in full and the hold never opens", () => {
+    const derived = deriveCardEvents(txn(SEQUENCE, { status: "SETTLED", settled: -7340 }));
+
+    expect(derived.events.map((e) => e.kind)).toEqual(["declined", "clearing"]);
+
+    const state = holdState(derived.events, CLOCK);
+    expect(state.authorisedCents).toBe(0n); // the refusal raised nothing
+    expect(state.capturedCents).toBe(7340n); // the approved capture is real
+    expect(state.holdCents).toBe(0n);
+    expect(state.terminallyClosed).toBe(false);
+
+    // The money that really moved still moves: `clearing` is untouched by any
+    // of this, so the financial posting happens exactly as before.
+    expect(movesFinancialBook("clearing")).toBe(true);
+  });
+
+  it("is order-free, like everything else in the model", () => {
+    const inOrder = holdState(deriveCardEvents(txn(SEQUENCE)).events, CLOCK);
+    const reversed = holdState(deriveCardEvents(txn([...SEQUENCE].reverse())).events, CLOCK);
+    expect(reversed.authorisedCents).toBe(inOrder.authorisedCents);
+    expect(reversed.capturedCents).toBe(inOrder.capturedCents);
+    expect(reversed.holdCents).toBe(inOrder.holdCents);
+  });
+});
+
+describe("deriveCardEvents — a refused ADVICE must not sneak in through the delta", () => {
+  it("auth 1000 APPROVED, advice 1500 DECLINED: A stays 1000", () => {
+    // The refusal branch runs BEFORE the absolute-to-delta conversion. If it
+    // did not, the advice would be turned into `incremental_authorization 500`
+    // and the refused amount would re-enter A(E) through the side door.
+    const derived = deriveCardEvents(
+      txn([
+        lithicEvent("AUTHORIZATION", 1000, { result: "APPROVED", token: "a" }),
+        lithicEvent("AUTHORIZATION_ADVICE", 1500, { result: "DECLINED", token: "b" }),
+      ]),
+    );
+
+    expect(derived.events.map((e) => e.kind)).toEqual(["authorization", "declined"]);
+    // The refused advice keeps its own ABSOLUTE figure, because there is no
+    // delta to compute for something that did not happen.
+    expect(derived.events[1]?.amountCents).toBe(1500n);
+
+    const state = holdState(derived.events, CLOCK);
+    expect(state.authorisedCents).toBe(1000n);
+    expect(state.holdCents).toBe(1000n);
+  });
+
+  it("an APPROVED advice after a refused one still measures from the approved total", () => {
+    const derived = deriveCardEvents(
+      txn([
+        lithicEvent("AUTHORIZATION", 1000, { result: "APPROVED", token: "a" }),
+        lithicEvent("AUTHORIZATION_ADVICE", 9000, { result: "DECLINED", token: "b" }),
+        lithicEvent("AUTHORIZATION_ADVICE", 1500, { result: "APPROVED", token: "c" }),
+      ]),
+    );
+    // 1500 absolute against a running total of 1000 — the refused 9000 never
+    // entered it — so the delta is 500.
+    expect(derived.events.map((e) => e.kind)).toEqual([
+      "authorization",
+      "declined",
+      "incremental_authorization",
+    ]);
+    expect(derived.events[2]?.amountCents).toBe(500n);
+    expect(holdState(derived.events, CLOCK).authorisedCents).toBe(1500n);
+  });
+});
+
+describe("deriveCardEvents — the rule is uniform, not authorisation-only", () => {
+  it("a refused CLEARING captures nothing and posts nothing", () => {
+    // No non-APPROVED capture has been observed in this sandbox, so this arm
+    // is asserted against a synthetic payload rather than a measured one — and
+    // it is asserted, rather than left to chance, because the alternative
+    // failure is posting money for a capture the network refused.
+    const derived = deriveCardEvents(
+      txn([
+        lithicEvent("AUTHORIZATION", 5000, { result: "APPROVED", token: "a" }),
+        lithicEvent("CLEARING", 5000, { result: "DECLINED", token: "b", settlement: 5000 }),
+      ]),
+    );
+
+    expect(derived.events.map((e) => e.kind)).toEqual(["authorization", "declined"]);
+    const state = holdState(derived.events, CLOCK);
+    expect(state.capturedCents).toBe(0n);
+    // The hold stays exactly where it was: nothing was captured, so nothing
+    // is released.
+    expect(state.holdCents).toBe(5000n);
+  });
+
+  it("a refused RETURN pays the customer nothing", () => {
+    const derived = deriveCardEvents(
+      txn([lithicEvent("RETURN", 2500, { result: "DECLINED", token: "r" })]),
+    );
+    expect(derived.events[0]?.kind).toBe("declined");
+    expect(movesFinancialBook(derived.events[0]?.kind ?? "refund")).toBe(false);
+  });
+
+  it("a refused step still deduplicates on its own provider token", () => {
+    const one = lithicEvent("AUTHORIZATION", 5000, { result: "DECLINED", token: "same" });
+    const derived = deriveCardEvents(txn([one, { ...one }]));
+    expect(derived.events).toHaveLength(1);
+    expect(derived.refused).toEqual(["same"]);
   });
 });

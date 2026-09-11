@@ -1,0 +1,316 @@
+/**
+ * An outbound wire, through the SAME `requestPayment()` path as ACH.
+ *
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ THIS SUITE MOVES MONEY. It raises a real payment instruction, approves   │
+ * │ it twice, releases it — which posts a real journal entry out of the      │
+ * │ customer's deposit account — and then puts it on Increase's sandbox      │
+ * │ Fedwire. Gated on RUN_DB_TESTS=1 AND INCREASE_API_KEY.                   │
+ * │                                                                          │
+ * │   set -a; . ./.env; set +a; RUN_DB_TESTS=1 pnpm vitest run \             │
+ * │     src/lib/rails/wire/outbound.integration.test.ts                      │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * THE CLAIM UNDER TEST IS A NEGATIVE ONE: that adding a wire rail required NO
+ * new money-out path, and that maker-checker, the KYB gate, the content hash
+ * and the ledger posting all apply to a wire because they were never about
+ * ACH in the first place. A negative claim is proven by running the existing
+ * code and watching it behave — so every call below except the last is a
+ * function that existed before this rail did.
+ *
+ * The one new call is `originateApprovedWire()`, and it happens AFTER the
+ * ledger entry and the `released` event have both committed. That order is the
+ * argument: an unapproved wire cannot reach Fedwire because it cannot be
+ * released, and a wire that left with no ledger entry is impossible because
+ * the entry came first.
+ */
+
+import { beforeAll, describe, expect, it } from 'vitest';
+
+const KEY = process.env['INCREASE_API_KEY'] ?? '';
+const RUN = process.env['RUN_DB_TESTS'] === '1' && KEY !== '';
+
+import type * as Approvals from '@/lib/approvals';
+import type * as Db from '@/lib/ledger/db';
+import type * as Payees from '@/lib/payees';
+import type * as Outbound from './outbound';
+
+const suite = RUN ? describe : describe.skip;
+
+/** `JSON.stringify` throws on a bigint, and every amount here is one. */
+const show = (value: unknown): string =>
+  JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v));
+
+const RIDGELINE_BUSINESS = 'e274546d-6bdd-5266-b0fb-cc839a7811f9';
+const INCREASE_ACCOUNT = 'sandbox_account_zkfx1wcn4brwoaiyksj6';
+
+/** Seeded actors. Their roles are the point, so they are named. */
+const PRIYA = 'b3c4f786-5d1b-5194-9aae-6342ba0ef606'; // maker, can_approve = false
+const DANA = '76f9266f-23c9-52de-b8ff-0ec0b23ef386'; // checker #1
+const MILES = '9fff2b99-0a56-56cd-8fdf-699d64d085ac'; // checker #2
+
+/** JPMorgan Chase's WIRE routing number. The Plaid item's ACH one is 011401533. */
+const WIRE_ROUTING = '021000021';
+const BENEFICIARY = 'Northwind Industrial LLC';
+const LAST4 = '0000';
+const FULL_ACCOUNT_NUMBER = '1111222233330000';
+
+suite('an outbound wire, through requestPayment()', () => {
+  let requestPayment: typeof Approvals.requestPayment;
+  let approvePayment: typeof Approvals.approvePayment;
+  let releasePayment: typeof Approvals.releasePayment;
+  let getPayment: typeof Approvals.getPayment;
+  let confirmPayee: typeof Payees.confirmPayee;
+  let originateApprovedWire: typeof Outbound.originateApprovedWire;
+  let resolveWireBeneficiary: typeof Outbound.resolveWireBeneficiary;
+  let sql: Db.Sql;
+  let valueDate: string;
+  const run = `wire-${Date.now()}`;
+
+  beforeAll(async () => {
+    ({ requestPayment, approvePayment, releasePayment, getPayment } = await import(
+      '@/lib/approvals'
+    ));
+    ({ confirmPayee } = await import('@/lib/payees'));
+    ({ originateApprovedWire, resolveWireBeneficiary } = await import('./outbound'));
+    ({ sql } = await import('@/lib/ledger/db'));
+
+    const [row] = await sql<{ value_date: string }[]>`
+      SELECT to_char(book_date(now()), 'YYYY-MM-DD') AS value_date`;
+    valueDate = row?.value_date ?? '';
+  });
+
+  const destination = {
+    type: 'wire' as const,
+    holderName: BENEFICIARY,
+    // A SWIFT BIC, because that is the only bank identifier
+    // `destinationSchema`'s wire variant has room for. A domestic Fedwire
+    // beneficiary is addressed by a 9-digit WIRE ABA, which this shape cannot
+    // carry — see the header of ./outbound.ts and docs/WIRES.md §6.
+    bic: 'CHASUS33',
+    accountNumberLast4: LAST4,
+  };
+
+  /* ---- the payee book is the wire's address book ----------------------- */
+
+  it('puts the beneficiary on the payee book, with its WIRE routing number', async () => {
+    const result = await confirmPayee(
+      {
+        candidate: {
+          businessId: RIDGELINE_BUSINESS,
+          displayName: `Northwind (wire) ${run}`,
+          holderName: BENEFICIARY,
+          rail: 'wire',
+          routingNumber: WIRE_ROUTING,
+          accountNumberLast4: LAST4,
+        },
+        payeeKey: `wire:${WIRE_ROUTING}:${LAST4}:${run}`,
+        actorId: PRIYA,
+      },
+      sql,
+    );
+
+    expect(result.refusal).toBeNull();
+    expect(result.saved).not.toBeNull();
+    // The ABA arithmetic ran, against the WIRE variant.
+    expect(result.check.checksumOk).toBe(true);
+    expect(result.check.routingNumber).toBe(WIRE_ROUTING);
+
+    // And the rail can find it, with the number the instruction cannot carry.
+    const resolved = await resolveWireBeneficiary(
+      { businessId: RIDGELINE_BUSINESS, destination },
+      sql,
+    );
+    expect(resolved.wireRoutingNumber).toBe(WIRE_ROUTING);
+    expect(resolved.holderName).toBe(BENEFICIARY);
+  }, 30_000);
+
+  it('refuses a beneficiary nobody has confirmed — on this rail only', async () => {
+    // `gatePaymentOnPayee()` deliberately allows an unknown ACH destination:
+    // requiring pre-registration breaks the one-off refund and the emergency
+    // supplier payment, and on ACH a delay is recoverable because the entry
+    // is. On a wire it is not, and "urgent payment to a beneficiary nobody
+    // has seen before" is a verbatim description of business email
+    // compromise, so this rail refuses instead.
+    await expect(
+      resolveWireBeneficiary(
+        {
+          businessId: RIDGELINE_BUSINESS,
+          destination: { ...destination, holderName: `Nobody Who Exists ${run}` },
+        },
+        sql,
+      ),
+    ).rejects.toThrow(/WIRE_PAYEE_NOT_ON_BOOK|not on the book|payee book/i);
+  }, 30_000);
+
+  /* ---- maker-checker, unchanged, on a rail it never heard of ----------- */
+
+  it('raises a wire citing the WIRE policy — $0 threshold, two approvers', async () => {
+    const raised = await requestPayment(
+      {
+        accountId: await depositAccountId(sql),
+        rail: 'wire',
+        amountCents: 4_200n,
+        currency: 'USD',
+        destination,
+        valueDate,
+        requestedByActorId: PRIYA,
+        idempotencyKey: `itest:${run}`,
+      },
+      sql,
+    );
+
+    expect(raised.ok, show(raised)).toBe(true);
+    if (!raised.ok) return;
+
+    // $42.00 — far below ACH's $2,500 — and it still needs TWO humans,
+    // because the wire threshold is $0 and the reason is recoverability
+    // rather than size. Nothing in `requestPayment()` knows that; it read the
+    // `approval_policy` row in force for this rail on this value date.
+    expect(raised.value.policy.rail).toBe('wire');
+    expect(raised.value.policy.thresholdCents).toBe(0n);
+    expect(raised.value.approvalsRequired).toBe(2);
+    expect(raised.value.created).toBe(true);
+
+    // NO MONEY HAS MOVED. An unapproved instruction has no ledger footprint at
+    // all, not even a hold.
+    const queued = await getPayment(raised.value.instructionId, sql);
+    expect(queued.ok && queued.value.state).toBe('requested');
+  }, 30_000);
+
+  it('refuses the initiator approving her own wire — at the DATABASE', async () => {
+    const found = await instruction(sql, `itest:${run}`);
+    const decision = await approvePayment(
+      { instructionId: found.id, actorId: PRIYA, contentHash: found.contentHash },
+      sql,
+    );
+    expect(decision.ok).toBe(false);
+  }, 30_000);
+
+  it('will not release on one approval when the policy asks for two', async () => {
+    const found = await instruction(sql, `itest:${run}`);
+    const first = await approvePayment(
+      { instructionId: found.id, actorId: DANA, contentHash: found.contentHash },
+      sql,
+    );
+    expect(first.ok, show(first)).toBe(true);
+
+    const early = await releasePayment({ instructionId: found.id, actorId: DANA }, sql);
+    expect(early.ok).toBe(false);
+
+    // The STATE is `approved` after one decision — the fold names the last
+    // event, and one person did approve. What stops the money is not the state
+    // but the COUNT against the policy the instruction cites: 1 held, 2
+    // required. Those are different questions and the release gate asks the
+    // second one, which is why a two-approver rule cannot be satisfied by a
+    // screen that only looks at a status.
+    const queued = await getPayment(found.id, sql);
+    expect(queued.ok && queued.value.state).toBe('approved');
+    expect(queued.ok && queued.value.approvalsHeld).toBe(1);
+    expect(queued.ok && queued.value.approvalsRequired).toBe(2);
+
+    // And nothing is on the ledger: no entry cites this instruction.
+    const posted = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM payment_instruction_event
+       WHERE instruction_id = ${found.id}::uuid AND entry_id IS NOT NULL`;
+    expect(posted[0]?.n).toBe(0);
+  }, 30_000);
+
+  /* ---- released, then and only then put on a wire ---------------------- */
+
+  it('releases on the second approval, posts to 1110, and reaches Fedwire', async () => {
+    const found = await instruction(sql, `itest:${run}`);
+    const second = await approvePayment(
+      { instructionId: found.id, actorId: MILES, contentHash: found.contentHash },
+      sql,
+    );
+    expect(second.ok, show(second)).toBe(true);
+
+    const released = await releasePayment({ instructionId: found.id, actorId: MILES }, sql);
+    expect(released.ok, show(released)).toBe(true);
+    if (!released.ok) return;
+
+    // Through the ledger's own named reader, not SQL of this test's —
+    // `src/lib/ledger/boundary.test.ts` failed the first draft of this line
+    // by name, and was right to: a rail test that knows the shape of
+    // `journal_line` is a rail test that will disagree with the ledger about
+    // it one day.
+    const { listLedgerLines } = await import('@/lib/ledger/queries');
+    // NO `businessId` filter: that predicate scopes to the customer's own
+    // accounts and 1110 is a HOUSE leaf (`business_id IS NULL`), so filtering
+    // by business would hide exactly the leg under test.
+    const lines = await listLedgerLines(
+      { rail: 'wire', book: 'financial', limit: 200 },
+      sql,
+    );
+    const legs = lines
+      .filter((l) => l.entryId === released.value.entryId)
+      .sort((a, b) => a.accountCode.localeCompare(b.accountCode));
+    // The customer's balance falls by the full amount and the house leg is
+    // 1110 — CASH, not an in-transit liability. `releasePayment()` already
+    // knew that before this rail existed: "the cash is gone the moment a wire
+    // leaves; there is no in-transit window worth modelling on an irrevocable
+    // rail".
+    //
+    // Asserted on the ENTRY's own lines rather than on the account balance,
+    // because `wire.integration.test.ts` credits this same business while this
+    // file runs. A balance delta would be asserting that nothing else in the
+    // system is running; two lines of one entry are this payment and nothing
+    // else.
+    //
+    // `listLedgerLines` returns `amount_cents * normal_side` — the SIGNED
+    // EFFECT ON THE ACCOUNT, not the raw column. So both legs are NEGATIVE and
+    // that is the whole sentence: house cash falls by $42.00 and the money we
+    // owe the customer falls by $42.00. The raw column has opposite signs
+    // (1110 is debit-normal at -4200, 2100 is credit-normal at +4200), and
+    // getting that inversion backwards is what makes an outbound payment
+    // increase the customer's balance.
+    expect(legs.map((l) => l.accountCode)).toEqual(['1110', '2100']);
+    expect(legs.map((l) => l.amountCents)).toEqual([-4_200n, -4_200n]);
+
+    // NOW it goes on the network, and not one instant earlier.
+    const sent = await originateApprovedWire({
+      instructionId: found.id,
+      beneficiaryAccountNumber: FULL_ACCOUNT_NUMBER,
+      sourceAccountId: INCREASE_ACCOUNT,
+    });
+
+    expect(sent.origination.ref).toMatch(/^sandbox_wire_transfer_/);
+    expect(sent.origination.amount).toEqual({ amount: 4_200n, currency: 'USD' });
+    expect(sent.origination.provider).toBe('increase.wire');
+    // Addressed from the CONFIRMED BOOK, not from the instruction. The wire
+    // ABA never entered `payment_instruction.counterparty` and never reached
+    // an approver's screen.
+    expect(sent.beneficiary.wireRoutingNumber).toBe(WIRE_ROUTING);
+    // The idempotency key is the instruction, so pressing send twice cannot
+    // send two wires — Increase returns the original.
+    expect(sent.instruction.clientReferenceId).toBe(`payment:${found.id}`);
+
+    const again = await originateApprovedWire({
+      instructionId: found.id,
+      beneficiaryAccountNumber: FULL_ACCOUNT_NUMBER,
+      sourceAccountId: INCREASE_ACCOUNT,
+    });
+    expect(again.origination.ref).toBe(sent.origination.ref);
+  }, 90_000);
+
+  /* ---- helpers --------------------------------------------------------- */
+
+  async function depositAccountId(conn: Db.Sql): Promise<string> {
+    const { mainDepositAccountId } = await import('@/lib/ledger/queries');
+    const id = await mainDepositAccountId(RIDGELINE_BUSINESS, conn);
+    if (id === null) throw new Error('the seeded business has no deposit account');
+    return id;
+  }
+
+  async function instruction(
+    conn: Db.Sql,
+    idempotencyKey: string,
+  ): Promise<{ id: string; contentHash: string }> {
+    const [row] = await conn<{ id: string; content_hash: string }[]>`
+      SELECT id, encode(content_hash, 'hex') AS content_hash
+        FROM payment_instruction WHERE idempotency_key = ${idempotencyKey}`;
+    if (row === undefined) throw new Error(`no instruction for ${idempotencyKey}`);
+    return { id: row.id, contentHash: row.content_hash };
+  }
+});

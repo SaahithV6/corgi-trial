@@ -49,6 +49,7 @@ const KIND_LABEL: Record<HoldEventRow["kind"], string> = {
   refund: "refund",
   expiry: "expiry",
   close: "close",
+  declined: "declined by the network",
 };
 
 /** Which term of the model each kind feeds. Shown per row, so nothing is implied. */
@@ -61,6 +62,11 @@ const KIND_TERM: Record<HoldEventRow["kind"], string> = {
   refund: "neither — financial book only",
   expiry: "closes(E)",
   close: "closes(E)",
+  // Feeds nothing, and saying so on the row is the point. A refusal used to be
+  // indistinguishable from an approval at ingest, and the ledger withheld
+  // $4,451.00 against authorisations the network had refused. This row is how a
+  // customer sees that the attempt happened and that it is holding no money.
+  declined: "neither — the network refused it, so it withholds nothing",
 };
 
 export function HoldDetailView({ detail }: { readonly detail: HoldDetail }) {

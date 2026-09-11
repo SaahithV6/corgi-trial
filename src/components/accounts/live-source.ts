@@ -20,7 +20,12 @@ import "server-only";
 import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
 import { availableBalance } from "@/lib/ledger/balances";
 import {
+  findBusiness,
+  firstEntryDescriptionForHold,
+  holdMemoCents,
+  listBusinesses,
   ledgerConnection,
+  readAccountIdentity,
   listHoldRows,
   readSnapshot,
   type Sql,
@@ -79,43 +84,53 @@ function readFailure(where: string, thrown: unknown): Result<never, ErrorShape> 
 export async function listConsoleBusinesses(
   conn: Sql,
 ): Promise<readonly ConsoleBusiness[]> {
-  const rows = await conn<
-    {
-      business_id: string;
-      legal_name: string;
-      account_id: string;
-      account_name: string;
-      currency: string;
-      card_count: string | number | bigint;
-      last_card_at: Date | null;
-    }[]
-  >`
-    SELECT dep.business_id                                   AS business_id,
-           b.legal_name                                      AS legal_name,
-           dep.id                                            AS account_id,
-           dep.name                                          AS account_name,
-           dep.currency                                      AS currency,
-           (SELECT count(*) FROM card c WHERE c.business_id = dep.business_id)
-                                                             AS card_count,
-           (SELECT max(c.created_at) FROM card c WHERE c.business_id = dep.business_id)
-                                                             AS last_card_at
-      FROM account dep
-      JOIN account memo ON memo.business_id = dep.business_id AND memo.code = '9100'
-      JOIN business b   ON b.id = dep.business_id
-     WHERE dep.code = '2100'
-       AND dep.book = 'financial'
-       AND dep.business_id IS NOT NULL
-       AND dep.closed_at IS NULL
-     ORDER BY last_card_at DESC NULLS LAST, b.legal_name`;
+  // The chart half is the ledger's: "every business, with its 2100 and its
+  // 9100". The card half is this console's own table. They were one join and
+  // that join re-stated the ledger's definition of a deposit account four
+  // predicates deep; they are two reads and an in-memory match now.
+  const businesses = (await listBusinesses(conn)).filter(
+    (b) => b.depositOpen && b.depositAccountId !== null && b.memoAccountId !== null,
+  );
+  if (businesses.length === 0) return [];
 
-  return rows.map((row) => ({
-    businessId: row.business_id,
-    legalName: row.legal_name,
-    accountId: row.account_id,
-    accountName: row.account_name,
-    currency: row.currency,
-    cardCount: Number(row.card_count),
-  }));
+  const cards = await conn<
+    { business_id: string; card_count: string | number | bigint; last_card_at: Date | null }[]
+  >`
+    SELECT c.business_id,
+           count(*)          AS card_count,
+           max(c.created_at) AS last_card_at
+      FROM card c
+     WHERE c.business_id = ANY(${businesses.map((b) => b.businessId)}::uuid[])
+     GROUP BY c.business_id`;
+  const byBusiness = new Map(cards.map((c) => [c.business_id, c]));
+
+  // ORDER BY last_card_at DESC NULLS LAST, b.legal_name.
+  //
+  // `listBusinesses` already returns legal-name order under POSTGRES's
+  // collation, and `Array.prototype.sort` is required to be stable, so sorting
+  // on the card clock alone reproduces the tie-break exactly — without
+  // re-deriving a name comparison in JavaScript, where `<` is code points and
+  // the two do not always agree.
+  return businesses
+    .map((b) => {
+      const card = byBusiness.get(b.businessId);
+      return {
+        businessId: b.businessId,
+        legalName: b.legalName,
+        accountId: b.depositAccountId as string,
+        accountName: b.depositAccountName as string,
+        currency: b.currency as string,
+        cardCount: Number(card?.card_count ?? 0),
+        lastCardAt: card?.last_card_at ?? null,
+      };
+    })
+    .sort((x, y) => {
+      if (x.lastCardAt === null && y.lastCardAt === null) return 0;
+      if (x.lastCardAt === null) return 1; // NULLS LAST
+      if (y.lastCardAt === null) return -1;
+      return y.lastCardAt.getTime() - x.lastCardAt.getTime(); // DESC
+    })
+    .map(({ lastCardAt: _lastCardAt, ...row }): ConsoleBusiness => row);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -328,9 +343,6 @@ type HoldHeadRow = {
   expires_at: Date | null;
   memo_account_id: string;
   account_id: string;
-  business_id: string;
-  legal_name: string;
-  descriptor: string | null;
   provider: string | null;
   provider_auth_id: string | null;
   origin: string | null;
@@ -338,7 +350,6 @@ type HoldHeadRow = {
   first_seen_at: Date | null;
   closure_reason: string | null;
   closed_at: Date | null;
-  memo_cents: bigint;
 };
 
 /**
@@ -362,6 +373,11 @@ export async function loadHoldDetail(
   try {
     const conn = await ledgerConnection();
 
+    // The hold, its authorisation and its closure: `hold`, `card_authorization`
+    // and `hold_closure` are not ledger tables and this query keeps them. What
+    // it no longer does is reach into `journal_entry` for the descriptor, into
+    // `journal_line` for the memo balance, or into `account` for the owning
+    // business — three ledger questions with three names below.
     const [head] = await conn<HoldHeadRow[]>`
       SELECT h.id                AS hold_id,
              h.kind              AS kind,
@@ -370,10 +386,6 @@ export async function loadHoldDetail(
              h.expires_at        AS expires_at,
              h.memo_account_id   AS memo_account_id,
              h.account_id        AS account_id,
-             a.business_id       AS business_id,
-             b.legal_name        AS legal_name,
-             (SELECT e.description FROM journal_entry e
-               WHERE e.hold_id = h.id ORDER BY e.booking_seq LIMIT 1) AS descriptor,
              ca.provider         AS provider,
              ca.provider_auth_id AS provider_auth_id,
              ca.origin           AS origin,
@@ -389,21 +401,31 @@ export async function loadHoldDetail(
              (SELECT hc.closed_at FROM hold_closure hc
                WHERE hc.hold_id = h.id
                  AND NOT EXISTS (SELECT 1 FROM hold_closure_reversal r
-                                  WHERE r.hold_id = hc.hold_id))       AS closed_at,
-             COALESCE((SELECT SUM(l.amount_cents * ac.normal_side)
-                         FROM journal_entry e
-                         JOIN journal_line  l  ON l.entry_id = e.id
-                         JOIN account       ac ON ac.id = l.account_id
-                        WHERE e.hold_id = h.id
-                          AND l.account_id = h.memo_account_id), 0)::bigint
-                                                                       AS memo_cents
+                                  WHERE r.hold_id = hc.hold_id))       AS closed_at
         FROM hold h
-        JOIN account  a ON a.id = h.account_id
-        JOIN business b ON b.id = a.business_id
         LEFT JOIN card_authorization ca ON ca.hold_id = h.id
        WHERE h.id = ${holdId}::uuid`;
 
     if (head === undefined) return ok(null);
+
+    // Three ledger questions, asked by name. `readAccountIdentity` replaces
+    // `JOIN account a ON a.id = h.account_id`, which was there for one column:
+    // `business_id`, a foreign key and not a definition of money.
+    const [account, descriptor, memoCents] = await Promise.all([
+      readAccountIdentity(head.account_id, conn),
+      firstEntryDescriptionForHold(head.hold_id, conn),
+      holdMemoCents(
+        { holdId: head.hold_id, memoAccountId: head.memo_account_id },
+        conn,
+      ),
+    ]);
+
+    // The two joins this replaced were INNER, so a hold whose account has no
+    // business was not a row. It still is not one, and "no such hold" stays
+    // the answer rather than becoming a half-populated screen.
+    if (account === null || account.businessId === null) return ok(null);
+    const business = await findBusiness(account.businessId, conn);
+    if (business === null) return ok(null);
 
     const eventRows = await conn<
       {
@@ -457,11 +479,11 @@ export async function loadHoldDetail(
     return ok({
       holdId: head.hold_id,
       kind: head.kind,
-      descriptor: head.descriptor ?? head.external_ref,
+      descriptor: descriptor ?? head.external_ref,
       externalRef: head.external_ref,
       accountId: head.account_id,
-      businessId: head.business_id,
-      businessName: head.legal_name,
+      businessId: business.businessId,
+      businessName: business.legalName,
       provider: head.provider,
       providerAuthId: head.provider_auth_id,
       origin: head.origin,
@@ -474,7 +496,7 @@ export async function loadHoldDetail(
           : { reason: head.closure_reason, closedAt: head.closed_at.toISOString() },
       events: rows,
       state: holdState(events, clock),
-      memoBalanceCents: head.memo_cents,
+      memoBalanceCents: memoCents,
       evaluatedAt: now.toISOString(),
     });
   } catch (thrown) {

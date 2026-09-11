@@ -21,6 +21,40 @@
  *   txn.amounts.hold.amount    signed NEGATIVE, and it is the *remaining* hold.
  *   txn.settled_amount et al.  deprecated aggregates that restate the above.
  *
+ * ─── The one field it MUST read, and did not ─────────────────────────────────
+ *
+ *   event.result               APPROVED, or the refusal the network answered
+ *                              with. Migration 0026.
+ *
+ * Until 0026 this file contained ZERO occurrences of `result`, `APPROVED` or
+ * `DECLINED`, and `card_auth_event` had no column to put the answer in. An
+ * authorisation the network REFUSED was therefore ingested as an
+ * `authorization` — indistinguishable, row for row, from one it approved — and
+ * raised `A(E)` by its full amount. The customer's money was then withheld for
+ * a purchase that never happened, until the seven-day expiry sweeper reached
+ * it. Measured: 60 authorisations, $2,951.00 of authorised amount that never
+ * existed, $1,151.00 of it still withheld across three businesses at the time
+ * of the fix, on transactions like
+ * `041d610c-a71a-432e-ad62-ca16b6d882b0` —
+ * `AUTHORIZATION 5000 result DECLINED ["ACCOUNT_DAILY_SPEND_LIMIT_EXCEEDED"]`.
+ *
+ * Neither `v_hold_drift` nor `v_hold_release_drift` could see it, and both were
+ * right to be empty: they compare the memo book against the fold over
+ * `card_auth_event`, and the fold's input had already lost the verdict at the
+ * front door. Two derivations of the same impoverished input agree perfectly.
+ * `v_refused_auth_hold` (0026) is the invariant that reaches outside the
+ * derivation, to the raw payload the provider actually sent.
+ *
+ * THE RULE, and it is deliberately uniform: `result` present and not
+ * `APPROVED` means the network did not do this, so the step contributes to
+ * NOTHING — not A, not C, not closure, not the financial book. It is still
+ * recorded, at its real amount and its real value date, under the kind
+ * `declined`. `CLEARING` and the credit steps are held to the same rule as
+ * `AUTHORIZATION`, even though every non-APPROVED result observed in this
+ * sandbox has been on an authorisation: the alternative is posting money for a
+ * capture the network refused, and of the two possible mistakes that is much
+ * the worse one.
+ *
  * `normalizeTransaction()` from the rail adapter is used here for exactly one
  * purpose: as an INDEPENDENT SECOND OPINION. It computes the hold from the same
  * events by a different route (advice-wins-absolutely rather than
@@ -59,6 +93,46 @@ import type { CardEvent, CardEventKind } from "./model";
 /** How we first heard of an authorisation. Reporting only; nothing branches. */
 export type AuthOrigin = "authorization" | "clearing_first" | "force_post";
 
+/** The only `result` Lithic uses for "the network did this". */
+export const APPROVED_RESULT = "APPROVED";
+
+/**
+ * `card_event_kind`'s member for a step the network refused. Added by
+ * migration 0026.
+ *
+ * WHY THE CAST. `CardEventKind` in `./model.ts` has deliberately NOT been
+ * widened to include it, and that is the whole design rather than an oversight
+ * to tidy up later. `H(E)` has two implementations that must agree exactly or
+ * `v_hold_drift` reports — `holdState()` and `v_card_auth_state` — and both
+ * select the kinds that feed a term by MEMBERSHIP of a fixed list:
+ *
+ *   TypeScript   RAISES_AUTH / LOWERS_AUTH / CAPTURES / CLOSES, four Sets
+ *   SQL          SUM(...) FILTER (WHERE ev.kind IN ('authorization', ...))
+ *
+ * A kind in none of those lists feeds nothing — in both implementations, by
+ * construction, with no edit to either and therefore no way for the two to
+ * drift apart. Widening the union would mean touching `model.ts` and the
+ * views together, which is exactly the class of change `docs/HOLDS.md` warns
+ * is "one migration that moves both, or it is not made".
+ *
+ * So the seam is this one cast, it is named, and `lithic-events.test.ts` pins
+ * the behaviour that matters — `holdState` folds a `declined` event to nothing
+ * — against the value rather than against the type.
+ */
+const DECLINED_KIND = "declined" as unknown as CardEventKind;
+
+/**
+ * Did the network refuse this step?
+ *
+ * `undefined` is NOT a refusal: Lithic's `result` is optional on
+ * `TransactionEvent`, and an absent verdict means we were not told, which is a
+ * different thing from being told no. Treating silence as a refusal would
+ * silently stop placing holds the moment the provider changed a payload shape.
+ */
+export function isRefused(result: string | null | undefined): boolean {
+  return typeof result === "string" && result !== "" && result !== APPROVED_RESULT;
+}
+
 export interface DerivedCardEvents {
   /** Lithic's transaction token — the provider's stable authorisation id. */
   readonly providerAuthId: string;
@@ -79,6 +153,24 @@ export interface DerivedCardEvents {
    * stores — keeps exactly the fields the arithmetic needs.
    */
   readonly stepTypes: ReadonlyMap<string, string>;
+  /**
+   * `providerEventId` → the network's verdict on that step, VERBATIM.
+   *
+   * Absent from the map when the payload carried no `result` for the step —
+   * which is a different claim from `APPROVED`, and is stored as NULL rather
+   * than guessed. `card_auth_event_result` (0026) is where this lands, and it
+   * is what `v_refused_auth_hold` reaches for when it asks whether money is
+   * being withheld on an authorisation the network refused.
+   */
+  readonly results: ReadonlyMap<string, string>;
+  /**
+   * The provider event ids this payload says the network REFUSED.
+   *
+   * Carried for the caller's reporting and for tests. The money consequence is
+   * already baked in — these are the events pushed as `declined` — so nothing
+   * downstream has to remember to check it.
+   */
+  readonly refused: readonly string[];
   /** What the first event we can see says about how this auth began. */
   readonly origin: AuthOrigin;
   /** `txn.created` in book time. The authorisation's own value date. */
@@ -236,24 +328,51 @@ export function deriveCardEvents(txn: Transaction): DerivedCardEvents {
 
   const events: CardEvent[] = [];
   const stepTypes = new Map<string, string>();
+  const results = new Map<string, string>();
+  const refused: string[] = [];
   const seen = new Set<string>();
   let runningAuthorised = 0n;
   let origin: AuthOrigin | null = null;
 
-  const push = (event: CardEvent, stepType: TransactionEventType): void => {
+  const push = (
+    event: CardEvent,
+    stepType: TransactionEventType,
+    result: string | undefined,
+  ): void => {
     if (seen.has(event.providerEventId)) return;
     seen.add(event.providerEventId);
     events.push(event);
     stepTypes.set(event.providerEventId, stepType);
+    if (result !== undefined && result !== "") results.set(event.providerEventId, result);
+    // Inside `push`, behind the `seen` check, so a payload that repeats an
+    // event token does not report the same refusal twice. Found by
+    // `lithic-events.test.ts`, not reasoned about.
+    if (event.kind === DECLINED_KIND) refused.push(event.providerEventId);
     if (RAISES.has(event.kind)) runningAuthorised += event.amountCents;
     else if (event.kind === "authorization_reversal") runningAuthorised -= event.amountCents;
     if (origin === null) {
-      origin =
-        event.kind === "authorization"
-          ? "authorization"
-          : event.kind === "force_post"
+      if (event.kind === DECLINED_KIND) {
+        // A refusal carries no canonical kind to read the origin off, so read
+        // the STEP instead: a transaction that opened with an AUTHORIZATION
+        // the network turned down still OPENED WITH AN AUTHORISATION, and
+        // `origin` answers "how did we first hear of this", which is a
+        // question about the message and not about the money.
+        // `card_authorization.origin` is CHECK-constrained to exactly these
+        // three values (0001) and nothing anywhere branches on it.
+        origin =
+          stepType === "FINANCIAL_AUTHORIZATION" || stepType === "FINANCIAL_CREDIT_AUTHORIZATION"
             ? "force_post"
-            : "clearing_first";
+            : stepType === "CLEARING"
+              ? "clearing_first"
+              : "authorization";
+      } else {
+        origin =
+          event.kind === "authorization"
+            ? "authorization"
+            : event.kind === "force_post"
+              ? "force_post"
+              : "clearing_first";
+      }
     }
   };
 
@@ -269,6 +388,39 @@ export function deriveCardEvents(txn: Transaction): DerivedCardEvents {
 
     const amountCents = eventMagnitude(lithicEvent);
     const valueDate = bookDate(new Date(lithicEvent.created ?? txn.created));
+    const result = lithicEvent.result;
+
+    // ---- THE REFUSAL BRANCH, and it comes FIRST ------------------------
+    //
+    // Before the advice conversion, and before `canonicalKind`, because a
+    // refused advice must not move `runningAuthorised` either: the delta an
+    // advice implies is the delta the network would have applied HAD IT
+    // AGREED, and converting a refusal into one would put the refused amount
+    // back into A(E) through the side door.
+    //
+    // The step is recorded in full — real amount, real value date, real
+    // provider event token, so a redelivery still deduplicates through
+    // `UNIQUE (auth_id, provider_event_id)` — under a kind that feeds no term
+    // of the model and moves no money. `isFinal` is FALSE: a refusal is not
+    // the network saying "no further capture is coming", it is the network
+    // saying "this one did not happen", and setting the flag would close the
+    // hold on a transaction that may yet carry an approved clearing. Lithic
+    // transaction 041d610c-a71a-432e-ad62-ca16b6d882b0 is exactly that shape:
+    // AUTHORIZATION 5000 DECLINED, then CLEARING 7340 APPROVED.
+    if (isRefused(result)) {
+      push(
+        {
+          kind: DECLINED_KIND,
+          amountCents,
+          isFinal: false,
+          valueDate,
+          providerEventId: token,
+        },
+        lithicEvent.type,
+        result,
+      );
+      continue;
+    }
 
     if (
       lithicEvent.type === "AUTHORIZATION_ADVICE" ||
@@ -287,6 +439,7 @@ export function deriveCardEvents(txn: Transaction): DerivedCardEvents {
           providerEventId: token,
         },
         lithicEvent.type,
+        result,
       );
       continue;
     }
@@ -303,6 +456,7 @@ export function deriveCardEvents(txn: Transaction): DerivedCardEvents {
         providerEventId: token,
       },
       lithicEvent.type,
+      result,
     );
   }
 
@@ -311,6 +465,8 @@ export function deriveCardEvents(txn: Transaction): DerivedCardEvents {
     providerCardToken: txn.card_token,
     events,
     stepTypes,
+    results,
+    refused,
     // An identity with no usable events yet is still an identity; calling its
     // origin 'clearing_first' would be a guess, and 'authorization' would be a
     // lie, so an empty payload inherits the neutral case.

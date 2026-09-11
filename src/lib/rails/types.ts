@@ -43,6 +43,14 @@
  * nothing else.
  */
 
+// Type-only, and therefore erased: ./contract.ts imports its money vocabulary
+// from this file with `import type` too, so neither direction survives to
+// runtime and there is no module cycle. `RailLiveness` is imported rather than
+// restated because `RailSlotHealth` and `RailProbe` must answer the liveness
+// question with the SAME six words — a slot health with its own private
+// vocabulary is how two surfaces come to disagree about what `live` means.
+import type { RailLiveness } from './contract';
+
 // ---------------------------------------------------------------------------
 // Money
 // ---------------------------------------------------------------------------
@@ -550,12 +558,30 @@ export class RailError extends Error {
  * `src/lib/webhooks/route-handler.ts` so a health route can render both without
  * a second vocabulary. `label` is what a human reads; `evidence` is what code
  * branches on.
+ *
+ * THREE FIELDS, THREE DIFFERENT QUESTIONS, AND THEY ARE NOT THE SAME QUESTION.
+ * Conflating them is what produced the bug this shape now prevents:
+ *
+ *   selected   WHICH ADAPTER is wired up. Decided from configuration, and
+ *              configuration is the right input for that question.
+ *   evidence   WHETHER THE PROVIDER IS REAL. A property of the adapter, known
+ *              at construction: Increase is a bank, the simulator is us.
+ *   liveness   WHETHER A ROUND TRIP HAS PROVEN IT WORKS, right now. This is
+ *              the ONLY one a credential cannot answer, and `unprobed` is the
+ *              honest verdict when a key is present and nothing has been run
+ *              with it. Same six words as `RailLiveness`/`Liveness`, so this
+ *              cannot become a seventh opinion.
+ *
+ * `label` is derived from the last two by `railProbeLabel` and is never
+ * written by hand — LIVE needs a real provider AND a successful round trip.
  */
 export interface RailSlotHealth {
   readonly slot: RailKind;
   readonly provider: string;
   readonly selected: 'live_adapter' | 'simulator';
   readonly evidence: Evidence;
+  /** What a round trip proved. Never inferred from a credential being set. */
+  readonly liveness: RailLiveness;
   readonly environment: RailEnvironment;
   readonly label: 'LIVE' | 'SIMULATED';
   /** Env var NAMES only. Never values — a health endpoint is public. */

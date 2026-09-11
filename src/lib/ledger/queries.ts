@@ -103,6 +103,84 @@ export type { LedgerSnapshot } from "./balance-definitions";
 export { readSnapshot } from "./balance-definitions";
 
 /* -------------------------------------------------------------------------- */
+/* The named readers                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `readers.ts` is where the questions OTHER modules kept asking the ledger's
+ * tables directly now live, and this is the one import surface for them.
+ *
+ * Forwarded rather than defined here for the same reason `readSnapshot` is:
+ * `src/components/**` is forbidden from importing `@/lib/ledger/db` (see
+ * `data-contract.ts`) and should not have to know which file inside this
+ * module a question lives in either. It asks `queries`; `queries` forwards.
+ */
+/**
+ * `Queryable` is forwarded for the same reason the readers are: a module that
+ * calls a reader from inside `sql.begin()` needs the parameter type, and it
+ * should not have to reach past this surface into `./db` — which carries
+ * `server-only` — to name it.
+ */
+export type { Queryable } from "./db";
+
+export type {
+  AccountFilter,
+  AccountIdentity,
+  AccountPeriod,
+  BusinessRow,
+  CorrectionGroupEntry,
+  CorrectionGroupLine,
+  DayActivity,
+  DepositAccountPeriod,
+  DepositMovementRow,
+  HoldItemisation,
+  JournalCensus,
+  LedgerCensus,
+  LateEntry,
+  LedgerLineFilter,
+  LedgerLineRow,
+  PeriodLine,
+  TrialBalanceTotals,
+} from "./readers";
+export {
+  bookingTimeOfSeq,
+  countPostingsForDays,
+  currentBookingWatermark,
+  entityBookingWatermark,
+  findAccount,
+  findBusiness,
+  findEntryByIdempotencyKey,
+  firstEntryDescriptionForHold,
+  heldCentsAsBelieved,
+  highestBookingSeqAffecting,
+  holdItemisationAsOf,
+  holdMemoCents,
+  listAccounts,
+  listBusinesses,
+  listDepositMovements,
+  listEntriesAboveWatermark,
+  listLedgerLines,
+  listRailControlEntries,
+  mostActiveDepositAccountId,
+  NoCensusRowError,
+  NoSuchAccountError,
+  readAccountIdentities,
+  readAccountIdentity,
+  readAccountPeriod,
+  readCorrectionGroup,
+  readLedgerCensus,
+  resolveChartCodes,
+} from "./readers";
+
+/**
+ * The two chart lookups that were already in `balance-definitions.ts` and that
+ * nobody outside this module could find, because they were not on the import
+ * surface the rest of the system uses. Six modules wrote `SELECT id FROM
+ * account WHERE code = '…'` instead. They are forwarded now.
+ */
+export { houseAccountId, mainDepositAccountId } from "./balance-definitions";
+
+/* -------------------------------------------------------------------------- */
 /* Identity                                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -116,6 +194,14 @@ export { readSnapshot } from "./balance-definitions";
  */
 export interface DepositAccountRow {
   readonly accountId: string;
+  /**
+   * The legal entity whose chart this account hangs off. Present because
+   * `book_day` is keyed by `(entity_id, business_date)`: signing off a
+   * business day is an act of the entity, not of one customer's account, and
+   * `src/lib/statements/read.ts` used to re-derive this whole row — same
+   * predicates, one extra column — rather than ask for it.
+   */
+  readonly entityId: string;
   readonly businessId: string;
   /** `account.name`, e.g. `Ridgeline Robotics, Inc. — business current account`. */
   readonly accountName: string;
@@ -147,6 +233,7 @@ export async function findDepositAccount(
   const rows = await conn<
     {
       account_id: string;
+      entity_id: string;
       business_id: string;
       account_name: string;
       legal_name: string;
@@ -154,6 +241,7 @@ export async function findDepositAccount(
     }[]
   >`
     SELECT a.id          AS account_id,
+           a.entity_id   AS entity_id,
            a.business_id AS business_id,
            a.name        AS account_name,
            b.legal_name  AS legal_name,
@@ -169,6 +257,7 @@ export async function findDepositAccount(
     ? null
     : {
         accountId: rows[0].account_id,
+        entityId: rows[0].entity_id,
         businessId: rows[0].business_id,
         accountName: rows[0].account_name,
         legalName: rows[0].legal_name,
@@ -183,6 +272,7 @@ export async function listDepositAccounts(
   const rows = await conn<
     {
       account_id: string;
+      entity_id: string;
       business_id: string;
       account_name: string;
       legal_name: string;
@@ -190,6 +280,7 @@ export async function listDepositAccounts(
     }[]
   >`
     SELECT a.id          AS account_id,
+           a.entity_id   AS entity_id,
            a.business_id AS business_id,
            a.name        AS account_name,
            b.legal_name  AS legal_name,
@@ -204,6 +295,7 @@ export async function listDepositAccounts(
 
   return rows.map((row) => ({
     accountId: row.account_id,
+    entityId: row.entity_id,
     businessId: row.business_id,
     accountName: row.account_name,
     legalName: row.legal_name,

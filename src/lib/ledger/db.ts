@@ -13,6 +13,7 @@
  */
 
 import "server-only";
+import type { TransactionSql } from "postgres";
 import postgres from "postgres";
 import { env } from "@/lib/env";
 
@@ -37,3 +38,19 @@ export const sql = postgres(env.APP_DATABASE_URL, {
 });
 
 export type Sql = typeof sql;
+
+/**
+ * What a read needs: something you can issue a tagged-template query against.
+ *
+ * `Sql` is the pool; inside `sql.begin()` you hold a `TransactionSql`, which is
+ * NOT assignable to it. Readers that only issue queries should not care which
+ * they were handed — and the ones that take `Sql` force a caller inside a
+ * transaction to either pass the pool (reading OUTSIDE its own transaction,
+ * which is how `readSnapshot()` once called `now()` on a connection that had
+ * not seen the rows it had just posted) or to give up and write the SQL
+ * inline, which is the boundary leak `boundary.test.ts` ratchets against.
+ *
+ * Both failures push in the wrong direction, so the parameter type is the
+ * union. A reader that genuinely needs pool-only behaviour asks for `Sql`.
+ */
+export type Queryable = Sql | TransactionSql<{ bigint: bigint }>;

@@ -6,6 +6,7 @@ import { AccrualErrorPanel } from "./AccrualErrorPanel";
 import { AccrualSkeleton } from "./AccrualSkeleton";
 import { ArithmeticPanel } from "./ArithmeticPanel";
 import { DayTable } from "./DayTable";
+import { InterestSection } from "./InterestSection";
 import { MonthTable } from "./MonthTable";
 import { PolicyPanel } from "./PolicyPanel";
 import { ScheduleTable } from "./ScheduleTable";
@@ -40,6 +41,7 @@ export async function AccrualView({
   const result = await source.load({
     ...(filter.scheduleId === null ? {} : { scheduleId: filter.scheduleId }),
     ...(filter.accrualDayId === null ? {} : { accrualDayId: filter.accrualDayId }),
+    ...(filter.interestDayId === null ? {} : { interestDayId: filter.interestDayId }),
   });
 
   if (isErr(result)) {
@@ -163,7 +165,13 @@ export async function AccrualView({
         <ArithmeticPanel row={view.selected} filter={filter} />
       )}
 
-      <PolicyPanel invariants={view.invariants} />
+      <hr className="border-border" />
+
+      <InterestSection view={view.interest} filter={filter} bookDate={view.bookDate} />
+
+      <hr className="border-border" />
+
+      <PolicyPanel invariants={view.invariants} interest={view.interest.invariants} />
 
       <FooterNote filter={filter} />
     </div>
@@ -175,10 +183,14 @@ function Header() {
     <header>
       <h1 className="text-lg font-semibold tracking-tight">Accruals</h1>
       <p className="mt-0.5 max-w-prose text-sm text-muted">
-        A monthly platform fee, accrued daily and posted to the ledger at the
-        business date it accrued for. A month&apos;s price does not divide into
-        days, so someone has to carry the remainder — this screen shows exactly
-        who, on which day, and why the month still sums to the price to the cent.
+        Two things accrue daily on one tick, and they round by two different
+        rules for a stated reason. <strong>The platform fee</strong> is one
+        monthly price split across the days of its month, so DESIGN §12.3
+        allocates it by largest remainder and the month sums to the price to the
+        cent. <strong>Interest</strong> is a fresh calculation each day on a
+        balance that changes, so there is no total to allocate and §12.2 rounds
+        it half to even. This screen shows both, with the working, and says
+        which clause governs each.
       </p>
     </header>
   );

@@ -8,6 +8,8 @@
  *   corrections.ts    the repair: reverse at the ORIGINAL value date. Pure choice,
  *                     impure posting.
  *   expiry.ts         the clock release, which is bookkeeping and not a repair.
+ *   completion.ts     the other end of the lifecycle: an OPENING whose memo
+ *                     posting never landed. Idempotent, total, safe mid-flight.
  *
  * `model.ts` and `lithic-events.ts` have no database and no clock of their own,
  * which is why the interesting properties — order-independence, duplicate
@@ -84,3 +86,12 @@ export {
   sweepExpiredHolds,
   type ExpirySweepResult,
 } from "./expiry";
+
+export {
+  completeOne,
+  findIncompleteHoldPostings,
+  sweepIncompleteHoldPostings,
+  type HoldCompletionResult,
+  type HoldCompletionSweepResult,
+  type IncompleteHoldPosting,
+} from "./completion";

@@ -4,7 +4,7 @@ That sentence is in the brief and in the T+2h attack plan. This document is
 about making it true of the code.
 
 `src/lib/rails/contract.ts` is the contract. `src/lib/rails/adapters/` is the
-five adapters. `src/lib/rails/contract.test.ts` is the argument that the
+adapters. `src/lib/rails/contract.test.ts` is the argument that the
 abstraction earns its keep — and if you only read one thing here, read the
 capability table in §3, because it is generated from the adapters and it says
 more about this system's honesty than any paragraph.
@@ -42,8 +42,9 @@ The two interfaces disagreed about the same ideas:
   and nothing at all for Lithic or Plaid.
 - **Liveness** was spelled four ways in the repo: `ProviderHealth.liveness`
   (four words), `ProbeResult.liveness` in `src/lib/integrations/probe.ts` (six),
-  `RailSlotHealth` (no liveness at all — it reports which adapter was
-  *selected*), and, inside `rails/`, nothing for the card or open-banking slots.
+  `RailSlotHealth` (no liveness at all — it reported which adapter was
+  *selected* and then labelled that LIVE, which is §7), and, inside `rails/`,
+  nothing for the card or open-banking slots.
 - **The seven-member `RailEvent` union** was used by nothing outside
   `src/lib/rails/`. The card rail's events reached the ledger as raw Lithic
   `Transaction` objects through `src/lib/holds/`.
@@ -55,13 +56,18 @@ clients with ad-hoc callers.
 
 Not from a textbook. From what these five modules actually do:
 
-| Operation | What it means | How many rails |
+Counts are over the **seven documented adapters** — the seven rows of §3, which
+is both ACH adapters, both stablecoin providers, and one each of card, open
+banking and wire. A `~` counts as supported: the operation is implemented and
+declared, and the glyph is about whether anyone has run it.
+
+| Operation | What it means | How many adapters |
 |---|---|---|
-| `originate` | push an instruction onto the network | 3 of 5 |
-| `observe` | turn a verified inbound delivery into a normalised fact about money | 3 of 5 |
-| `settle` | report that money finally moved, and for how much | 3 of 5 |
-| `reverse` | report that settled money came back | 2 of 5 |
-| `probe` | describe its own liveness | **5 of 5** |
+| `originate` | push an instruction onto the network | 5 of 7 |
+| `observe` | turn a verified inbound delivery into a normalised fact about money | 4 of 7 |
+| `settle` | report that money finally moved, and for how much | 6 of 7 |
+| `reverse` | report that settled money came back | 3 of 7 |
+| `probe` | describe its own liveness | **7 of 7** |
 
 **`probe` is the only universal one.** That is the finding, not a
 disappointment. "Is this integration live, and is what it produces evidence of
@@ -104,12 +110,13 @@ an operation turns the suite red until the table is regenerated.
 
 | Rail | Provider | Evidence | originate | observe | settle | reverse | probe |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Increase ACH | `increase.ach` | live | ~ | ~ | ~ | ~ | ~ |
+| Increase ACH | `increase.ach` | live | ~ | ~ | ~ | ~ | + |
 | ACH simulator | `achsim.ach` | simulated | + | + | + | + | + |
 | Lithic card issuing | `lithic.card` | live | - | + | + | + | + |
 | Plaid account linking | `plaid` | live | - | - | - | - | + |
 | Base Sepolia, signed here | `base.usdc` | live | + | - | + | - | + |
 | Circle Web3 Services, Base Sepolia | `circle.w3s` | live | + | - | + | - | + |
+| Increase wire (Fedwire) | `increase.wire` | live | + | + | + | - | + |
 
 The ACH slot is served by **exactly one** of the first two rows at a time —
 `INCREASE_API_KEY` present means Increase, absent means the simulator, the same
@@ -118,13 +125,61 @@ documentation; `allRailAdapters()` returns only the one actually serving the
 slot, because an honesty table for a running deployment must not show a live
 rail and its simulator side by side.
 
+**The wire row was missing from this table until 2026-09-11, and the reason it
+was missing is worth more than the row.** `src/lib/rails/wire/` had been built
+and measured end to end against Increase's sandbox — a real Fedwire transfer
+originated, settled with an IMAD and reversed, real inbound wires credited —
+and it was deliberately left out of `allRailAdapters()` and out of
+`contract.test.ts`'s `documentedRails()`. The stated reason was scope: a sixth
+row turns the drift assertion red until this file is regenerated, and this file
+belonged to somebody else. The effect was that **the mechanism built to keep
+this table true was the reason it was incomplete.** A generated table that omits
+a rail in order to avoid being regenerated is a hand-written table with extra
+steps, and the omission was invisible precisely because the test was green. Both
+files now carry the rail, and the regeneration is one command.
+
+**The wire rail is unconditional in `allRailAdapters()`, unlike ACH.** There is
+no wire simulator: the slot is served by this adapter or by nothing, so there is
+no pair to choose between. It is listed the way Lithic and Plaid are — always
+present, with `probe()` reporting `not_configured` on a box with no credential —
+because a rail that disappears from the honesty table when it is unconfigured is
+the one failure that table exists to prevent.
+
 ### Reading the rows
 
-**The whole Increase row is `~`.** There has never been an `INCREASE_API_KEY` in
-this repo. Every wire shape in that adapter comes from `research/ach/NOTES.md`,
-where not one line is marked `[MEASURED]`. The code is real and the reasoning
-about the settlement promotion is real; none of it has met a bank. That is now
-in the type system and on this table, not only in a README paragraph.
+**The Increase row is `~` except for `probe`, and the exception is the point.**
+A sandbox `INCREASE_API_KEY` exists now, and exactly one operation has been run
+with it: `probe` sent `GET /accounts?limit=1` to `sandbox.increase.com` and got
+**200 on 2026-09-11**, from `increaseAchAdapter().probe()` itself. That call is
+committed as `src/lib/rails/increase/probe.integration.test.ts` — gated on
+`RUN_LIVE_PROBES=1` and the key, skipped everywhere else — so the cell can be
+re-earned in eight seconds rather than believed:
+
+```
+set -a; . ./.env; set +a; RUN_LIVE_PROBES=1 pnpm vitest run \
+  src/lib/rails/increase/probe.integration.test.ts
+```
+
+The same test points a deliberately wrong-but-well-formed key at Increase and
+asserts the verdict is `unauthorised`, not `live` — the pasted-placeholder case,
+run for real against the provider rather than argued about.
+
+**`originate`, `observe`, `settle` and `reverse` stay `~`, and moving them would
+be the same bug in a better disguise.** A read of `/accounts` proves a
+credential authenticates and a host answers. It proves nothing about whether
+`POST /ach_transfers` maps a `TransferRequest` correctly, whether the
+`submitted + settlement.settled_at → settled` promotion fires, or whether an R01
+arrives shaped the way `research/ach/NOTES.md` guessed — and not one line of
+that file is marked `[MEASURED]`. Two specific facts keep those four cells
+honest rather than merely cautious:
+
+- The sandbox account holds one returned ACH transfer, and **this adapter did
+  not create it**: its `idempotency_key` is null, and `initiateCredit` always
+  sends `Idempotency-Key: <clientReferenceId>`.
+- Two real Increase deliveries have reached the deployed webhook endpoint and
+  had their signatures verified — and **both were dead-lettered**, "no consumer
+  registered for provider `increase`". `parseEvent` has still never seen a real
+  delivery, so `observe` is `~`.
 
 **Lithic cannot originate.** A card rail never originates a payment — the
 merchant's acquirer does, the network routes, and Lithic tells us afterwards,
@@ -146,6 +201,42 @@ confirmed chain transfer is final — no return code, no chargeback, no recall.
 file was written. A `reverted` transaction is a **failed origination**, not a
 reversal: the transfer never happened and no USDC moved.
 
+**The wire row is four `measured` cells and one refusal, and the refusal is the
+finding.** Every cell's `evidence` names the call and the sandbox object it
+produced, so any of them is re-earnable in seconds — `POST /wire_transfers`,
+`POST /simulations/wire_transfers/{id}/submit`, `GET /wire_transfers?limit=1`,
+and an `observe()` run against the exact verified bytes of a real delivery read
+out of `webhook_inbox` rather than a fixture shaped like one. That is a stricter
+standard than the Increase ACH row's `~`, and it is met by the boring means: the
+calls were made.
+
+`reverse` is `-`, and **money did come back, measured, and the rail still
+refuses the capability.** `POST /simulations/wire_transfers/{id}/reverse`
+returned 200 and produced an object whose `class_name` is
+`inbound_wire_reversal`, with its **own** IMAD (`20260911apvdjfqt599399`, not
+the original's `20260911sgzamiaa787670`), its own transaction id, and
+`return_reason_code: null`. Read together those say one thing: a different
+Fedwire message is a different payment, it came the other way, and the null
+return code is there because — unlike ACH's R01–R85 — **Fedwire has no return
+code table to fill it from**. So what came back is a second payment the
+beneficiary's bank chose to send. We cannot cause it, are not owed it, and have
+no code to classify it by. `adapter.wireReturnOfFunds()` reads it as the inbound
+credit it is, on the adapter's own surface and never on the contract.
+
+This refusal is a *different kind* from USDC's, and the difference is worth
+keeping: USDC's is physics — a confirmed chain transfer cannot be unmade. A
+wire's is law and network design — the money **can** come back, and we have
+watched it; what we cannot do is compel it.
+
+**One vendor, two rails, two probes.** `increase.ach` and `increase.wire` are
+separate rows behind one credential, and that is not duplication. Increase gates
+features **per key**: the same credential that answers 200 on `GET
+/wire_transfers` answers **403 `private_feature_error`** on
+`/wire_drawdown_requests`. A single Increase probe would be one round trip
+standing in for two different propositions, which is liveness-by-presence one
+indirection removed. So the wire probe asks `/wire_transfers` and not
+`/accounts`, and its integration test asserts **both** status codes side by side.
+
 ## 4. What the contract deliberately does not do
 
 **It does not unify the instructions.** `initiateCredit(TransferRequest)` and
@@ -165,7 +256,7 @@ also have to describe a card rail that cannot originate and a bank-linking
 adapter that cannot move a cent.
 
 **It does not re-expose `getTransfer`.** A read-back by provider id is not part
-of the intersection of five rails, and a caller that needs one already knows
+of the intersection of these rails, and a caller that needs one already knows
 which rail it is holding.
 
 ## 5. The payoff
@@ -255,13 +346,8 @@ never received it.
 
 ## 6. Known gaps, stated rather than hidden
 
-- **`achRailHealth()` in `achsim/factory.ts` labels the ACH slot `LIVE` from
-  `INCREASE_API_KEY` being a non-empty string, with no round trip.** That is
-  liveness by presence, which is precisely what `src/lib/integrations/probe.ts`
-  was written to stop — "a system ends up labelling four providers LIVE because
-  someone pasted the placeholders out of `.env.example`". It is left exactly as
-  it was, because changing it would change behaviour and this was a refactor.
-  `increaseAchAdapter().probe()` is the version that earns the word.
+- ~~**`achRailHealth()` labels the ACH slot `LIVE` from `INCREASE_API_KEY` being
+  a non-empty string, with no round trip.**~~ **Fixed 2026-09-11.** See §7.
 - **Nothing outside `src/lib/rails/` consumes the contract yet.** The five
   bespoke probes in `integrations/probe.ts` and the card path through
   `src/lib/holds/` are the callers that should collapse onto it, and both are
@@ -280,3 +366,97 @@ never received it.
 - **`observe` is declared `false` for Circle even though Circle offers
   subscription webhooks.** This deployment does not use them and has never
   received one.
+- **`RailSettlement` carries no direction.** `reportSettlements()` nets
+  `returned` negative and everything else positive, and has no concept of an
+  outbound payment versus an inbound receipt — so a $2,500 wire we sent and a
+  $12,500 wire we received sum to `+$15,000`. On ACH this was masked because
+  that feed is effectively one-directional; the wire rail, which observes both
+  directions, is what surfaced it. It is a property of `contract.ts`, not of any
+  one rail, and `wire/adapter.test.ts` asserts it as-is with a comment rather
+  than working around it. The fix is a `direction` on `RailSettlement` and two
+  producers updated at the same time, the way `settled` gained its `amount`.
+- **Wire drawdown requests are 403 `private_feature_error` on this key.**
+  `GET /wire_drawdown_requests` answers *"This API method is in private beta."*
+  So this deployment does not pull money by wire, and does not simulate doing
+  so. Named rather than worked around.
+- **A wire approval ladder.** One `(threshold_cents, required_approvals)` pair
+  is one band, and the wire threshold sits at the floor, so there is no way to
+  express *"two approvers above $250,000, one below"*. That needs a second
+  column or a row per band — a schema change, and a week-two item.
+
+## 7. The ACH slot's verdict, and where it comes from
+
+**Fixed 2026-09-11.** `achRailHealth()` and `createAchRail()` in
+`achsim/factory.ts` both published `label: 'LIVE'` for the ACH slot on the
+strength of `INCREASE_API_KEY` being a non-empty string — no round trip, on a
+slot whose live adapter had never been run against the provider. A placeholder
+pasted out of `.env.example` would have earned the same word. That is liveness
+by presence: the mistake DECISIONS 011 killed and `src/lib/integrations/probe.ts`
+was written to prevent, surviving inside the factory, in a package whose own
+header calls a silent downgrade "how a demo ends up showing simulated money to a
+panel that thinks it is watching a bank". §6 of this file listed it as a known
+gap and said it was being left alone because fixing it would change behaviour.
+The behaviour it preserved was a false claim, which makes it a bug and not a
+baseline.
+
+### Which answer `/api/health` publishes
+
+**Not this one.** The deployed endpoint's `ach_rail` slot comes from
+`src/lib/integrations/probe.ts`, which sends a real `GET /accounts` and reports
+what came back (`"GET /accounts -> 200"`, live, 7 of 7 as of 2026-09-11), and
+`src/app/api/health/route.ts` explicitly stamps probe verdicts over anything
+derived from credential presence so the response carries one opinion. So the
+endpoint was never publishing the false claim — but `achRailHealth()` was a
+second, unearned answer to the same question sitting one import away from it,
+and the next caller to reach for the convenient synchronous one would have
+published it.
+
+### Three questions, three fields
+
+`RailSlotHealth` now separates what one variable used to answer:
+
+| Field | Question | Decided by |
+|---|---|---|
+| `selected` | which adapter is wired up | configuration — and a credential is the right input for this |
+| `evidence` | is the provider real or is it us | the adapter, at construction |
+| `liveness` | has a round trip proven it works | **a round trip, or `unprobed`** |
+
+`liveness` is `RailLiveness`, the same six words as `RailProbe` and
+`integrations/probe.ts` — `live`, `unauthorised`, `unreachable`, `rate_limited`,
+`not_configured`, `unprobed` — imported rather than restated so the slot health
+cannot become a seventh opinion about what `live` means. `label` is computed by
+`railProbeLabel` in every branch and is never written by hand: **LIVE requires a
+real provider AND a successful round trip.**
+
+### So which function may say LIVE
+
+```ts
+achRailHealth(env)            // sync, pure, no network -> never LIVE
+createAchRail(opts).health    // sync, constructs a rail  -> never LIVE
+await probeAchRailHealth()    // one HTTP round trip      -> LIVE, if earned
+```
+
+The first two report `liveness: 'unprobed'` when `INCREASE_API_KEY` is set,
+with the sentence *"credential present, NOT probed"*, because a function that
+touches no network is not entitled to a verdict about a network. The third
+builds whichever adapter is actually serving the slot, calls its `probe()`, and
+reports what came back — `unauthorised` for a rejected key, `unreachable` for a
+dead network, `rate_limited` for a throttled one, and `live` only for a 2xx. It
+never throws, and it does not cache: `src/lib/integrations/verdict-cache.ts`
+owns the question of when an earned verdict may be quoted instead of re-proven,
+and a second cache here would be a second opinion about the age of one fact.
+
+The simulator branch reports `liveness: 'live'` — it is in this process, so if
+the code is running it is running — and is still labelled `SIMULATED`, because
+`evidence` is `simulated` and both halves are required. It cannot claim LIVE by
+construction.
+
+### What is still owed, and by whom
+
+`src/lib/integrations/probe.ts` is owned elsewhere and needs two things. Its
+`ach_rail` probe hardcodes `https://sandbox.increase.com` and ignores
+`INCREASE_BASE_URL`, so a deployment pointed anywhere else would probe a host
+the application does not use — the same drift the `business_registry` comment in
+that file records ("the probe must ask the provider the APPLICATION uses"),
+pointed at ACH. And it duplicates `increaseAchAdapter().probe()` rather than
+calling it, which is the second bullet of §6 in concrete form.

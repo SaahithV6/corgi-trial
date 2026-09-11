@@ -59,7 +59,7 @@ export async function OnboardingView({ view }: { readonly view: View }) {
 
       <Note title="Every seeded business misses the registry, and that is the correct answer">
         <p>
-          The three businesses on this book are fictional, so GLEIF — a real registry, queried live
+          Every business on this book is fictional, so GLEIF — a real registry, queried live
           — answers <span className="font-mono">not_in_lei_registry</span> for all three, and the
           registry leg reads <span className="font-mono">needs_review</span>. That is not a broken
           check. GLEIF holds 3,426,836 records, 360,275 of them US, against tens of millions of US

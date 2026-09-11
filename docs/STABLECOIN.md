@@ -703,3 +703,115 @@ src/lib/rails/stablecoin/
   circle-recon.ts      1140 against the chain, never against Circle's balance
   circle-*.test.ts     81 tests, none of them touching a network
 ```
+
+---
+
+## The payout is now priced, and that changes the entry
+
+*Appended after the FX gate was wired into this script. Everything above still
+holds — the signing, the hash-before-broadcast, the three crash points, the
+receipt discipline. What changed is what the script refuses to do and what it
+posts.*
+
+### It will not send without an accepted quote
+
+`scripts/payout-usdc.mjs` used to move a USDC amount with no recorded statement
+about what the customer agreed that amount was worth. That is a transfer, not a
+bank transaction. It now calls `requireAcceptedQuote()` immediately before
+`sendUsdcPayout()` and exits non-zero on a refusal, with nothing signed and
+nothing broadcast:
+
+```bash
+node scripts/payout-usdc.mjs --quote-new --currency MXN --usd 3.00
+node scripts/payout-usdc.mjs --quote-accept FXQ-XXXXXXXX
+node scripts/payout-usdc.mjs --quote FXQ-XXXXXXXX
+```
+
+The three quote modes are in this script so the whole path — quote, accept,
+send, confirm, post — runs from one file a grader can read. They call the same
+`src/lib/fx/store.ts` functions the `/payouts` screen's server actions call;
+neither the pricing nor the expiry is reimplemented here.
+
+**A transfer that is genuinely not a conversion must say so**, with
+`--domestic`. `gate.ts` refuses to guess which payouts are cross-border and it
+is right not to: moving a customer's own dollars to their own wallet has no FX
+risk and nothing to quote. The flag is printed in the run output, because
+"we skipped the price gate" should never happen quietly.
+
+### Two posting templates, one idempotency key
+
+| | domestic (`--domestic`) | cross-border (`--quote`) |
+| --- | --- | --- |
+| module | `src/lib/rails/stablecoin/ledger.ts` | `src/lib/fx/settle.ts` |
+| lines | DR 2100 · CR 1140 · CR 2900 | DR 2100 · CR 4200 · CR 1140 · CR 2900 · CR/DR 4300 |
+| amount | typed (`--amount`) | derived from the commitment |
+| quote consumed | no | `fx_quote_settlement`, once, by PRIMARY KEY |
+
+`postUsdcPayout()` is unchanged and is still the right entry for a transfer
+that is not a currency conversion. Special-casing it on "is there a quote"
+would put FX vocabulary inside a rail adapter, and a rail is an adapter, not a
+schema.
+
+**Both templates derive the same `payoutIdempotencyKey(txHash)`**, which is
+UNIQUE on `journal_entry`. That is deliberate and it is the safety net: one
+confirmed transfer produces exactly one entry no matter which template ran, so
+a script that crashed after a quoted posting and was re-run without `--quote`
+cannot double-book the money — it returns the entry that already exists.
+
+### A fourth crash point, found live
+
+The three crash points above are about *this script* dying. There is a fourth,
+and the live run hit it: **the transfer confirms, and the commitment lapses
+before anyone gets back to it.**
+
+Base Sepolia returned a receipt whose `blockHash` was zero at the tip. The
+adapter's canonicality re-check compared that against the chain's real hash,
+called the outcome `reorged`, and posted nothing — conservative and correct on
+the information it had. But 1.482518 USDC had moved, and by the time the
+transaction was confirmed by hand the quote's 60-second settlement window had
+closed.
+
+The recovery (`--settle <hash>`) then hit the FX gate, which refused it. **That
+was wrong.** The gate exists to stop value leaving; on a recovery the value has
+already left, and refusing to post it only makes the ledger disagree with the
+chain — a reconciliation break manufactured by a control. So:
+
+* **the gate does not run on `--settle`**, and the run says so in words;
+* **`--amount` on `--settle` is the chain's figure, not a derived one** — what
+  actually left is a fact, and the ledger has to match it, not a recomputation
+  of what it should have been;
+* the commitment is still checked where it is *consumed*, by the database:
+  `fx_quote_settlement`'s trigger refused the lapsed quote, so the entry posted
+  and the quote stayed unsettled.
+
+```
+entry 4e69213f-aa6d-4d58-b79a-ed061f7976ca   tx 0x1984a32d…ce7fe   block 46666139
+CR 4200 101 · DR 2100/e274546d… 250 · CR 1140 148 · CR 2900 1      balance 0
+commitment consumed:  REFUSED  FX_QUOTE_COMMITMENT_LAPSED
+```
+
+The ledger tells the truth about the money; the quote book tells the truth
+about the commitment; the disagreement is a visible break rather than a lie in
+either.
+
+### Sub-cent dust, on the quoted path
+
+`§12.6` and account `2900` are unchanged, and the reasoning in *"Why the ledger
+is in cents and not in USDC"* above is exactly why the quoted entry needs the
+same line. A commitment funded to the rail's own resolution is almost never a
+whole number of cents: the demo payout cost **197.9521 cents**, so 197 credited
+1140 and **9,521 / 10,000 of a cent** credited 2900 with the fraction in the
+memo. It is not folded into `4300`, because 4300 is a market position and a
+rounding artefact hidden inside one is a residual nobody owns.
+`docs/FX.md §11` sets out which §12 clause governs and why it is 12.6 and not
+12.2 or 12.3.
+
+### The confirmed run
+
+```
+tx     0x0acfad50d866e99ce4db08f3c09a2c8ca1d2771fd00ebcb6b0678fb75777d79e
+block  46666112   status 0x1   2026-09-11T04:21:52Z
+gas    44843 @ 6000000 wei = 269058000000 wei
+sender 18.500000 USDC -> 16.520479 USDC
+entry  027255d5-ee38-4eed-ac50-9771ba8d589a   value date 2026-09-11
+```

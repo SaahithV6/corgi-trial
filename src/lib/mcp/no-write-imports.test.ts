@@ -18,6 +18,14 @@
  *   `@/lib/payees/store`  loadPayeeBook          …and acknowledgeWarning
  *   `@/lib/pots/store`    listPots               …and, next door, movePotFunds
  *
+ * The disputes and accrual readers made it sharper again, and added a second
+ * shape of the same problem — the BARREL. `@/lib/disputes/store` holds
+ * `listDisputeStates` next to `insertDispute`, which is the old shape. But
+ * `@/lib/disputes/index.ts` re-exports `./operations`, which imports
+ * `postEntry`: importing the barrel for a read would make nothing new callable
+ * and would still drag the journal-writing module into this process's graph.
+ * Both spellings are now refused below.
+ *
  * A named import brings in one binding, not a module's whole surface, so
  * nothing became reachable. But "we did not import the write" is a fact about
  * today's diff, and a fact about a diff is not a control. This test makes it
@@ -74,9 +82,49 @@ const FORBIDDEN_IMPORTS: readonly { readonly name: string; readonly why: string 
   { name: "settleTransaction", why: "books an on-chain settlement — AGENT-LIMITS §9" },
   // KYB (§16).
   { name: "manualReviewLeg", why: "decides a KYB review — AGENT-LIMITS §16" },
+  // Disputes (§17, §18). These arrived with `list_disputes`, and they are the
+  // sharpest instance of the problem this file exists for: the read the tool
+  // needs, `listDisputeStates`, lives in the same module as `insertDispute`.
+  { name: "raiseDispute", why: "opens a case and starts the network clock — AGENT-LIMITS §17" },
+  { name: "insertDispute", why: "writes the case row directly — AGENT-LIMITS §17" },
+  { name: "insertDisputeEvent", why: "writes a lifecycle transition — AGENT-LIMITS §17" },
+  { name: "submitEvidence", why: "files with the network — AGENT-LIMITS §17" },
+  { name: "recordDecision", why: "records a verdict — AGENT-LIMITS §17" },
+  { name: "openDisputeHold", why: "encumbers customer money — AGENT-LIMITS §18" },
+  { name: "closeDisputeHold", why: "releases an encumbrance — AGENT-LIMITS §18" },
+  {
+    name: "authorizeProvisionalCredit",
+    why: "is the maker-checker step itself — AGENT-LIMITS §18",
+  },
+  { name: "grantProvisionalCredit", why: "advances the bank's money — AGENT-LIMITS §18" },
+  { name: "declineProvisionalCredit", why: "decides an advance — AGENT-LIMITS §18" },
+  { name: "clawBackCredit", why: "takes money back off a customer — AGENT-LIMITS §18" },
+  { name: "writeOffCredit", why: "absorbs a loss onto 5200 — AGENT-LIMITS §18" },
+  { name: "finalizeCredit", why: "makes an advance permanent — AGENT-LIMITS §18" },
+  // Accrual (§19, §20).
+  { name: "runAccrual", why: "posts the daily fee — AGENT-LIMITS §20" },
+  { name: "runInterest", why: "posts the daily interest — AGENT-LIMITS §20" },
+  { name: "claimDay", why: "claims an accrual day for a tick — AGENT-LIMITS §20" },
+  { name: "recordPosting", why: "records an accrual decision — AGENT-LIMITS §20" },
 ];
 
-/** Modules no file here may import at all, write function or not. */
+/**
+ * Modules no file here may import at all, write function or not.
+ *
+ * The last four are BARRELS, and they are the entries worth explaining,
+ * because they are not modules whose purpose is to write — they are modules
+ * that re-export one.
+ *
+ * `@/lib/disputes/index.ts` re-exports `./operations`, and
+ * `@/lib/accrual/index.ts` re-exports `./accrue`; both of those import
+ * `postEntry`. A named import from a barrel brings in one binding, so
+ * importing `listDisputeStates` from `@/lib/disputes` would make nothing new
+ * CALLABLE — but it would put `ledger/post.ts` into this process's module
+ * graph, and "the MCP module does not import ledger/post.ts" is the strongest
+ * sentence in docs/AGENT-LIMITS.md. The gateway therefore reaches past both
+ * barrels to `@/lib/disputes/store` and to scoped SQL, and this list makes
+ * that a rule rather than a habit.
+ */
 const FORBIDDEN_MODULES: readonly string[] = [
   "@/lib/ledger/post",
   "@/lib/approvals/decide",
@@ -85,6 +133,11 @@ const FORBIDDEN_MODULES: readonly string[] = [
   "@/lib/standing/fire",
   "@/lib/rails/stablecoin/tx",
   "@/lib/rails/stablecoin/secp256k1",
+  "@/lib/disputes/operations",
+  "@/lib/accrual/accrue",
+  "@/lib/accrual/interest",
+  "@/lib/disputes",
+  "@/lib/accrual",
 ];
 
 function sourceFiles(): { readonly file: string; readonly text: string }[] {
@@ -157,5 +210,46 @@ describe("the MCP module imports nothing that writes", () => {
     expect(approvals[0]).toMatch(/getPayment/);
     expect(approvals[0]).toMatch(/requestPayment/);
     expect(approvals[0]).not.toMatch(/\bapprove|\brelease|\breject|\bcancel/);
+  });
+
+  it("reaches disputes past the barrel, at the read-only store", () => {
+    // The gateway needs `listDisputeStates` and `listDisputeEvents`. Both are
+    // in `@/lib/disputes/store`, which also holds `insertDispute`; the barrel
+    // next door re-exports the module that calls `postEntry`. This asserts the
+    // import is spelled the way that keeps `ledger/post.ts` out of the graph.
+    const gateway = files.find((f) => f.file === "gateway.ts");
+    const disputes = importLines(gateway?.text ?? "").filter((l) =>
+      l.includes("@/lib/disputes"),
+    );
+    expect(disputes).toHaveLength(1);
+    expect(disputes[0]).toContain('"@/lib/disputes/store"');
+    expect(disputes[0]).toMatch(/listDisputeStates/);
+    expect(disputes[0]).toMatch(/listDisputeEvents/);
+    expect(disputes[0]).not.toMatch(/insert|open|close|raise/i);
+  });
+
+  it("takes nothing from the accrual module but pure arithmetic", () => {
+    // `@/lib/accrual/types` has no database handle, no `server-only` and no
+    // imports of its own beyond zod. `explainAllocation` renders integers the
+    // ledger already stored; it cannot post anything. Everything else about
+    // accrual on this surface is scoped SQL in the gateway.
+    for (const { file, text } of files) {
+      for (const line of importLines(text)) {
+        if (!line.includes("@/lib/accrual")) continue;
+        expect(
+          line.includes('"@/lib/accrual/types"'),
+          `${file} imports accrual from somewhere other than the pure types module: ${line}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("keeps the refusal catalogue free of imports entirely", () => {
+    // `limits.ts` is a list of operations that write. The one way it could
+    // become dangerous is by importing one of them for a type, so it imports
+    // nothing at all and this asserts it rather than trusting the diff.
+    const limits = files.find((f) => f.file === "limits.ts");
+    expect(limits).toBeDefined();
+    expect(importLines(limits?.text ?? "")).toHaveLength(0);
   });
 });

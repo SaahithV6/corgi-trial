@@ -9,6 +9,7 @@ import {
   type RaiseResult,
   type TransitionResult,
 } from "@/app/(app)/disputes/actions";
+import { formatUsd } from "@/lib/format/money";
 import { Money } from "@/components/ui/Money";
 import { Badge, FOCUS_RING, Note, Panel } from "@/components/ui/primitives";
 
@@ -161,7 +162,7 @@ export function RaiseDisputeForm({
                 >
                   {charges.map((c) => (
                     <option key={c.entryId} value={c.entryId}>
-                      {c.valueDate} · ${(c.disputableCents / 100).toFixed(2)} ·{" "}
+                      {c.valueDate} · {formatUsd(c.disputableCents)} ·{" "}
                       {c.cardLastFour === null ? c.description : `card ••${c.cardLastFour}`}
                     </option>
                   ))}
@@ -179,7 +180,9 @@ export function RaiseDisputeForm({
                   inputMode="decimal"
                   required
                   defaultValue={
-                    charge === undefined ? "" : (charge.disputableCents / 100).toFixed(2)
+                    charge === undefined
+                      ? ""
+                      : formatUsd(charge.disputableCents, { symbol: false, group: false })
                   }
                   disabled={disabled || pending}
                   className={INPUT_CLASS}
@@ -450,7 +453,7 @@ export function CaseActions({
             >
               {open.map((c) => (
                 <option key={c.disputeId} value={c.disputeId}>
-                  {c.caseRef} · ${(c.amountCents / 100).toFixed(2)} · {c.status.replaceAll("_", " ")}
+                  {c.caseRef} · {formatUsd(c.amountCents)} · {c.status.replaceAll("_", " ")}
                 </option>
               ))}
             </select>

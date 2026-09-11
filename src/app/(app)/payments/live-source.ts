@@ -35,6 +35,7 @@ import type {
   PolicyOptionView,
   SourceAccountView,
   TransactGateView,
+  WirePayeeOption,
 } from "@/components/payments/data-contract";
 import { listPolicies } from "@/lib/approvals/policy-store";
 import { isPayoutRail, type ApprovalPolicy } from "@/lib/approvals/types";
@@ -44,6 +45,8 @@ import { transactGateForAccount } from "@/lib/kyb/wire";
 import type { TransactDecision } from "@/lib/kyb";
 import { sql, type Sql } from "@/lib/ledger/db";
 import { listDepositAccounts } from "@/lib/ledger/queries";
+import { checkRoutingNumber } from "@/lib/payees/aba";
+import { loadPayeeBook, type PayeeBookEntry } from "@/lib/payees/store";
 import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
 
 /**
@@ -104,6 +107,58 @@ function toPolicyOption(policy: ApprovalPolicy): PolicyOptionView | null {
 }
 
 /**
+ * One payee-book row, as a wire beneficiary the form can offer.
+ *
+ * Returns `null` for anything that is not addressable by Fedwire, and the
+ * three reasons are each a real refusal one layer down rather than a tidy-up
+ * here:
+ *
+ *   archived          `resolveWireBeneficiary()` filters archived rows out.
+ *   no routing number `WIRE_PAYEE_HAS_NO_ROUTING_NUMBER` — a BIC is not a
+ *                     Fedwire address.
+ *   bad check digit   `WIRE_ROUTING_NUMBER_IMPOSSIBLE`, and
+ *                     `gatePaymentOnPayee()` would refuse it first.
+ *
+ * Offering a beneficiary the origination path is going to refuse is the bug
+ * this picker exists to fix, so the filter is the same set of conditions,
+ * applied earlier.
+ *
+ * `wireSupported === false` is deliberately NOT filtered: it is a directory
+ * answer that usually means the ACH variant of the routing number has been
+ * put in a wire field, and that is a thing a clerk should SEE beside the
+ * beneficiary rather than have silently removed from the list. It carries a
+ * refusal code instead.
+ */
+function toWirePayee(entry: PayeeBookEntry): WirePayeeOption | null {
+  if (entry.archived) return null;
+  if (entry.rail !== "wire") return null;
+  const routingNumber = entry.routingNumber;
+  if (routingNumber === null) return null;
+  if (entry.accountNumberLast4 === null) return null;
+  if (!checkRoutingNumber(routingNumber).valid) return null;
+
+  // THE PREDICTION, and the same predicate `gatePaymentOnPayee()` applies —
+  // the newest check on this beneficiary warned and nobody has signed for it.
+  // A prediction and not the decision: the gate re-runs inside the write
+  // transaction, which is where a warning raised a second ago is still seen.
+  const gateRefusalCode =
+    entry.outcome === "warned" && !entry.acknowledged ? "PAYEE_WARNING_UNACKNOWLEDGED" : null;
+
+  return {
+    payeeId: entry.payeeId,
+    displayName: entry.displayName,
+    holderName: entry.holderName,
+    wireRoutingNumber: routingNumber,
+    accountNumberLast4: entry.accountNumberLast4,
+    institutionName: entry.institutionName,
+    outcome: entry.outcome,
+    acknowledged: entry.acknowledged,
+    freshness: entry.freshness,
+    gateRefusalCode,
+  };
+}
+
+/**
  * The live source.
  *
  * `asOf` is taken once, before the reads, so a screenshot is a consistent
@@ -115,9 +170,14 @@ export function createLivePaymentsSource(conn: Sql = sql): PaymentsDataSource {
       const asOf = new Date().toISOString();
 
       try {
-        const [accountRows, policyRows] = await Promise.all([
+        const [accountRows, policyRows, payeeRows] = await Promise.all([
           listDepositAccounts(conn),
           listPolicies(conn),
+          // The whole book, once, rather than one query per account: this is
+          // the operator view (`loadPayeeBook({})`) and it is grouped by
+          // business below. A read, outside any transaction, exactly like the
+          // gate preview above it.
+          loadPayeeBook({}, conn),
         ]);
 
         // Both gates for every account, so the screen can show what this
@@ -148,10 +208,18 @@ export function createLivePaymentsSource(conn: Sql = sql): PaymentsDataSource {
           .map(toPolicyOption)
           .filter((policy): policy is PolicyOptionView => policy !== null);
 
+        const wirePayeesByBusiness: Record<string, WirePayeeOption[]> = {};
+        for (const row of payeeRows) {
+          const option = toWirePayee(row);
+          if (option === null) continue;
+          (wirePayeesByBusiness[row.businessId] ??= []).push(option);
+        }
+
         return ok({
           actor,
           accounts,
           policies,
+          wirePayeesByBusiness,
           defaultValueDate: bankingToday(),
           asOf,
         });

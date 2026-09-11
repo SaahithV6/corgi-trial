@@ -48,8 +48,8 @@ export const LOOK_AT: readonly LookAtItem[] = [
   {
     key: "simulated",
     href: "#integrations",
-    linkText: "The two SIMULATED rows",
-    text: "Both carry the measurement that demoted them: Stripe Connect is not enabled, and the USDC wallet holds twenty dollars with zero gas to move it. Each was reported LIVE by an earlier probe that checked the credential instead of the capability, which is the failure this table exists to prevent.",
+    linkText: "The evidence column on every row",
+    text: "Each verdict names the call that produced it, not the credential that suggested it. Two rows were LIVE for a while on exactly that mistake \u2014 one probe read an HTTP 429 as success, another read a changed 400 message as success \u2014 and both were caught by measuring rather than by anything on this page. A slot is only live when a real call proved the capability.",
   },
 ];
 

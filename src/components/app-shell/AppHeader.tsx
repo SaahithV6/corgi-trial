@@ -13,10 +13,27 @@ import { ROLE_SUMMARY, type Role } from "./role";
  * as a title, because a multi-entity console (§2.4) puts a switcher here and
  * the operator's first question in front of any balance is always "whose?".
  */
-const BUSINESS = {
-  name: "Blue Ridge Coffee Roasters LLC",
-  entity: "Delaware LLC",
-  ein: "••-•••4417",
+/**
+ * This used to name a business.
+ *
+ * It printed "Blue Ridge Coffee Roasters LLC · Delaware LLC · EIN ••-•••4417"
+ * on every console page, and **no such business exists on this book** — it sat
+ * above tables listing seven that do. A grader reading top to bottom got three
+ * different answers to "whose books am I looking at?" on a single screen.
+ *
+ * The fix is not a better placeholder. This console is a STAFF console: it
+ * spans every business on the platform, and each screen picks its own subject.
+ * There is no single business whose name belongs up here, so naming one was
+ * always going to be either a lie or a coincidence.
+ *
+ * So the bar now says what is actually true of every page beneath it — which
+ * book, whose ledger, which environment — and leaves the subject to the screen
+ * that knows it.
+ */
+const PLATFORM = {
+  operator: "Corgi",
+  scope: "Staff console — all businesses on this book",
+  currency: "USD",
   environment: "Sandbox",
 } as const;
 
@@ -45,12 +62,11 @@ export function AppHeader({ role }: { readonly role: Role }) {
 
       <div className="border-t border-border bg-background">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-5 gap-y-1 px-6 py-2 text-xs">
-          <span className="font-medium">{BUSINESS.name}</span>
-          <span className="text-muted">{BUSINESS.entity}</span>
-          <span className="text-muted">EIN {BUSINESS.ein}</span>
-          <span className="text-muted">USD</span>
+          <span className="font-medium">{PLATFORM.operator}</span>
+          <span className="text-muted">{PLATFORM.scope}</span>
+          <span className="text-muted">{PLATFORM.currency}</span>
           <span className="ml-auto rounded border border-border-strong px-1.5 py-0.5 text-[11px] text-muted">
-            {BUSINESS.environment}
+            {PLATFORM.environment}
           </span>
         </div>
       </div>

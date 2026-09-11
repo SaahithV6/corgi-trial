@@ -74,7 +74,11 @@
  */
 
 import { postEntry, reverseAndRebook } from "@/lib/ledger/post";
-import type { Sql } from "@/lib/ledger/queries";
+import {
+  houseAccountId,
+  mostActiveDepositAccountId,
+  type Sql,
+} from "@/lib/ledger/queries";
 
 import { publishStatement, reissueStatement, closeDay } from "./publish";
 import { readStatementAccount } from "./read";
@@ -121,28 +125,77 @@ export interface StatementDemoResult {
 /**
  * Resolve the deposit account the demo runs against.
  *
- * The busiest one, so the statement has an opening balance with history behind
- * it rather than a suspiciously round zero. Passing an explicit id overrides
- * this; the test does not, because picking the account by activity is also a
- * check that the query works on an account with real depth.
+ * ---------------------------------------------------------------------------
+ * IT PICKS BY ACTIVITY ON THE DAY, NOT BY LIFETIME VOLUME
+ * ---------------------------------------------------------------------------
+ *
+ * This used to ask for the BUSIEST deposit account — most postings, ever — and
+ * the argument was a good one: an account with real depth behind it gives the
+ * statement an opening balance that is not a suspiciously round zero, and
+ * exercises the period queries on more than three lines. Volume was a proxy
+ * for "the account worth showing".
+ *
+ * The proxy stopped holding, and it did so quietly. Integration suites post to
+ * the live database on every run, so the busiest deposit account on this
+ * installation is now `Holds Integration Fixture Co.` with 940 postings and
+ * NONE of them on this demo's day, ahead of `Ridgeline Robotics, Inc.` — the
+ * actual demo customer — at 528 postings of which four are. The consequences
+ * compounded in a way worth writing down, because none of them announced
+ * themselves:
+ *
+ *   1. `pickDemoAccount()` started returning the fixture company.
+ *   2. `seedStatementDemo()` then wrote nothing, correctly: every entry it
+ *      posts is keyed (`statements:demo:2026-07-25:…`), those keys already
+ *      existed on Ridgeline, and `postEntry` is idempotent at the UNIQUE
+ *      index. So the demo's money stayed where it was.
+ *   3. But `publishStatement` and `reissueStatement` are keyed on the ACCOUNT,
+ *      and they duly issued statements for the fixture company for a day on
+ *      which it had done nothing. Three versions, zero lines each.
+ *   4. `/statements` defaults to the account with the newest stated day. The
+ *      fixture now had one, and it sorts first alphabetically, so the screen
+ *      opened on an empty document — a fixture company's blank statement as
+ *      the first thing a grader sees on a screen the brief grades hardest.
+ *   5. The integration test that asserts the in-period difference equals the
+ *      reversal minus the re-book got `0n` and had been red since.
+ *
+ * Nothing here was a regression from a refactor: running the old SQL verbatim
+ * against the live database returns the fixture account too.
+ *
+ * ---------------------------------------------------------------------------
+ * SO WHAT IT SELECTS NOW, AND WHY THAT IS THE RIGHT QUESTION
+ * ---------------------------------------------------------------------------
+ *
+ * The account with the most postings whose VALUE DATE falls on the day this
+ * demo is about, falling back to lifetime volume when no account has any.
+ *
+ * A statement is a document about a period. The account worth rendering one
+ * for is the account that has something to show on it — that is not a
+ * heuristic standing in for the real question, it IS the real question, and
+ * "busiest overall" was only ever an approximation of it that happened to be
+ * right while the only heavy accounts were real customers. Tying the choice to
+ * the day being displayed makes it immune to whatever the test suites do
+ * overnight, because a fixture posting a thousand rows to 1983 can no longer
+ * outvote four rows on the day in question.
+ *
+ * The fallback matters as much as the rule. On a database seeded from zero
+ * nothing has activity on this day yet — the demo is what creates it — so the
+ * first key is zero everywhere and the selection degrades to the old query
+ * exactly, byte for byte (see `mostActiveDepositAccountId`). The first run
+ * picks by volume and posts; every run after that finds its own postings and
+ * picks the same account. The selector converges rather than re-deciding.
+ *
+ * Passing an explicit id still overrides all of it; the test does not, because
+ * letting it choose is also a check that the choice is sane.
  */
 export async function pickDemoAccount(conn: Sql): Promise<string> {
-  const rows = await conn<{ account_id: string }[]>`
-    SELECT a.id AS account_id
-      FROM account a
-      LEFT JOIN journal_line l ON l.account_id = a.id
-     WHERE a.code = '2100'
-       AND a.book = 'financial'
-       AND a.business_id IS NOT NULL
-       AND a.closed_at IS NULL
-     GROUP BY a.id
-     ORDER BY count(l.*) DESC, a.id
-     LIMIT 1`;
-  const row = rows[0];
-  if (row === undefined) {
+  const accountId = await mostActiveDepositAccountId(
+    { periodStart: DEMO_BUSINESS_DATE, periodEnd: DEMO_BUSINESS_DATE },
+    conn,
+  );
+  if (accountId === null) {
     throw new Error("no customer deposit account: run node scripts/seed.mjs");
   }
-  return row.account_id;
+  return accountId;
 }
 
 async function pickActor(conn: Sql): Promise<string> {
@@ -154,11 +207,9 @@ async function pickActor(conn: Sql): Promise<string> {
 }
 
 async function pickControlAccount(code: string, conn: Sql): Promise<string> {
-  const rows = await conn<{ id: string }[]>`
-    SELECT id FROM account WHERE code = ${code} AND business_id IS NULL LIMIT 1`;
-  const row = rows[0];
-  if (row === undefined) throw new Error(`no ${code} control account: run node scripts/seed.mjs`);
-  return row.id;
+  const id = await houseAccountId(code, conn);
+  if (id === null) throw new Error(`no ${code} control account: run node scripts/seed.mjs`);
+  return id;
 }
 
 export async function seedStatementDemo(

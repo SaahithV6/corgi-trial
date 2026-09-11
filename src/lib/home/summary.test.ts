@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import { isErr, isOk } from "@/lib/result";
 
 import {
+  DEFAULT_DEPLOYMENT_ORIGIN,
   parseHealth,
   readHealth,
   readSystemState,
@@ -30,20 +31,45 @@ import type { Sql } from "@/lib/ledger/queries";
 
 type Row = Record<string, unknown>;
 
+/**
+ * A connection that answers every statement from one script, and RECORDS the
+ * transaction it was asked to open.
+ *
+ * `begin` is part of the fake because it is part of the contract now.
+ * `readSystemState` runs its two statements — the ledger census and the
+ * platform counters — inside one REPEATABLE READ READ ONLY transaction, which
+ * is what replaced "keep all the SQL in one template literal" as the mechanism
+ * holding the single-snapshot guarantee. A fake that silently tolerated the
+ * transaction being dropped would let that guarantee be deleted in silence,
+ * so the options string is captured and asserted on.
+ */
 function fakeSql(rows: readonly Row[]): {
   readonly conn: Sql;
   readonly statements: readonly string[];
+  readonly transactions: readonly string[];
 } {
   const statements: string[] = [];
+  const transactions: string[] = [];
   const conn = (strings: TemplateStringsArray, ...values: unknown[]) => {
     statements.push(strings.join(` ?${values.length === 0 ? "" : ""} `));
     return Promise.resolve(rows);
   };
-  return { conn: conn as unknown as Sql, statements };
+  (conn as unknown as { begin: unknown }).begin = (
+    options: string,
+    body: (tx: unknown) => Promise<unknown>,
+  ) => {
+    transactions.push(options);
+    return body(conn);
+  };
+  return { conn: conn as unknown as Sql, statements, transactions };
 }
 
 function throwingSql(thrown: unknown): Sql {
   const conn = () => Promise.reject(thrown);
+  (conn as unknown as { begin: unknown }).begin = (
+    _options: string,
+    body: (tx: unknown) => Promise<unknown>,
+  ) => body(conn);
   return conn as unknown as Sql;
 }
 
@@ -135,10 +161,37 @@ describe("readSystemState", () => {
     expect(sql).not.toMatch(/\bstatus\s*=\s*'SETTLED'/i);
   });
 
-  it("takes every figure in one statement, so they share one snapshot", async () => {
+  it("takes every figure from ONE SNAPSHOT, in one repeatable-read transaction", async () => {
+    const { conn, statements, transactions } = fakeSql([ROW]);
+    await readSystemState(conn);
+
+    // Two statements now — the ledger's census, and the counters that need
+    // tables the ledger does not own. What makes them describe the same
+    // instant is no longer that they are one string; it is that Postgres takes
+    // ONE snapshot at the first statement of a REPEATABLE READ transaction and
+    // every later statement reads from it. Asserting the count alone would
+    // have been asserting the old mechanism.
+    expect(statements).toHaveLength(2);
+    expect(transactions).toEqual(["isolation level repeatable read read only"]);
+  });
+
+  it("asks the ledger for the ledger's own figures, and nothing more", async () => {
     const { conn, statements } = fakeSql([ROW]);
     await readSystemState(conn);
-    expect(statements).toHaveLength(1);
+    const census = statements.find((s) => s.includes("journal_entry")) ?? "";
+    const platform = statements.find((s) => s.includes("webhook_inbox")) ?? "";
+
+    // The split is one test applied per figure: does it come from
+    // journal_entry / journal_line / account and from nothing else?
+    expect(census).not.toBe("");
+    expect(platform).not.toBe("");
+    expect(census).not.toContain("webhook_inbox");
+    expect(census).not.toContain("card_auth");
+    // And this file no longer writes SQL against the ledger's tables at all —
+    // boundary.test.ts measures that directly, and this asserts the intent:
+    // the census statement is the READER's, reached by import.
+    expect(platform).not.toContain("journal_line");
+    expect(platform).not.toContain("journal_entry");
   });
 
   it("returns the driver's own code when the database is unreachable", async () => {
@@ -176,44 +229,147 @@ function headersOf(entries: Record<string, string>): { get(n: string): string | 
   return { get: (name) => entries[name.toLowerCase()] ?? null };
 }
 
+/**
+ * The permitted set, as Vercel would supply it on a preview deployment.
+ *
+ * Passed explicitly so these assertions are about the CODE and not about
+ * whatever `process.env` happens to hold on the machine running them — which
+ * is the same reason the rest of this file uses a scripted connection.
+ */
+const PREVIEW_ENV = {
+  VERCEL_URL: "corgi-trial-9fh3kd-lain.vercel.app",
+  VERCEL_BRANCH_URL: "corgi-trial-git-boundary-lain.vercel.app",
+  VERCEL_PROJECT_PRODUCTION_URL: "corgi-trial-psi.vercel.app",
+};
+
 describe("resolveOrigin", () => {
   it("trusts the forwarded proto, because TLS terminates at the edge", () => {
     expect(
       resolveOrigin(
         headersOf({ host: "corgi-trial-psi.vercel.app", "x-forwarded-proto": "https" }),
+        PREVIEW_ENV,
       ),
     ).toBe("https://corgi-trial-psi.vercel.app");
   });
 
   it("takes the first hop of a proxy chain", () => {
     expect(
-      resolveOrigin(headersOf({ host: "example.test", "x-forwarded-proto": "https,http" })),
-    ).toBe("https://example.test");
+      resolveOrigin(
+        headersOf({
+          host: "corgi-trial-psi.vercel.app",
+          "x-forwarded-proto": "https,http",
+        }),
+        PREVIEW_ENV,
+      ),
+    ).toBe("https://corgi-trial-psi.vercel.app");
   });
 
   it("prefers x-forwarded-host, so a preview reads its own health", () => {
     expect(
       resolveOrigin(
-        headersOf({ host: "internal:3000", "x-forwarded-host": "preview.vercel.app" }),
+        headersOf({
+          host: "internal:3000",
+          "x-forwarded-host": "corgi-trial-9fh3kd-lain.vercel.app",
+        }),
+        PREVIEW_ENV,
       ),
-    ).toBe("https://preview.vercel.app");
+    ).toBe("https://corgi-trial-9fh3kd-lain.vercel.app");
   });
 
-  it("uses http for localhost and https for everything else", () => {
-    expect(resolveOrigin(headersOf({ host: "localhost:3000" }))).toBe(
+  it("lets a branch alias read its own health too", () => {
+    expect(
+      resolveOrigin(
+        headersOf({ "x-forwarded-host": "corgi-trial-git-boundary-lain.vercel.app" }),
+        PREVIEW_ENV,
+      ),
+    ).toBe("https://corgi-trial-git-boundary-lain.vercel.app");
+  });
+
+  it("uses http for loopback and https for a permitted public host", () => {
+    expect(resolveOrigin(headersOf({ host: "localhost:3000" }), {})).toBe(
       "http://localhost:3000",
     );
-    expect(resolveOrigin(headersOf({ host: "127.0.0.1:3000" }))).toBe(
+    expect(resolveOrigin(headersOf({ host: "127.0.0.1:3000" }), {})).toBe(
       "http://127.0.0.1:3000",
     );
-    expect(resolveOrigin(headersOf({ host: "corgi.example" }))).toBe(
-      "https://corgi.example",
+    expect(resolveOrigin(headersOf({ host: "[::1]:3000" }), {})).toBe(
+      "http://[::1]:3000",
+    );
+    expect(
+      resolveOrigin(headersOf({ host: "corgi.example" }), {
+        APP_BASE_URL: "https://corgi.example",
+      }),
+    ).toBe("https://corgi.example");
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* The hole this allowlist closes                                      */
+  /* ------------------------------------------------------------------ */
+
+  it("NEVER fetches a host the caller made up — SSRF, and a spoofable live table", () => {
+    // Two things are being stopped at once. The server must not be steerable
+    // into an outbound request to an arbitrary host; and `parseHealth` renders
+    // whatever comes back as THIS system's live-versus-simulated table, so a
+    // caller who picks the host picks the verdicts. Presenting a simulated
+    // integration as live is an automatic fail of the whole trial.
+    const attacker = headersOf({
+      host: "corgi-trial-psi.vercel.app",
+      "x-forwarded-host": "attacker.example",
+      "x-forwarded-proto": "https",
+    });
+    expect(resolveOrigin(attacker, PREVIEW_ENV)).toBe(
+      "https://corgi-trial-psi.vercel.app",
     );
   });
 
-  it("returns null rather than guessing when there is no host", () => {
-    expect(resolveOrigin(headersOf({}))).toBeNull();
-    expect(resolveOrigin(headersOf({ host: "   " }))).toBeNull();
+  it("does not accept a look-alike on the same public suffix", () => {
+    // The wildcard that would have been tempting — `*.vercel.app` — is the
+    // same hole with an extra step, because anyone can deploy to that domain.
+    expect(
+      resolveOrigin(
+        headersOf({ "x-forwarded-host": "corgi-trial-psi.attacker.vercel.app" }),
+        PREVIEW_ENV,
+      ),
+    ).toBe("https://corgi-trial-psi.vercel.app");
+  });
+
+  it("falls back to the CONFIGURED origin, not to the header, and not to VERCEL_URL", () => {
+    // APP_BASE_URL wins when set...
+    expect(
+      resolveOrigin(headersOf({ "x-forwarded-host": "attacker.example" }), {
+        ...PREVIEW_ENV,
+        APP_BASE_URL: "https://configured.example/",
+      }),
+    ).toBe("https://configured.example");
+
+    // ...and the STABLE production host otherwise. Never the per-deployment
+    // VERCEL_URL, which is superseded within the hour — the same ordering the
+    // Lithic and Plaid webhook-URL resolvers use, for the same reason.
+    expect(
+      resolveOrigin(headersOf({ "x-forwarded-host": "attacker.example" }), PREVIEW_ENV),
+    ).toBe("https://corgi-trial-psi.vercel.app");
+  });
+
+  it("falls back rather than guessing when there is no host at all", () => {
+    expect(resolveOrigin(headersOf({}), PREVIEW_ENV)).toBe(
+      "https://corgi-trial-psi.vercel.app",
+    );
+    expect(resolveOrigin(headersOf({ host: "   " }), PREVIEW_ENV)).toBe(
+      "https://corgi-trial-psi.vercel.app",
+    );
+    // With nothing configured at all there is still a built-in production
+    // origin, so the panel degrades to "the wrong deployment's true verdicts"
+    // rather than to "an origin somebody else chose".
+    expect(resolveOrigin(headersOf({}), {})).toBe(DEFAULT_DEPLOYMENT_ORIGIN);
+  });
+
+  it("matches the host case-insensitively, because DNS is", () => {
+    expect(
+      resolveOrigin(
+        headersOf({ "x-forwarded-host": "CORGI-TRIAL-PSI.VERCEL.APP" }),
+        PREVIEW_ENV,
+      ),
+    ).toBe("https://CORGI-TRIAL-PSI.VERCEL.APP");
   });
 });
 

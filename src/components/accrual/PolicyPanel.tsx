@@ -1,30 +1,50 @@
 import { Panel } from "@/components/ui/primitives";
 
-import type { AccrualInvariants } from "./data-contract";
+import type { AccrualInvariants, InterestInvariantsView } from "./data-contract";
 
 /**
  * The written policy, on the screen that implements it.
  *
- * Four questions a reviewer will ask, answered where the numbers are rather
+ * The questions a reviewer will ask, answered where the numbers are rather
  * than only in docs/ACCRUAL.md — because the document and the screen drifting
  * apart is exactly how a rounding rule becomes two rounding rules.
  */
-export function PolicyPanel({ invariants }: { readonly invariants: AccrualInvariants }) {
+export function PolicyPanel({
+  invariants,
+  interest,
+}: {
+  readonly invariants: AccrualInvariants;
+  readonly interest: InterestInvariantsView;
+}) {
   return (
     <Panel
-      title="The rule, and what the database enforces"
-      description="Written in full in docs/ACCRUAL.md and in the header of db/migrations/0020_accrual.sql. Summarised here because a policy nobody can find is a policy nobody follows."
+      title="The rules, and what the database enforces"
+      description="Written in full in docs/ACCRUAL.md and in the headers of db/migrations/0020_accrual.sql and 0024_interest.sql. Summarised here because a policy nobody can find is a policy nobody follows."
     >
       <div className="space-y-4 px-5 py-4 text-xs leading-relaxed text-muted">
-        <Item title="The rounding rule is the one already in this ledger, not a second one">
-          research/ledger/DESIGN.md §12.3: an amount split across N shares is
-          allocated by LARGEST REMAINDER — floor each share, then distribute the
-          shortfall one penny at a time — which guarantees the shares sum to the
-          source <em>exactly</em>. §12.4 breaks the tie by ordinal ascending, and
-          here the ordinal is the day of the month. Half-to-even (§12.2) is the
-          rule for turning one value into one cent amount, and applying it per
-          day would bill $24.90 for a $25.00 plan. Two rounding rules in one
-          ledger is a reconciliation break waiting to happen, so there is one.
+        <Item title="TWO rounding rules, because DESIGN §12 has two — and each product uses the one whose precondition it meets">
+          <strong>§12.3, largest remainder, for the platform fee.</strong> One
+          amount split across N shares: floor each share, then distribute the
+          shortfall one penny at a time, which guarantees the shares sum to the
+          source <em>exactly</em>. §12.4 breaks the tie by ordinal ascending and
+          here the ordinal is the day of the month. Rounding each day on its own
+          would bill $24.90 for a $25.00 plan.
+          <br />
+          <br />
+          <strong>§12.2, half to even, for daily interest.</strong> One value —
+          a balance, a rate and one day — to one cent amount. §12.3 is not
+          merely worse here, it is <em>undefined</em>: largest remainder needs a
+          source amount to distribute, and there is none, because the
+          month&apos;s interest is not a known number until the month has
+          happened and the balance changes every day. You cannot floor N shares
+          of a number you do not have. Half to EVEN rather than half up because
+          half-up would hand every exact half-cent to the same party forever —
+          to us on an overdraft, to the customer on a credit balance.
+          <br />
+          <br />
+          Two rules, not three, and neither was invented for this feature. The
+          fee&apos;s residual penny is real money with an address; interest has
+          no residual to place, which is why <code>2900</code> is not engaged.
         </Item>
 
         <Item title="Someone eats the penny, deterministically, and it is nobody over a whole month">
@@ -67,8 +87,50 @@ export function PolicyPanel({ invariants }: { readonly invariants: AccrualInvari
           allowed it. Refusing to accrue on a thin balance would make that day&apos;s
           statement wrong and the month stop summing to the price, so a fee can
           push a deposit account into a debit balance — which is precisely the
-          condition <code>v_overdrawn_accounts</code> exists to surface. That is
-          a decision, written down, not an omission.
+          condition <code>v_overdrawn_accounts</code> exists to surface, and
+          precisely what the overdraft rate on the card above would then price.
+          That is a decision, written down, not an omission.
+        </Item>
+
+        <Item title="A rate change cannot re-price yesterday, and that is a trigger rather than a convention">
+          The rate card is effective-dated and append-only, following{" "}
+          <code>approval_policy</code> and <code>funds_availability_policy</code>.{" "}
+          <code>interest_rate_at(tier, date)</code> resolves on the ACCRUAL
+          date, so a replay of an old day re-derives the old rate by
+          construction. On top of that,{" "}
+          <code>interest_rate_policy_forward_only</code> refuses any new row
+          whose effective date is not strictly after every existing row for its
+          tier <em>and</em> strictly after every date already accrued under it —
+          because afterwards the postings are immutable and the only repair
+          would be a reversal and a re-book of every affected day.{" "}
+          <code>v_interest_rate_drift</code> ({interest.rateDrift} rows) asks the
+          same question of the whole book at any moment.
+        </Item>
+
+        <Item title="Interest is priced on the SETTLED ledger balance, at a recorded watermark">
+          Not the available balance: a hold is money the customer still has and
+          we still owe, so we still owe interest on it — a card authorisation is
+          not a withdrawal. The basis comes from{" "}
+          <code>ledger_settled_cents()</code>, which is migration 0022&apos;s
+          single definition of a balance and not a private copy, with both
+          bitemporal predicates. The booking watermark it was true at is stored
+          beside it, because &ldquo;the balance on 9 September&rdquo; is only an
+          answer once you say when you asked. A correction backdated into a day
+          already priced does NOT re-price it — the number stands and remains
+          reproducible from the row — and the interest adjustment that would
+          re-price it is named as a gap in docs/ACCRUAL.md rather than
+          half-built.
+        </Item>
+
+        <Item title="Interest credited daily compounds daily, and that is visible rather than hidden">
+          Each day&apos;s interest is posted to the deposit account at that
+          day&apos;s value date, so the next day&apos;s basis includes it. The
+          product therefore compounds daily and the effective annual yield is
+          slightly above the quoted rate. That is a consequence of &ldquo;accrued
+          at end of day, visibly, on the ledger&rdquo; rather than a separate
+          decision — the alternative would be a second balance definition that
+          excludes interest lines, which is exactly the drift migration 0022
+          spent a pass undoing.
         </Item>
       </div>
     </Panel>

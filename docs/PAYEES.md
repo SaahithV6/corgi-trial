@@ -22,6 +22,12 @@ calls that were made and what came back.
 So this feature has three legs of very different strength, and the whole design
 is about not letting the weak ones borrow credibility from the strong one.
 
+**Both rails that carry an ABA get all four legs.** ACH and WIRE are addressed
+by a 9-digit routing number, and they are addressed by *different* ones — the
+same bank's wire ABA is not its ACH ABA. Until 2026-09-11 the gate looked only
+at ACH and a wire got none of this; §5a is the whole story, and it is the one
+section in this document about a bug rather than a design.
+
 | Leg | What it proves | How strong | Blocks? |
 | --- | --- | --- | --- |
 | **1. The ABA check digit** | This routing number is arithmetically possible | Proof. No provider, no network, no counterparty | **Yes** |
@@ -506,6 +512,115 @@ and it is what earns the name leg the right to be a warning rather than a wall.
    *absent*. A disabled button says "you may not do this", which invites
    somebody to find out who can. For arithmetic there is nobody.
 
+### 5a. THE HOLE: the gate was a no-op on wires, and wires are the rail that cannot be recalled
+
+Fixed 2026-09-11. Recorded here rather than quietly patched, because the shape
+of it is more useful than the fix.
+
+`gatePaymentOnPayee()` opened with, in effect:
+
+```ts
+const routingNumber = input.destination.type === "ach" ? input.destination.routingNumber : null;
+```
+
+and then `if (routingNumber === null || last4 === null) return null;`. So a
+**wire received neither leg 1 nor leg 4** — no ABA check-digit arithmetic and no
+standing-warning check — on the one rail where the money cannot be recovered.
+The two rails this feature protects are the two rails addressed by an ABA, and
+it protected one of them.
+
+**It was not a missed branch. It was a missing field.** `destinationSchema`'s
+wire variant was `{ type: 'wire', holderName, bic, accountNumberLast4 }`, and a
+**BIC is a SWIFT identifier for a bank**, used on cross-border payments. A
+domestic Fedwire beneficiary is addressed by a 9-digit ABA — specifically the
+**WIRE** variant of it, which is a different number from the same bank's ACH
+variant. The seeded Plaid item carries `011401533` for ACH and `021000021` for
+wire, and substituting one for the other is an R13 days later. So the field the
+gate was reading was not the field the payment was using, and the early return
+was the correct behaviour of a schema that was wrong.
+
+The fix is four small edits and one refusal:
+
+1. `wireRoutingNumber: z.string().regex(/^\d{9}$/).optional()` on the wire
+   variant, and `bic` demoted to optional — kept for genuinely cross-border
+   wires, no longer the only bank identifier.
+2. `destinationRoutingNumber()` in the gate returns the ACH number for an ACH
+   destination and the wire number for a wire one. Named `wireRoutingNumber`
+   and not `routingNumber` on purpose: **the mistake this rail suffers is the
+   substitution**, and a field that accepts both names accepts it in silence.
+3. `describeDestination()` and `buildDestination()` follow.
+4. A wire carrying no wire routing number is **refused**
+   (`PAYEE_WIRE_ROUTING_NUMBER_MISSING`) rather than skipped.
+
+**Why the schema field is OPTIONAL and the enforcement is in the gate.**
+`parseDestination()` re-validates every STORED destination on the way out, so a
+required field would turn the ten pre-existing wire instructions — including the
+$42.00 wire that really went out on Fedwire — into "Unrecognised destination —
+do not approve" on `/approvals`, and would stop `originateApprovedWire()`
+recognising its own transfer. Requiring it would rewrite history by refusing to
+read it. The gate runs on the way IN and never on the way out, so a refusal
+there is forward-only by construction.
+
+**What `/payments` does about it.** The wire branch is now a **payee picker**,
+not a free-text field, and the asymmetry with ACH is deliberate and preserved:
+`originateApprovedWire()` refuses a beneficiary that is not on the confirmed
+book, so a free-text wire is a payment a clerk can raise and nobody can send —
+a refusal that arrives two approvals and one ledger entry too late. Requiring
+pre-registration would be wrong for ACH for the reasons in *What the gate
+deliberately does not refuse* below: those costs are costs of **delay**, and an
+ACH entry is recallable for two banking days. A wire is not, and *"urgent
+payment, right now, to a beneficiary nobody has seen before"* is a verbatim
+description of business email compromise.
+
+### 5b. THE SECOND HOLE: the gate could not report its own failure
+
+Also fixed 2026-09-11, and it compounds with the first.
+
+The standing-warning check was wrapped, whole, in
+`try { … } catch { return null }`. Every outcome inside it therefore reached the
+caller as the same value: **"no warning on this destination" and "the lookup
+exploded" were indistinguishable**, and the payment proceeded either way. The
+condition the guard exists to catch — a database this transaction cannot read —
+was precisely the condition that silently disabled the guard.
+
+Put beside §5a, the combination was the worst case this build had: on wires the
+gate returned early and validated nothing, and on the paths where it did run,
+any failure inside it read as a pass.
+
+**The argument for failing open was about a different system.** It said: *"a
+destination-validation service that can stop every payment by falling over is a
+worse risk than one that occasionally does not run."* That is true of a separate
+service. There is no separate service — this runs on `tx`, the same connection
+and the same transaction that is about to `INSERT` the instruction. A throw here
+does not mean the payee book is unreachable while payments are healthy; it means
+**this transaction cannot read**, and the INSERT two statements later is going
+to fail anyway. Failing open bought availability that was never on offer, and
+paid for it by disarming the check on the rail with no recall.
+
+It now fails closed, with `PAYEE_STANDING_CHECK_UNAVAILABLE`, and the message
+names **which** read did not complete — the account's business, or the payee
+book — because "invalid request" is not something an operator can act on. The
+driver's own text is deliberately not included: it names internal ids and table
+structure and this string is rendered on a screen. Only the error's class is.
+
+**The `try` now wraps the CALL and not the DECISION.** Everything after it is a
+decision about a value that came back, and the thing this has to distinguish is
+"the database answered null" from "the database did not answer".
+
+**The one case that still proceeds, named exactly**, because a bare `catch` over
+everything is what got us here:
+
+> A destination with no payee-book row, on a business with no payee book at
+> all, proceeds.
+
+Both of those are ANSWERS, not failures: a deposit account with no business row
+cannot have a payee book, and an unregistered destination is deliberately
+allowed. **What it can let through:** a payment to a beneficiary nobody has ever
+checked, with nothing but the ABA arithmetic in front of it. On ACH that is the
+accepted trade and the reasoning is below. On WIRE it is not — and it is closed
+one layer down rather than here, because `resolveWireBeneficiary()` refuses to
+address a Fedwire message to a beneficiary that is not on the confirmed book.
+
 ### The intermediate case, and why it is not an exception
 
 The payment gate refuses a payment to a payee whose standing warning **nobody
@@ -543,12 +658,25 @@ soft reason, and it is not:
 | `NAME_NOT_VERIFIABLE` | note | The normal case for US ACH. A warning on every payment is no warning |
 | `DIRECTORY_CONFIRMED` / `NAME_CONFIRMED_BY_INSTITUTION` | note | Positive findings, recorded, stop nothing |
 
+### And two refusals the GATE makes that are not `PayeeFinding`s at all
+
+`assertBlockIsArithmetic()` polices the ladder above, and it is about what a
+CHECK on a payee may claim. These two are decisions the payment gate makes about
+a payment, and they are deliberately not findings — a finding is a statement
+about a beneficiary, and neither of these is.
+
+| Code | What it means |
+| --- | --- |
+| `PAYEE_WIRE_ROUTING_NUMBER_MISSING` | A wire carrying no 9-digit wire routing number. Both checks above are unrunnable on it, so it is refused rather than skipped. A BIC is not a substitute: it names a bank on SWIFT, and Fedwire does not read it. |
+| `PAYEE_STANDING_CHECK_UNAVAILABLE` | The payee-book lookup threw. The payment is refused, and the message names which read failed. See §5b. |
+
 ---
 
 ## 6. Where to wire it in
 
-> **`src/app/(app)/payments/**` is off-limits to this worker.** This section is
-> the handover.
+> **`src/app/(app)/payments/**` was off-limits to the worker who wrote this
+> section.** It is now wired: the one line below is in `requestPayment()`, and
+> the wire branch of `/payments` carries a payee picker (§5a).
 
 ### The one line, in `requestPayment()`
 
@@ -594,12 +722,11 @@ fails when they do.
 
 ### Which direction it fails in
 
-`gatePaymentOnPayee` **never throws**, and a failure inside it returns `null` —
-the payment proceeds. That is the deliberate direction: the ledger, the KYB
-gate and maker-checker are the controls that must hold, and this is an
-additional check in front of them. A destination-validation service that can
-stop every payment by falling over is a worse risk than one that occasionally
-does not run.
+**Closed.** `gatePaymentOnPayee` never *throws* — every outcome is a value — but
+"never throws" is not "always proceeds", and conflating those two is what made
+this function a no-op on its own failure. A lookup that fails returns
+`PAYEE_STANDING_CHECK_UNAVAILABLE` and the payment is refused. §5b is the full
+argument, and the one case that still proceeds is named there.
 
 ### The screen
 

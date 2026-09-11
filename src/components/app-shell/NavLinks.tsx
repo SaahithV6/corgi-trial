@@ -33,7 +33,20 @@ const LIVE = [
   { href: "/accruals", label: "Accruals" },
   { href: "/disputes", label: "Disputes" },
   { href: "/reconciliation", label: "Reconciliation" },
+  // Sits next to Reconciliation because it is a second READING of the same
+  // breaks, never a second list. It asserts that on its own face — "showing
+  // 7 of 7, the engine reported 7, this screen hides none" — and has no
+  // default filter and no hide-explained toggle, because a screen that can
+  // quietly drop a break is worse than no screen.
+  { href: "/breaks", label: "Explained breaks" },
   { href: "/statements", label: "Statements" },
+  // Last, and named for what it is. The screen itself opens with "WE ARE DOING
+  // THIS, NOT THE PROVIDER" and every control sentence has us as the subject,
+  // so a cropped screenshot still cannot read as evidence of a real outage.
+  { href: "/team", label: "Team" },
+  { href: "/audit", label: "Audit trail" },
+  { href: "/events", label: "Outbound events" },
+  { href: "/chaos", label: "Chaos harness" },
 ] as const;
 
 export function NavLinks() {

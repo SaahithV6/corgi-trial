@@ -92,7 +92,45 @@ export const destinationSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("wire"),
     holderName: z.string().min(1),
-    bic: z.string().min(1),
+    /**
+     * THE FIELD FEDWIRE ACTUALLY ROUTES ON.
+     *
+     * A domestic Fedwire beneficiary is addressed by a 9-digit ABA — and
+     * specifically by the WIRE variant of it, which is a DIFFERENT number from
+     * the same bank's ACH variant. The seeded Plaid item carries `011401533`
+     * for ACH and `021000021` for wire, and substituting one for the other is
+     * an R13 (invalid ACH routing number) on the way back, days later, on a
+     * rail that has no way back. `bic` below cannot catch that: a BIC
+     * identifies a BANK on the SWIFT network, which is a cross-border fact and
+     * not a Fedwire address.
+     *
+     * OPTIONAL, AND ONLY BECAUSE HISTORY IS. Ten `payment_instruction` rows
+     * were written before this field existed, carrying `{holderName, bic,
+     * accountNumberLast4}` and nothing else. `parseDestination()` re-validates
+     * every stored destination on the way OUT, so a required field here would
+     * turn each of those into "Unrecognised destination — do not approve" on
+     * `/approvals` and would stop `originateApprovedWire()` recognising its own
+     * $42.00 wire. Making it required would rewrite history by refusing to read
+     * it.
+     *
+     * SO THE ENFORCEMENT IS IN THE GATE, NOT THE SCHEMA. `gatePaymentOnPayee()`
+     * refuses a NEW wire that carries no wire routing number
+     * (`PAYEE_WIRE_ROUTING_NUMBER_MISSING`), which is forward-only by
+     * construction: the gate runs on the way in, at `requestPayment()`, and
+     * never on the way out.
+     */
+    wireRoutingNumber: z
+      .string()
+      .regex(/^\d{9}$/, { error: "a wire routing number is 9 digits" })
+      .optional(),
+    /**
+     * Now optional, and no longer the only bank identifier.
+     *
+     * Kept because a genuinely cross-border wire has one and it is worth
+     * carrying; demoted because it was never the field this rail routes on, and
+     * a required field that cannot be validated crowds out the one that can.
+     */
+    bic: z.string().min(1).optional(),
     accountNumberLast4: z.string().regex(/^\d{4}$/, { error: "last four digits only" }),
   }),
   z.object({
@@ -111,7 +149,20 @@ export function describeDestination(destination: PaymentDestination): string {
     case "ach":
       return `${destination.holderName} · ACH ${destination.routingNumber} ••${destination.accountNumberLast4} (${destination.accountType})`;
     case "wire":
-      return `${destination.holderName} · wire ${destination.bic} ••${destination.accountNumberLast4}`;
+      // The wire ABA first, because it is what the money is routed on and what
+      // an approver can check against the beneficiary's own paperwork. The BIC
+      // is printed after it when there is one, and printed ALONE only for the
+      // pre-`wireRoutingNumber` rows, which say so rather than looking
+      // complete.
+      return (
+        `${destination.holderName} · wire ` +
+        (destination.wireRoutingNumber === undefined
+          ? destination.bic === undefined
+            ? "no bank identifier"
+            : `BIC ${destination.bic} (no wire ABA on this instruction)`
+          : `${destination.wireRoutingNumber}${destination.bic === undefined ? "" : ` · BIC ${destination.bic}`}`) +
+        ` ••${destination.accountNumberLast4}`
+      );
     case "usdc":
       return `USDC ${destination.chain} · ${destination.address}`;
     case "internal":

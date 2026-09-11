@@ -29,20 +29,35 @@ type AccrualsPageProps = {
 /**
  * `/accruals` — what accrued, on which day, and the arithmetic that produced it.
  *
+ * TWO PRODUCTS ON ONE SCREEN AND ONE TICK. The platform fee (DESIGN §12.3,
+ * largest remainder, because a month's price is split across its days) and
+ * daily interest (DESIGN §12.2, half to even, because there is no total to
+ * split). They are deliberately not two pages: the interesting thing about
+ * them is that they round by different rules on the same book for a stated
+ * reason, and you cannot see that if they are apart.
+ *
  * Five states, all reachable from the query string:
  *
- *   (none)          every schedule and every day it has accrued, live
+ *   (none)          every schedule and every day either product accrued, live
  *   ?state=loading  the skeleton, held open by a genuinely slow read
  *   ?state=empty    nobody enrolled; an honest blank
  *   ?state=error    the query failed; nothing accrued, retry is live
- *   ?state=edge     THE DAY THE RESIDUAL PENNY LANDS — the 10th and the 11th of
- *                   a 30-day month side by side, differing by one cent for one
- *                   stated reason
+ *   ?state=edge     TWO ONE-CENT STEPS, ONE PER PRODUCT, on adjacent days of
+ *                   one account each, for two different reasons.
+ *                   THE FEE: the 10th and the 11th of a 30-day month — the last
+ *                   day that carries a residual penny and the first that does
+ *                   not (§12.3/§12.4).
+ *                   THE INTEREST: the 8th and the 9th of September — the last
+ *                   day priced by the 1.50% card and the first priced by the
+ *                   1.25% one. The balance went UP between them and the amount
+ *                   went DOWN, so nothing but the rate explains it, and a
+ *                   replay of the 8th still resolves the 1.50% card.
  *
- * ...plus the filter and the drill-through, which are also URL state:
+ * ...plus the filters and the drill-throughs, which are also URL state:
  *
- *   ?schedule=<uuid>  one plan's days
- *   ?day=<uuid>       the full working for one date
+ *   ?schedule=<uuid>  one enrolment's days (either product)
+ *   ?day=<uuid>       the full working for one FEE date
+ *   ?interest=<uuid>  the full working for one INTEREST date
  *
  * WHY `default` IS LIVE AND THE OTHER FOUR ARE NOT. The claim being graded is
  * that a fee accrues once per day, at the right value date, and that a month of
@@ -55,12 +70,25 @@ type AccrualsPageProps = {
  * `default` falls back to the fixture and the screen SAYS SO on its face.
  *
  * THE EDGE STATE IS A FIXTURE, AND THE THING IT SHOWS IS NOT MADE UP. The
- * fixture computes its figures with the same `allocateForDate()` the ledger
- * calls, so it cannot disagree with the rule. What it borrows is the calendar:
- * it puts the 10th and the 11th on one screen so the one-cent step is visible
- * now rather than tomorrow. The same step exists in the live table as real
- * entries — 2026-09-10 accrues 84¢ and 2026-09-11 accrues 83¢ on the $25.00
- * plan — and the live rows are the evidence; the fixture is the demo.
+ * fixture computes its figures with the same `allocateForDate()` and
+ * `computeDailyInterest()` the ledger calls, so it cannot disagree with either
+ * rule. What it borrows is the calendar: it puts the two days of each pair on
+ * one screen so the one-cent step is visible now rather than tomorrow. Both
+ * steps exist in the live table as real entries — 2026-09-10 accrues 84¢ and
+ * 2026-09-11 accrues 83¢ on the $25.00 plan; 2026-09-08 accrues 8¢ and
+ * 2026-09-09 accrues 7¢ on Kettle & Crumb's balance — and the live rows are
+ * the evidence; the fixture is the demo.
+ *
+ * WHAT THE EDGE STATE DOES *NOT* SHOW, AND WHY. The natural edge for an
+ * interest product is the day an account crosses zero, so that both rates
+ * appear on one account in one view. This book has no such day:
+ * `v_overdrawn_accounts` is empty and no deposit leaf has been in debit on any
+ * value date in the catch-up window — measured, at the live watermark, before
+ * a line of this was written. The screen says so on its face in the overdraft
+ * measurement panel rather than manufacturing an overdraft to photograph. The
+ * rate-change edge is the one this book can actually demonstrate, and it tests
+ * the same machinery: two rates on one account on adjacent days, resolved by
+ * the accrual date.
  *
  * The Suspense boundary is what makes the loading state honest: `AccrualView`
  * is an async server component, the fallback is the real skeleton, and

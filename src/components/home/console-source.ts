@@ -6,6 +6,8 @@ import { describeDestination, type QueuedPayment } from "@/lib/approvals/types";
 import {
   ledgerConnection,
   listDepositAccounts,
+  listDepositMovements,
+  readSnapshot,
   type Sql,
 } from "@/lib/ledger/queries";
 import { createLiveAccountDataSource } from "@/components/account/live-data-source";
@@ -145,20 +147,6 @@ class PositionError extends Error {
 /** How many recent lines the console shows. A front door, not a statement. */
 export const MOVEMENT_LIMIT = 8;
 
-interface MovementRow {
-  readonly entry_id: string;
-  readonly booking_seq: bigint;
-  readonly booking_time: Date;
-  readonly value_date: Date;
-  readonly entry_type: string;
-  readonly description: string;
-  readonly rail: string | null;
-  readonly external_ref: string | null;
-  readonly amount_cents: bigint;
-  readonly account_id: string;
-  readonly business_name: string;
-}
-
 /**
  * The last few lines that touched a customer's money.
  *
@@ -175,46 +163,21 @@ interface MovementRow {
  * the value date is printed beside it so the two clocks are never confused.
  */
 async function readMovements(conn: Sql): Promise<readonly Movement[]> {
-  const rows = await conn<MovementRow[]>`
-    SELECT e.id                                  AS entry_id,
-           e.booking_seq                         AS booking_seq,
-           e.booking_time                        AS booking_time,
-           e.value_date                          AS value_date,
-           e.entry_type::text                    AS entry_type,
-           e.description                         AS description,
-           e.rail::text                          AS rail,
-           e.external_ref                        AS external_ref,
-           (l.amount_cents * a.normal_side)::bigint AS amount_cents,
-           a.id                                  AS account_id,
-           b.legal_name                          AS business_name
-      FROM journal_line l
-      JOIN journal_entry e ON e.id = l.entry_id
-      JOIN account a       ON a.id = l.account_id
-      JOIN business b      ON b.id = a.business_id
-     WHERE e.book = 'financial'
-       AND a.code = '2100'
-       AND a.business_id IS NOT NULL
-     ORDER BY e.booking_seq DESC, l.ordinal
-     LIMIT ${MOVEMENT_LIMIT}`;
+  const rows = await listDepositMovements(MOVEMENT_LIMIT, conn);
 
   return rows.map((row) => ({
-    entryId: row.entry_id,
-    bookingSeq: row.booking_seq.toString(),
-    bookingTime: row.booking_time.toISOString(),
-    valueDate: isoDate(row.value_date),
-    entryType: row.entry_type,
+    entryId: row.entryId,
+    bookingSeq: row.bookingSeq.toString(),
+    bookingTime: row.bookingTime.toISOString(),
+    valueDate: row.valueDate,
+    entryType: row.entryType,
     description: row.description,
     rail: row.rail,
-    externalRef: row.external_ref,
-    amountCents: row.amount_cents,
-    accountId: row.account_id,
-    businessName: row.business_name,
+    externalRef: row.externalRef,
+    amountCents: row.amountCents,
+    accountId: row.accountId,
+    businessName: row.businessName,
   }));
-}
-
-/** `YYYY-MM-DD` from a `date` column, which the driver hands back as a Date. */
-function isoDate(value: Date): string {
-  return value.toISOString().slice(0, 10);
 }
 
 interface CountsRow {
@@ -241,11 +204,18 @@ interface CountsRow {
  * be a second opinion about a question the database already answers.
  */
 async function readCounts(conn: Sql): Promise<CountsRow> {
-  const rows = await conn<CountsRow[]>`
-    SELECT now()                                                  AS read_at,
-           (SELECT COALESCE(MAX(booking_seq), 0)
-              FROM journal_entry)::bigint                          AS booking_watermark,
-           (SELECT count(*) FROM v_overdrawn_accounts)::int        AS overdrawn_accounts,
+  // The instant AND the watermark from the ledger's own snapshot, in one
+  // statement — which is stricter than what this query did before, not looser.
+  // It used to read `now()` beside its own `MAX(booking_seq)`; `now()` is the
+  // TRANSACTION's start and `readSnapshot` uses `clock_timestamp()`, which is
+  // when the watermark was actually taken. The counts below are a second
+  // statement and therefore a second MVCC snapshot; they are queue depths on
+  // an operator console, not money, and none of them is derivable from the
+  // watermark, so nothing here can disagree with itself.
+  const snapshot = await readSnapshot(conn);
+
+  const rows = await conn<Omit<CountsRow, "read_at" | "booking_watermark">[]>`
+    SELECT (SELECT count(*) FROM v_overdrawn_accounts)::int        AS overdrawn_accounts,
            (SELECT count(*) FROM webhook_inbox
              WHERE state = 'parked')::int                          AS parked_webhooks,
            (SELECT count(*) FROM webhook_inbox
@@ -260,7 +230,7 @@ async function readCounts(conn: Sql): Promise<CountsRow> {
     // human" on a screen whose job is to say what needs one.
     throw new Error("the console counts query returned no row");
   }
-  return row;
+  return { ...row, read_at: snapshot.asOf, booking_watermark: snapshot.bookingWatermark };
 }
 
 /* -------------------------------------------------------------------------- */

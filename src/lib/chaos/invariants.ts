@@ -1,0 +1,77 @@
+/**
+ * The invariant list, as data, with nothing else in the module.
+ *
+ * This is a COPY of `INVARIANT_VIEWS` in `scripts/dbcheck.mjs` — same views,
+ * same claims, same order. It has to be a copy, because `scripts/**` is not
+ * part of the TypeScript program and making the gate depend on the app
+ * building would be the wrong direction for that dependency to run.
+ *
+ * A copy is exactly the kind of thing that drifts silently, so it is held in
+ * its own file with no imports, and `invariants.test.ts` reads `dbcheck.mjs`
+ * off disk and asserts the two lists are identical.
+ *
+ * THE FAILURE THAT TEST EXISTS FOR: somebody adds a fifteenth invariant to the
+ * gate, the chaos dashboard keeps checking fourteen, and the screen says ALL
+ * INVARIANTS HOLD while an invariant nobody wired up is being violated in front
+ * of the panel. A dashboard that checks thirteen of fourteen and reports "all"
+ * is worse than one that checks none, because it is believed.
+ */
+
+/** Every view that MUST return zero rows, with the claim it makes. */
+export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
+  ['v_entry_unbalanced', 'every entry sums to zero, per currency'],
+  ['v_line_denorm_drift', 'denormalised clocks match their entry'],
+  ['v_hold_drift', 'the memo book equals the fold over card events'],
+  ['v_hold_release_drift', 'a released hold withholds nothing'],
+  ['v_book_not_zero', 'the whole book nets to zero, per entity and book'],
+  ['v_deposit_control_drift', 'the deposits subtree equals what we report'],
+  ['v_accrual_month_drift', "a month's daily shares sum to the fee exactly"],
+  ['v_accrual_ledger_drift', 'every accrual claim matches the entry it cites'],
+  ['v_standing_order_double_fire', 'one occurrence, at most one payment instruction'],
+  [
+    'v_dispute_ledger_double_count',
+    'one dispute line, one row — the episode screen counts money once',
+  ],
+  ['v_balance_definition_drift', 'the hold model and availability agree, at the live point'],
+  ['v_interest_ledger_drift', 'every interest posting matches the entry and side it cites'],
+  ['v_interest_rate_drift', 'no day has been re-priced by a rate that came later'],
+  // ---- added to the gate by migration 0026's owner, while this file was
+  // being written. `invariants.test.ts` is what noticed, which is the whole
+  // reason it exists: the list had drifted by two inside one afternoon, and a
+  // dashboard reporting "all invariants hold" over thirteen of fifteen would
+  // have been believed. Both are card-hold invariants and therefore the two
+  // most relevant on this screen of any in the list.
+  [
+    'v_refused_auth_hold',
+    'no hold withholds money against an authorisation the network refused',
+  ],
+  [
+    'v_hold_closure_not_terminal',
+    'no permanent closure stands over a hold the fold says is open',
+  ],
+  // Migration 0025 declared this must be empty and nothing queried it for the
+  // rest of the night. It is the wire rail's whole availability claim — a wire
+  // is final, so its funds are available on arrival, and this is the assertion
+  // that the arithmetic actually does that rather than the code merely
+  // intending to.
+  //
+  // Added here as well as in `scripts/dbcheck.mjs` because the two lists are
+  // asserted equal by this module's own test. That parity is the point: a
+  // chaos dashboard checking fifteen invariants while CI checks sixteen is a
+  // screen quietly claiming more coverage than it has, which is the failure
+  // this build has now catalogued eighteen times.
+  [
+    'v_wire_availability_drift',
+    'a wire credit withholds nothing, because a wire cannot be returned',
+  ],
+  // 0033. Both made to fail on purpose before being trusted; the second
+  // needed two triggers disabled to violate, which proves they compose.
+  [
+    'v_approved_auth_for_dead_member',
+    'no authorisation is approved for a member who has been removed',
+  ],
+  [
+    'v_member_approval_without_right',
+    'no approval stands from a member who lacked the right at the time',
+  ],
+] as const;

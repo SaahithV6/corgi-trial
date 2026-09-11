@@ -82,6 +82,7 @@ export {
   SIM_WEBHOOK_SECRET_ENV,
   achRailHealth,
   createAchRail,
+  probeAchRailHealth,
   type AchRailSelection,
   type CreateAchRailOptions,
   type EnvBag,

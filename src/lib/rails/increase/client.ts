@@ -374,7 +374,13 @@ export class IncreaseAchRail implements PaymentRail {
       amount: direction === 'credit' ? magnitude : -magnitude,
       statement_descriptor: req.statementDescriptor,
       standard_entry_class_code: SEC_CODE_BY_AUTHORIZATION[d.authorization],
-      individual_name: d.holderName,
+      // Increase 400s on an individual_name longer than 22 characters, and a
+      // 400 here is a payment that does not happen. "Fairbanks Machining LLC"
+      // is 23 — a real payee on this book that could not be paid at all.
+      //
+      // Truncating is the lesser evil and it is what the field is for: a name
+      // on a bank statement, not an identifier. Nothing joins on it.
+      individual_name: d.holderName.slice(0, 22),
       destination_account_holder: d.holderKind ?? 'unknown',
     };
 
@@ -446,7 +452,20 @@ export class IncreaseAchRail implements PaymentRail {
     if (!ev || typeof ev !== 'object' || !ev.id || !ev.category) {
       return this.unknownEvent('', '', String(ev?.category ?? 'malformed'), 'unparseable', ev);
     }
-    if (!ev.associated_object_id?.startsWith('ach_transfer_')) {
+    // Match on the TYPE, not on a prefix of the id.
+    //
+    // Increase's sandbox ids are `sandbox_ach_transfer_...`, so a
+    // `startsWith('ach_transfer_')` gate classified every sandbox delivery as
+    // an event about something this adapter does not model — and returned 200.
+    // Silently. Every settlement and every return we generated in sandbox went
+    // down that branch, which is the entire rail we claim to support, dropped
+    // by a string that was right about production and wrong about the only
+    // environment anyone has run.
+    //
+    // `associated_object_type` is the field Increase actually documents for
+    // this, it is identical in both environments, and it cannot be defeated by
+    // a prefix nobody thought to look for.
+    if (ev.associated_object_type !== 'ach_transfer') {
       // A real event about something this adapter does not model — an inbound
       // transfer, a declined transaction. 200 and move on.
       return this.unknownEvent(ev.id, ev.associated_object_id ?? '', ev.category, 'unmodelled_event', ev);

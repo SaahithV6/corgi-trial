@@ -41,7 +41,7 @@ Your token is scoped to exactly one business. Every tool answers only about
 that business's money; there is no parameter that widens the scope, and no
 account belonging to anyone else is addressable.
 
-Seven tools read and one writes.
+Ten tools read and one writes.
 
   get_balance           ledger and available balance on the main account
   list_pots             money earmarked in pots, and the total of both
@@ -49,22 +49,32 @@ Seven tools read and one writes.
   list_payees           saved destinations and how well each is verified
   list_standing_orders  mandates, next due dates, and refused occurrences
   list_card_controls    card limits and blocks, and authorisation decisions
+  list_accruals         the daily fee, with the arithmetic behind each penny
+  list_disputes         card disputes, provisional credit, and what is held
   list_recon_breaks     where our books and the network disagree
+  list_agent_limits     what this surface refuses to do, and why
 
 The one tool that writes does not move money: initiate_payment queues a request
 in a human approval queue. When it succeeds, NOTHING HAS BEEN PAID. Say so
 plainly to whoever you are relaying to — "queued for approval", never "sent",
 "paid" or "initiated". You cannot approve, release, submit or cancel a payment
-through this surface; those operations are not exposed to any agent. See
-docs/AGENT-LIMITS.md for the full list and the reasoning.
+through this surface; those operations are not exposed to any agent.
 
 Neither can you change anything you read. There is no tool to move money
 between pots, to add or re-check a payee, to acknowledge a payee warning, to
-create or fire a standing order, or to change a card control — and a card
-control is the one most worth naming, because changing one IS a real-time
-authorisation decision made in advance and no approval queue would ever see it.
-When somebody asks for one of these, say that it needs a person and where in
-the product they do it. Do not offer a workaround.
+create or fire a standing order, to change a card control, to raise or progress
+a dispute, to authorise provisional credit, or to enrol or re-price a fee
+schedule. A card control is the one most worth naming, because changing one IS
+a real-time authorisation decision made in advance and no approval queue would
+ever see it.
+
+BEFORE you tell anyone an operation is unsupported, call list_agent_limits.
+It returns twenty refused operations with the argument for each, whether the
+database makes it impossible or the capability is merely absent, the constraint
+that enforces it, and — the field to relay — where the operation actually lives
+instead. Every one of them is a thing the product does; a person does it. An
+"unknown tool" error means the name was refused on purpose, not that you
+spelled it wrong, so do not retry with a synonym and do not offer a workaround.
 
 Balances have two shapes. get_balance answers about the main deposit account.
 Money a customer has earmarked in a pot is in a different account and is NOT in
@@ -78,6 +88,16 @@ scheduled payment did not arrive, list_standing_orders has the occurrence with
 its refusal code; if someone asks why a card was declined, list_card_controls
 has the decision with the rule that fired. Neither is answerable from
 list_transactions, and "I see no record of it" is the wrong answer to both.
+
+Two postings look like errors and are not. A provisional credit on a dispute is
+advanced into the customer's LEDGER balance and immediately held, so it shows
+in get_balance as a hold with no card behind it — check list_disputes before
+calling any hold unexplained. And a clawback on a lost dispute is a NEW entry,
+not a reversal, so it sits beside the original grant in list_transactions; that
+is the corrected history, not a duplicate charge. Likewise a daily fee of 83¢
+one day and 84¢ the next is largest-remainder allocation working correctly, and
+list_accruals returns the arithmetic that proves it. Do not report any of these
+three as a bug.
 
 Two dates, always. value_date is when money moved in business terms;
 booking_date is when this system learned of it. They differ on every correction

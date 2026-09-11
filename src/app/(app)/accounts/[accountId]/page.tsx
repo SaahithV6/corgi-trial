@@ -1,7 +1,15 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
 
-import { Badge } from "@/components/ui/primitives";
+import { Badge, FOCUS_RING, Note } from "@/components/ui/primitives";
+import Link from "next/link";
+import { systemClock } from "@/lib/timetravel/clock";
+import {
+  AS_KNOWN_AT_PARAM,
+  AS_OF_PARAM,
+  parseTimeTravelParams,
+  withTimeTravel,
+} from "@/lib/timetravel/params";
 import { AccountSkeleton, AccountView } from "@/components/account/AccountView";
 import { DemoStateBar } from "@/components/account/DemoStateBar";
 import { parseDemoView } from "@/components/account/demo-state";
@@ -36,6 +44,16 @@ type AccountPageProps = {
  *   ?state=edge     available is negative after an over-capture
  *   ?auth=pending   lands a $50.00 fuel-pump authorisation, as a fixture
  *
+ * THIS SCREEN DOES NOT TIME TRAVEL, and says so when asked to. It reads
+ * through `AccountDataSource`, whose live implementation
+ * (`src/components/account/live-data-source.ts`) takes its own snapshot
+ * internally and exposes no seam to inject one — and that module belongs to
+ * another worker on this build. Rather than render a control that does
+ * nothing, or worse, render travelled-looking figures that are not, the page
+ * states the limitation and points at `/transactions`, which honours both axes
+ * for the same account. A screen that ignored the parameter while showing a
+ * time-travel control would be a lie.
+ *
  * Which one is on screen is stated rather than implied. A console that shows
  * seeded demo money in the same chrome as a customer's real balance, with
  * nothing to tell them apart, is one screenshot away from a very bad meeting.
@@ -51,11 +69,20 @@ export default async function AccountPage({
   searchParams,
 }: AccountPageProps) {
   const { accountId } = await params;
-  const view = parseDemoView(await searchParams);
+  const resolved = await searchParams;
+  const view = parseDemoView(resolved);
   const live = isLiveView(view);
+
+  // Parsed only to detect that a point was ASKED FOR. With neither parameter
+  // present this is `absent`, nothing extra renders, and the page is exactly
+  // the page it was before.
+  const parsed = parseTimeTravelParams(resolved, systemClock.now());
+  const asked = !parsed.ok || !parsed.request.absent;
 
   return (
     <div className="space-y-6">
+      {asked ? <NotTravelledHere accountId={accountId} resolved={resolved} /> : null}
+
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         {live ? (
           <Badge tone="positive" title="Read from the journal at request time.">
@@ -85,5 +112,52 @@ export default async function AccountPage({
         <AccountView accountId={accountId} view={view} />
       </Suspense>
     </div>
+  );
+}
+
+/**
+ * The honest label, rendered only when a point was actually asked for.
+ *
+ * It names the module, the reason, and the screen that DOES answer — because
+ * "this does not work here" without a destination is a dead end, and the
+ * destination exists.
+ */
+function NotTravelledHere({
+  accountId,
+  resolved,
+}: {
+  readonly accountId: string;
+  readonly resolved: Record<string, string | string[] | undefined>;
+}) {
+  const first = (key: string): string | null => {
+    const raw = resolved[key];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    return value === undefined || value === "" ? null : value;
+  };
+
+  const href = withTimeTravel(`/transactions?account=${accountId}`, {
+    asOf: first(AS_OF_PARAM),
+    asKnownAt: first(AS_KNOWN_AT_PARAM),
+  });
+
+  return (
+    <Note emphasis title="This screen does not time travel — the figures below are as at now">
+      <p>
+        <span className="font-mono text-text">?{AS_OF_PARAM}</span> and{" "}
+        <span className="font-mono text-text">?{AS_KNOWN_AT_PARAM}</span> are
+        ignored here. This page reads through{" "}
+        <span className="font-mono">AccountDataSource</span>, whose live
+        implementation takes its own snapshot internally and exposes no seam to
+        inject one; that module is owned by another worker on this build. Every
+        balance, hold and posting below is the live one.
+      </p>
+      <p className="mt-1.5">
+        <Link href={href} className={`underline underline-offset-4 ${FOCUS_RING}`}>
+          Open this account at that point on /transactions
+        </Link>{" "}
+        — same account, both axes honoured, with the acts that changed the
+        answer itemised.
+      </p>
+    </Note>
   );
 }

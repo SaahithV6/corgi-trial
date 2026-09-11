@@ -20,14 +20,14 @@ function propertyNames(schema: unknown, found: string[] = []): string[] {
 }
 
 describe("the registry", () => {
-  it("is seven read tools and exactly one write tool", () => {
+  it("is ten read tools and exactly one write tool", () => {
     // The count of READ tools is allowed to grow as the product does — each
     // one answers a question the surface could not answer before. The count of
     // WRITE tools is the number this test exists to pin: it was one when the
-    // surface had three readers and it is one now that it has seven, and a
+    // surface had three readers and it is one now that it has ten, and a
     // second entry in this list is a design change that belongs in
     // docs/AGENT-LIMITS.md before it belongs in a diff.
-    expect(TOOLS).toHaveLength(8);
+    expect(TOOLS).toHaveLength(11);
     expect(READ_TOOLS.map((t) => t.name)).toEqual([
       "get_balance",
       "list_pots",
@@ -35,7 +35,10 @@ describe("the registry", () => {
       "list_payees",
       "list_standing_orders",
       "list_card_controls",
+      "list_accruals",
+      "list_disputes",
       "list_recon_breaks",
+      "list_agent_limits",
     ]);
     expect(WRITE_TOOLS).toHaveLength(1);
     expect(WRITE_TOOLS.map((t) => t.name)).toEqual(["initiate_payment"]);
@@ -79,6 +82,18 @@ describe("the registry", () => {
       "unblock",
       "move_to_pot",
       "add_payee",
+      // Added with the disputes and accrual readers. Same argument: each is a
+      // plausible-sounding sibling of a tool that now exists, which is exactly
+      // when a banned list earns its keep. AGENT-LIMITS §17-§20.
+      "raise_dispute",
+      "withdraw_dispute",
+      "submit_evidence",
+      "provisional_credit",
+      "claw_back",
+      "write_off",
+      "run_accrual",
+      "skip_accrual",
+      "set_plan_price",
     ];
     for (const tool of TOOLS) {
       for (const word of banned) {
@@ -89,7 +104,7 @@ describe("the registry", () => {
 });
 
 describe("annotations are honest", () => {
-  it("marks the three readers read-only and the writer not", () => {
+  it("marks every reader read-only and the one writer not", () => {
     for (const tool of READ_TOOLS) {
       expect(tool.annotations.readOnlyHint).toBe(true);
       expect(tool.readOnly).toBe(true);

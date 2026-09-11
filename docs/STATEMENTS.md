@@ -40,7 +40,9 @@ The order of the page is the argument.
    fact. Below the tiles, one line says whether the left-hand reading is a
    document somebody *issued* (`AS PUBLISHED`, with version, actor, issue time
    and whether the hash reproduced) or only a reading anybody can *reproduce*
-   (`NOT PUBLISHED`, with the watermark it was read at).
+   (`NOT PUBLISHED`, with the watermark it was read at). Directly beneath it,
+   on the live screen only, is the way off this screen and into somebody
+   else's inbox: **Download statement PDF** — see *The document* below.
 
 2. **What corrected it, and when we learned** (`AsCorrectedPanel.tsx`), when
    the two differ. Grouped by `correction_group_id`, because *a reversal and
@@ -78,6 +80,140 @@ The order of the page is the argument.
 6. **Versions of this statement**, when any were issued. A correction produces a
    **new version**, never an edit; v1 stays byte-identical forever and v2 exists
    beside it.
+
+---
+
+---
+
+## The document: a PDF an accountant can file
+
+A statement that exists only inside a React screen cannot be forwarded to an
+accountant, attached to a filing, or read by somebody who was not at the demo.
+So the screen has a **Download statement PDF** button, and what comes out is
+the same two readings — the same `renderStatement()` calls at the same two
+watermarks, through the same `formatUsd` — serialised into the one format that
+survives an inbox.
+
+It is **generated from the ledger on the press**, never transcribed. The brief's
+document rule is one line and it is absolute:
+
+> *Documents must be generated from data, never hand-typed.*
+
+### What is on the page, and why an accountant can tie it
+
+An accountant's test is not aesthetic. It is *can I tie this to something*.
+So the page prints **two identities**, each one computed in `bigint` cents at
+render time and each one followed by the word `CHECKS` or `DOES NOT CHECK`:
+
+```
+opening balance  +  every movement (date, description, reference, booking seq)  =  closing balance
+$21,059.55       +  $951.50 across 2 movements                                  =  $22,011.05
+
+as published closing  +  every act booked above that watermark  =  as corrected closing
+$22,011.05            +  $50.00                                 =  $22,061.05
+```
+
+The first is what any bank statement owes its reader. The second is the one no
+ordinary statement has, because no ordinary statement is bitemporal — and it is
+itemised act by act, each act carrying its value date, its booking sequence and
+the instant we learned it.
+
+Both readings' tables carry a running balance column, so the reader can add the
+column down and land on the closing figure rather than being asked to believe
+it. Rows on the as-corrected table that landed **after** the document went out
+are shaded and marked `†`, with the footnote saying what that means: a later
+booking time, the same value date, nothing edited.
+
+### Both time axes, for a reader who has never heard the word
+
+Above the figures, in plain words, before any number:
+
+> **TWO DATES SIT ON EVERY ENTRY IN THIS LEDGER.** The value date is the day the
+> money belongs to — here, Jul 25, 2026. The booking time is the moment we
+> learned about it, which can be days later. Nothing is ever edited: when we
+> learn something new about Jul 25, 2026, a new entry is appended carrying Jul
+> 25, 2026's value date and today's booking time. So this page shows Jul 25,
+> 2026 twice — as we reported it, and as we now know it — and lists what moved
+> between.
+
+Then the three figures as a band of equal weight: **as published**, the signed
+**difference**, **as corrected**, each with its booking watermark on its face.
+On a day nothing has corrected, the middle tile says `none` rather than `$0.00`
+and a panel says what would have to happen for the two to differ — the document
+has to read well on the three hundred and sixty-four days that were never
+corrected, or nobody trusts it on the one that was.
+
+### Byte-identical survived the new format
+
+It did, and it is asserted rather than claimed.
+
+`renderStatementPdf` is a **pure function of its input** — no clock, no random
+source, no environment — and `src/lib/statements/pdf-writer.ts` is a
+hand-rolled PDF 1.4 writer that refuses the four things which make a PDF
+irreproducible:
+
+| what usually varies | what this writer does |
+| --- | --- |
+| `/CreationDate`, `/ModDate` from the clock | **omitted entirely.** The document's own dates — value date, close, issue time — are content, drawn from immutable rows, and printed on the page |
+| a random trailer `/ID` | **the document fingerprint**: sha256 over both readings' own content hashes and the watermarks they were taken at |
+| embedded font **subsets**, whose bytes and subset tag vary by run | **nothing embedded.** The four standard Type1 faces (Helvetica, Helvetica-Bold, Courier, Courier-Bold) with `WinAnsiEncoding`; the AFM widths are in the source and are used only for truncation and right-alignment |
+| deflate streams, whose bytes depend on the zlib build | **uncompressed.** A statement is kilobytes of text, and an uncompressed stream also means `strings file.pdf` shows an auditor every figure on the page |
+
+Layout arithmetic is in **integer points** from the top-left, so no float
+formatting can reach the file's bytes either.
+
+The proof is run two ways:
+
+- `src/lib/statements/pdf.test.ts` (unpriced, runs in CI) generates the same
+  statement twice and compares the **bytes**, generates it again from a
+  separately-constructed but structurally identical input, asserts the absence
+  of `/CreationDate` and `/FontFile`, and walks the xref table checking that
+  every object is at the byte offset it claims.
+- `statements.integration.test.ts` presses the real button twice against the
+  **live Neon book** — through `statementPdfAction`, the same entry point the
+  screen uses — and compares the bytes. Measured on this book:
+
+```
+  STATEMENT PDF — live, generated twice
+  file          statement-ridgeline-robotics-inc-2026-07-25-v1.pdf
+  value date    2026-07-25
+  watermarks    believed seq 508 · corrected seq 3053
+  bytes         18798 both times, identical: true
+  fingerprint   d915c9bc161d60b2460ebd63e87ae9af3517401c943546f6c440dd843cb46eb7
+```
+
+**The honest caveat, which is on the page and not only here.** The as-corrected
+column is read at the *current* watermark, and that number moves whenever
+anything is booked anywhere on the book. Two PDFs of the same day taken either
+side of a card clearing are different documents — and they say so, because each
+carries its watermark. What is guaranteed is exactly what has always been
+guaranteed by this module: **fix both watermarks and the bytes are fixed.** The
+fingerprint is a hash of the *content*, not of the file, so it stays meaningful
+if the layout ever changes.
+
+### Why a button and not `GET /statements/document.pdf`
+
+A URL would be the nicer artefact. `src/components/home/ScreenLinks.test.ts`
+walks `src/app` and requires every route this build serves to be either named on
+the front door or written down as deliberately absent with a reason — a test
+that exists because the front door once claimed to list every screen while
+listing six of thirteen, leaving `/funding` unreachable from the only URL in a
+submission email. A new route handler under `/statements/` fails that test until
+the decision is recorded in `ScreenLinks.tsx`, which this module does not own.
+Evading it — naming the file `route.tsx` so the walker misses it, or hiding it
+under a group directory — would be defeating a completeness test on purpose.
+
+So the document comes from a server action, which adds no route, breaks no test,
+and still hands the reader the thing that actually matters: a PDF file they can
+attach to an email. Promoting it to a route later is a four-line handler around
+`renderStatementPdf` plus one entry on the front door.
+
+### No new dependency
+
+`package.json` is unchanged. `pdf-writer.ts` is ~380 lines and has no imports at
+all; `pdf.ts` imports only `node:crypto`, the money formatter and the date
+formatter. A PDF library would have been more code to audit, not less, and every
+one of them defeats byte-stability by default.
 
 ---
 
@@ -183,6 +319,11 @@ anywhere on this path.
 | --- | --- |
 | `src/app/(app)/statements/page.tsx` | the route: parses URL state, picks live-or-fixture, holds the Suspense boundary |
 | `src/app/(app)/statements/live-source.ts` | the live `StatementsScreenSource`: resolves account, value date and anchor, renders both documents, itemises the difference |
+| `src/app/(app)/statements/actions.ts` | `statementPdfAction` — reads through the same loader the screen uses and returns the PDF. Writes nothing |
+| `src/lib/statements/pdf.ts` | the statement laid out as a document: both readings, both identities, the acts between them |
+| `src/lib/statements/pdf-writer.ts` | a dependency-free, byte-deterministic PDF 1.4 writer: standard fonts, no dates, no random id, no compression |
+| `src/lib/statements/pdf.test.ts` | byte-identity, xref integrity, the two identities, and the `DOES NOT CHECK` path — all without a database |
+| `src/components/statements/StatementPdfLink.tsx` | the button, carrying the screen's resolved account, day, version and anchor |
 | `src/components/statements/data-contract.ts` | the seam — `BothReadingsView`, `ReadingView`, `AnchorOptionView`, `StatementsScreenSource` |
 | `src/components/statements/screen-fixtures.ts` | the same screen without a database |
 | `src/components/statements/BothReadings.tsx` | the headline: two figures, the difference, the publication status |

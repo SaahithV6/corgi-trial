@@ -186,9 +186,48 @@ v_standing_order_unresolved    0    claimed and never decided
 v_standing_order_double_fire   0    a scheduled date naming >1 instruction
 ```
 
-The second cannot be non-empty while `payment_instruction.idempotency_key` is
-`UNIQUE`. That is the point of writing it down: its emptiness is a consequence
-of a constraint, not of anybody's discipline.
+**The second one used to be empty for the wrong reason, and that is worth more
+than the guard itself.**
+
+The sentence that stood here said `v_standing_order_double_fire` *"cannot be
+non-empty while `payment_instruction.idempotency_key` is `UNIQUE`"*, offered as a
+strength — an emptiness that is a consequence of a constraint rather than of
+anybody's discipline. It was the opposite. The old body joined
+`payment_instruction ON pi.idempotency_key = o.idempotency_key`, a **UNIQUE**
+column, and then asked for `count(DISTINCT pi.id) > 1`. At most one row can
+match a UNIQUE value, so the `HAVING` was unsatisfiable: the view was
+`WHERE false` with extra steps, and its emptiness was a consequence of nothing at
+all. Four places in this repo quoted that emptiness as proof, this document among
+them.
+
+**Migration 0023 replaced the body.** It joins on the mandate's *keyspace* —
+`'standing:<order id>:%'` — and attributes an instruction to an occurrence by the
+derived key **or** by the occurrence's scheduled date. That catches the double
+fire the UNIQUE index structurally cannot see: a second instruction for the same
+mandate and the same date under a different *spelling* of the key. Which is
+exactly what §2 of this document already argues at length — **a wrong key is a
+second payment** — so the guard now checks the thing the prose beside it always
+claimed it checked.
+
+It was demonstrated rather than reasoned: an unpadded, `DateStyle`-dependent key
+was planted on a real occurrence on the live book. The new body returns one row,
+listing both spellings. The old body returned nothing for the same plant.
+
+**Its blind spot, stated because a guard whose limits are not written down is
+back to being believed for the wrong reason:** an instruction raised *outside*
+the `standing:` keyspace is indistinguishable from a legitimate manual payment,
+and this view will not find it. Shape-matching on amount, payee and date was
+tried as a way to close that, and it returned **five false positives** against
+the live book — a customer who pays the same supplier the same amount on the same
+day of the month by hand is not a double fire, and a guard that says they are is
+one operators learn to ignore.
+
+**This is the second guard in this build found to be empty for the wrong
+reason**, after `v_hold_drift`, whose `WHERE NOT is_released AND memo <> target`
+excludes a spuriously-closed hold *by construction* and therefore cannot see the
+exact failure it exists to catch (`CUT-LIST.md` §3.2). The pattern is the honest
+through-line: **a zero-row invariant proves nothing until somebody has watched it
+return a row.** Both are now in `pnpm db:check`, which is 25 checks.
 
 ### It does not build a second way to move money
 

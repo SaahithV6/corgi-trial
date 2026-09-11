@@ -511,3 +511,103 @@ async function lossAccountCents(): Promise<bigint> {
       FROM v_trial_balance WHERE code = '5200'`;
   return rows[0]?.cents ?? 0n;
 }
+
+/**
+ * INTAKE, AT THE ROW — the two guards migration 0023 moved into SQL.
+ *
+ * Both of these were real defects found by running the feature against the
+ * live book, written down in docs/DISPUTES.md §8, and fixed in TypeScript
+ * because 0019 was already applied and an applied migration is immutable.
+ * 0023 moved them where they belong, and these are the tests that say so.
+ */
+suite("the guards that moved into the database", () => {
+  /**
+   * A DISPUTE CLAWBACK IS NOT A DISPUTABLE CHARGE.
+   *
+   * It is a card-rail entry that debits the customer, so it satisfied every
+   * rule `assert_dispute_intake()` had: card, financial, a net debit on this
+   * customer's deposit leaf, within the amount unclaimed. There is one such
+   * case standing in the live book — a customer disputed the recovery of their
+   * own provisional credit — and it is left standing, because deleting history
+   * to make a guard look older than it is would be the worse crime.
+   *
+   * The rule: a disputable charge must ALSO CREDIT 2200, the network
+   * settlement payable. That is the shape of a real clearing — the customer
+   * was debited AND THE NETWORK WAS PAID — and there is no network case to
+   * file against an entry that paid nobody.
+   *
+   * It already lived in `listDisputableCharges()`, which is a LIST. This
+   * asserts it at the INSERT, where a caller that never asks the list still
+   * meets it.
+   */
+  it("refuses a dispute raised against a clawback entry, at the trigger", async () => {
+    const rows = await conn<
+      {
+        entry_id: string;
+        account_id: string;
+        memo_account_id: string;
+        raised_by: string;
+        policy_id: string;
+      }[]
+    >`
+      SELECT de.entry_id, d.account_id, d.memo_account_id, d.raised_by, d.policy_id
+        FROM dispute_event de
+        JOIN dispute d ON d.id = de.dispute_id
+       WHERE de.kind = 'credit_clawed_back' AND de.entry_id IS NOT NULL
+       ORDER BY de.occurred_at DESC
+       LIMIT 1`;
+    const claw = rows[0];
+    expect(claw).toBeDefined();
+    if (claw === undefined) return;
+
+    // The list has never offered it. That is the courtesy in front of the gate.
+    const offered = await disputes.listDisputableCharges({ businessId, limit: 50 }, conn);
+    expect(offered.map((c) => c.entryId)).not.toContain(claw.entry_id);
+
+    // And now the gate itself, reached the way a script or the MCP write
+    // surface would reach it: straight at the table.
+    const caseRef = `TEST-CLAWBACK-${Date.now()}`;
+    await expect(
+      conn`
+        INSERT INTO dispute (case_ref, disputed_entry_id, account_id, memo_account_id,
+                             reason, network, network_code, narrative, amount_cents,
+                             value_date, network_outside_date, raised_by, policy_id)
+        VALUES (${caseRef}, ${claw.entry_id}::uuid, ${claw.account_id}::uuid,
+                ${claw.memo_account_id}::uuid, 'fraud', 'visa', '10.4',
+                'A clawback is not a purchase and there is no network case to file.',
+                100, book_date(now()), book_date(now()) + 120,
+                ${claw.raised_by}::uuid, ${claw.policy_id}::uuid)`,
+    ).rejects.toThrow(/network settlement payable|2200/i);
+  });
+
+  /**
+   * ONE LINE, ONE ROW.
+   *
+   * `v_dispute_ledger` unions the entries an event cites with the memo entries
+   * reachable through the grant's hold, and on a WON case those sets overlapped
+   * in exactly one place: the finalising event cites the hold RELEASE, which is
+   * also a memo posting on that hold. UNION did not collapse them because
+   * `event_kind` differs, so the episode screen printed the release twice —
+   * $73.40 appearing to move twice on the one screen whose whole purpose is
+   * that the ledger can be checked by hand.
+   *
+   * It was deduped at the read with DISTINCT ON. 0023 fixes the view, by
+   * ANTI-JOIN rather than by DISTINCT: the memo source yields only what the
+   * events do not already carry, so a duplicate arising any OTHER way still
+   * shows up — and `v_dispute_ledger_double_count` is the standing assertion
+   * that none does. It is in `scripts/dbcheck.mjs`.
+   */
+  it("returns every dispute line exactly once, with no dedupe at the read", async () => {
+    const dbl = await conn<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM v_dispute_ledger_double_count`;
+    expect(dbl[0]?.n).toBe(0);
+
+    // And on a won case specifically, which is where the overlap lived.
+    for (const state of await disputes.listDisputeStates({ businessId, limit: 50 }, conn)) {
+      if (state.status !== "closed_won") continue;
+      const lines = await disputes.listDisputeLedger(state.id, conn);
+      const seen = new Set(lines.map((l) => `${l.entryId}:${l.ordinal}`));
+      expect(seen.size).toBe(lines.length);
+    }
+  });
+});

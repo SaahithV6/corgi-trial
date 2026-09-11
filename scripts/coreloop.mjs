@@ -104,7 +104,12 @@ const DEFAULT_BASE_URL = "https://corgi-trial-psi.vercel.app";
 /* ========================================================================== */
 
 function parseArgs(argv) {
-  const args = { baseUrl: process.env.CORELOOP_BASE_URL ?? DEFAULT_BASE_URL, only: null };
+  const args = {
+    baseUrl: process.env.CORELOOP_BASE_URL ?? DEFAULT_BASE_URL,
+    only: null,
+    business: null,
+    listSubjects: false,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--base-url") {
@@ -117,10 +122,26 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg.startsWith("--only=")) {
       args.only = arg.slice("--only=".length).split(",").map((n) => Number(n.trim()));
+    } else if (arg === "--business") {
+      args.business = argv[i + 1] ?? null;
+      i += 1;
+    } else if (arg.startsWith("--business=")) {
+      args.business = arg.slice("--business=".length);
+    } else if (arg === "--list-subjects") {
+      args.listSubjects = true;
     } else if (arg === "--help" || arg === "-h") {
       console.log(
         "usage: node scripts/coreloop.mjs [--base-url URL] [--only 1,2,3]\n" +
-          "Drives the published core loop end to end against the DEPLOYED system.",
+          "                                [--business <uuid | name substring>] [--list-subjects]\n" +
+          "Drives the published core loop end to end against the DEPLOYED system.\n" +
+          "\n" +
+          "  --business       run the whole loop for ONE named business instead of the\n" +
+          "                   highest-ranked one. This exists because \"the core loop\n" +
+          "                   passes 7/7 on a second business\" is a claim nobody could\n" +
+          "                   make honestly while the script had no way to choose a\n" +
+          "                   second business: it selected one and there was no argument\n" +
+          "                   that changed it. Now the claim is a command.\n" +
+          "  --list-subjects  print the ranking and exit, without running a leg.",
       );
       process.exit(0);
     }
@@ -828,6 +849,34 @@ const today = new Date().toISOString().slice(0, 10);
  * foil. Re-deriving `canTransact()`'s rule here would be a second opinion that
  * can drift from the first, which is the exact failure the KYB leg exists to
  * catch.
+ *
+ * ── WHAT THE RANKING WAS MISSING, AND WHY IT MATTERED ──────────────────────
+ *
+ * It read `kyb_evidence` out of the view and then never used it. So among the
+ * businesses the gate ALLOWS the tiebreak fell through to `legs_on_file` and
+ * then to `localeCompare`, and the alphabet chose the subject: "Hold Fuzzer
+ * Fixture Co.", approved on two legs by `simulated-hold-fuzzer`, sorted ahead
+ * of "Kettle & Crumb Bakery LLC" and "Ridgeline Robotics, Inc.", both of which
+ * carry a real GLEIF call and a real Stripe Identity verification in their leg
+ * history.
+ *
+ * Leg 1's whole claim is "a REAL KYB check", and the run was demonstrating it
+ * on the business verified by our own simulator. Nothing about that is a
+ * falsehood the script tells — every line it printed was true — but the
+ * evidence it chose to print was the weakest available, which is the same
+ * defect as a guard that excludes the failure it looks for, pointed at a demo.
+ *
+ * So evidence is now a ranking term, ahead of the alphabet:
+ *
+ *   1. the deployed gate's answer (ALLOWED first) — unchanged, and still the
+ *      only thing that decides a VERDICT rather than an order;
+ *   2. the rolled evidence tier: live > manual > simulated. `v_business_kyb`
+ *      rolls the WEAKEST leg, so this is "how good is the worst evidence
+ *      behind this business";
+ *   3. how many of its two legs are, at their latest observation, still
+ *      standing on a live third-party answer;
+ *   4. legs on file, then the alphabet, as before — a total order, so the
+ *      choice stays deterministic and a run is reproducible.
  */
 const candidates = await sql`
   SELECT dep.business_id       AS business_id,
@@ -837,7 +886,15 @@ const candidates = await sql`
          b.ein                 AS ein,
          k.legs_on_file        AS legs_on_file,
          k.kyb_status::text    AS kyb_status,
-         k.kyb_evidence::text  AS kyb_evidence
+         k.kyb_evidence::text  AS kyb_evidence,
+         -- The two legs, named, so the header can say WHICH provider answered
+         -- rather than only how strong the weakest answer was.
+         k.registry_provider   AS registry_provider,
+         k.registry_evidence::text AS registry_evidence,
+         k.director_provider   AS director_provider,
+         k.director_evidence::text AS director_evidence,
+         (CASE WHEN k.registry_evidence::text = 'live' THEN 1 ELSE 0 END
+        + CASE WHEN k.director_evidence::text = 'live' THEN 1 ELSE 0 END) AS live_legs
     FROM account dep
     JOIN account memo    ON memo.business_id = dep.business_id AND memo.code = '9100'
     JOIN business b      ON b.id = dep.business_id
@@ -883,22 +940,98 @@ const GATE_RANK = {
 };
 const rankOf = (answer) => (answer.allowed ? -1 : (GATE_RANK[answer.code] ?? 9));
 
-// Allowed first; then the business with real KYB legs on file, because a
-// fixture with nothing on file is never the right subject for a loop whose
-// first leg is a KYB check; then the refusal closest to an allowance.
+/**
+ * How strong the WEAKEST leg's evidence is. Lower is stronger.
+ *
+ * The enum's own order is `live, manual, simulated` and `v_business_kyb` rolls
+ * the business up with `max(evidence)`, i.e. the weakest leg — so this reads
+ * the same scale the schema already committed to rather than inventing a
+ * second one. `manual` outranks `simulated` and is beneath `live` for the
+ * reason 038 gives: an operator review is a real decision by a real person
+ * recorded against a real provider answer, and a simulator's approval is a
+ * fixture agreeing with itself.
+ */
+const EVIDENCE_RANK = { live: 0, manual: 1, simulated: 2 };
+const evidenceRankOf = (answer) => EVIDENCE_RANK[answer.kyb_evidence] ?? 3;
+
+// Allowed first — the gate, never re-derived here. Then the strength of the
+// evidence behind the business, because leg 1's claim is "a real KYB check"
+// and demonstrating it on the business our own simulator approved proves the
+// simulator. Then live legs, legs on file, and finally the alphabet, which
+// makes the order total and the run reproducible.
 const ranked = [...gateAnswers].sort(
   (a, b) =>
     rankOf(a) - rankOf(b) ||
+    evidenceRankOf(a) - evidenceRankOf(b) ||
+    Number(b.live_legs ?? 0) - Number(a.live_legs ?? 0) ||
     Number(b.legs_on_file ?? 0) - Number(a.legs_on_file ?? 0) ||
     a.legal_name.localeCompare(b.legal_name),
 );
-const subject = ranked[0];
+
+/**
+ * `--business` overrides the ranking and NOTHING ELSE.
+ *
+ * It does not skip the gate, does not assume an answer, and does not lower a
+ * bar: the named business was pressed against the deployed `/onboarding` gate
+ * with every other candidate, above, and if the deployment refuses it the legs
+ * that need a transactable business will skip and say so — exactly as they do
+ * for the ranked subject. The flag chooses WHICH business the run carries; it
+ * has no opinion about what the run then finds.
+ *
+ * A name that matches nothing is a hard exit rather than a silent fallback to
+ * the ranked subject: a run that quietly carried a different business than the
+ * one asked for would print seven verdicts about the wrong entity.
+ */
+let subject = ranked[0];
+if (args.business !== null) {
+  const needle = String(args.business).trim().toLowerCase();
+  const chosen = ranked.filter(
+    (c) =>
+      String(c.business_id).toLowerCase() === needle ||
+      String(c.legal_name).toLowerCase().includes(needle),
+  );
+  if (chosen.length === 0) {
+    console.error(`--business ${args.business}: no candidate business matches.`);
+    console.error("Candidates on this book:");
+    for (const c of ranked) console.error(`  ${c.business_id}  ${c.legal_name}`);
+    await sql.end();
+    process.exit(2);
+  }
+  if (chosen.length > 1) {
+    console.error(`--business ${args.business}: matches ${chosen.length} businesses; be more specific.`);
+    for (const c of chosen) console.error(`  ${c.business_id}  ${c.legal_name}`);
+    await sql.end();
+    process.exit(2);
+  }
+  subject = chosen[0];
+}
+
 const foil = gateAnswers.find((c) => !c.allowed && c.business_id !== subject?.business_id);
 
 if (subject === undefined) {
   console.error("no business on this book holds both a 2100 deposit account and a 9100 memo account");
   await sql.end();
   process.exit(2);
+}
+
+if (args.listSubjects) {
+  console.log("");
+  console.log("  CANDIDATE SUBJECTS, in the order this script ranks them");
+  console.log("  gate answer, then evidence tier, then live legs, then legs on file, then name");
+  console.log("");
+  for (const c of ranked) {
+    console.log(
+      `    ${(c.allowed ? "ALLOWED " : "REFUSED ")}${String(c.code).padEnd(22)}` +
+        ` ${String(c.legal_name).padEnd(34)} evidence ${String(c.kyb_evidence).padEnd(10)}` +
+        ` live legs ${c.live_legs}  registry ${c.registry_provider ?? "(none)"}` +
+        ` / director ${c.director_provider ?? "(none)"}` +
+        (c.business_id === ranked[0]?.business_id ? "   <- default subject" : ""),
+    );
+    console.log(`      --business ${c.business_id}`);
+  }
+  console.log("");
+  await sql.end();
+  process.exit(0);
 }
 
 const BIZ = subject.business_id;
@@ -929,8 +1062,13 @@ console.log(`    2100 deposit      ${DEPOSIT}`);
 console.log(`    9100 memo         ${subject.memo_account}`);
 console.log(`    console           ${baseUrl}${CONSOLE_PATH}`);
 console.log(THIN);
-console.log("  WHY THIS BUSINESS — the deployed gate was asked, live, before anything else ran");
-for (const answer of gateAnswers) {
+console.log(
+  args.business === null
+    ? "  WHY THIS BUSINESS — the deployed gate was asked, live, before anything else ran"
+    : `  WHY THIS BUSINESS — NAMED on the command line (--business ${args.business}); the deployed` +
+      "\n                      gate was still asked about every candidate below, live, first",
+);
+for (const answer of ranked) {
   const mark = answer.allowed ? "ALLOWED " : "REFUSED ";
   const role =
     answer.business_id === subject.business_id
@@ -940,8 +1078,22 @@ for (const answer of gateAnswers) {
         : "";
   console.log(
     `    ${mark} ${String(answer.code).padEnd(22)} ${String(answer.legal_name).padEnd(32)}` +
-      ` ${answer.kyb_status}/${answer.kyb_evidence}, ${answer.legs_on_file} leg(s)${role}`,
+      ` ${answer.kyb_status}/${answer.kyb_evidence}, ${answer.legs_on_file} leg(s),` +
+      ` ${answer.live_legs} live${role}`,
   );
+}
+// The evidence behind leg 1's claim, named rather than summarised: "a real KYB
+// check" is only worth reading if the reader can see WHICH provider answered.
+console.log(
+  `    evidence          registry ${subject.registry_provider ?? "(none on file)"}` +
+    ` (${subject.registry_evidence ?? "none"}) · director ${subject.director_provider ?? "(none on file)"}` +
+    ` (${subject.director_evidence ?? "none"})`,
+);
+if (subject.kyb_evidence === "simulated") {
+  console.log("");
+  console.log(YELLOW("    The strongest evidence available on this book is SIMULATED. Leg 1 will say so, and"));
+  console.log(YELLOW("    the run demonstrates the gate rather than a real KYB check. That is a fact about"));
+  console.log(YELLOW("    the book, not a pass: --list-subjects shows what else is here."));
 }
 if (!subject.allowed) {
   console.log("");

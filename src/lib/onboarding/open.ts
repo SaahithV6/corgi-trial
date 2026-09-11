@@ -62,6 +62,7 @@
 import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
+import { readAccountIdentities } from "@/lib/ledger/queries";
 import { rootLogger, type Logger } from "@/lib/log";
 import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
 
@@ -309,20 +310,37 @@ export async function accountOpenings(
       kyb_evidence: string;
     }[]
   >`
-    SELECT o.account_id, a.code, a.name, o.opened_at,
+    SELECT o.account_id, o.opened_at,
            COALESCE(act.display_name, o.opened_by::text) AS opened_by,
            o.kyb_status::text   AS kyb_status,
            o.kyb_evidence::text AS kyb_evidence
       FROM account_opening o
-      JOIN account a   ON a.id = o.account_id
       LEFT JOIN actor act ON act.id = o.opened_by
      WHERE o.business_id = ${businessId}::uuid
-     ORDER BY o.opened_at, a.code`;
+     ORDER BY o.opened_at, o.account_id`;
 
-  return rows.map((row) => ({
+  // `code` and `name` are the ledger's columns; the join that used to fetch
+  // them was also the ORDER BY's second key. It is `o.account_id` now, and the
+  // rows are re-sorted by `(opened_at, code)` below — in that order, and with
+  // the codes in hand — so the list a caller sees is unchanged.
+  const accounts = await readAccountIdentities(
+    rows.map((r) => r.account_id),
+    conn,
+  );
+  // The join was INNER: an opening whose account has gone was not a row.
+  const present = rows.filter((r) => accounts.has(r.account_id));
+  present.sort((x, y) => {
+    const byTime = x.opened_at.getTime() - y.opened_at.getTime();
+    if (byTime !== 0) return byTime;
+    const xc = accounts.get(x.account_id)?.code ?? "";
+    const yc = accounts.get(y.account_id)?.code ?? "";
+    return xc < yc ? -1 : xc > yc ? 1 : 0;
+  });
+
+  return present.map((row) => ({
     accountId: row.account_id,
-    code: row.code,
-    name: row.name,
+    code: accounts.get(row.account_id)?.code ?? "",
+    name: accounts.get(row.account_id)?.name ?? "",
     openedAt: row.opened_at.toISOString(),
     openedBy: row.opened_by,
     kybStatus: row.kyb_status,

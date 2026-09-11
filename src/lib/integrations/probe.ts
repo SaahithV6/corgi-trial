@@ -252,14 +252,34 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
   ach_rail: async () => {
     const key = env.INCREASE_API_KEY;
     if (!key) return { liveness: "not_configured", detail: "INCREASE_API_KEY absent", ms: 0 };
+    // The host comes from configuration, not from a literal.
+    //
+    // This hardcoded `sandbox.increase.com` while the application reads
+    // `INCREASE_BASE_URL`, so a deployment pointed anywhere else would have
+    // been probing a host it does not use and reporting the answer as this
+    // slot's liveness. That is the same drift recorded a few lines below for
+    // `business_registry` — the probe must ask the provider the APPLICATION
+    // uses — and it was sitting one slot away the whole time.
+    // `process.env` directly, because that is where the CLIENT reads it:
+    // `increase/client.ts` documents "Defaults to process.env.INCREASE_BASE_URL,
+    // else the sandbox URL" and the key is deliberately not in `envSchema`.
+    // Reading the schema here would have been a second source of truth for the
+    // one fact this probe exists to check.
+    const base = (process.env["INCREASE_BASE_URL"] ?? "https://sandbox.increase.com").replace(/\/+$/, "");
     const { res, ms, err } = await timed((signal) =>
-      fetch("https://sandbox.increase.com/accounts?limit=1", {
+      fetch(`${base}/accounts?limit=1`, {
         headers: { Authorization: `Bearer ${key}` },
         signal,
       }),
     );
     if (!res) return { liveness: "unreachable", detail: err ?? "no response", ms };
-    return { liveness: fromStatus(res.status), detail: `GET /accounts -> ${res.status}`, ms };
+    // The detail names the call that was actually made, including the host, so
+    // a reader can re-run it rather than trust it.
+    return {
+      liveness: fromStatus(res.status),
+      detail: `GET ${base}/accounts?limit=1 -> ${res.status}`,
+      ms,
+    };
   },
 
   business_registry: async () => {

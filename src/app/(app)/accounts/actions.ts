@@ -72,6 +72,7 @@ import { z } from "zod";
 import { currentActor } from "@/lib/approvals/session";
 import { availableBalance } from "@/lib/ledger/balances";
 import { sql } from "@/lib/ledger/db";
+import { findBusiness, readAccountIdentity } from "@/lib/ledger/queries";
 import {
   findAuthorization,
   holdState,
@@ -226,14 +227,14 @@ async function requireActor(
 async function requireBusiness(
   businessId: string,
 ): Promise<{ legalName: string } | null> {
-  const [row] = await sql<{ legal_name: string }[]>`
-    SELECT b.legal_name
-      FROM business b
-      JOIN account dep  ON dep.business_id = b.id AND dep.code = '2100'
-      JOIN account memo ON memo.business_id = b.id AND memo.code = '9100'
-     WHERE b.id = ${businessId}::uuid
-     LIMIT 1`;
-  return row === undefined ? null : { legalName: row.legal_name };
+  // "Has both leaves of the chart" — a 2100 and a 9100 — because that pair is
+  // what a card and a hold both need somewhere to live. The two inner joins
+  // that used to say it are the ledger's to make; the predicate over their
+  // result is this action's.
+  const business = await findBusiness(businessId, sql);
+  if (business === null) return null;
+  if (business.depositAccountId === null || business.memoAccountId === null) return null;
+  return { legalName: business.legalName };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -733,11 +734,22 @@ export async function simulateClearingAction(
 
   // The authorisation is a reference too: it must already exist in this ledger
   // and belong to the business the form named.
-  const [owner] = await sql<{ hold_id: string; business_id: string }[]>`
-    SELECT ca.hold_id, a.business_id
+  // `card_authorization` is the cards module's table and this read stays here.
+  // The `JOIN account` was there to reach ONE column — `business_id`, so the
+  // form's claim about whose authorisation this is can be checked — and that
+  // is `readAccountIdentity`'s job.
+  const [auth] = await sql<{ hold_id: string; account_id: string }[]>`
+    SELECT ca.hold_id, ca.account_id
       FROM card_authorization ca
-      JOIN account a ON a.id = ca.account_id
      WHERE ca.provider = ${PROVIDER} AND ca.provider_auth_id = ${transactionToken}`;
+
+  const owner =
+    auth === undefined
+      ? undefined
+      : {
+          hold_id: auth.hold_id,
+          business_id: (await readAccountIdentity(auth.account_id, sql))?.businessId ?? null,
+        };
 
   if (owner === undefined) {
     return refuse(

@@ -18,8 +18,10 @@
  *
  *   2. A REFUSAL IS A ROW. An occurrence whose amount the LEDGER balance covers
  *      and the AVAILABLE balance does not is closed as attempted-and-refused,
- *      with its code, its sentence, and the four figures observed at the moment
- *      of the decision.
+ *      with its code, its sentence, and the five figures observed at the moment
+ *      of the decision — ledger, holds, uncleared, committed outflows and
+ *      available — which since migration 0023 are asserted to add up by a CHECK
+ *      constraint on the row rather than by whoever wrote the INSERT.
  *
  * ─── What this suite writes to the live database ────────────────────────────
  *
@@ -42,7 +44,7 @@
  * there are more than $100 of holds and uncleared credits against that account.
  * The test asserts that precondition and says so rather than skipping quietly.
  *
- * Once the refusal is written it is permanent evidence: the four figures are
+ * Once the refusal is written it is permanent evidence: the five figures are
  * stored AS OBSERVED, so the row keeps meaning what it meant even after the
  * balances move.
  */
@@ -53,6 +55,7 @@ import type * as BalancesModule from "@/lib/ledger/balances";
 
 import type * as FireModule from "./fire";
 import type * as StoreModule from "./store";
+import { mainDepositAccountId } from "@/lib/ledger/queries";
 
 const RUN = process.env["RUN_DB_TESTS"] === "1";
 const d = RUN ? describe : describe.skip;
@@ -111,10 +114,9 @@ d("standing orders, against the live database", () => {
 
     bookDate = await store.bookToday();
 
-    const [account] = await sql<{ id: string }[]>`
-      SELECT id FROM account WHERE code = '2100' AND business_id = ${BUSINESS_ID}::uuid`;
-    if (account === undefined) throw new Error("the seeded Ridgeline deposit account is missing");
-    accountId = account.id;
+    const account = await mainDepositAccountId(BUSINESS_ID, sql);
+    if (account === null) throw new Error("the seeded Ridgeline deposit account is missing");
+    accountId = account;
 
     // ---- establish the precondition rather than assume it ---------------
     //
@@ -323,10 +325,56 @@ d("standing orders, against the live database", () => {
     expect(after[0]?.n).toBe(1);
   });
 
-  it("keeps the double-fire invariant empty", async () => {
-    // The standing-order equivalent of v_hold_drift. It cannot be non-empty
-    // while payment_instruction.idempotency_key is UNIQUE — which is the point
-    // of asking: emptiness is a consequence of a constraint.
+  it("keeps the double-fire invariant empty — and the invariant can fail", async () => {
+    // THIS TEST USED TO BE HALF A TEST, and the missing half is the point.
+    //
+    // It asserted `countDoubleFires() === 0` and explained that the view
+    // "cannot be non-empty while payment_instruction.idempotency_key is
+    // UNIQUE". That was true, and it was the problem: the view joined
+    // `payment_instruction` ON that unique column and reported count > 1, so
+    // it could not return a row under any state of the database. An empty
+    // result proved nothing, and this assertion dressed it up as evidence.
+    //
+    // Migration 0023 pointed the view at the question the unique index does
+    // NOT answer — a second instruction in the mandate's KEYSPACE under a
+    // different spelling of the derived key — and this test now proves the
+    // view catches it before trusting that it is empty.
+    expect(await store.countDoubleFires()).toBe(0);
+
+    // Plant the double fire, inside a transaction that is rolled back. The
+    // key is the occurrence's own with a suffix: in the mandate's keyspace,
+    // on the occurrence's own date, and not refused by any constraint in
+    // 0012 — which is exactly the shape that would pay a landlord twice.
+    let sawWhilePlanted = -1;
+    await sql
+      .begin(async (tx) => {
+        await tx`
+          INSERT INTO payment_instruction
+            (account_id, rail, amount_cents, currency, counterparty, value_date,
+             requested_by, policy_id, idempotency_key, content_hash)
+          SELECT so.account_id, so.rail, so.amount_cents, so.currency, so.counterparty,
+                 o.scheduled_date, so.created_by, pi.policy_id,
+                 o.idempotency_key || ':retry', pi.content_hash
+            FROM standing_order_occurrence o
+            JOIN standing_order so ON so.id = o.standing_order_id
+            JOIN payment_instruction pi ON pi.idempotency_key = o.idempotency_key
+           WHERE o.standing_order_id = ${fundedOrderId}::uuid
+             AND o.scheduled_date = ${bookDate}::date`;
+        sawWhilePlanted = only(
+          await tx<{ n: number }[]>`
+            SELECT count(*)::int AS n FROM v_standing_order_double_fire
+             WHERE standing_order_id = ${fundedOrderId}::uuid`,
+        ).n;
+        // Nothing here may survive. The plant is evidence, not a fixture.
+        throw new Error("planted-double-fire-rollback");
+      })
+      .catch((e: unknown) => {
+        if (!String((e as Error).message).includes("planted-double-fire-rollback")) throw e;
+      });
+
+    expect(sawWhilePlanted).toBe(1);
+
+    // And the book is exactly as it was.
     expect(await store.countDoubleFires()).toBe(0);
   });
 
@@ -369,6 +417,7 @@ d("standing orders, against the live database", () => {
         observed_ledger_cents: bigint;
         observed_holds_cents: bigint;
         observed_uncleared_cents: bigint;
+        observed_pending_outbound_cents: bigint;
         observed_available_cents: bigint;
         shortfall_cents: bigint;
         instruction_id: string | null;
@@ -376,6 +425,7 @@ d("standing orders, against the live database", () => {
     >`
       SELECT occurrence_id, disposition::text AS disposition, refusal_code, refusal_reason,
              observed_ledger_cents, observed_holds_cents, observed_uncleared_cents,
+             observed_pending_outbound_cents,
              observed_available_cents, shortfall_cents, instruction_id
         FROM v_standing_order_history
        WHERE standing_order_id = ${refusedOrderId}::uuid AND scheduled_date = ${bookDate}::date`;
@@ -383,29 +433,29 @@ d("standing orders, against the live database", () => {
     expect(row?.disposition).toBe("refused");
     expect(row?.refusal_code).toBe("INSUFFICIENT_AVAILABLE_FUNDS");
 
-    // The four figures, as observed, and the arithmetic between them.
+    // The five figures, as observed, and the arithmetic between them.
     const ledger = row?.observed_ledger_cents ?? 0n;
     const holds = row?.observed_holds_cents ?? 0n;
     const uncleared = row?.observed_uncleared_cents ?? 0n;
+    const pendingOutbound = row?.observed_pending_outbound_cents ?? 0n;
     const available = row?.observed_available_cents ?? 0n;
 
-    // FOUR OF THE FIVE TERMS, and the fifth is named rather than hidden.
+    // ALL FIVE TERMS, AND THE IDENTITY ASSERTED AS AN IDENTITY.
     //
-    // `standing_order_outcome` records `observed_ledger/holds/uncleared/
-    // available` — the decomposition as it stood when migration 0012 was
+    // `standing_order_outcome` used to record four — ledger, holds, uncleared,
+    // available — the decomposition as it stood when migration 0012 was
     // written. Migration 0022 gave `available` a fifth term, COMMITTED
     // OUTFLOWS (debits already booked for a future value date), and 0012's
-    // table has no column for it. Adding one is a migration this worker was
-    // not scoped to write, so the recorded identity is now an INEQUALITY and
-    // the unexplained remainder is exactly that fifth term.
-    //
-    // Asserted as an inequality rather than dropped, because the direction
-    // still carries the claim: available can only be LOWER than
-    // ledger − holds − uncleared, never higher. A row where it were higher
-    // would mean money was invented.
-    expect(available).toBeLessThanOrEqual(ledger - holds - uncleared);
+    // table had no column for it, so what the row recorded was an INEQUALITY
+    // that this test could only assert as one. Migration 0023 added
+    // `observed_pending_outbound_cents`, and the CHECK constraint
+    // `standing_order_outcome_availability_identity` refuses a row carrying
+    // all five that does not add up. A refusal printed on a screen can now be
+    // added up by hand, which is the only test that matters for a figure
+    // printed next to the word "refused".
+    expect(available).toBe(ledger - holds - uncleared - pendingOutbound);
 
-    // And the full identity IS asserted, live, on all five terms.
+    // The same identity, live, from the one definition both sides call.
     const live = await balances.availableBalance(BUSINESS_ID);
     expect(
       live.ledgerCents -

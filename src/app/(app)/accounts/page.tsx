@@ -34,6 +34,19 @@ import { CardControlsPanel } from "@/components/accounts/CardControlsPanel";
 import { fixtureConsole, holdOpenForLoadingState } from "@/components/accounts/fixtures";
 import { loadConsole } from "@/components/accounts/live-source";
 
+import { systemClock } from "@/lib/timetravel/clock";
+import {
+  AS_KNOWN_AT_PARAM,
+  AS_OF_PARAM,
+  parseTimeTravelParams,
+  withTimeTravel,
+  type TimeTravelRequest,
+} from "@/lib/timetravel/params";
+import { RefusalPanel } from "@/components/timetravel/Refusal";
+import { TimeTravelBar } from "@/components/timetravel/TimeTravelBar";
+import { CutNotice } from "@/components/timetravel/CutNotice";
+
+import { TimeTravelUnavailableNote, TravelledDirectory } from "./time-travel";
 import {
   drainAction,
   issueCardAction,
@@ -105,6 +118,25 @@ export const maxDuration = 60;
  * `?state=loading` slows the read rather than faking the render. The `key`
  * forces a fresh boundary per state and per customer, so switching re-suspends
  * instead of showing the previous customer's balances under a new heading.
+ *
+ * ===========================================================================
+ * TIME TRAVEL: PARTIAL, AND LABELLED AS PARTIAL
+ * ===========================================================================
+ *
+ * `?asOf=<date>&asKnownAt=<timestamp>` is honoured by the DEPOSIT DIRECTORY on
+ * this screen and NOT by the card and hold console. The directory is pure
+ * ledger — `settledBalanceCents` and `accountAvailability` called with a
+ * travelled snapshot — and the console reads through a module owned by another
+ * worker that takes its own live snapshot internally.
+ *
+ * So the console carries an explicit PINNED TO NOW note whenever the URL names
+ * a point, naming the module and the reason. A screen that ignored the
+ * parameter while showing a time-travel control would be a lie, and this build
+ * fails harder for a false label than for a missing feature.
+ *
+ * WITH NEITHER PARAMETER PRESENT NOTHING ON THIS PAGE CHANGES AT ALL. The
+ * parse reports `absent`, none of the time-travel components render, no extra
+ * query is issued, and the page is exactly the one that was here before.
  */
 export default async function AccountsPage({
   searchParams,
@@ -114,6 +146,23 @@ export default async function AccountsPage({
   const resolvedSearchParams = await searchParams;
   const view = parseConsoleView(resolvedSearchParams);
   const live = isLiveConsole(view);
+
+  // ONE CLOCK, TAKEN ONCE. Nothing below calls `new Date()`.
+  const parsed = parseTimeTravelParams(resolvedSearchParams, systemClock.now());
+  const travelling = parsed.ok && !parsed.request.absent;
+  const basePath = accountsBasePath(resolvedSearchParams);
+  const liveHref = withTimeTravel(basePath, { asOf: null, asKnownAt: null });
+
+  // An impossible coordinate is refused BEFORE a connection is opened, and it
+  // replaces the screen rather than sitting above a page full of figures that
+  // silently answer a different question.
+  if (!parsed.ok) {
+    return (
+      <div className="space-y-6">
+        <RefusalPanel refusals={parsed.refusals} liveHref={liveHref} />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -130,6 +179,14 @@ export default async function AccountsPage({
       </header>
 
       <ProvenanceLine live={live} />
+
+      {travelling ? (
+        <Suspense fallback={null}>
+          <TimeTravelSection request={parsed.request} basePath={basePath} liveHref={liveHref} />
+        </Suspense>
+      ) : (
+        <TimeTravelEntryPoint basePath={basePath} />
+      )}
 
       <DemoStateBar view={view} />
 
@@ -395,4 +452,127 @@ function DemoAccountDirectory() {
       </TableScroll>
     </Panel>
   );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Time travel                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The travelled half of this screen.
+ *
+ * An async server component behind its own Suspense boundary, so resolving the
+ * point and folding five accounts at it never delays the console above — the
+ * two are independent reads and the slower one must not hold the faster one
+ * hostage.
+ */
+async function TimeTravelSection({
+  request,
+  basePath,
+  liveHref,
+}: {
+  readonly request: TimeTravelRequest;
+  readonly basePath: string;
+  readonly liveHref: string;
+}) {
+  const { ledgerConnection } = await import("@/lib/ledger/queries");
+  const { resolveTimePoint } = await import("@/lib/timetravel/point");
+  const { correctionLandmarks } = await import("@/lib/timetravel/landmarks");
+  // `busiestDepositAccountId` is in `readers.ts` and is NOT on the `queries.ts`
+  // forwarding surface. Imported by path rather than added to that surface,
+  // because `src/lib/ledger/**` is not this worker's to edit — reported in
+  // `docs/TIMETRAVEL.md` as a one-line export that belongs there.
+  const { mostActiveDepositAccountId } = await import("@/lib/ledger/readers");
+
+  const conn = await ledgerConnection();
+  const point = await resolveTimePoint(request, conn, systemClock);
+
+  // The control needs somewhere to get its landmarks from. The busiest deposit
+  // account is the one a demo is most likely to have driven, and the bar says
+  // which account they came from rather than implying they are book-wide.
+  const busiest = await mostActiveDepositAccountId({}, conn);
+  const landmarks =
+    busiest === null ? [] : await correctionLandmarks({ accountId: busiest }, conn);
+
+  return (
+    <div className="space-y-6">
+      <TimeTravelBar
+        point={point}
+        basePath={basePath}
+        landmarks={landmarks}
+        liveHref={liveHref}
+      />
+      <CutNotice point={point} />
+      <TravelledDirectory point={point} />
+      <TimeTravelUnavailableNote point={point} />
+    </div>
+  );
+}
+
+/**
+ * The way in, when no point is named.
+ *
+ * Deliberately a link and not a rendered control: with no parameter this page
+ * must be byte-for-byte the page it was before, and a control that reads the
+ * ledger to populate itself is not nothing. It is also the only route to
+ * `/transactions`, which is not in the nav — `src/components/app-shell/NavLinks.tsx`
+ * belongs to another worker and adding an entry there is a one-line change
+ * that is theirs to make.
+ */
+function TimeTravelEntryPoint({ basePath }: { readonly basePath: string }) {
+  return (
+    <aside
+      aria-label="Time travel"
+      className="rounded-lg border border-dashed border-border-strong px-4 py-3"
+    >
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+          Time travel
+        </span>
+        <p className="max-w-prose text-xs leading-relaxed text-muted">
+          Every figure on this console is a fold over journal lines at a value
+          date and a booking watermark. Name a point in the URL —{" "}
+          <span className="font-mono text-text">?{AS_OF_PARAM}=</span> and{" "}
+          <span className="font-mono text-text">?{AS_KNOWN_AT_PARAM}=</span> —
+          and the deposit directory re-renders there.{" "}
+          <Link
+            href="/transactions"
+            className={`underline underline-offset-4 ${FOCUS_RING}`}
+          >
+            /transactions
+          </Link>{" "}
+          honours both axes in full, with the acts that changed the answer.
+        </p>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-1">
+        <Link
+          href={withTimeTravel(basePath, { asKnownAt: null, asOf: null })}
+          aria-current="page"
+          className={`rounded bg-surface-raised px-2 py-1 text-xs font-medium shadow-[inset_0_0_0_1px_var(--color-border-strong)] ${FOCUS_RING}`}
+        >
+          now
+        </Link>
+        <Link
+          href="/transactions?state=edge"
+          className={`rounded px-2 py-1 text-xs text-muted hover:text-text ${FOCUS_RING}`}
+        >
+          show me a corrected day
+        </Link>
+      </div>
+    </aside>
+  );
+}
+
+/** This route with its own query state, as the base every time link builds on. */
+function accountsBasePath(
+  params: Record<string, string | string[] | undefined>,
+): string {
+  const out = new URLSearchParams();
+  for (const key of ["state", "business", "card", AS_OF_PARAM, AS_KNOWN_AT_PARAM]) {
+    const raw = params[key];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (value !== undefined && value !== "") out.set(key, value);
+  }
+  const query = out.toString();
+  return query === "" ? "/accounts" : `/accounts?${query}`;
 }

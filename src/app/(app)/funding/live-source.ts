@@ -54,6 +54,7 @@ import {
   type Availability,
 } from "@/lib/ledger/balance-definitions";
 import {
+  listBusinesses,
   listDepositAccounts,
   listHoldRows,
   readSnapshot,
@@ -382,43 +383,42 @@ function toGateView(decision: TransactDecision): TransactGateView {
 }
 
 /**
- * Every business on the book, with no join to `account`.
+ * Every business on the book, gated.
  *
  * TWO REASONS IT IS SHAPED THIS WAY. The first is honesty: a business with no
  * deposit account — Silverline Freight Co. is one — is invisible to an
  * account-shaped list, so a screen built on `listDepositAccounts()` alone can
- * never answer "why can I not fund Silverline". It can now: the gate refuses it
+ * never answer "why can I not fund Silverline". It can: the gate refuses it
  * `KYB_NEEDS_REVIEW` and the row also says no account has been opened.
  *
- * The second is the ledger boundary. `src/lib/ledger/boundary.test.ts` forbids
- * any module outside `src/lib/ledger/**` from writing SQL against `account`,
- * `journal_entry` or `journal_line`, and this file is not on its allowlist and
- * is not going on it. `business` and `v_business_kyb` are neither; the account
- * side of the join is `listDepositAccounts()`, which is the ledger module's own
- * named reader, and the two are matched in memory.
+ * The second was the ledger boundary, and it no longer applies. This file used
+ * to read `business` on its own and match `listDepositAccounts()` against it in
+ * memory, because `src/lib/ledger/boundary.test.ts` forbids any module outside
+ * `src/lib/ledger/**` from writing SQL against `account` — and there was no
+ * reader for "every business on the book", only for "every account with money
+ * in it". `listBusinesses()` is that reader. The LEFT JOIN it needed is in the
+ * ledger module now, where it can be written, and the in-memory match that
+ * stood in for it is gone.
  */
 async function listGatedBusinesses(
   conn: Sql,
   depositAccountByBusiness: ReadonlyMap<string, string>,
 ): Promise<readonly BusinessView[]> {
-  const rows = await conn<{ id: string; legal_name: string; ein: string | null }[]>`
-    SELECT b.id, b.legal_name, b.ein
-      FROM business b
-     ORDER BY b.legal_name`;
+  const rows = await listBusinesses(conn);
 
   return Promise.all(
     rows.map(async (row): Promise<BusinessView> => {
       // Both gates, exactly as `/payments` reads them: what this deployment
       // does, and what a real-money deployment requiring live evidence would do.
       const [now, strict] = await Promise.all([
-        transactGateForBusiness(row.id, { conn }),
-        transactGateForBusiness(row.id, { conn, policy: { requireLiveEvidence: true } }),
+        transactGateForBusiness(row.businessId, { conn }),
+        transactGateForBusiness(row.businessId, { conn, policy: { requireLiveEvidence: true } }),
       ]);
       return {
-        id: row.id,
-        legalName: row.legal_name,
+        id: row.businessId,
+        legalName: row.legalName,
         ein: row.ein,
-        depositAccountId: depositAccountByBusiness.get(row.id) ?? null,
+        depositAccountId: depositAccountByBusiness.get(row.businessId) ?? null,
         gate: toGateView(now),
         gateIfLiveRequired: toGateView(strict),
       };

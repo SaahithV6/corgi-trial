@@ -32,7 +32,7 @@ do fit behind. See `docs/RAILS.md` §1 for what was there before and why.
 | Slot | Adapter | Provider slug | Status | Evidence | Exercised against a real provider? |
 |---|---|---|---|---|---|
 | **Cards** | `lithic/` | `lithic.card` | **LIVE** | `live` | **Yes** — sandbox key, measurements in DECISIONS 006 |
-| **ACH** | `increase/client.ts` | `increase.ach` | **LIVE code path, NEVER RUN** | `live` | **No.** There is no Increase key in this repo. Every wire shape is `[DOCS]`, from `research/ach/NOTES.md`. Nothing in that file is marked `[MEASURED]`, because nothing in it has been measured. |
+| **ACH** | `increase/client.ts` | `increase.ach` | **PROBED ONLY — no money has moved** | `live` | **Only the probe.** `GET /accounts?limit=1` → 200, 2026-09-11, re-runnable via `increase/probe.integration.test.ts`. Every money-moving wire shape is still `[DOCS]`, from `research/ach/NOTES.md`; nothing in that file is marked `[MEASURED]`. |
 | **ACH** | `achsim/` | `achsim.ach` | **SIMULATED** | `simulated` | n/a — it is the simulator |
 | **USDC** | `stablecoin/adapter.ts` | `base.usdc` | **LIVE** | `live` | **Yes** — confirmed on Base Sepolia |
 | **USDC** | `stablecoin/circle-provider.ts` | `circle.w3s` | **LIVE** | `live` | **Yes** — Circle Web3 Services, hash verified against the chain |
@@ -43,7 +43,9 @@ picked, and it says so out loud:
 
 ```ts
 const { rail, health, engine } = createAchRail();
-// health.label      'LIVE' | 'SIMULATED'
+// health.selected   'live_adapter' | 'simulator'  — which adapter is wired up
+// health.liveness   what a round trip proved, or 'unprobed'
+// health.label      'LIVE' | 'SIMULATED'  — needs BOTH halves, never hand-written
 // health.reason     one sentence an operator can act on
 // health.missingEnv env var NAMES only, never values
 ```
@@ -57,10 +59,24 @@ Never silently. `factory.test.ts` asserts that every selection path emits
 exactly one line and that the no-key path is a `warn`, not an `info` — an
 `info` line is one people filter out.
 
-`achRailHealth(env)` returns the same report with no client constructed and no
-network touched, shaped like `IntegrationReport` in
-`src/lib/webhooks/route-handler.ts` so `/api/health` can render rail slots and
-webhook integrations side by side.
+**The key decides `selected`. It never decides `liveness`.** Both of these are
+synchronous and touch no network, so neither can return a LIVE label, however
+many credentials are set:
+
+```ts
+achRailHealth(env)            // pure; 'unprobed' when a key is present
+createAchRail(opts).health    // constructs a rail; same
+await probeAchRailHealth()    // one real round trip; LIVE, if earned
+```
+
+Until 2026-09-11 the first two published `LIVE` off a non-empty
+`INCREASE_API_KEY` with no call at all — liveness by presence, the DECISIONS 011
+failure, inside the package written to prevent silent dishonesty about this
+exact slot. `docs/RAILS.md` §7 is the full account. `achRailHealth(env)` still
+returns its report with no client constructed and no network touched, shaped
+like `IntegrationReport` in `src/lib/webhooks/route-handler.ts` so `/api/health`
+can render rail slots and webhook integrations side by side — it just no longer
+claims a verdict it did not earn.
 
 ---
 

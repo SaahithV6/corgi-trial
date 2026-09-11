@@ -31,6 +31,7 @@
 import "server-only";
 
 import { sql } from "@/lib/ledger/db";
+import { isMemberState, isTeamRole } from "@/lib/team/roles";
 
 import { CONTROL_READ_BUDGET_MS, DECISION_APPEND_BUDGET_MS, withDeadline } from "./budget";
 import {
@@ -43,6 +44,7 @@ import {
   type DecisionOutcome,
   type DecisionRecord,
   type DecisionSource,
+  type MemberDecisionTerms,
   type Verdict,
 } from "./types";
 
@@ -63,6 +65,21 @@ type LookupRow = {
   readonly note: string | null;
   readonly day_cents: bigint;
   readonly month_cents: bigint;
+};
+
+/** The member half of the same row. All null for a card nobody holds. */
+type MemberRow = {
+  readonly member_id: string | null;
+  readonly member_version_id: string | null;
+  readonly member_version: number | null;
+  readonly member_name: string | null;
+  readonly member_state: string | null;
+  readonly member_role: string | null;
+  readonly member_per_txn_limit_cents: bigint | null;
+  readonly member_daily_limit_cents: bigint | null;
+  readonly member_monthly_limit_cents: bigint | null;
+  readonly member_day_cents: bigint;
+  readonly member_month_cents: bigint;
 };
 
 /**
@@ -110,7 +127,7 @@ export async function readControlsAndSpend(params: {
 
   try {
     const rows = await withDeadline(
-      sql<LookupRow[]>`
+      sql<(LookupRow & MemberRow)[]>`
         SELECT c.id                       AS card_id,
                cc.control_version_id,
                cc.version,
@@ -122,9 +139,24 @@ export async function readControlsAndSpend(params: {
                cc.blocked_mccs,
                cc.note,
                s.day_cents,
-               s.month_cents
+               s.month_cents,
+               cm.member_id,
+               mv.member_version_id,
+               mv.version              AS member_version,
+               ma.display_name         AS member_name,
+               mv.state                AS member_state,
+               mv.role                 AS member_role,
+               mv.per_txn_limit_cents  AS member_per_txn_limit_cents,
+               mv.daily_limit_cents    AS member_daily_limit_cents,
+               mv.monthly_limit_cents  AS member_monthly_limit_cents,
+               ms.day_cents            AS member_day_cents,
+               ms.month_cents          AS member_month_cents
           FROM card c
           LEFT JOIN v_card_control_current cc ON cc.card_id = c.id
+          LEFT JOIN card_member cm            ON cm.card_id = c.id
+          LEFT JOIN team_member tm            ON tm.id = cm.member_id
+          LEFT JOIN actor ma                  ON ma.id = tm.actor_id
+          LEFT JOIN v_team_member_current mv  ON mv.member_id = cm.member_id
           CROSS JOIN LATERAL (
             SELECT
               COALESCE(SUM(d.amount_cents) FILTER (
@@ -141,6 +173,22 @@ export async function readControlsAndSpend(params: {
               AND d.request_status = ANY(${PURCHASE_STATUSES as string[]})
               AND d.decided_at >= now() - interval '40 days'
           ) s
+          CROSS JOIN LATERAL (
+            SELECT
+              COALESCE(SUM(d.amount_cents) FILTER (
+                WHERE book_date(d.decided_at) = book_date(now())
+              ), 0)::bigint AS day_cents,
+              COALESCE(SUM(d.amount_cents) FILTER (
+                WHERE date_trunc('month', book_date(d.decided_at))
+                    = date_trunc('month', book_date(now()))
+              ), 0)::bigint AS month_cents
+            FROM card_auth_decision d
+            WHERE d.member_id = cm.member_id
+              AND d.outcome = 'approve'
+              AND d.source = ${params.source}
+              AND d.request_status = ANY(${PURCHASE_STATUSES as string[]})
+              AND d.decided_at >= now() - interval '40 days'
+          ) ms
          WHERE c.provider = ${params.provider}
            AND c.provider_card_token = ${params.providerCardToken}
          LIMIT 1
@@ -154,7 +202,14 @@ export async function readControlsAndSpend(params: {
     // that card token". It is emphatically not a failure, and `decide()`
     // treats the two oppositely — see `card_not_under_control`.
     if (row === undefined) {
-      return { status: "read", cardId: null, controls: null, spend: { dayCents: 0n, monthCents: 0n } };
+      return {
+        status: "read",
+        cardId: null,
+        controls: null,
+        spend: { dayCents: 0n, monthCents: 0n },
+        member: null,
+        memberSpend: { dayCents: 0n, monthCents: 0n },
+      };
     }
 
     return {
@@ -162,6 +217,8 @@ export async function readControlsAndSpend(params: {
       cardId: row.card_id,
       controls: toControls(row),
       spend: { dayCents: row.day_cents, monthCents: row.month_cents },
+      member: toMember(row),
+      memberSpend: { dayCents: row.member_day_cents, monthCents: row.member_month_cents },
     };
   } catch (thrown) {
     return {
@@ -169,6 +226,46 @@ export async function readControlsAndSpend(params: {
       detail: thrown instanceof Error ? `${thrown.name}: ${thrown.message}` : "control read failed",
     };
   }
+}
+
+/**
+ * The member half of the row, or null.
+ *
+ * `state` and `role` arrive as `text` and are NARROWED HERE rather than cast.
+ * The CHECK constraints in 0033 mean only the known values can be in those
+ * columns, so an unknown one means the schema and this file have drifted — and
+ * the safe answer to "I do not recognise this person's state" on a path that
+ * decides whether money moves is NOT to guess `active`. It returns null, which
+ * makes the card behave as a card with no member: judged by its own controls,
+ * approved or declined on those, and recorded with `member_id: null` so the
+ * gap is visible in the decision log rather than assumed away.
+ *
+ * This is the only place in the module that could throw on a hot path, and it
+ * deliberately does not.
+ */
+function toMember(row: MemberRow): MemberDecisionTerms | null {
+  if (
+    row.member_id === null ||
+    row.member_version_id === null ||
+    row.member_version === null ||
+    row.member_state === null ||
+    row.member_role === null
+  ) {
+    return null;
+  }
+  if (!isMemberState(row.member_state) || !isTeamRole(row.member_role)) return null;
+
+  return {
+    memberId: row.member_id,
+    memberVersionId: row.member_version_id,
+    version: row.member_version,
+    displayName: row.member_name ?? "this cardholder",
+    state: row.member_state,
+    role: row.member_role,
+    perTxnLimitCents: row.member_per_txn_limit_cents,
+    dailyLimitCents: row.member_daily_limit_cents,
+    monthlyLimitCents: row.member_monthly_limit_cents,
+  };
 }
 
 function toControls(row: LookupRow): CardControls | null {
@@ -231,19 +328,28 @@ export async function appendDecision(
     lookup.status === "read" && lookup.controls !== null
       ? lookup.controls.controlVersionId
       : null;
+  // Denormalised at the instant of the decision, not joined later. A card's
+  // member cannot change — `card_member` has the card as its PRIMARY KEY and no
+  // UPDATE — so the join would give the same answer forever; but the per-person
+  // velocity sum has to be an index scan over one column, and that column is
+  // this one. `member_version_id` is the terms this was judged under, pinned
+  // exactly as `control_version_id` pins the card's, so raising somebody's
+  // limit tomorrow cannot make today's decline look wrong.
+  const member = lookup.status === "read" ? (lookup.member ?? null) : null;
 
   try {
     const rows = await withDeadline(
       sql<{ id: string }[]>`
         INSERT INTO card_auth_decision (
           provider, provider_auth_token, provider_card_token,
-          card_id, control_version_id,
+          card_id, control_version_id, member_id, member_version_id,
           amount_cents, mcc, merchant_descriptor, request_status,
           outcome, result_code, rule, reason, inputs,
           decision_latency_us, source, request_id
         ) VALUES (
           ${params.provider}, ${request.providerAuthToken}, ${request.card.token},
           ${cardId}, ${controlVersionId},
+          ${member?.memberId ?? null}, ${member?.memberVersionId ?? null},
           ${request.amountCents}, ${request.mcc}, ${request.merchantDescriptor},
           ${request.requestStatus},
           ${verdict.outcome}, ${verdict.result}, ${verdict.rule}, ${verdict.reason},
@@ -469,6 +575,9 @@ type DecisionRow = {
   readonly inputs: Record<string, unknown>;
   readonly decision_latency_us: number;
   readonly source: DecisionSource;
+  readonly member_id: string | null;
+  readonly member_name: string | null;
+  readonly member_version: number | null;
 };
 
 /**
@@ -489,8 +598,23 @@ export async function listDecisions(params: {
            d.card_id, d.last_four, d.nickname, d.control_version,
            d.amount_cents, d.mcc, d.merchant_descriptor, d.request_status,
            d.outcome, d.result_code, d.rule, d.reason, d.inputs,
-           d.decision_latency_us, d.source
+           d.decision_latency_us, d.source,
+           base.member_id, ma.display_name AS member_name, mv.version AS member_version
       FROM v_card_auth_decision d
+      -- ONE PK LOOKUP BACK TO THE BASE TABLE, AND THE REASON IS WORTH STATING.
+      -- v_card_auth_decision (migration 0014) has an explicit column list, so
+      -- the two columns 0033 added to card_auth_decision are not in it. The
+      -- right fix is two more columns on that view, which needs a migration
+      -- 0033 could no longer be (a migration is immutable once applied) and
+      -- which this work was not scoped to write. So this reaches the same row
+      -- by primary key rather than re-deriving the view's four joins here,
+      -- which would leave a second definition of "a decision with its card and
+      -- its control version" in the repository. Off the hot path: the ASA route
+      -- never calls this.
+      LEFT JOIN card_auth_decision base ON base.id = d.id
+      LEFT JOIN team_member tm        ON tm.id = base.member_id
+      LEFT JOIN actor ma              ON ma.id = tm.actor_id
+      LEFT JOIN team_member_version mv ON mv.id = base.member_version_id
      WHERE d.business_id = ${params.businessId}
      ORDER BY d.decided_at DESC
      LIMIT ${params.limit ?? 25}
@@ -517,6 +641,9 @@ export async function listDecisions(params: {
     inputs: row.inputs,
     decisionLatencyUs: row.decision_latency_us,
     source: row.source,
+    memberId: row.member_id,
+    memberName: row.member_name,
+    memberVersion: row.member_version,
   }));
 }
 

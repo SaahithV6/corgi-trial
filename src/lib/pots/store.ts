@@ -15,6 +15,12 @@ import "server-only";
 
 import type { Sql } from "@/lib/ledger/db";
 import { availableBalance } from "@/lib/ledger/balances";
+import {
+  findEntryByIdempotencyKey,
+  listBusinesses,
+  readAccountIdentities,
+  readAccountIdentity,
+} from "@/lib/ledger/queries";
 
 import type { Availability, MoveDirection, PotFigure } from "./model";
 
@@ -38,25 +44,17 @@ export interface PotBusinessRow {
 export async function listPotBusinesses(
   conn: Sql,
 ): Promise<readonly PotBusinessRow[]> {
-  const rows = await conn<
-    { business_id: string; legal_name: string; main_account_id: string }[]
-  >`
-    SELECT a.business_id AS business_id,
-           b.legal_name  AS legal_name,
-           a.id          AS main_account_id
-      FROM account a
-      JOIN business b ON b.id = a.business_id
-     WHERE a.code = '2100'
-       AND a.book = 'financial'
-       AND a.business_id IS NOT NULL
-       AND a.closed_at IS NULL
-     ORDER BY b.legal_name`;
-
-  return rows.map((row) => ({
-    businessId: row.business_id,
-    legalName: row.legal_name,
-    mainAccountId: row.main_account_id,
-  }));
+  // `code = '2100'` exactly, financial book, open — which is the LEDGER's
+  // definition of a customer's spendable leaf and was written down here a
+  // second time. `listBusinesses()` is where it lives; this filter is the only
+  // part that belonged to pots.
+  return (await listBusinesses(conn))
+    .filter((b) => b.depositOpen && b.depositAccountId !== null)
+    .map((b) => ({
+      businessId: b.businessId,
+      legalName: b.legalName,
+      mainAccountId: b.depositAccountId as string,
+    }));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -81,7 +79,6 @@ export async function listPots(
       pot_id: string;
       business_id: string;
       account_id: string;
-      account_code: string;
       name: string;
       purpose: string | null;
       opened_at: Date;
@@ -91,21 +88,26 @@ export async function listPots(
     SELECT pb.pot_id,
            pb.business_id,
            pb.account_id,
-           a.code AS account_code,
            pb.name,
            pb.purpose,
            pb.opened_at,
            pb.balance_cents
       FROM v_pot_balance pb
-      JOIN account a ON a.id = pb.account_id
      WHERE pb.business_id = ${businessId}::uuid
      ORDER BY pb.opened_at`;
+
+  // `account.code` is the one column the join was for, and it is the ledger's
+  // column. The view already decides which pots belong to this business.
+  const accounts = await readAccountIdentities(
+    rows.map((r) => r.account_id),
+    conn,
+  );
 
   return rows.map((row) => ({
     potId: row.pot_id,
     businessId: row.business_id,
     accountId: row.account_id,
-    accountCode: row.account_code,
+    accountCode: accounts.get(row.account_id)?.code ?? "",
     name: row.name,
     purpose: row.purpose,
     openedAt: row.opened_at,
@@ -153,8 +155,6 @@ export async function findPot(
       business_id: string;
       name: string;
       pot_account_id: string;
-      main_account_id: string;
-      entity_id: string;
       balance_cents: bigint;
     }[]
   >`
@@ -162,24 +162,32 @@ export async function findPot(
            p.business_id   AS business_id,
            p.name          AS name,
            p.account_id    AS pot_account_id,
-           main.id         AS main_account_id,
-           main.entity_id  AS entity_id,
            COALESCE(pb.balance_cents, 0)::bigint AS balance_cents
       FROM pot p
-      JOIN account a       ON a.id = p.account_id
-      JOIN account main    ON main.id = a.parent_id
       LEFT JOIN v_pot_balance pb ON pb.pot_id = p.id
      WHERE p.id = ${potId}::uuid`;
 
   const row = rows[0];
   if (row === undefined) return null;
+
+  // The main leaf is the pot account's PARENT, followed through the chart
+  // rather than looked up a second time by `(code, business_id)`: the pot's
+  // parent IS the main leaf by construction (`v_pot_orphan` fires if it ever
+  // is not), so the tree cannot point at the wrong customer. Walking it is the
+  // ledger's job — `parentAccountId` is a column of `account`.
+  const potAccount = await readAccountIdentity(row.pot_account_id, conn);
+  const parentId = potAccount?.parentAccountId ?? null;
+  const main = parentId === null ? null : await readAccountIdentity(parentId, conn);
+  // Both joins were INNER: a pot whose account or whose parent has gone is not
+  // a row, and must not become a half-resolved transfer target.
+  if (main === null) return null;
   return {
     potId: row.pot_id,
     businessId: row.business_id,
     name: row.name,
     potAccountId: row.pot_account_id,
-    mainAccountId: row.main_account_id,
-    entityId: row.entity_id,
+    mainAccountId: main.accountId,
+    entityId: main.entityId,
     balanceCents: row.balance_cents,
   };
 }
@@ -412,17 +420,7 @@ export async function findEntryByKey(
   idempotencyKey: string,
   conn: Sql,
 ): Promise<{ entryId: string; bookingSeq: bigint; valueDate: string } | null> {
-  const rows = await conn<
-    { id: string; booking_seq: bigint; value_date: string }[]
-  >`
-    SELECT id, booking_seq, to_char(value_date,'YYYY-MM-DD') AS value_date
-      FROM journal_entry
-     WHERE idempotency_key = ${idempotencyKey}`;
-
-  const row = rows[0];
-  return row === undefined
-    ? null
-    : { entryId: row.id, bookingSeq: row.booking_seq, valueDate: row.value_date };
+  return findEntryByIdempotencyKey(idempotencyKey, conn);
 }
 
 /** The system actor every posting on this path is attributed to. */

@@ -59,6 +59,7 @@
 import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
+import { readCorrectionGroup as readLedgerCorrectionGroup } from "@/lib/ledger/queries";
 
 import { ageBucketOf, severityOf } from "./aging";
 import {
@@ -287,68 +288,40 @@ export async function readCorrectionGroup(
   entryId: string,
   conn: Sql = sql,
 ): Promise<readonly EntryDetail[]> {
-  const entries = await conn<
-    {
-      id: string;
-      booking_seq: bigint;
-      booking_time: string;
-      value_date: string;
-      entry_type: "original" | "reversal" | "rebook";
-      description: string;
-      external_ref: string | null;
-      idempotency_key: string;
-      reverses_entry_id: string | null;
-      correction_group_id: string;
-    }[]
-  >`
-    SELECT e.id, e.booking_seq, e.booking_time::text AS booking_time,
-           e.value_date::text AS value_date, e.entry_type, e.description,
-           e.external_ref, e.idempotency_key, e.reverses_entry_id,
-           e.correction_group_id
-      FROM journal_entry e
-     WHERE e.correction_group_id = (
-             SELECT correction_group_id FROM journal_entry WHERE id = ${entryId}::uuid)
-     ORDER BY e.booking_seq`;
+  // Two queries over `journal_entry` and `journal_line`, moved behind the
+  // ledger's own name for them. The reader returns entries and lines flat and
+  // RAW — debit-positive, credit-negative, no `normal_side` fold — which is
+  // what this screen prints: the journal as the journal, not from the
+  // customer's point of view. Nesting them is presentation and stays here.
+  const group = await readLedgerCorrectionGroup(entryId, conn);
+  if (group.entries.length === 0) return [];
 
-  if (entries.length === 0) return [];
+  const byEntry = new Map<string, EntryLineDetail[]>();
+  for (const line of group.lines) {
+    const detail: EntryLineDetail = {
+      ordinal: line.ordinal,
+      accountCode: line.accountCode,
+      accountName: line.accountName,
+      amountCents: line.amountCents,
+      railControl: line.railControl,
+    };
+    const list = byEntry.get(line.entryId);
+    if (list === undefined) byEntry.set(line.entryId, [detail]);
+    else list.push(detail);
+  }
 
-  const lines = await conn<
-    {
-      entry_id: string;
-      ordinal: number;
-      code: string;
-      name: string;
-      amount_cents: bigint;
-      rail_control: string | null;
-    }[]
-  >`
-    SELECT l.entry_id, l.ordinal, a.code, a.name, l.amount_cents,
-           a.rail_control::text AS rail_control
-      FROM journal_line l
-      JOIN account      a ON a.id = l.account_id
-     WHERE l.entry_id = ANY(${entries.map((e) => e.id)}::uuid[])
-     ORDER BY l.entry_id, l.ordinal`;
-
-  return entries.map((e) => ({
-    entryId: e.id,
-    bookingSeq: e.booking_seq,
-    bookingTime: e.booking_time,
-    valueDate: e.value_date,
-    entryType: e.entry_type,
+  return group.entries.map((e) => ({
+    entryId: e.entryId,
+    bookingSeq: e.bookingSeq,
+    bookingTime: e.bookingTime,
+    valueDate: e.valueDate,
+    entryType: e.entryType,
     description: e.description,
-    externalRef: e.external_ref,
-    idempotencyKey: e.idempotency_key,
-    reversesEntryId: e.reverses_entry_id,
-    correctionGroupId: e.correction_group_id,
-    lines: lines
-      .filter((l) => l.entry_id === e.id)
-      .map((l) => ({
-        ordinal: l.ordinal,
-        accountCode: l.code,
-        accountName: l.name,
-        amountCents: l.amount_cents,
-        railControl: l.rail_control,
-      })),
+    externalRef: e.externalRef,
+    idempotencyKey: e.idempotencyKey,
+    reversesEntryId: e.reversesEntryId,
+    correctionGroupId: e.correctionGroupId,
+    lines: byEntry.get(e.entryId) ?? [],
   }));
 }
 

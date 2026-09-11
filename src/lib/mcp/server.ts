@@ -61,8 +61,9 @@ import {
   WRITE_LIMIT_PER_MINUTE,
   clientKey,
 } from "./ratelimit";
+import { refusalForTool } from "./limits";
 import { bookDate } from "./time";
-import { findTool } from "./tools";
+import { TOOLS, findTool } from "./tools";
 import { ToolError, type Gateway, type Grant, type ToolContext } from "./types";
 
 /** 256 KB. A tool call is a few hundred bytes; anything larger is not one. */
@@ -409,11 +410,31 @@ async function callTool(
 
   const tool = findTool(name);
   if (tool === undefined) {
+    // The available list is derived from the registry rather than typed out.
+    // It used to be a literal of four names and it stayed a literal of four
+    // names through three tools being added, so a model that guessed
+    // `list_pots` was told, in writing, that `list_pots` did not exist.
+    //
+    // `refused` is the more interesting half. "Unknown tool" is the worst
+    // answer to a guess, because it is indistinguishable from a typo and a
+    // model will keep guessing synonyms. When the guess is an operation this
+    // surface deliberately refuses, say so in the error and point at the tool
+    // that carries the argument — `list_agent_limits` — instead of letting the
+    // model conclude it spelled something wrong.
+    const refusal = refusalForTool(name);
     return errorResult(
       failure(id, INVALID_PARAMS, `unknown tool "${name}"`, {
-        available: ["get_balance", "list_transactions", "list_recon_breaks", "initiate_payment"],
+        available: TOOLS.map((t) => t.name),
+        ...(refusal === undefined
+          ? {}
+          : {
+              refused: true,
+              reason: `This is not a missing tool, it is a refused operation: ${refusal.operation.toLowerCase()}. See docs/AGENT-LIMITS.md §${refusal.section}.`,
+              instead: refusal.instead,
+              explain_with: "list_agent_limits",
+            }),
       }),
-      "UNKNOWN_TOOL",
+      refusal === undefined ? "UNKNOWN_TOOL" : "REFUSED_OPERATION",
     );
   }
 
@@ -493,6 +514,23 @@ function summarise(tool: string, data: Record<string, unknown>): Record<string, 
       return { rows: Array.isArray(data["open_breaks"]) ? data["open_breaks"].length : 0 };
     case "get_balance":
       return { basis: (data["as_of"] as Record<string, unknown> | undefined)?.["basis"] ?? null };
+    case "list_disputes":
+      return {
+        cases: Array.isArray(data["cases"]) ? data["cases"].length : 0,
+        // Worth having in the audit line on its own: this is customer money
+        // the bank advanced and is holding, and "who asked about it, when" is
+        // a question that gets asked after the fact rather than before.
+        held_cents:
+          (data["totals"] as Record<string, Record<string, unknown>> | undefined)?.["held"]?.[
+            "cents"
+          ] ?? null,
+      };
+    case "list_accruals":
+      return { days: Array.isArray(data["days"]) ? data["days"].length : 0 };
+    case "list_agent_limits":
+      // The query, never the answer. A model repeatedly asking whether it may
+      // approve payments is a signal worth being able to grep for.
+      return { query: data["query"], matched: data["matched"] };
     default:
       return null;
   }

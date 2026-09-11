@@ -1,6 +1,16 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
 
+import { systemClock } from "@/lib/timetravel/clock";
+import {
+  AS_KNOWN_AT_PARAM,
+  AS_OF_PARAM,
+  parseTimeTravelParams,
+  withTimeTravel,
+} from "@/lib/timetravel/params";
+import { RefusalPanel } from "@/components/timetravel/Refusal";
+
+import { StatementTimeTravel } from "./time-travel";
 import { StatementStateBar } from "@/components/statements/StatementStateBar";
 import { StatementsSkeleton, StatementsView } from "@/components/statements/StatementsView";
 import { createFixtureStatementsScreen } from "@/components/statements/screen-fixtures";
@@ -76,14 +86,75 @@ type StatementsPageProps = {
  * forces a fresh boundary per view so switching states, days or anchors
  * re-suspends instead of showing the previous document under a new heading —
  * which on a statements screen would be worse than a flicker.
+ *
+ * ===========================================================================
+ * TIME TRAVEL, AND WHY IT SPLITS IN TWO HERE
+ * ===========================================================================
+ *
+ * `?asOf=` is honoured COMPLETELY and invisibly: it is mapped onto this
+ * screen's own `?day=` filter, because they are the same axis under two names.
+ * The whole screen — both readings, the corrections, the hashes, the versions —
+ * then renders that value date.
+ *
+ * `?asKnownAt=` is honoured in its OWN panel, above the document, and is
+ * deliberately not folded into `?as=`. That control has four positions and
+ * each is a watermark with a NAME a reader can check — the watermark a
+ * document was issued against, the watermark a day was frozen at. An arbitrary
+ * instant is not one of those four, and `BelievedAnchor` is a closed type in
+ * `src/components/statements/data-contract.ts`, which belongs to another
+ * worker. Squeezing an instant into it would mean either mislabelling the
+ * left-hand column or snapping the reader's instant to the nearest anchor and
+ * answering a different question. Both are false labels.
+ *
+ * WITH NEITHER PARAMETER PRESENT THIS PAGE IS UNCHANGED. The parse reports
+ * `absent`, the panel does not render, no extra query is issued, and the
+ * filter is the one `parseStatementFilter` produced from the URL as before.
  */
 export default async function StatementsPage({ searchParams }: StatementsPageProps) {
-  const filter = parseStatementFilter(await searchParams);
+  const resolved = await searchParams;
+
+  // ONE CLOCK, TAKEN ONCE, AT THE TOP.
+  const parsed = parseTimeTravelParams(resolved, systemClock.now());
+
+  const basePath = statementsBasePath(resolved);
+  const liveHref = withTimeTravel(basePath, { asOf: null, asKnownAt: null });
+
+  // Refused before a connection is opened, and it replaces the screen rather
+  // than sitting above a document that silently answers a different question.
+  if (!parsed.ok) {
+    return (
+      <div className="space-y-6">
+        <RefusalPanel refusals={parsed.refusals} liveHref={liveHref} />
+      </div>
+    );
+  }
+
+  // `asOf` IS the value axis this screen already has. Mapped onto `?day=`
+  // rather than handled separately, so the document below renders the day the
+  // URL asked for — the whole screen honours the value axis, not a panel.
+  const forFilter =
+    parsed.request.asOfValueDate === null
+      ? resolved
+      : { ...resolved, day: parsed.request.asOfValueDate };
+
+  const filter = parseStatementFilter(forFilter);
   const source = await selectSource(filter.state);
+  const travelling = !parsed.request.absent;
 
   return (
     <div className="space-y-6">
       <StatementStateBar filter={filter} />
+
+      {travelling ? (
+        <Suspense fallback={null}>
+          <StatementTimeTravel
+            request={parsed.request}
+            accountId={filter.accountId}
+            basePath={basePath}
+            liveHref={liveHref}
+          />
+        </Suspense>
+      ) : null}
 
       <Suspense
         key={`${filter.state}:${filter.accountId ?? ""}:${filter.businessDate ?? ""}:${filter.version ?? ""}:${filter.anchor ?? ""}`}
@@ -116,4 +187,18 @@ async function selectSource(state: string): Promise<StatementsScreenSource> {
 
   const { loadStatementsScreen } = await import("./live-source");
   return { load: loadStatementsScreen };
+}
+
+/** This route with its own query state, as the base every time link builds on. */
+function statementsBasePath(
+  params: Record<string, string | string[] | undefined>,
+): string {
+  const out = new URLSearchParams();
+  for (const key of ["state", "account", "v", "as", AS_OF_PARAM, AS_KNOWN_AT_PARAM]) {
+    const raw = params[key];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (value !== undefined && value !== "") out.set(key, value);
+  }
+  const query = out.toString();
+  return query === "" ? "/statements" : `/statements?${query}`;
 }

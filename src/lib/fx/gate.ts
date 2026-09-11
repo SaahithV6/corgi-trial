@@ -57,15 +57,25 @@
  *      nothing to quote, and requiring one would be ceremony. The caller
  *      decides which payouts are cross-border; the gate does not guess.
  *
- * ── IT FAILS CLOSED, UNLIKE THE PAYEE GATE ──────────────────────────────────
+ * ── IT FAILS CLOSED, AND SO DOES THE PAYEE GATE NOW ─────────────────────────
  *
- * `gatePaymentOnPayee()` returns `null` — proceed — when it cannot reach the
- * database, and that is right for it: it is an additional check in front of
- * controls that do hold, and a destination-validation service that can stop
- * every payment by falling over is the bigger risk.
+ * This paragraph used to draw a contrast: `gatePaymentOnPayee()` returned
+ * `null` — proceed — when it could not reach the database, and that was
+ * defended here as right for it, on the grounds that a destination-validation
+ * service able to stop every payment by falling over is the bigger risk.
  *
- * THIS GATE TAKES THE OPPOSITE POSITION AND THE ASYMMETRY IS DELIBERATE. It is
- * not an additional check — it IS the control. "The customer agreed a price"
+ * That argument does not survive being looked at. The payee gate's `catch`
+ * wrapped the whole standing-warning section, so a query error, a timeout or a
+ * malformed row was indistinguishable from "no warning found" — the condition
+ * the guard exists to catch was the same condition that silently disabled it.
+ * It now returns `PAYEE_STANDING_CHECK_UNAVAILABLE` naming which read failed,
+ * while a null identity or zero payee rows still count as ANSWERS and proceed.
+ * A payment that could not be checked is not a payment that has been checked.
+ *
+ * So both gates fail closed, for the same reason rather than by coincidence,
+ * and what follows is no longer an asymmetry. It is still worth stating,
+ * because this gate is not an additional check — it IS the control. "The
+ * customer agreed a price"
  * has no second enforcement point anywhere in the system, so a gate that
  * proceeds when it cannot read is a gate that sends unpriced money into
  * another currency whenever Postgres hiccups. An outage here stops payouts,
