@@ -2,7 +2,10 @@
 
 import { useActionState, useId } from "react";
 
-import { setClientCardControlsAction } from "@/app/(app)/client/cards-actions";
+import {
+  setClientCardControlsAction,
+  setClientCardFrozenAction,
+} from "@/app/(app)/client/cards-actions";
 import { FOCUS_RING, Note } from "@/components/ui/primitives";
 import { MCC_GROUPS } from "@/lib/cards/mcc";
 
@@ -80,6 +83,81 @@ function Receipt({ result }: { readonly result: ClientControlResult }) {
         </dl>
       )}
     </Note>
+  );
+}
+
+/**
+ * Freeze, in one press.
+ *
+ * The rules form below can also freeze a card, and it is the wrong place to do
+ * it from: it needs a radio, a reason, and five other fields that are all part
+ * of the version it writes, so a bad character in a limit box refuses the
+ * freeze along with the limit. Stopping a card is the safest thing a cardholder
+ * can do and it was the slowest control on the screen.
+ *
+ * This is deliberately NOT behind a confirmation. Freezing is reversible by the
+ * button that replaces it, costs nothing if it was a mistake, and a card being
+ * used by somebody who should not have it is measured in seconds. The
+ * irreversible direction is the other one — but turning a card back on only
+ * restores the limits it already had, so it is not destructive either, and a
+ * dialog in front of it would train people to click through dialogs.
+ *
+ * The receipt is the action's own sentence, printed where the button is, so the
+ * page does not have to be re-read to know whether the press landed.
+ */
+export function FreezeCardButton({
+  cardId,
+  businessId,
+  frozen,
+  cardLabel,
+}: {
+  readonly cardId: string;
+  readonly businessId: string;
+  readonly frozen: boolean;
+  readonly cardLabel: string;
+}) {
+  const [result, action, pending] = useActionState(
+    setClientCardFrozenAction,
+    CLIENT_CONTROL_IDLE,
+  );
+  const mine = result.cardId === null || result.cardId === cardId;
+
+  return (
+    <form action={action} className="mt-3 flex flex-col items-start gap-1.5">
+      <input type="hidden" name="cardId" value={cardId} />
+      <input type="hidden" name="businessId" value={businessId} />
+      <input type="hidden" name="intent" value={frozen ? "unfreeze" : "freeze"} />
+      <button
+        type="submit"
+        disabled={pending}
+        aria-label={
+          frozen ? `Turn ${cardLabel} back on` : `Freeze ${cardLabel} now`
+        }
+        className={`rounded border border-border-strong px-3 py-1.5 text-xs font-medium ${FOCUS_RING} disabled:opacity-60 ${
+          frozen ? "bg-surface" : "text-negative"
+        }`}
+      >
+        {pending
+          ? frozen
+            ? "Turning it on…"
+            : "Freezing…"
+          : frozen
+            ? "Turn this card back on"
+            : "Freeze this card"}
+      </button>
+      <span className="max-w-prose text-[11px] leading-relaxed text-muted">
+        {frozen
+          ? "It keeps the limits it already had."
+          : "Stops every payment on it at once. Reversible here; the limits are untouched."}
+      </span>
+      {mine && result.status !== "idle" ? (
+        <div className="w-full max-w-prose">
+          <Note emphasis={result.status === "failed"} title={result.code ?? "Done"}>
+            <p>{result.message}</p>
+          </Note>
+        </div>
+      ) : null}
+    </form>
   );
 }
 

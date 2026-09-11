@@ -8,7 +8,11 @@ import {
 import { describeMcc } from "@/lib/cards/mcc";
 import { formatUsd } from "@/lib/format/money";
 
-import { CardControlsForm, type CardControlsDefaults } from "./CardControlsForm";
+import {
+  CardControlsForm,
+  FreezeCardButton,
+  type CardControlsDefaults,
+} from "./CardControlsForm";
 import type { CardLine, CardsScreen, DecisionLine } from "./contract";
 import { ClientHeaderBar } from "./Chrome";
 import type { ClientView } from "./view-state";
@@ -202,6 +206,11 @@ function CardRow({
   readonly card: CardLine;
   readonly businessId: string;
 }) {
+  const cardLabel =
+    card.holderName ??
+    card.nickname ??
+    (card.lastFour === null ? "this card" : `the card ending ${card.lastFour}`);
+
   return (
     <li className="px-5 py-4">
       <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
@@ -264,13 +273,27 @@ function CardRow({
         </div>
       </div>
 
+      {/* One press, above the rules form. Stopping a card is the safest thing
+          on this screen and it used to be the slowest: a radio, a mandatory
+          reason, and five other fields that could refuse the freeze on a typo. */}
+      <FreezeCardButton
+        cardId={card.cardId}
+        businessId={businessId}
+        frozen={card.state === "frozen"}
+        cardLabel={cardLabel}
+      />
+
+      {/* KEYED ON THE STATE IT OPENS WITH. Every field below is uncontrolled
+          (`defaultChecked`, `defaultValue`), which React does not re-sync when
+          new props arrive — so after the one-press freeze above revalidated
+          this page, the radio here still read "On", and the next "Save these
+          rules" would have written `active` and quietly unfrozen a card nobody
+          asked to unfreeze. Changing the key remounts the form so it re-opens
+          pre-filled with what is actually in force. */}
       <CardControlsForm
+        key={`${card.state ?? "ungoverned"}:${card.controlVersion ?? 0}`}
         defaults={controlDefaults(card, businessId)}
-        cardLabel={
-          card.holderName ??
-          card.nickname ??
-          (card.lastFour === null ? "this card" : `the card ending ${card.lastFour}`)
-        }
+        cardLabel={cardLabel}
       />
     </li>
   );

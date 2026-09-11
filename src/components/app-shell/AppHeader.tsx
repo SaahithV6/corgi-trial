@@ -1,4 +1,7 @@
 import Link from "next/link";
+import type { Route } from "next";
+
+import { isOperator } from "@/lib/authz";
 
 import { FOCUS_RING } from "../ui/primitives";
 
@@ -46,22 +49,33 @@ const PLATFORM = {
 } as const;
 
 export function AppHeader({ role }: { readonly role: Role }) {
+  /**
+   * The wordmark goes to the principal's own home.
+   *
+   * It used to be `/accounts` unconditionally, which for a customer session is
+   * a link to a 403 — the one link in the chrome that survived hiding the
+   * operator nav, because it is not in `LIVE` and so `visibleTo()` never saw
+   * it. Exactly the shape of failure this repo keeps finding: the guard's
+   * population stopped one element short of the thing that was wrong.
+   */
+  const home = (isOperator(role) ? "/accounts" : "/client") as Route;
+
   return (
     <header className="border-b border-border bg-surface">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-3 px-6 py-3">
         <div className="flex items-baseline gap-2.5">
           <Link
-            href="/accounts"
+            href={home}
             className={`text-sm font-semibold tracking-tight ${FOCUS_RING}`}
           >
             Corgi
           </Link>
           <span className="text-[11px] uppercase tracking-[0.08em] text-muted">
-            Ops console
+            {isOperator(role) ? "Ops console" : "Your account"}
           </span>
         </div>
 
-        <NavLinks />
+        <NavLinks role={role} />
 
         <div className="ml-auto flex items-center gap-4">
           <RoleSwitcher role={role} />

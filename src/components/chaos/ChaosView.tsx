@@ -26,6 +26,7 @@
  */
 
 import { Money } from '@/components/ui/Money';
+import { isRetryable } from '@/components/ui/error-detail';
 import { Badge, Note, Panel, TableScroll, TD_CLASS, TH_CLASS } from '@/components/ui/primitives';
 import { RetryButton } from '@/components/ui/RetryButton';
 import { formatTimestamp } from '@/lib/format/datetime';
@@ -34,21 +35,26 @@ import type { ErrorShape } from '@/lib/result';
 import { ChaosBanner } from './ChaosBanner';
 import { ChaosControls } from './ChaosControls';
 import type { ChaosDataSource, ChaosRunView, ChaosView as View } from './data-contract';
-import { isLiveState, type ChaosViewState } from './view-state';
+import { CHAOS_STATE_UNREADABLE } from './unreadable';
 
-export async function ChaosView({
-  source,
-  view,
-}: {
-  readonly source: ChaosDataSource;
-  readonly view: ChaosViewState;
-}) {
+/**
+ * WHICH STATE THIS IS COMES FROM THE SOURCE, NOT FROM THE URL. It used to take
+ * the parsed view as well and badge the header `LIVE LEDGER` whenever the URL
+ * named a live state — which said "live" on a refusal, because the URL is a
+ * request to read the book and not evidence that the book was read. The badge
+ * now comes from `data.source`, which only a source that actually loaded can
+ * set, and a failed load badges nothing at all.
+ */
+export async function ChaosView({ source }: { readonly source: ChaosDataSource }) {
   const result = await source.load();
 
   if (!result.ok) {
+    // No badge on a refusal. CHAOS OFF above a read that never happened is the
+    // reassurance this whole repair exists to withdraw, and `LIVE LEDGER` over
+    // it would be claiming the ledger it failed to open.
     return (
       <div className="space-y-6">
-        <Header live={isLiveState(view.state)} asOf={null} on={false} />
+        <Header live={null} asOf={null} on={null} />
         <ErrorPanel error={result.error} />
       </div>
     );
@@ -65,9 +71,10 @@ export async function ChaosView({
 
       {live ? null : (
         <p className="max-w-prose text-xs leading-relaxed text-muted">
-          These figures are a fixture. Either a demo state other than <code>default</code> is
-          selected, or no database is configured — see the state bar above. Nothing on this screen
-          is a statement about a real book, and no control on it is armed.
+          These figures are a fixture, because a demo state other than <code>default</code> is
+          selected — see the state bar above. A deployment with no database does not land here: it
+          refuses, and says so. Nothing on this screen is a statement about a real book, and no
+          control on it is armed.
         </p>
       )}
 
@@ -116,9 +123,12 @@ function Header({
   asOf,
   on,
 }: {
-  readonly live: boolean;
+  // `null` on both means "this render read nothing, so it badges nothing".
+  // CHAOS OFF and LIVE LEDGER are each an answer to a question somebody opens
+  // this screen to settle, and a refusal has neither answer to give.
+  readonly live: boolean | null;
   readonly asOf: string | null;
-  readonly on: boolean;
+  readonly on: boolean | null;
 }) {
   return (
     <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
@@ -131,8 +141,12 @@ function Header({
         </p>
       </div>
       <div className="flex items-center gap-3">
-        <Badge tone={on ? 'negative' : 'quiet'}>{on ? 'CHAOS ARMED' : 'CHAOS OFF'}</Badge>
-        <Badge tone={live ? 'neutral' : 'quiet'}>{live ? 'LIVE LEDGER' : 'FIXTURE DATA'}</Badge>
+        {on === null ? null : (
+          <Badge tone={on ? 'negative' : 'quiet'}>{on ? 'CHAOS ARMED' : 'CHAOS OFF'}</Badge>
+        )}
+        {live === null ? null : (
+          <Badge tone={live ? 'neutral' : 'quiet'}>{live ? 'LIVE LEDGER' : 'FIXTURE DATA'}</Badge>
+        )}
         {asOf === null ? null : (
           <span className="text-[11px] text-muted">as at {formatTimestamp(asOf)}</span>
         )}
@@ -141,13 +155,30 @@ function Header({
   );
 }
 
+/**
+ * The refusal.
+ *
+ * TWO CAUSES, ONE PANEL, DIFFERENT WORDS. A read that failed and a deployment
+ * with no database configured both arrive here, and both refuse identically —
+ * no switch, no countdown, no invariant verdict, no control to press. They
+ * differ in their code, in the note under the heading, and in whether a retry
+ * is offered. The retry control is dropped when the failure says it is not
+ * retryable, because a button offering to re-run a read that cannot succeed
+ * sits next to the words "retryable: no" and contradicts them.
+ */
 function ErrorPanel({ error }: { readonly error: ErrorShape }) {
+  const retryable = isRetryable(error);
+  const noDatabase = error.code === CHAOS_STATE_UNREADABLE.code;
+
   return (
     <section className="rounded-lg border border-negative/40 bg-surface">
       <header className="border-b border-border px-5 py-4">
-        <h2 className="text-sm font-semibold tracking-tight text-negative">
-          The chaos screen could not be read
-        </h2>
+        <div className="flex flex-wrap items-baseline gap-3">
+          <h2 className="text-sm font-semibold tracking-tight text-negative">
+            {noDatabase ? 'The chaos screen was not read' : 'The chaos screen could not be read'}
+          </h2>
+          {noDatabase ? <Badge tone="negative">NO DATABASE</Badge> : null}
+        </div>
       </header>
       <div className="space-y-4 px-5 py-5">
         <dl className="grid gap-3 sm:grid-cols-[10rem_1fr]">
@@ -157,13 +188,27 @@ function ErrorPanel({ error }: { readonly error: ErrorShape }) {
             What happened
           </dt>
           <dd className="max-w-prose text-sm leading-relaxed">{error.message}</dd>
+          <dt className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+            Retryable
+          </dt>
+          <dd className="font-mono text-xs">{retryable ? 'yes' : 'no'}</dd>
         </dl>
-        <Note title="Nothing was armed and nothing was delivered">
-          This screen failed on a <strong>read</strong>. A read cannot arm a chaos control and
-          cannot release a withheld delivery, so whatever state chaos was in before this page
-          loaded, it is still in — and every armed control is still on its own expiry clock.
-        </Note>
-        <RetryButton />
+        {noDatabase ? (
+          <Note title="Nothing was armed, and nothing here says nothing is armed">
+            This screen <strong>read nothing</strong>. A read cannot arm a chaos control and cannot
+            release a withheld delivery, so whatever state chaos was in before this page loaded, it
+            is still in — but this page did not find out what that state is. If a control is armed
+            somewhere, it is still on its own expiry clock and this screen is not showing the
+            countdown.
+          </Note>
+        ) : (
+          <Note title="Nothing was armed and nothing was delivered">
+            This screen failed on a <strong>read</strong>. A read cannot arm a chaos control and
+            cannot release a withheld delivery, so whatever state chaos was in before this page
+            loaded, it is still in — and every armed control is still on its own expiry clock.
+          </Note>
+        )}
+        {retryable ? <RetryButton /> : null}
       </div>
     </section>
   );

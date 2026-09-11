@@ -79,11 +79,12 @@ export async function AccrualView({
 
       {view.source === "fixture" ? (
         <p className="max-w-prose text-xs leading-relaxed text-muted">
-          These figures are a fixture. Either a demo state other than{" "}
-          <code>default</code> is selected, or no database is configured — see
-          the state bar above. The arithmetic is still real: the fixture calls
-          the same <code>allocateForDate()</code> the ledger does, so it cannot
-          disagree with the rule. What is not real is that any of it was posted.
+          These figures are a fixture, because a demo state other than{" "}
+          <code>default</code> is selected — see the state bar above. A
+          deployment with no database does not land here: it refuses, and says
+          so. The arithmetic is still real: the fixture calls the same{" "}
+          <code>allocateForDate()</code> the ledger does, so it cannot disagree
+          with the rule. What is not real is that any of it was posted.
         </p>
       ) : null}
 

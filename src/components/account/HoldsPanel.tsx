@@ -1,7 +1,10 @@
+import Link from "next/link";
+
 import { formatAge, formatCountdown, formatTimestamp } from "@/lib/format/datetime";
 import { Money } from "@/components/ui/Money";
 import {
   Badge,
+  FOCUS_RING,
   Panel,
   TD_CLASS,
   TH_CLASS,
@@ -110,7 +113,18 @@ function HoldRow({ hold, asOf }: { readonly hold: Hold; readonly asOf: string })
     <tr className={hold.remainingCents === 0 ? "text-muted" : ""}>
       <td className={TD_CLASS}>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium text-text">{hold.descriptor}</span>
+          {/* The descriptor is the only handle an operator has on a hold, and it
+              used to be plain text — so the authorisation arithmetic behind the
+              three amount columns, which has its own page at
+              /accounts/holds/<id>, was reachable from the account directory and
+              not from the account itself. */}
+          <Link
+            href={`/accounts/holds/${hold.id}`}
+            className={`font-medium text-text underline underline-offset-4 ${FOCUS_RING}`}
+            title="Open this hold: the event set, the fold at each step, and the closed(E) terms."
+          >
+            {hold.descriptor}
+          </Link>
           <Badge tone="quiet">{KIND_LABEL[hold.kind]}</Badge>
 
           {status === "over_captured" ? (

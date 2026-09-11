@@ -6,7 +6,7 @@ import {
   TD_CLASS,
   TH_CLASS,
 } from "@/components/ui/primitives";
-import { formatDate } from "@/lib/format/datetime";
+import { formatDate, formatTimestamp } from "@/lib/format/datetime";
 
 import type { PayeeRow } from "./data-contract";
 import {
@@ -48,6 +48,12 @@ export function PayeeTable({
   return (
     <TableScroll>
       <table className="w-full border-collapse">
+        <caption className="px-5 pb-3 text-left text-xs text-muted">
+          {rows.length} payee{rows.length === 1 ? "" : "s"}, newest added first — ordered by
+          when the payee was keyed, not by when it was last checked. Archived payees are
+          listed with the rest and marked; nothing is hidden from this table and there is no
+          second page.
+        </caption>
         <thead>
           <tr className="border-b border-border">
             <th scope="col" className={TH_CLASS}>Payee</th>
@@ -110,11 +116,15 @@ export function PayeeTable({
                 </td>
 
                 <td className={TD_CLASS}>
-                  <OutcomeBadge outcome={row.outcome} />
+                  <OutcomeBadge outcome={row.outcome} acknowledged={row.acknowledged} />
                   {row.outcome === "warned" ? (
                     <div className="mt-1 text-[11px] text-muted">
                       {row.acknowledged
-                        ? `signed by ${row.acknowledgedByName}`
+                        ? `signed by ${row.acknowledgedByName ?? "an actor no longer on file"}${
+                            row.acknowledgedAt === null
+                              ? ""
+                              : ` · ${formatTimestamp(row.acknowledgedAt)}`
+                          }`
                         : "nobody has signed for it"}
                     </div>
                   ) : null}

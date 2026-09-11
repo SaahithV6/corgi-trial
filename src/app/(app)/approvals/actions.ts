@@ -80,6 +80,14 @@ const decisionSchema = z.object({
   }),
   intent: z.enum(["approve", "reject", "release"]),
   reason: z.string().max(500).optional(),
+  /**
+   * The release confirmation. Absent on approve and reject, which add an event
+   * and stop; required on release, which posts the entry and hands the
+   * instruction to a rail. Checked HERE and not only in the form, because a
+   * checkbox a hand-assembled POST can omit is a courtesy and not a control —
+   * the same reason the maker-checker rule lives in a trigger.
+   */
+  releaseConfirmed: z.literal("yes").optional(),
 });
 
 const SUCCESS: Record<"approve" | "reject" | "release", string> = {
@@ -106,6 +114,7 @@ export async function decideAction(
     contentHash: formData.get("contentHash"),
     intent: formData.get("intent"),
     reason: formData.get("reason") ?? undefined,
+    releaseConfirmed: formData.get("releaseConfirmed") ?? undefined,
   });
 
   if (!parsed.success) {
@@ -118,8 +127,21 @@ export async function decideAction(
     };
   }
 
-  const { instructionId, contentHash, intent, reason } = parsed.data;
+  const { instructionId, contentHash, intent, reason, releaseConfirmed } = parsed.data;
   const log = rootLogger.child({ instructionId, intent });
+
+  // Release is the one intent that moves money. It is refused unless the
+  // request carried the confirmation the form makes the operator tick, so the
+  // friction survives a POST that skipped the screen.
+  if (intent === "release" && releaseConfirmed === undefined) {
+    return {
+      status: "refused",
+      code: "RELEASE_NOT_CONFIRMED",
+      message:
+        "A release must carry the confirmation that names the amount and the destination. Nothing was written and no entry was posted.",
+      instructionId,
+    };
+  }
 
   if (!hasDatabase()) {
     // Unreachable from the screen — with no database `/approvals` draws the

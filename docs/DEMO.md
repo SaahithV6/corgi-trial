@@ -1,4 +1,4 @@
-# Demo access, the two roles, and a click path
+# Demo access, the three roles, and a click path
 
 Live: **https://corgi-trial-psi.vercel.app**
 
@@ -239,6 +239,62 @@ It is also not a substitute for the control — the server action ignores the
 component entirely, and a POST assembled by hand reaches the same trigger and is
 refused by the same `RAISE EXCEPTION`. Core-loop leg 5 does exactly that,
 deliberately, and is refused.
+
+---
+
+### 2.1 The third role: **Customer** — and what it actually changes
+
+Added on the last day, after this was asked directly: *why can I reach the ops
+console from the customer side?* The answer was that you could, and it was worse
+than it looked. `/client` rendered links to **all sixteen operator screens**, no
+operator screen checked a role, and both roles that existed — Staff and Approver
+— were Corgi employees. The client surface was a **view, not a tenant
+boundary**: the per-business `WHERE business_id = $1` predicates under
+`src/app/(app)/client/` were correct and always had been, so isolation was real
+one layer down and absent at the layer a person clicks.
+
+| | **Staff / Approver** | **Customer** |
+| --- | --- | --- |
+| `/client`, `/client/activity`, `/client/cards`, `/client/pay`, `/client/approvals`, `/client/pots`, `/client/disputes`, `/client/payouts`, `/client/open` | yes | **yes** |
+| `/accounts`, `/payments`, `/approvals`, `/audit`, `/team`, `/dashboard`, `/onboarding`, `/economics`, … and every operator screen added after this was written | yes | **no — HTTP 403, code `OPERATOR_ONLY`** |
+| `/` (the front door) | yes | yes — see the caveat below |
+
+Measured on a local production build, `next start`:
+
+```
+$ curl -s -i -H 'Cookie: corgi_demo_role=customer' http://localhost:3020/accounts | head -4
+HTTP/1.1 403 Forbidden
+cache-control: no-store
+content-type: text/html; charset=utf-8
+x-corgi-authz: deny; OPERATOR_ONLY
+```
+
+**This is authorisation, not authentication.** §1 is still true: there is
+nothing to sign into, and the cookie is still a demo credential anyone can type.
+What changed is that it now *restricts* rather than merely *decorates* — and a
+restriction driven by an unverified claim is safe in a way a grant is not, since
+the worst a forged cookie can do is lock its own sender out. Approving money is
+still decided by the database, not by the cookie.
+
+**Where the decision lives.** One module, `src/lib/authz/`, and it is **default
+deny**: the customer-reachable set is the explicit list and *everything else* is
+operator-only, including routes that do not exist yet. It is enforced twice — in
+`src/middleware.ts`, which answers before any route or server action runs, and
+again in `src/app/(app)/layout.tsx`, which re-derives the same decision and fails
+closed if the middleware never ran. The nav calls the same function, so a link is
+painted if and only if the server would serve it. Hiding the nav is **not** the
+control; the 403 is.
+
+**The switch still works in both directions**, which `verify-demo.mjs` checks 8
+and 9 pin: Customer is a third button on the same segmented control, posting the
+same server action, and the default with no cookie is still Staff (check 7).
+
+**Known residual leak, stated rather than hidden.** `/` stays reachable to a
+customer, and `/` renders platform-wide summary figures. It is reachable because
+it is where the role switch lives — refusing it would strand a person in the
+customer role with no way back, and the submission email points a stranger at
+exactly that URL. Closing it means `/` rendering a different page per principal,
+which is a page change and not a guard change. It is the next thing to do.
 
 ---
 
@@ -882,3 +938,142 @@ waiting for the cron. `POST /api/cron/standing` ticks the standing-order
 schedule the same way. Both also accept Vercel's cron header, and both answer 401
 with neither. The cron itself runs daily rather than hourly, and the reason is in
 [`CUT-LIST.md`](./CUT-LIST.md) §3.3.
+
+---
+
+# §9. The provider-outage step, scripted for a human — 2026-09-11
+
+The published attack is the brief's own wording: *"Turn off your issuing
+provider's webhooks for five minutes mid-demo and ask what the customer sees."*
+
+**This step is performed by a person, on purpose.** It is deliberately NOT in
+`scripts/livefire.mjs`, and the reason is the whole argument for doing it by
+hand: a Lithic event subscription left disabled by a crashed, timed-out or
+`SIGKILL`ed test run is a broken card rail for the rest of the demo, and an
+automated suite cannot guarantee it will get to run its own restore. A person
+holding the restore command can.
+
+## 9.1 What is safe here, and it was measured
+
+Two facts, both read off the live sandbox at 2026-09-11T18:2xZ:
+
+```
+GET https://sandbox.lithic.com/v1/auth_stream          -> {"enrolled": true}
+GET https://sandbox.lithic.com/v1/event_subscriptions  -> ep_3J8yb9xommtOdKee1FzpUA4GBrW
+                                                          disabled: false
+                                                          url: https://corgi-trial-psi.vercel.app/api/webhooks/lithic
+```
+
+**Auth Stream Access is enrolled SEPARATELY from the event subscription.** So
+disabling the subscription stops the asynchronous clearing feed and does **not**
+stop card authorisation at the terminal. Cards keep working while the feed is
+dark. That is exactly the state the attack is about: the money is being
+authorised, and we are not being told about it.
+
+## 9.2 Why silence alone is not enough any more
+
+`/api/health` no longer treats `MAX(webhook_inbox.received_at)` plus a clock as
+an outage, because that cannot tell *"the provider stopped delivering while
+transactions were happening"* from *"nobody swiped a card"*. It narrows the
+silence against `card_auth_decision WHERE source = 'provider'` — the ASA record,
+written synchronously while Lithic holds an authorisation open at a terminal, on
+a channel independent of the inbox whose silence is in question.
+
+So the sequence matters. **Disable, and THEN transact.** Disabling and waiting
+reads `dormant` and correctly stays green:
+
+```json
+"verdict": "dormant",
+"note": "no transaction has been initiated since the newest delivery ...
+         There is nothing outstanding for this provider to have sent"
+```
+
+That is not the endpoint failing to notice an outage. That is the endpoint
+refusing to page somebody because the card rail was quiet — and it is the exact
+reason live-fire attack 7 no longer asserts `status === "degraded"` (it induces
+its silence by sending nothing, so `dormant` is the honest reading of what it
+induced). See the header of
+`src/test/livefire/attack-07-provider-outage.test.ts`.
+
+## 9.3 The step
+
+Run these from the repo root with `set -a; . ./.env; set +a` already done.
+
+**1 — Show the feed healthy.** Open `/accounts`. No banner.
+
+```bash
+curl -s "$BASE/api/health" | jq '.status,
+  (.integrations.webhookHealth.providers[] | select(.provider=="lithic") | {verdict, secondsSinceLastDelivery}),
+  (.integrations.transactionInitiation.providers[] | select(.provider=="lithic") | {verdict, initiatedSinceLastDelivery})'
+```
+
+**2 — Turn the webhooks off.** Note the `url` is REQUIRED by Lithic's schema on
+this PATCH; sending `{"disabled": true}` alone answers `400 "url" is a required
+property`.
+
+```bash
+curl -s -X PATCH \
+  -H "Authorization: $LITHIC_API_KEY" -H 'content-type: application/json' \
+  -d '{"url":"https://corgi-trial-psi.vercel.app/api/webhooks/lithic","disabled":true}' \
+  https://sandbox.lithic.com/v1/event_subscriptions/ep_3J8yb9xommtOdKee1FzpUA4GBrW
+```
+
+**3 — TRANSACT while it is dark.** This is the half that makes it an outage
+rather than a quiet hour. Use the **Simulate an authorisation** form on
+`/accounts` (a real `POST /v1/simulate/authorize`), or curl it. The card
+authorises — ASA is still enrolled — and the clearing webhook never arrives.
+
+**4 — Wait past 180s** (`staleAfterSeconds` for Lithic) and re-read health. The
+narrowing now has traffic to find:
+
+```
+webhookHealth.lithic.verdict                        stale
+transactionInitiation.lithic.verdict                transacting
+transactionInitiation.lithic.initiatedSinceLastDelivery   >= 1
+webhookHealth.lithic.degradesDeployment             true
+webhookHealth.degradedBy                            ["lithic"]
+status                                              degraded
+```
+
+**5 — Ask what the customer sees.** Reload `/accounts`. The banner reads
+**"Issuing provider feed is quiet — lithic"**, with *"no delivery for N
+minutes"* rendered from the endpoint's own number, and **the balances below it
+are still there.** They are not blanked and not spinning, because every figure
+on that page is a fold over rows that are already durable. The banner says the
+narrow true thing — there may be events we have not heard about — not the wide
+false one, "your balance is wrong".
+
+**6 — RESTORE. Do this before anything else, and verify it.**
+
+```bash
+curl -s -X PATCH \
+  -H "Authorization: $LITHIC_API_KEY" -H 'content-type: application/json' \
+  -d '{"url":"https://corgi-trial-psi.vercel.app/api/webhooks/lithic","disabled":false}' \
+  https://sandbox.lithic.com/v1/event_subscriptions/ep_3J8yb9xommtOdKee1FzpUA4GBrW
+
+# VERIFY by re-reading, not by trusting the PATCH's response:
+curl -s -H "Authorization: $LITHIC_API_KEY" \
+  https://sandbox.lithic.com/v1/event_subscriptions | jq '.data[] | {token, disabled}'
+# must print  "disabled": false
+```
+
+**7 — Drain the backlog** and show it applies exactly once:
+
+```bash
+curl -s -X POST -H "authorization: Bearer $DRAIN_TOKEN" "$BASE/api/drain"
+```
+
+## 9.4 What the suite proves instead, without the risk
+
+Live-fire attack 7 replays the induced outage's **own published facts** through
+`attributeDeliverySilence` — the same pure function `/api/health` calls — with
+exactly one input varied: provider-sourced ASA decisions after the last
+delivery. With `0` the verdict is `dormant` and `degradedBy` is empty. With `1`
+it is `transacting`, `degradesDeployment` is `true`, `degradedBy` is
+`["lithic"]` and the top-level status would read `degraded`. The narrowing can
+only ever subtract on a counted zero; it cannot silence real loss.
+
+**What that does NOT prove, and §9.3 does:** that a genuinely disabled
+subscription produces that second state end to end. If the panel wants to see
+the endpoint actually turn red, §9.3 is the only thing that shows it, and it
+needs a human at step 6.

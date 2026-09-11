@@ -4,6 +4,9 @@ import type { Metadata } from "next";
 import { DemoStateBar } from "@/components/onboarding/DemoStateBar";
 import { OnboardingSkeleton, OnboardingView } from "@/components/onboarding/OnboardingView";
 import { parseOnboardingView } from "@/components/onboarding/demo-state";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 export const metadata: Metadata = {
   title: "Onboarding · Corgi ops console",
@@ -42,13 +45,17 @@ export default async function OnboardingPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const view = parseOnboardingView(await searchParams);
+  // ONE VALUE, TWO SURFACES. The state bar's badge and note, and whether
+  // `OnboardingView` reads live or refuses, both come from this line, so they
+  // cannot disagree about what this screen read.
+  const noDatabase = !hasDatabase();
 
   return (
     <div className="space-y-6">
-      <DemoStateBar view={view} />
+      <DemoStateBar view={view} noDatabase={noDatabase} />
 
       <Suspense key={view.state} fallback={<OnboardingSkeleton />}>
-        <OnboardingView view={view} />
+        <OnboardingView view={view} noDatabase={noDatabase} />
       </Suspense>
     </div>
   );

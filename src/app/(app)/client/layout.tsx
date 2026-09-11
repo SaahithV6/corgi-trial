@@ -5,7 +5,7 @@ import { readRole, ROLE_LABEL } from "@/components/app-shell/role";
 /**
  * The client surface's own shell.
  *
- * A nested layout under `(app)`, so these five screens keep the console's
+ * A nested layout under `(app)`, so these nine screens keep the console's
  * header and the provider-health banner and add one thing of their own: a
  * standing statement of what this surface is and, more importantly, what it is
  * not. It is rendered on every client screen rather than on a landing page,
@@ -44,7 +44,7 @@ export default async function ClientLayout({
           Customer view · one business
         </p>
         <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted">
-          These five screens are the bank&rsquo;s customer speaking to their own
+          These nine screens are the bank&rsquo;s customer speaking to their own
           money: one business, their words, no chart-of-accounts codes and no
           other customer&rsquo;s figures anywhere on the page. Every read is
           scoped inside the query, by a <code>WHERE business_id</code> predicate

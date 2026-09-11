@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { FOCUS_RING } from "@/components/ui/primitives";
+import { Badge, FOCUS_RING } from "@/components/ui/primitives";
 
 import {
   DEMO_STATES,
@@ -23,8 +23,29 @@ import {
  * front of a panel without running the tick — and an accrual tick is the one
  * job on this console that posts money with no human in between, so a screen
  * that could trigger one by being looked at would be indefensible.
+ *
+ * ONE SCREEN, ONE CLAIM ABOUT ITS DATA SOURCE. `noDatabase` comes from
+ * `page.tsx`, which resolved it once with `hasDatabase()` and used the same
+ * value to choose the source `AccrualView` reads through. On the `default`
+ * state — the only live one — it replaces the hint rather than sitting beside
+ * it: the default hint reads "from the database", and left standing over a
+ * screen that opened no connection it is a second claim that disagrees with the
+ * first.
  */
-export function AccrualStateBar({ filter }: { readonly filter: AccrualFilter }) {
+const NO_DATABASE_NOTE =
+  "No database is configured for this deployment. No schedule was listed, no day was read and no invariant view was counted — an empty day table here is not a tick with nothing to do, and a drift count of nought is a view nobody queried.";
+
+export function AccrualStateBar({
+  filter,
+  noDatabase = false,
+}: {
+  readonly filter: AccrualFilter;
+  readonly noDatabase?: boolean;
+}) {
+  // `default` is the only state that reads the database, so it is the only one
+  // that has nothing to show without one.
+  const refusing = noDatabase && filter.state === "default";
+
   return (
     <aside
       aria-label="Demo states"
@@ -58,10 +79,12 @@ export function AccrualStateBar({ filter }: { readonly filter: AccrualFilter }) 
             );
           })}
         </div>
+
+        {refusing ? <Badge tone="negative">NO DATABASE</Badge> : null}
       </div>
 
       <p className="mt-2 max-w-prose text-[11px] leading-relaxed text-muted">
-        {DEMO_STATE_HINTS[filter.state]}
+        {refusing ? NO_DATABASE_NOTE : DEMO_STATE_HINTS[filter.state]}
       </p>
     </aside>
   );

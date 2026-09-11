@@ -747,3 +747,152 @@ is what makes the claim true.
 | 5 | Lithic subscription + delivery log | screenshot, §5 shot 1 | sandbox badge, `ep_3J8yb9xommtOdKee1FzpUA4GBrW`, the production URL, `SUCCESS`/`202` rows |
 | 6 | Increase ACH lifecycle | screenshot, §5 shot 2 | `sandbox_ach_transfer_x5vdo5m7b6k924sszlms`, `returned`, **`settled_at` still set**, `insufficient_fund` |
 | 7 | Stripe test mode | screenshot, §5 shot 3 | the TEST MODE banner, `we_1UEAf8DgSL5WTGpm2qVqN478`, all four identity events |
+
+---
+
+# LIVE FIRE — run of 2026-09-11T18:29:07Z · PASS 7 · FAIL 0 · SKIP 1 · 312s
+
+```
+node scripts/livefire.mjs
+target     https://corgi-trial-psi.vercel.app
+database   corgi_app@ep-curly-tooth-ayhug2be-pooler.c-5.us-east-2.aws.neon.tech/neondb
+providers  Lithic sandbox LIVE · Increase sandbox LIVE
+```
+
+One run, against production, posting real money. **A SKIP IS NOT A PASS.**
+
+| # | Attack | Verdict | |
+|---|---|---|---|
+| 1 | $50 fuel-pump auth: AVAILABLE drops 5000, LEDGER does not move | **PASS** | 1/1 |
+| 2 | $73.40 capture: hold released exactly once, available not clamped | **SKIP** | 2 passed, 1 skipped |
+| 3 | Backdated reversal: corrected figure AND as-believed, both at once | **PASS** | 3/3 |
+| 4 | Settlement before its authorisation ends exactly where in-order does | **PASS** | 1/1 |
+| 5 | Self-approval refused by the DATABASE (SQLSTATE 42501) | **PASS** | 4/4 |
+| 6 | Row deleted from tonight's scheme file → `in_ledger_not_file` break | **PASS** | 3/3 |
+| 7 | Issuing-provider webhook outage degrades visibly, invents no money | **PASS** | 3/3 |
+| 8 | Dedupe against a genuinely signed provider replay: twice is one | **PASS** | 4/4 |
+
+## The one non-PASS, with its reason
+
+**Attack 2 — SKIP.** Two of its three assertions passed: the hold's memo
+entries net to zero (one opening, one release, `-5000` then `+5000`), the
+$73.40 settled in exactly one financial entry, and available came out
+un-clamped and negative — `ledger(4475436) − holds(67000) − uncleared(5550000)`
+exactly.
+
+It skipped on the third because **no `hold_closure` row was written**, and the
+test records that as *a decision, not a gap*. The reason was measured on the
+Lithic sandbox during this very run, which is what makes it worth reading:
+
+> Transaction `123048ca-ec41-462f-96ad-30ae2f51fede`: AUTHORIZATION 5000 →
+> CLEARING 7340 (over-capture; status SETTLED, `amounts.hold` 0) → `POST
+> /v1/simulate/authorization_advice` 9000 → HTTP 201, Lithic appended
+> AUTHORIZATION_ADVICE 9000 APPROVED → CLEARING 1660 APPROVED, settlement now
+> -9000.
+
+**Over-capture is not terminal.** After the over-capture the authorisation rose
+again and the hold reopened for the un-captured 1660 cents, which the network
+then really captured. `hold_closure` is append-only with `PRIMARY KEY
+(hold_id)`, so a closure written on `C >= A` would have freed money that was
+still authorised, and undoing it needs a `hold_closure_reversal` — the exact
+$60 failure migration 0011 exists to clean up. The closure row lands on
+something genuinely terminal: `is_final`, an explicit close, or the seven-day
+expiry sweep.
+
+That is a defensible design position, but it is **not** the attack's published
+claim, so it scores SKIP and not PASS.
+
+## Attack 7 — the assertion that was wrong, and what replaced it
+
+Attack 7 asserted `status === "degraded"` after opening a deliberate silence.
+**That assertion encoded the precise defect that had just been removed from the
+endpoint underneath it**, so it was rewritten rather than repaired.
+
+Escalation used to be `MAX(webhook_inbox.received_at)` and a clock. That
+measures *time since the last webhook* when the question is *are we losing
+deliveries*, and it cannot separate "the provider stopped delivering while
+transactions were happening" from "nobody swiped a card". Measured on this
+deployment at 17:56Z with **no outage in progress**: verdict `stale`,
+`degradesDeployment: true`, while the liveness probe read `GET /v1/cards → 200`
+in the same response.
+
+`/api/health` now narrows the silence against `card_auth_decision WHERE source =
+'provider'` — the ASA record, written synchronously while Lithic holds an
+authorisation open at a terminal, on a channel independent of the inbox whose
+silence is in question. **Attack 7 induces its outage by sending nothing**, so
+the honest verdict is `dormant`.
+
+Measured this run:
+
+```
+dark window 179s (started 'fresh' at 6s, 0 restarts)
+webhookHealth.lithic.verdict                            stale  (184s, inside the 180-900s band)
+published lastDelivery == MAX(webhook_inbox.received_at)  2026-09-11T18:31:10.827Z
+transactionInitiation.lithic.verdict                    dormant
+transactionInitiation.lithic.initiatedSinceLastDelivery  0   (last initiation 211s ago, BEFORE that delivery)
+narrowedDeliveryAlarm                                   true
+degradedBy                                              []
+status                                                  ok
+```
+
+**And the claim the attack's wording is actually about, proven without touching
+the subscription:** the run replays its own published facts through
+`attributeDeliverySilence` — the same pure function `/api/health` calls — with
+exactly one input varied.
+
+| ASA decisions after last delivery | verdict | degradesDeployment | degradedBy | status |
+|---|---|---|---|---|
+| 0 *(this run's real state)* | `dormant` | false | `[]` | `ok` |
+| 1 *(one card at a terminal, 1s later)* | `transacting` | **true** | `["lithic"]` | **`degraded`** |
+
+The narrowing only ever subtracts on a counted zero; it cannot silence an outage
+that is losing deliveries.
+
+**NOT PROVEN BY THIS RUN, and stated as such:** that a genuinely disabled
+subscription produces the second row end to end. **No Lithic event subscription
+was disabled at any point.** Subscription `ep_3J8yb9xommtOdKee1FzpUA4GBrW` was
+read twice and reads `disabled: false`; the only PATCH attempted was a no-op
+that Lithic rejected with `400 "url" is a required property`, so nothing was
+mutated. Inducing a true outage requires disabling the subscription and **then**
+transacting — a scripted human step in `docs/DEMO.md` §9, deliberately not
+automated, because a subscription left disabled by a crashed or `SIGKILL`ed run
+is a broken card rail for the rest of the demo.
+
+Attack 7 also still asserts the customer-facing half, and it passed: the
+deployed console renders `data-provider-status="provider-down"`, *"Issuing
+provider feed is quiet — lithic"*, *"no delivery for 3 minutes"* against the
+endpoint's 185s, **with the balances still rendered underneath rather than
+blanked.** The banner keys off `verdict === "stale"`, not off
+`degradesDeployment` — so the customer is told the feed is quiet even when the
+deployment is correctly not paging anybody, which is the right layering.
+
+## Rows this run wrote
+
+The ledger is append-only; none of this can be removed.
+
+- **Attack 1** — Lithic txn `ace633f6-44b8-486f-a539-6616a2bdab17`; hold
+  `c4e146a2-0185-45b1-9c8f-058b20161458` (origin `authorization`); memo entries
+  on business `1151e7b5`, available -1129224 → -1134224, ledger unchanged.
+- **Attack 2** — Lithic txns `123048ca-ec41-462f-96ad-30ae2f51fede` and
+  `f519e1d2-a25e-4fbb-8db8-9ad361572874`; hold
+  `1893917f-a8da-4d10-a0ae-a58714dd8593`, 2 memo entries netting 0; one
+  financial entry of 7340.
+- **Attack 3** — business `f1e1fa3e-0000-4000-8000-000000000003`; entries
+  `874eda4f`, `32fcb0c3` (reversal), `b5e42f0a`, `9751e47a` (reversal); inbox
+  rows `47ae5814`, `3bc5c882`, `fc07ccea`; booking_seq 11935 → 11948.
+- **Attack 4** — transactions `9311f116` (in-order) and `aac5b0c1`
+  (`clearing_first`), both ledger delta -7340.
+- **Attack 5** — payment instruction `f1031501-1129-4153-8260-e5a5419df67f`
+  (420000 cents), 1 approved event by a second human.
+- **Attack 6** — recon run `6424e1d5-074a-43cf-8a90-1d074c5b69a5`; planted break
+  ref `LF6-MTXAKI1J-3` (139 cents); settlement entries at booking_seq
+  11961–11964, synthetic business date 2027-10-18.
+- **Attack 7** — business `f1e1fa7e-0000-4000-8000-000000000007`; hold
+  `82609905-bb7c-4a53-bc59-9915bd10403e`; event
+  `d67a5c6d-20a8-4e43-8565-c4ba70f1e52e`; booking_seq 11965 → 11966.
+- **Attack 8** — inbox row `07ddf92c-c99f-47fc-adb0-8f6c0634be3b`, exactly one
+  for `msg_3JC4LKRlpPrLmrOQ4IbcfIpJ9Tz` after 1 delivery + 2 signed replays + 1
+  tampered replay.
+
+Trial balance read 0 at every assertion point; `v_hold_drift` and
+`v_hold_release_drift` both 0.

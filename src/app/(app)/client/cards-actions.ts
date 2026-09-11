@@ -124,6 +124,152 @@ function limitFact(label: string, cents: bigint | null): ControlFact {
   };
 }
 
+/**
+ * Freeze or unfreeze one card, in one press.
+ *
+ * ===========================================================================
+ * WHY THIS IS NOT THE RULES FORM
+ * ===========================================================================
+ *
+ * `setClientCardControlsAction` below is the right shape for setting limits and
+ * the wrong shape for stopping a card. Saving the rules form requires choosing
+ * a radio, typing a reason, and submitting five other fields that are all part
+ * of the version being written — so a card somebody is trying to stop RIGHT NOW
+ * stays live until they have also satisfied a note field, and a typo in a limit
+ * box (`LIMIT_INVALID`) refuses the freeze along with the limit. The safest
+ * thing a cardholder can do was the hardest thing on the screen.
+ *
+ * So freezing is its own control, with its own action, and it is one press.
+ *
+ * WHAT IT CARRIES FORWARD. A control change is an INSERT of a COMPLETE version
+ * (`setCardControls`), not a patch, so freezing has to re-state the limits that
+ * are already in force or it would silently drop them. They are read in the
+ * SAME statement that proves the card is this customer's, so there is no window
+ * between the two and no second round trip.
+ *
+ * WHY THE NOTE IS WRITTEN HERE AND NOT ASKED FOR. `note` is NOT NULL and it is
+ * the first thing read when a decline is disputed. Asking for it is what makes
+ * the rules form slow, and a freeze does not need a reason to be defensible —
+ * the record says exactly what happened and who did it, which is the whole job
+ * of that column. The sentence stored is true of the only thing this action can
+ * do.
+ *
+ * IDEMPOTENT ON PURPOSE. Pressing Freeze on an already-frozen card writes no
+ * new version and says so, rather than appending v9, v10, v11 to a card nobody
+ * changed. A version series is read by people; double-clicking a button must
+ * not put noise in it.
+ */
+export async function setClientCardFrozenAction(
+  _previous: ClientControlResult,
+  formData: FormData,
+): Promise<ClientControlResult> {
+  const cardId = String(formData.get("cardId") ?? "");
+  const businessId = String(formData.get("businessId") ?? "");
+  if (!UUID.test(cardId) || !UUID.test(businessId)) {
+    return failed("CARD_NOT_ON_THIS_BUSINESS", NOT_YOURS, null);
+  }
+
+  const freeze = String(formData.get("intent") ?? "") === "freeze";
+
+  // One statement: the two-column predicate that decides whose card this is,
+  // and the version in force, together. `LEFT JOIN LATERAL` so a card nobody
+  // has ever set rules on still comes back — it can be frozen too.
+  const [row] = await sql<
+    {
+      card_state: CardState | null;
+      per_txn_limit_cents: bigint | null;
+      daily_limit_cents: bigint | null;
+      monthly_limit_cents: bigint | null;
+      blocked_mccs: string[] | null;
+    }[]
+  >`
+    SELECT cc.card_state,
+           cc.per_txn_limit_cents,
+           cc.daily_limit_cents,
+           cc.monthly_limit_cents,
+           cc.blocked_mccs
+      FROM card c
+      LEFT JOIN LATERAL (
+        SELECT v.card_state,
+               v.per_txn_limit_cents,
+               v.daily_limit_cents,
+               v.monthly_limit_cents,
+               v.blocked_mccs
+          FROM card_control_version v
+         WHERE v.card_id = c.id
+         ORDER BY v.version DESC
+         LIMIT 1
+      ) cc ON TRUE
+     WHERE c.id = ${cardId}::uuid
+       AND c.business_id = ${businessId}::uuid
+     LIMIT 1
+  `;
+  if (row === undefined) {
+    return failed("CARD_NOT_ON_THIS_BUSINESS", NOT_YOURS, null);
+  }
+
+  const alreadyFrozen = row.card_state === "frozen";
+  if (alreadyFrozen === freeze) {
+    return {
+      status: "ok",
+      code: null,
+      message: freeze
+        ? "This card was already frozen. Nothing changed and no new version was written — nothing is approved on it until you turn it back on."
+        : "This card was already on. Nothing changed and no new version was written; payments on it are judged against the limits below.",
+      facts: [],
+      cardId,
+      at: new Date().toISOString(),
+    };
+  }
+
+  const actor = await currentActor();
+  if (actor === null) {
+    return failed(
+      "NO_ACTOR",
+      "This session does not resolve to anybody on the book, so there is nobody to record as having made this change.",
+      cardId,
+    );
+  }
+
+  const written = await setCardControls({
+    cardId,
+    draft: {
+      cardState: freeze ? "frozen" : "active",
+      perTxnLimitCents: row.per_txn_limit_cents,
+      dailyLimitCents: row.daily_limit_cents,
+      monthlyLimitCents: row.monthly_limit_cents,
+      blockedMccs: row.blocked_mccs ?? [],
+      note: freeze
+        ? "Frozen from the customer's own card screen."
+        : "Turned back on from the customer's own card screen.",
+    },
+    actorId: actor.id,
+  });
+
+  if (!written.ok) return failed(written.code, written.message, cardId);
+
+  revalidatePath("/client/cards");
+
+  const c = written.controls;
+  return {
+    status: "ok",
+    code: null,
+    message: freeze
+      ? "This card is frozen. Nothing will be approved on it until you turn it back on, whatever the limits say. The card is not cancelled and the limits it had are unchanged."
+      : "This card is on again. Payments are judged against the limits it already had — freezing never changed them.",
+    facts: [
+      { label: "Rules version", value: `v${c.version}`, mono: true },
+      { label: "In force from", value: c.effectiveFrom, mono: true },
+      { label: "Card", value: c.cardState === "frozen" ? "frozen" : "active" },
+      limitFact("Per payment", c.perTxnLimitCents),
+      limitFact("Per day", c.dailyLimitCents),
+      limitFact("Per month", c.monthlyLimitCents),
+    ],
+    cardId,
+    at: new Date().toISOString(),
+  };
+}
+
 export async function setClientCardControlsAction(
   _previous: ClientControlResult,
   formData: FormData,

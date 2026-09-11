@@ -5,6 +5,7 @@ import type { Route } from "next";
 import { usePathname } from "next/navigation";
 
 import { CLIENT_SCREENS } from "@/components/client/view-state";
+import { visibleTo, type Role } from "@/lib/authz";
 
 import { FOCUS_RING } from "../ui/primitives";
 
@@ -107,7 +108,23 @@ export function isClientHref(href: string): boolean {
  * see whether a link is REACHABLE on the screen a reader is using, which is the
  * same failure it was written to catch, one layer down.
  */
-export function NavLinks() {
+/**
+ * THE NAV FOLLOWS THE GUARD. IT DOES NOT REPLACE IT.
+ *
+ * `visibleTo()` runs the same `authorize()` the middleware and the `(app)`
+ * layout run, over these same hrefs, so a link is painted if and only if the
+ * server would serve it. That is the only relationship between the two worth
+ * having: one policy, three readers, and no chance of the chrome advertising a
+ * refusal or — far worse — of somebody deciding that not painting the link was
+ * the fix. It is not. The fix is the 403; this is cosmetics downstream of it.
+ *
+ * `LIVE` above is deliberately unfiltered and still carries every front-door
+ * screen, because `NavLinks.test.ts` asserts that completeness in both
+ * directions and loosening it to accommodate a role would give up the property
+ * that caught `/economics` and `/transactions` shipped-and-linked-from-nowhere.
+ * The filter is applied here, at render, against the principal.
+ */
+export function NavLinks({ role }: { readonly role: Role }) {
   const pathname = usePathname();
 
   /**
@@ -141,14 +158,17 @@ export function NavLinks() {
     );
   };
 
-  const staff = LIVE.filter((item) => !isClientHref(item.href));
-  const client = LIVE.filter((item) => isClientHref(item.href));
+  const permitted = visibleTo(role, LIVE);
+  const staff = permitted.filter((item) => !isClientHref(item.href));
+  const client = permitted.filter((item) => isClientHref(item.href));
 
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-      <nav aria-label="Operations console" className="flex flex-wrap items-center gap-1">
-        {staff.map(link)}
-      </nav>
+      {staff.length === 0 ? null : (
+        <nav aria-label="Operations console" className="flex flex-wrap items-center gap-1">
+          {staff.map(link)}
+        </nav>
+      )}
 
       {client.length === 0 ? null : (
         <nav

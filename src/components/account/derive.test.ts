@@ -5,7 +5,7 @@ import type { ErrorShape, Result } from "@/lib/result";
 
 import type { Hold, Posting } from "./data-contract";
 import { DEMO_ACCOUNTS, createFixtureSource, isLiveView } from "./fixtures";
-import { demoQuery, parseDemoView } from "./demo-state";
+import { DEFAULT_POSTING_ROWS, demoQuery, parseDemoView } from "./demo-state";
 import {
   expectedRemainingCents,
   holdStatus,
@@ -32,7 +32,7 @@ const ACCOUNT_ID = "acct_operating_4417";
  * test suite into one that needs a database and a seeded account.
  */
 async function load(state: "default" | "empty" | "edge", authPending = false) {
-  const source = createFixtureSource({ state, authPending });
+  const source = createFixtureSource({ state, authPending, postingRows: DEFAULT_POSTING_ROWS });
   const [summary, holds, postings] = await Promise.all([
     source.getAccountSummary({ accountId: ACCOUNT_ID }),
     source.listHolds({ accountId: ACCOUNT_ID }),
@@ -329,7 +329,7 @@ describe("reconcileBalances", () => {
 
 describe("the error state", () => {
   it("fails as a value on every method, with a stable code", async () => {
-    const source = createFixtureSource({ state: "error", authPending: false });
+    const source = createFixtureSource({ state: "error", authPending: false, postingRows: DEFAULT_POSTING_ROWS });
     const results: readonly Result<unknown, ErrorShape>[] = await Promise.all([
       source.getAccountSummary({ accountId: ACCOUNT_ID }),
       source.listHolds({ accountId: ACCOUNT_ID }),
@@ -345,7 +345,7 @@ describe("the error state", () => {
 
 describe("which source answers a URL", () => {
   it("serves the bare default state from the live ledger", () => {
-    expect(isLiveView({ state: "default", authPending: false })).toBe(true);
+    expect(isLiveView({ state: "default", authPending: false, postingRows: DEFAULT_POSTING_ROWS })).toBe(true);
   });
 
   it("keeps every demo state a fixture", () => {
@@ -353,7 +353,7 @@ describe("which source answers a URL", () => {
     // conditions you seed on a live ledger to show someone. They stay
     // reachable from a URL and they write nothing.
     for (const state of ["loading", "empty", "error", "edge"] as const) {
-      expect(isLiveView({ state, authPending: false }), state).toBe(false);
+      expect(isLiveView({ state, authPending: false, postingRows: DEFAULT_POSTING_ROWS }), state).toBe(false);
     }
   });
 
@@ -361,7 +361,7 @@ describe("which source answers a URL", () => {
     // Landing a $50.00 authorisation means writing a hold, and this screen
     // never writes: money movement goes through a route handler with
     // maker-checker, never through a render.
-    expect(isLiveView({ state: "default", authPending: true })).toBe(false);
+    expect(isLiveView({ state: "default", authPending: true, postingRows: DEFAULT_POSTING_ROWS })).toBe(false);
   });
 });
 
@@ -386,6 +386,7 @@ describe("demo state parsing", () => {
     expect(parseDemoView({ state: "empty" })).toEqual({
       state: "empty",
       authPending: false,
+      postingRows: DEFAULT_POSTING_ROWS,
     });
   });
 });

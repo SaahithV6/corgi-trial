@@ -1,6 +1,9 @@
+import Link from "next/link";
+
 import { Money } from "@/components/ui/Money";
 import {
   Badge,
+  FOCUS_RING,
   Panel,
   TableScroll,
   TD_CLASS,
@@ -75,7 +78,17 @@ export function PotTable({
                 <span className="font-medium">{legalName} — main balance</span>
                 <p className="mt-0.5 text-xs text-muted">
                   Spendable. This is the account <code>availableBalance()</code>{" "}
-                  reads.
+                  reads. Its postings — every transfer below and everything else
+                  that moved this account — are on{" "}
+                  <Link
+                    href="/accounts"
+                    className={`underline underline-offset-2 ${FOCUS_RING}`}
+                  >
+                    the deposit directory
+                  </Link>
+                  , which links each 2100 account to its own activity. A pot&rsquo;s
+                  own account is not addressable there: only 2100 accounts with a
+                  business are.
                 </p>
               </td>
               <td className={`${TD_CLASS} money text-xs`}>2100</td>

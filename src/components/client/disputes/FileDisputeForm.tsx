@@ -65,11 +65,17 @@ export type ReasonChoice = {
 
 function Receipt({ result }: { readonly result: FileDisputeResult }) {
   if (result.status === "idle") return null;
+  // ALREADY FILED IS NOT A FAILURE AND MUST NOT WEAR ONE'S HEADING. The action
+  // distinguishes it from a refusal deliberately — it hands back the case that
+  // already exists rather than opening a second — and then this printed
+  // `DISPUTE_ALREADY_FILED` in shouting snake case above it, which is the same
+  // heading a genuine error gets. A customer reading that concludes their claim
+  // did not go in. The code still appears, in the facts, for anyone ringing up.
   const heading =
     result.status === "filed"
       ? "Claim raised"
       : result.status === "already_filed"
-        ? result.code
+        ? "You have already claimed this charge"
         : result.code;
   return (
     <Note emphasis={result.status === "refused"} title={heading ?? "Result"}>

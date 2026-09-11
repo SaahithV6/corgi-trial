@@ -43,30 +43,41 @@ import type { ClientPotsScreen } from "./contract";
  * to one number, not the same SUM shown twice.
  */
 
-/** The five screens plus this one. The business travels across every link. */
+/**
+ * Every client screen, with this one marked. The business travels across every
+ * link.
+ *
+ * `CLIENT_SCREENS` now CONTAINS `/client/pots`, so the trailing "you are here"
+ * pill this used to append rendered a SECOND Pots control beside the one in the
+ * list — two identical pills, one of which reloaded the page you were already
+ * on, and no indication which of them you were standing on. The current screen
+ * is marked inside the map instead.
+ */
 function PotsNav({ view }: { readonly view: ClientView }) {
   return (
     <nav aria-label="Your account" className="flex flex-wrap items-center gap-1">
-      {CLIENT_SCREENS.map((item) => (
-        <Link
-          key={item.href}
-          href={
-            clientHref(item.href, {
-              state: view.state,
-              businessId: view.businessId,
-            }) as Route
-          }
-          className={`rounded px-3 py-1.5 text-sm text-muted hover:text-text ${FOCUS_RING}`}
-        >
-          {item.label}
-        </Link>
-      ))}
-      <span
-        aria-current="page"
-        className="rounded bg-surface-raised px-3 py-1.5 text-sm font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border)]"
-      >
-        Pots
-      </span>
+      {CLIENT_SCREENS.map((item) => {
+        const active = item.href === "/client/pots";
+        return (
+          <Link
+            key={item.href}
+            href={
+              clientHref(item.href, {
+                state: view.state,
+                businessId: view.businessId,
+              }) as Route
+            }
+            aria-current={active ? "page" : undefined}
+            className={`rounded px-3 py-1.5 text-sm ${FOCUS_RING} ${
+              active
+                ? "bg-surface-raised font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border)]"
+                : "text-muted hover:text-text"
+            }`}
+          >
+            {item.label}
+          </Link>
+        );
+      })}
     </nav>
   );
 }
@@ -134,8 +145,12 @@ export function PotsClientView({
               {subject.accountName ?? "No current account has been opened yet."}
             </p>
           </div>
+          {/* `/client/pots`, not `/client`. The picker is a GET form whose
+              action IS this argument, so naming the balance screen here took a
+              customer who switched business on their pots page to a different
+              screen for the business they chose. */}
           <BusinessPicker
-            screen="/client"
+            screen="/client/pots"
             view={view}
             header={{
               businessId: subject.businessId,
@@ -225,7 +240,35 @@ export function PotsClientView({
         description="One account, opened under your own current account. It starts empty."
         as="h2"
       >
-        <OpenPotForm businessId={subject.businessId} />
+        {subject.accountName === null ? (
+          // A POT IS AN ACCOUNT UNDER AN ACCOUNT, so with no current account
+          // there is nothing for it to sit under. `pot_open()` refuses in the
+          // database and it is right to, but the customer was reaching that
+          // refusal by filling in a form and pressing a button, and what came
+          // back was a Postgres sentence with a uuid in it. The screen already
+          // knows, at render, that there is no account. `/client/pay` says the
+          // same thing the same way on the same condition.
+          <div className="px-5 pb-5">
+            <Note emphasis title="There is no account to open a pot under">
+              <p>
+                No current account has been opened for this business yet, so
+                there is nothing for a pot to sit under &mdash; a pot is a real
+                account coded beneath your current account, not a label. An
+                account opens when the business passes its checks, not by hand.
+              </p>
+              <p className="mt-2">
+                Start that at{" "}
+                <Link href="/client/open" className="underline">
+                  /client/open
+                </Link>
+                . Nothing on this page is lost; pots appear here the moment the
+                account exists.
+              </p>
+            </Note>
+          </div>
+        ) : (
+          <OpenPotForm businessId={subject.businessId} />
+        )}
       </Panel>
 
       {pots.length === 0 ? null : (

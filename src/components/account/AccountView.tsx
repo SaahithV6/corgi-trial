@@ -51,7 +51,7 @@ export async function AccountView({
   const [summaryResult, holdsResult, postingsResult] = await Promise.all([
     source.getAccountSummary({ accountId }),
     source.listHolds({ accountId }),
-    source.listPostings({ accountId, limit: 25 }),
+    source.listPostings({ accountId, limit: view.postingRows }),
   ]);
 
   // One failed query fails the screen. A page that renders a balance beside a
@@ -124,7 +124,11 @@ export async function AccountView({
 
       <HoldsPanel holds={holds} asOf={summary.asOf} />
 
-      <PostingsTable postings={postings} ledgerCents={summary.ledgerCents} />
+      <PostingsTable
+        postings={postings}
+        ledgerCents={summary.ledgerCents}
+        pageSize={view.postingRows}
+      />
 
       <p className="max-w-prose text-xs leading-relaxed text-muted">
         {role === "approver"

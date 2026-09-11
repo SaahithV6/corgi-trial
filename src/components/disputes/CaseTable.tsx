@@ -52,7 +52,7 @@ export function CaseTable({
   return (
     <Panel
       title="Cases"
-      description="Every dispute raised on this customer. 'advanced' and 'held' are both sums over journal_line; while a case is open they are equal, which is the whole promise."
+      description="Newest first, by the instant the case was raised, capped at 50 — an older case than the last row is not shown here. 'advanced' and 'held' are both sums over journal_line; while a case is open they are equal, which is the whole promise."
     >
       <TableScroll>
         <table className="w-full border-collapse text-sm">
@@ -112,6 +112,18 @@ export function CaseTable({
                   <Badge tone={statusTone(c.status)} title={c.statusMeaning}>
                     {statusLabel(c.status)}
                   </Badge>
+                  {/* A status with no date is a state with no history. `decidedOn`
+                      is the value date the case was resolved on; it is null while
+                      the case is still running. */}
+                  <p className="mt-1 text-[11px] text-muted">
+                    {c.decidedOn === null ? (
+                      "not yet decided"
+                    ) : (
+                      <>
+                        decided <span className="money">{c.decidedOn}</span>
+                      </>
+                    )}
+                  </p>
                 </td>
 
                 <td className={TD_CLASS}>

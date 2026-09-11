@@ -12,9 +12,12 @@ import {
 } from "@/components/home/OperatorConsole";
 import { ScreenLinks } from "@/components/home/ScreenLinks";
 import { WhatToLookAt } from "@/components/home/WhatToLookAt";
-import { parseConsoleState } from "@/components/home/console-state";
+import { parseConsoleState, type ConsoleState } from "@/components/home/console-state";
 import { RoleSwitcher } from "@/components/app-shell/RoleSwitcher";
 import { readRole, type Role } from "@/components/app-shell/role";
+import { rootLogger } from "@/lib/log";
+import { isOperator } from "@/lib/authz/roles";
+import { visibleTo } from "@/lib/authz/policy";
 
 export const metadata: Metadata = {
   title: "Corgi Neobank — ops console",
@@ -118,7 +121,155 @@ export default async function HomePage({
         </div>
       </header>
 
-      <main id="main" className="mx-auto max-w-6xl space-y-6 px-6 py-8">
+      {isOperator(role) ? (
+        <OperatorFrontDoor state={state} />
+      ) : (
+        <CustomerFrontDoor role={role} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The front door a CUSTOMER gets, and the leak it closes.
+ *
+ * `/` is the one URL every operator route's refusal points back to, and the
+ * one URL the submission email hands a stranger. It was also the only page in
+ * the build with no tenancy on it: a principal holding the `customer` role was
+ * served the platform console — every business on the book, their balances,
+ * the approval queue, the recent money movement — because the guard covers
+ * `/accounts`, `/approvals`, `/audit` and the rest by default-deny but
+ * deliberately exempts `/`, since refusing `/` would strand a customer with no
+ * way back to the role switch.
+ *
+ * The exemption is right and the leak was real. Both are true because the
+ * problem was never the guard: it is that ONE page was rendering the same
+ * thing for two populations. So `/` renders per principal. The refusal's
+ * `elsewhere` still resolves, the role switch is still in the header and still
+ * works, and a customer session sees no platform-wide figure and no operator
+ * href — not hidden by CSS, not painted and then filtered: not rendered.
+ *
+ * WHY THE LINKS ARE FILTERED BY `visibleTo()` RATHER THAN LISTED. The list
+ * below is customer surface by construction, so the filter should be a no-op —
+ * and that is exactly why it is here. If somebody later adds an operator href
+ * to it, `authorize()` removes it, because the nav must not be able to
+ * advertise a door the server would refuse. The decision has one implementation
+ * (`src/lib/authz/policy.ts`) and this page calls it; it does not restate it.
+ */
+function CustomerFrontDoor({ role }: { readonly role: Role }) {
+  const links = visibleTo(role, CUSTOMER_LINKS);
+
+  return (
+    <main id="main" className="mx-auto max-w-3xl space-y-6 px-6 py-8">
+      <div>
+        <h1 className="text-lg font-semibold tracking-tight">
+          Your business with Corgi
+        </h1>
+        <p className="mt-0.5 max-w-prose text-sm text-muted">
+          You are signed in as a customer, which is one business on the book and
+          not the book. Your balance, your activity, your cards and your
+          payments are behind the links below. Nothing on this page is a figure
+          about Corgi&rsquo;s other customers, because this session is not
+          served any.
+        </p>
+      </div>
+
+      <ul className="grid gap-3 sm:grid-cols-2">
+        {links.map((link) => (
+          <li key={link.href}>
+            <a
+              href={link.href}
+              className="block rounded border border-border bg-surface px-4 py-3 hover:bg-surface-raised"
+            >
+              <span className="text-sm font-medium">{link.label}</span>
+              <span className="mt-0.5 block text-xs leading-relaxed text-muted">
+                {link.description}
+              </span>
+            </a>
+          </li>
+        ))}
+      </ul>
+
+      <div className="rounded border border-border bg-surface px-4 py-3">
+        <p className="max-w-prose text-xs leading-relaxed text-muted">
+          The operator console — every business on the book, the approval queue,
+          the audit log, reconciliation — is not served to this session. Asking
+          for one of those URLs is refused by the server with the code{" "}
+          <code>OPERATOR_ONLY</code> and the header{" "}
+          <code>x-corgi-authz: deny; OPERATOR_ONLY</code>; the screen is not
+          rendered and then hidden. Switch to Staff or Approver with the control
+          in the header above to read it.
+        </p>
+      </div>
+
+      <footer className="border-t border-border pt-4 text-xs leading-relaxed text-muted">
+        Sandbox deployment. No real money and no real customer data: the
+        businesses on the book are fictional and every provider credential is a
+        test key.
+      </footer>
+    </main>
+  );
+}
+
+/**
+ * The customer surface, as a nav.
+ *
+ * Every href here is classified `customer` in `ROUTE_SURFACE`, and each is an
+ * existing route — no route is added by this page. `visibleTo()` is still run
+ * over it; see `CustomerFrontDoor`.
+ */
+const CUSTOMER_LINKS = [
+  {
+    href: "/client",
+    label: "Overview",
+    description: "Your balance, and what is available to spend after holds.",
+  },
+  {
+    href: "/client/activity",
+    label: "Activity",
+    description: "Every entry against your account, newest first.",
+  },
+  {
+    href: "/client/cards",
+    label: "Cards",
+    description: "Your cards, their limits, and what each has authorised.",
+  },
+  {
+    href: "/client/pay",
+    label: "Make a payment",
+    description: "Pay a payee. Money out is checked by a second person.",
+  },
+  {
+    href: "/client/approvals",
+    label: "Awaiting approval",
+    description: "Payments you have raised that a checker has not yet released.",
+  },
+  {
+    href: "/client/pots",
+    label: "Pots",
+    description: "Money you have set aside. Held, and not available to spend.",
+  },
+  {
+    href: "/client/payouts",
+    label: "Payouts",
+    description: "Money sent out, and where each one got to.",
+  },
+  {
+    href: "/client/disputes",
+    label: "Disputes",
+    description: "Card transactions you have challenged, and their state.",
+  },
+  {
+    href: "/client/open",
+    label: "Open an account",
+    description: "Onboarding: who you are, and who owns the business.",
+  },
+] as const;
+
+/** The console, unchanged. Reached only by `staff` and `approver`. */
+function OperatorFrontDoor({ state }: { readonly state: ConsoleState }) {
+  return (
+    <main id="main" className="mx-auto max-w-6xl space-y-6 px-6 py-8">
         <div>
           <h1 className="text-lg font-semibold tracking-tight">
             Operator console
@@ -168,8 +319,7 @@ export default async function HomePage({
           provider are labelled SIMULATED above, with the measurement that
           demoted them.
         </footer>
-      </main>
-    </div>
+    </main>
   );
 }
 
@@ -178,12 +328,24 @@ export default async function HomePage({
  *
  * `readRole` reads a cookie and cannot reach the database, but it is awaited
  * before the shell renders and a throw here would be the whole response.
- * Defaulting to `staff` is the safe direction: staff can approve nothing.
+ *
+ * IT DEFAULTS TO `customer`, AND THAT CHANGED WITH THIS PAGE. It used to
+ * default to `staff`, reasoning that staff can approve nothing. That was the
+ * safe direction while the only thing a role decided was whether a button
+ * worked; it is the wrong direction now that the role decides WHOSE MONEY this
+ * page is about. A cookie read that throws is a session we know nothing about,
+ * and the least we can serve someone we know nothing about is one business's
+ * front door rather than every business on the book. Failing closed costs a
+ * staff member one click on the role switch, which is in the header either way.
  */
 async function readRoleSafely(): Promise<Role> {
   try {
     return await readRole();
-  } catch {
-    return "staff";
+  } catch (thrown) {
+    rootLogger.warn("home.role_read_failed", {
+      reason: thrown instanceof Error ? thrown.message : String(thrown),
+      servedAs: "customer",
+    });
+    return "customer";
   }
 }

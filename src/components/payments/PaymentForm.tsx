@@ -739,6 +739,32 @@ function WireBranch({
 /* -------------------------------------------------------------------------- */
 
 /**
+ * What to do next about a refusal this MODULE raises.
+ *
+ * The gate refusals arrive with their remedy already in the sentence —
+ * `PAYEE_WARNING_UNACKNOWLEDGED` carries the `/payees?payee=<id>&sign=1` URL
+ * that resolves it, and the wire gate says in as many words to pick the
+ * beneficiary off the payee book. The four codes below are the ones `actions.ts`
+ * produces before it ever reaches a gate, and they said accurately what had
+ * failed and nothing about what to do about it. A code with no next step is a
+ * dead end.
+ *
+ * Roles are switched with the "Acting as" control in the page header. There is
+ * no URL that sets one, so the remedy names the control rather than inventing a
+ * link that would not work.
+ */
+const REMEDY: Record<string, string> = {
+  INVALID_FORM:
+    "Next: fix the fields listed above and submit again. Nothing was written, so nothing needs undoing and the reference is still free to reuse.",
+  INVALID_AMOUNT:
+    "Next: type the amount as plain dollars and cents — 1250.00, no currency symbol, no thousands separator, no more than two decimal places. It is converted to integer cents by string arithmetic, so anything it cannot read exactly is refused rather than rounded.",
+  PAYMENTS_NO_DATABASE:
+    "Next: nothing on this screen. This deployment has no APP_DATABASE_URL, so no payment can be raised here at all and a second attempt changes nothing.",
+  NO_ACTOR:
+    "Next: pick an identity with the “Acting as” control in the page header. Every payment_instruction carries a requested_by, so a request with nobody behind it is not writable.",
+};
+
+/**
  * A refusal, with its code, rendered as itself.
  *
  * Not translated, not grouped, not softened into "something went wrong". The
@@ -747,6 +773,7 @@ function WireBranch({
  * only durable handle on what happened.
  */
 function RefusalPanel({ result }: { readonly result: RaiseResult }) {
+  const remedy = result.code === null ? undefined : REMEDY[result.code];
   return (
     <div className="rounded-md border border-negative/50 px-4 py-3">
       <p className="text-xs font-semibold text-negative">
@@ -765,6 +792,10 @@ function RefusalPanel({ result }: { readonly result: RaiseResult }) {
             </li>
           ))}
         </ul>
+      )}
+
+      {remedy === undefined ? null : (
+        <p className="mt-2 max-w-prose text-xs leading-relaxed text-text">{remedy}</p>
       )}
 
       <p className="mt-2 max-w-prose text-[11px] leading-relaxed text-muted">
@@ -852,6 +883,19 @@ function ReceiptPanel({
         An approval must cite that hash. It is sha256 over this payment&rsquo;s account, rail,
         amount, destination and value date — change any of them and this is a different
         instruction with a different hash, and an approval given for the old one does not apply.
+      </p>
+
+      <p className="mt-3 max-w-prose text-[11px] leading-relaxed text-muted">
+        Write the instruction id down. The queue on /approvals holds this payment only until
+        somebody releases or rejects it, and there is no screen in this console that lists a
+        payment after that. What survives is the journal entry the release posts: it is named on
+        the release event in the queue before the row leaves, its idempotency key is{" "}
+        <span className="font-mono">payment:release:&lt;instruction id&gt;</span>, and it is on the
+        paying account&rsquo;s Activity table at{" "}
+        <Link href={`/accounts/${receipt.accountId}?rows=200`} className="underline underline-offset-4">
+          /accounts/{receipt.accountId}
+        </Link>
+        .
       </p>
 
       <div className="mt-3">

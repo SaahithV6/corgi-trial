@@ -1551,3 +1551,416 @@ the exact shape of each shortfall:
 Everything labelled historical above is labelled historical because it is, and
 nothing that a runnable refused to prove is counted as proven. A skip is not a
 pass.
+
+---
+
+# THE TEN, AS CLICK PATHS — walked against production 2026-09-11 ~18:30Z
+
+Every URL below was fetched from **https://corgi-trial-psi.vercel.app** while
+writing this section and the quoted figures are what came back. Where a thing
+cannot be done from a UI surface it says so in bold; that is not a hedge, it is
+the answer.
+
+`$B` = `https://corgi-trial-psi.vercel.app`. All eleven routes answered 200.
+
+**The three graded hardest come first**, in the brief's own order: the hold model
+under hostile sequencing, the bitemporal correction, and whether available
+balance is derived truth or a stored lie.
+
+---
+
+## H1 (item 2) — The hold model under hostile sequencing · 90s
+
+**URL:** `$B/accounts/holds/af08eac0-2666-42d2-a323-c0f98b1752bb`
+
+One page, six events, the whole lifecycle. Point at the table **"Every card
+event in this authorisation's event set, with the running fold at each step"**.
+Its rows, as served:
+
+| kind | amount | A(E) so far | C(E) so far |
+|---|---|---|---|
+| authorisation reversal | $73.40 | -$73.40 | $0.00 |
+| authorisation | $50.00 | -$23.40 | $0.00 |
+| clearing | $73.40 | -$23.40 | $73.40 |
+| incremental authorisation | $73.40 | $50.00 | $73.40 |
+| clearing | $73.40 | $50.00 | $146.80 |
+| authorisation reversal | $50.00 | $0.00 | $146.80 |
+
+Then point at **the fold**: `A(E) — authorised $0.00`, `C(E) — captured
+$146.80`, `H(E) — held $0.00`, and the sentence above it: **"H(E) is not stored
+anywhere. It is this arithmetic, over the set above."**
+
+Five of the seven lifecycle steps are on this one screen — authorisation,
+**incremental**, **two separate captures**, **over-capture** (C(E) $146.80
+exceeds A(E), and the page says why: *"May exceed A(E) — fuel pumps and tips
+over-capture routinely"*), and **reversal**. The best line to read aloud is the
+order-independence note under the table: *"the order of the rows changes every
+one of them and changes none of the totals below. That is the order-independence
+claim, visible rather than asserted."*
+
+**Expiry** is the sixth kind and is not on this hold — 143 `expiry` events exist
+on the book; `$B/accounts/holds/05055d30-3ef8-4f9c-ab28-ecbc1a5ee2f4` carries
+one alongside a `clearing_first` origin.
+
+**To TRIGGER lifecycle steps live:** `$B/accounts` → **"Simulate an
+authorisation"** (amount, MCC, descriptor → real `POST /v1/simulate/authorize`),
+then **"Settle it"** per hold (blank amount = full). Re-submitting "Settle it"
+is how you show partial capture, multiple captures and over-capture from the
+UI — the row renders the form even on a closed hold precisely so over-capture is
+demonstrable. **Not triggerable from any form:** incremental authorisation,
+authorisation reversal, expiry. Those arrive only as genuine Lithic network
+payloads.
+
+---
+
+## H2 (item 6) — The bitemporal correction · 60s · "we run this live"
+
+**Use a real demo business.** Ridgeline Robotics, value date 2026-09-08,
+correction group `e397837a-4c5d-4d40-b2fc-0b1f38c708c2`: a settlement booked at
+the wrong amount (seq 3915), reversed (seq 3916), re-booked corrected (seq
+3917) — all three at value date **2026-09-08**, all three booked **2026-09-11**.
+
+**ONE URL shows both figures at once** — this is the whole demo:
+
+```
+$B/transactions?account=a0c41a37-2be1-5c30-bfe9-03455f048fac&asOf=2026-09-08&asKnownAt=2026-09-11T09:46:46.200Z
+```
+
+Point at the panel **"2026-09-08 — closing balance, read twice / Same value
+date. Same rows. One argument changed."** It carries, side by side:
+
+- badge **"the belief changed"**
+- **As believed then · $50,998.07** · booking watermark **3915**
+- **Difference · +$16.60** · *over 1 later act*
+- **As corrected — everything we know · $51,014.67** · booking watermark 11966
+
+Then move the booking axis past the correction and show it converge:
+
+```
+$B/transactions?account=a0c41a37-2be1-5c30-bfe9-03455f048fac&asOf=2026-09-08&asKnownAt=2026-09-11T09:46:47.000Z
+```
+
+→ badge **"the two queries agree"**, As believed **$51,014.67**, Difference
+**$0.00**, watermark **3917**. Same day, same rows; the only thing that moved is
+what we had learned.
+
+Below it, **"What we learned after that point, and when"** itemises the acts
+that make up the +$16.60, and the page states the cut's own limits out loud:
+*"The cut is on `booking_seq`, not on a timestamp"*, `Proved: no correction act
+is split`, and a named `Not proved:` clause.
+
+**A sharper pair, on a fixture account** (73 milliseconds apart, $50.00 of
+difference) if you want the correction act visible by name:
+
+```
+$B/transactions?account=2eb04bde-236e-4c3a-b89f-657cc7dc61eb&asOf=1988-06-21&asKnownAt=2026-09-11T04:58:08.573Z   -> As believed $951.50   (wm 2680)
+$B/transactions?account=2eb04bde-236e-4c3a-b89f-657cc7dc61eb&asOf=1988-06-21&asKnownAt=2026-09-11T04:58:08.647Z   -> As believed $1,001.50 (wm 2682)
+```
+
+Both read **As corrected $28,840.09** — the corrected figure is the same from
+either standpoint, which is the point. The act is named on screen: *"Reversal of
+`91d5a24f`…: statement proof MTWHJLCM: merchant reversed and re-presented"*, seq
+2681. It is on **Hold Fuzzer Fixture Co.**, not one of the three demo
+businesses — prefer Ridgeline above in front of a panel.
+
+**DO NOT use `$B/transactions?state=edge` for this.** It is a genuinely
+interesting screen — it lands mid-write to spring the cut-snap guard — but as
+served today it resolves to a fuzz-fixture account whose two readings are
+**identical** ($494,456.99 both, Difference $0.00, *"the two queries agree"*).
+A panel would see two of the same number.
+
+**A correction cannot be ENTERED from the UI.** `reverseAndRebook()` is reached
+only from webhook consumers, cron repair paths and scripts. `/transactions` is a
+viewing surface; the presenter picks two watermarks, never authors a correction.
+
+**Second surface, and it is arguably the better one:** `$B/statements?state=edge`
+— see item 7.
+
+---
+
+## H3 (item 1) — Available is derived, not stored · 45s
+
+**URL:** `$B/accounts`. The **"Customer deposit accounts"** table has **"Ledger
+balance"** and **"Available balance"** as adjacent columns, one row per account.
+That is the 10-second version.
+
+**The 45-second version, which is the one that answers the question**, is the
+itemised derivation. On the time-travel page or the account screen, point at
+**"Available balance at that point, itemised — The five terms of available
+balance"**, served as:
+
+```
+Settled ledger balance          $494,456.99
+less active holds               -$19,083.00
+less uncleared credits           -$5,000.00
+less committed outflows              $0.00
+Available                      $470,373.99
+```
+
+with the caption *"The same function the live screens call."* One definition:
+SQL function `ledger_availability(...)` in `db/migrations/0022_balance_definitions.sql`,
+which **returns a table, not a stored row**; `v_available_balance` and the
+TypeScript `accountAvailability()` both call it. There is no `available_cents`
+column on any table and `pnpm db:check` fails the build if one ever appears.
+
+**The proof that it is not a clamped lie:** `$B/accounts?state=edge` renders an
+available balance that is **negative and not floored at zero**. Live fire attack
+2 asserted the same thing against production this morning: *"available ==
+ledger(4475436) − holds(67000) − uncleared(5550000) exactly, not clamped — and
+it IS negative, reported as negative rather than floored at zero."*
+
+---
+
+## 3 — Settlement is not authorisation, including a force post with no auth · 60s
+
+**URL:** `$B/accounts/holds/01dfc4ff-bb96-4f68-8027-eef6f07a9ea7` —
+`origin = force_post`. The event table shows a **force post** row feeding
+`+ C(E)` with no authorisation term beneath it. 60 authorisations on this book
+carry `origin = force_post`; 208 `force_post` events in total.
+
+The arithmetic claim to make: C(E) is `Σ over {clearing, force_post}` and A(E)
+is `Σ over {authorization, incremental_authorization} − Σ over
+{authorization_reversal}` — printed on the page. A settlement that never had an
+authorisation simply has no A(E) term; nothing branches on it.
+
+**A fresh force post cannot be produced from any UI form.** The forms on
+`/accounts` only drive Lithic's two-message flow. A bare force post requires
+`POST https://sandbox.lithic.com/v1/simulate/authorize {"status":
+"FINANCIAL_AUTHORIZATION", ...}` by hand. Viewable in the UI; not inducible
+from it.
+
+---
+
+## 4 — Out-of-order delivery, settlement before its auth · 90s
+
+**Inducible from the UI.** `$B/chaos` → arm **"Reorder buffer (seconds)"**
+(`reorder_window`, effect text *"We release our own deliveries backwards inside
+a window"*) → **Start an episode** → the clearing webhook is delivered before the
+authorisation for a real $50.00 / $73.40 pair. The resulting hold reads
+`origin: clearing_first`.
+
+**To show the finished article instead:**
+`$B/accounts/holds/05055d30-3ef8-4f9c-ab28-ecbc1a5ee2f4` — `origin =
+clearing_first`. 214 authorisations on this book carry that origin. The line to
+point at is on the hold page itself: *"How we first heard of it. Recorded for
+reporting; **nothing branches on it** — a clearing that beat its authorisation
+takes the identical arithmetic path."*
+
+**Proven against production this morning** by live fire attack 4, PASS: in-order
+episode `9311f116` and clearing-first episode `aac5b0c1` (re-signed and POSTed
+clearing-first, HTTP 202 then 202) both produced ledger delta -7340, available
+delta -7340, hold delta 0 — **EQUAL**.
+
+---
+
+## 5 — Returns and recalls, corrected on the day it happened · 60s
+
+**URL:** `$B/statements?state=edge` — see item 7; it is the same screen and it is
+showing exactly this. As served, the correction is a **card refund reversal of
+-$73.40** and the page states the principle in its own words:
+
+> *"The correction is an ADDITION to the record — a reversal and a re-book
+> appended at the original value date — not an edit of it."*
+
+**Inbound ACH recall on a real demo business:** Kettle & Crumb Bakery LLC
+carries an arrival and a recall at the **same value date 2026-09-11**.
+`recallInboundAch()` books the recall as a new entry at the recall's own value
+date and never edits the original. Also surfaced read-only on `$B/dashboard`
+under **"Inbound credits nobody can attribute"**.
+
+**Not inducible from any UI form.** A return/recall arrives only from a real
+signed Increase webhook; producing a fresh one means
+`POST /inbound_ach_transfers/{id}/transfer_return` against the Increase sandbox
+by hand.
+
+---
+
+## 7 — A closed day, reproducible forever, identical every time · 60s
+
+**URL:** `$B/statements?state=edge`. This is one of the two strongest screens in
+the build. Point at the table **"Each reading's booking watermark, closing
+figure and content hash"**, served as:
+
+| Reading | Watermark | Lines | Closing | Content hash, recomputed now |
+|---|---|---|---|---|
+| As believed | 11958 | 134 | $66,655.91 | `6eab9049a805…bb28` |
+| As corrected | 11966 | 135 | $66,582.51 | `7a157759d70f…bdce` |
+
+with the badge **DERIVED, NOT STORED** and this sentence, which is the answer to
+the question being asked:
+
+> *"Neither figure above is stored anywhere. Both are `renderStatement(period,
+> watermark)` — the same function, the same rows, the same canonical form — run
+> twice with one argument changed, on this request. Re-running either at its own
+> watermark produces the same bytes forever: no row can appear below a watermark
+> after the fact, because `booking_seq` is drawn while holding the ledger append
+> lock, so sequence order is commit order; and no row below it can change,
+> because the money tables are append-only and the application role holds no
+> `UPDATE`."*
+
+**To show identical-every-time:** reload the URL. The hashes are recomputed from
+the ledger on every page load — the page is never prerendered — so an unchanged
+hash across two loads is a real reproduction, not a cache. For a file the panel
+can keep, press **Download statement PDF** twice and compare the printed
+**document fingerprint**.
+
+The page also closes the loop on item 5: *"Total movement since the left-hand
+reading … -$73.40"*, **"The difference is accounted for"**, and *"The acts above
+sum to exactly the difference between the two readings. Nothing on this day
+changed that we cannot name and point at."*
+
+---
+
+## 8 — Standing orders, fire-once, insufficient-funds policy written · 90s
+
+**URL:** `$B/standing-orders`.
+
+**Creating a mandate IS a UI action** — the `MandatePanel` form at the foot of
+the page (`createStandingOrderAction`) returns a receipt saying exactly when it
+will first fire. Proven: `standing_order` 48 → 49.
+
+**The written policy is on screen**, under the heading **"What happens when the
+money is not there"** — *"The written policy, in the place it has to be
+readable — beside the row it explains."* Its four claims, verbatim:
+
+- **"Refuse the occurrence and close it."** No partial payment, no
+  carry-forward, no queue that fires whenever the money happens to arrive.
+- **"Checked against AVAILABLE, not the ledger."** *"Money committed to a hold
+  is already spent."*
+- **"The refusal is a row, not a silence."** *"'It never fired and nobody knows
+  why' is the failure that actually hurts, and it is a MISSING row — so a
+  refusal is a present one."*
+- Two **rejected** alternatives argued explicitly: partial payment (*"invents an
+  instruction nobody authorised"*) and carry-forward (*"that is the 3am
+  surprise"*).
+
+Point also at the two live invariant tiles: **Claimed, undecided `0`** and
+**Double fires `0`**, with the note that the second *"cannot be non-zero while
+`payment_instruction.idempotency_key` is UNIQUE — its emptiness is a consequence
+of a constraint, not of anybody being careful."*
+
+`$B/standing-orders?state=edge` shows a real refused occurrence: code
+**`INSUFFICIENT_AVAILABLE_FUNDS`**, *"the ledger balance covers this payment but
+the available balance does not."* That is item 1 and item 8 in the same row.
+
+**FIRING cannot be done from any UI surface.** `runStandingOrders()` is behind
+`POST /api/cron/standing`, bearer-token only, and the actions file deliberately
+does not import it. The fire-once move in front of a panel is:
+
+```bash
+curl -s -X POST -H "authorization: Bearer $DRAIN_TOKEN" "$B/api/cron/standing"
+```
+
+---
+
+## 9 — Scheme reconciliation with an aging breaks screen · 90s
+
+**URL:** `$B/reconciliation`. As served:
+
+```
+business date  Dec 08, 2027      run #1      watermark seq 5788      LIVE LEDGER
+Matched  3 / 3      Breaks  1      Net difference  +$240.71      Past a close  0
+```
+
+**The aging buckets are there**, as filter chips with live counts: **0-1 days
+`1` · 2-3 days `0` · 4-7 days `0` · 8-30 days `0` · 31+ days `0`**, plus an
+**Age** column and a **Severity** ladder on the break table. The sentence to
+read aloud is underneath it:
+
+> *"Aging is measured from the value date and from day closes, not from when the
+> job last ran — a break does not get younger because the nightly run was late.
+> Severity escalates when a break has been open across a day close: somebody
+> signed off a business day with it outstanding."*
+
+The run list shows **"A run is immutable. Re-running appends; it never
+revises."** with a content hash per run (`17fc3d148063…`).
+
+**"We will plant one" — already planted, this morning, PASS.** Live fire attack
+6 deleted a row from tonight's scheme file and the break appeared:
+`in_ledger_not_file / unmatched_reference`, ref **`LF6-MTXAKI1J-3`**, 139 cents,
+business date 2027-10-18, severity `open`, recon run
+`6424e1d5-074a-43cf-8a90-1d074c5b69a5`. It is on the screen now.
+
+**A RECONCILIATION RUN CANNOT BE TRIGGERED FROM ANY UI SURFACE.** Re-verified at
+11:29 today: `/reconciliation` and `/breaks` each contain a single `page.tsx`
+with no `actions.ts`, no form and no server action, and `runReconciliation()` /
+`seedReconDemo()` have **zero callers anywhere under `src/app/**` or
+`src/components/**`**. The only API route is `GET
+/api/v1/reconciliation/breaks`, marked `readOnly: true`. To produce a fresh run
+in front of a panel you run `node scripts/livefire.mjs --only 6`. Say that
+plainly rather than hunting for a button.
+
+**`$B/breaks?state=edge`** is the sharper screen: a break whose correction group
+is incomplete — a reversal with no re-book yet — so every signal reads
+"explained" while money is still missing.
+
+*Cosmetic flaw a panel may notice:* the Age column currently reads **`-453d`**,
+because attack 6 forward-dates its synthetic business date to 2027-10-18 on
+purpose so the run is reachable from the breaks screen. The severity is right
+(`day still open`); the number is negative.
+
+---
+
+## 10 — Maker-checker; the initiator can never approve their own · 60s
+
+**URL:** `$B/approvals?state=edge`. As served: actor **Priya Raman**, badge
+**"cannot approve"**, and the demo-state caption states the trap and springs it:
+
+> *"The row at the top was raised by whoever you are currently acting as.
+> Approve is disabled with the reason stated — **flip the role switcher and it
+> stays disabled, because the reason is who raised it, not which role you
+> hold.**"*
+
+Flip the switcher in front of them. That is the demo.
+
+Point at the panel **"Maker-checker on money out, and where it is actually
+enforced"**:
+
+> *"The initiator of a payment can never approve it. That is not a rule this
+> screen applies: it is a trigger on `payment_instruction_event` that raises
+> SQLSTATE 42501 when an `approved` row's actor is the instruction's
+> `requested_by`."*
+
+**Proven against the production database this morning**, live fire attack 5,
+PASS — a raw `INSERT` bypassing the app entirely:
+
+```
+SQLSTATE 42501 from assert_maker_checker():
+  "maker-checker: actor 76f9266f-23c9-52de-b8ff-0ec0b23ef386 initiated
+   instruction f1031501-1129-4153-8260-e5a5419df67f and cannot approve it"
+approved events after both attempts: 0
+then a SECOND human approved the same instruction: 1 approved event
+```
+
+**Nor can the agent surface**, and it is blocked three ways, independently:
+
+1. `assert_maker_checker()` also refuses any actor whose `kind <> 'human'`.
+2. `CHECK (NOT (kind <> 'human' AND can_approve))` on `actor` — an approving
+   agent row is structurally impossible, not merely rejected.
+3. The MCP port never exposes the verb. `src/lib/mcp/approvals-port.ts`:
+   *"WHAT THIS PORT DELIBERATELY DOES NOT EXPOSE, and must never grow:
+   `approvePayment`, `rejectPayment`, `cancelPayment`, `releasePayment` … None
+   of them is reachable from a bearer token."* The agent can only
+   `initiate_payment`, which queues a request a human works through.
+
+`$B/client/approvals?state=edge` is the customer-facing mirror of the same rule.
+
+---
+
+## What could NOT be demonstrated from a UI surface
+
+Stated plainly, because a confident guess is worth less than a named gap:
+
+| # | Thing | Where it can be shown | Where it CANNOT |
+|---|---|---|---|
+| 3 | A **fresh** bare force post | hold page, `origin = force_post` | no form; raw `simulate/authorize` with `FINANCIAL_AUTHORIZATION` |
+| 5 | A **fresh** return / recall | `/statements?state=edge`, `/dashboard` | no form; Increase sandbox API by hand |
+| 6 | **Entering** a correction | `/transactions`, `/statements` (viewing both figures) | `reverseAndRebook()` has no UI caller |
+| 8 | **Firing** a standing order | mandate creation works from the form | `POST /api/cron/standing`, bearer token |
+| 9 | **Running** a reconciliation | breaks + aging + runs all render | no form anywhere; `scripts/livefire.mjs --only 6` |
+| 2 | incremental auth / reversal / expiry | all visible on hold pages | only real Lithic network payloads |
+
+Also worth knowing before someone asks: **Silverline Freight Co. exists as a
+business row but has no deposit accounts on this book** — only Ridgeline
+Robotics and Kettle & Crumb Bakery do. Do not open a Silverline account screen
+in front of a panel expecting balances.

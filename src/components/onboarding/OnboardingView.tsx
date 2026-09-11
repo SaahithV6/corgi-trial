@@ -1,7 +1,6 @@
-import { ROLE_LABEL, readRole } from "@/components/app-shell/role";
+import { ROLE_LABEL, readRole, type Role } from "@/components/app-shell/role";
 import { Badge, MetaList, Note } from "@/components/ui/primitives";
 import { formatTimestamp } from "@/lib/format/datetime";
-import { createLiveOnboardingSource } from "@/lib/kyb/wire";
 import { isErr } from "@/lib/result";
 
 import { EntityCard } from "./EntityCard";
@@ -11,6 +10,7 @@ import { RegistryProbe } from "./RegistryProbe";
 import { WiringPanel } from "./WiringPanel";
 import type { OnboardingDataSource } from "./data-contract";
 import { createFixtureSource } from "./fixtures";
+import { ONBOARDING_STATE_UNREADABLE, createUnreadableOnboardingSource } from "./unreadable";
 import type { OnboardingView as View } from "./demo-state";
 
 export { OnboardingSkeleton };
@@ -32,20 +32,26 @@ export { OnboardingSkeleton };
  *   by predicate  `canTransact()` reads `v_business_kyb` and refuses, with a
  *                 code, on every state that is not exactly `approved`.
  */
-export async function OnboardingView({ view }: { readonly view: View }) {
+export async function OnboardingView({
+  view,
+  noDatabase = false,
+}: {
+  readonly view: View;
+  readonly noDatabase?: boolean;
+}) {
   const role = await readRole();
   const live = view.state === "default";
 
-  const source: OnboardingDataSource = live
-    ? createLiveOnboardingSource()
-    : createFixtureSource(view.state);
+  const source = await selectSource(view, live, noDatabase);
 
   const result = await source.getSnapshot();
 
   if (isErr(result)) {
+    // No source badge on a refusal. `LIVE` over a screen that read no evidence
+    // row would be claiming the provenance of verdicts it does not have.
     return (
       <div className="space-y-6">
-        <Header role={role} live={live} asOf={null} />
+        <Header role={role} live={null} asOf={null} />
         <ErrorPanel error={result.error} />
       </div>
     );
@@ -126,15 +132,24 @@ function Header({
   live,
   asOf,
 }: {
-  readonly role: "staff" | "approver";
-  readonly live: boolean;
+  // `Role`, not the two operator roles spelled out. A customer never reaches
+  // this screen — src/middleware.ts answers 403 OPERATOR_ONLY before it renders
+  // — so narrowing here would be a second, weaker copy of that decision living
+  // in a prop type, and the two would drift.
+  readonly role: Role;
+  // `null` means "this render read nothing, so it badges nothing". LIVE and
+  // FIXTURE are both claims about where a verdict came from, and a refusal has
+  // no verdict and no claim.
+  readonly live: boolean | null;
   readonly asOf: string | null;
 }) {
   return (
     <header>
       <div className="flex flex-wrap items-baseline gap-3">
         <h1 className="text-lg font-semibold tracking-tight">Onboarding &amp; KYB</h1>
-        <Badge tone={live ? "positive" : "quiet"}>{live ? "LIVE" : "FIXTURE"}</Badge>
+        {live === null ? null : (
+          <Badge tone={live ? "positive" : "quiet"}>{live ? "LIVE" : "FIXTURE"}</Badge>
+        )}
       </div>
       <p className="mt-0.5 max-w-prose text-sm text-muted">
         Two legs, one composite, and an evidence label that cannot be forged. Status and evidence
@@ -150,4 +165,42 @@ function Header({
       </div>
     </header>
   );
+}
+
+/**
+ * Which source answers this view.
+ *
+ * Live for `default`, fixture for the other four — and a REFUSAL for `default`
+ * when there is no database to read.
+ *
+ * THE LIVE MODULE IS IMPORTED DYNAMICALLY, AND THAT IS THE REPAIR. It used to
+ * be a static `import { createLiveOnboardingSource } from "@/lib/kyb/wire"` at
+ * the top of this file. That module's graph reaches `@/lib/ledger/db` ->
+ * `@/lib/env`, which throws `EnvironmentError` at module scope without
+ * `APP_DATABASE_URL` — deliberately, so a malformed database URL kills the
+ * process at boot rather than at the first request that needs money. A static
+ * import therefore took the whole page module down with it, including the four
+ * fixture states that need no database at all. Measured with the variable
+ * deleted, `/onboarding` rendered the framework's error page.
+ *
+ * Deferring it means the screen can render the words "no database configured".
+ * `noDatabase` is resolved in `page.tsx` by `@/lib/has-database`, which imports
+ * nothing, so the question cannot be the thing that crashes for the condition
+ * it asks about.
+ *
+ * The four drawn states are checked FIRST and stay drawn either way: they are
+ * demonstrations, and "no database" does not make a drawing any more or less
+ * drawn.
+ */
+async function selectSource(
+  view: View,
+  live: boolean,
+  noDatabase: boolean,
+): Promise<OnboardingDataSource> {
+  if (!live) return createFixtureSource(view.state);
+
+  if (noDatabase) return createUnreadableOnboardingSource(ONBOARDING_STATE_UNREADABLE);
+
+  const { createLiveOnboardingSource } = await import("@/lib/kyb/wire");
+  return createLiveOnboardingSource();
 }

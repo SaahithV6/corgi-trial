@@ -33,7 +33,23 @@ export type DemoView = {
    * `default` state.
    */
   readonly authPending: boolean;
+  /**
+   * How many postings the Activity table asks for.
+   *
+   * `?rows=` on the URL, clamped by the data source to `MAX_POSTINGS_LIMIT`.
+   * It exists because the table is a PAGE and the balances above it are a fold
+   * over the whole journal: with a fixed 25 rows, a payment released earlier the
+   * same day was simply absent from the only screen that lists it, and nothing
+   * on the page said so. Garbage and out-of-range values fall back to the
+   * default rather than refusing the page — a mistyped query string must not
+   * hide an account.
+   */
+  readonly postingRows: number;
 };
+
+/** What `?rows=` defaults to, and the most it can ask for. */
+export const DEFAULT_POSTING_ROWS = 25;
+export const MAX_POSTING_ROWS = 200;
 
 export const DEMO_STATE_LABELS: Record<DemoState, string> = {
   default: "Default",
@@ -69,7 +85,10 @@ export function parseDemoView(
   const raw = first(searchParams["state"]);
   const state: DemoState = isDemoState(raw) ? raw : "default";
   const authPending = first(searchParams["auth"]) === "pending";
-  return { state, authPending };
+  const rows = Number.parseInt(first(searchParams["rows"]) ?? "", 10);
+  const postingRows =
+    Number.isFinite(rows) && rows > 0 ? Math.min(rows, MAX_POSTING_ROWS) : DEFAULT_POSTING_ROWS;
+  return { state, authPending, postingRows };
 }
 
 /** `?state=edge`, `?auth=pending`, or `""`. Stable key order so URLs compare. */

@@ -84,13 +84,25 @@ export function HoldDetailView({ detail }: { readonly detail: HoldDetail }) {
           >
             ← Back to the card &amp; hold console
           </Link>
+          {" · "}
+          <Link
+            href={`/accounts/${detail.accountId}`}
+            className={`underline underline-offset-4 hover:text-text ${FOCUS_RING}`}
+          >
+            Back to this hold&rsquo;s account
+          </Link>
         </p>
         <h1 className="mt-2 text-lg font-semibold tracking-tight">
           {detail.descriptor}
         </h1>
         <p className="mt-0.5 text-sm text-muted">
           {detail.businessName} · hold on account{" "}
-          <span className="font-mono text-xs">{detail.accountId}</span>
+          <Link
+            href={`/accounts/${detail.accountId}`}
+            className={`font-mono text-xs underline underline-offset-4 hover:text-text ${FOCUS_RING}`}
+          >
+            {detail.accountId}
+          </Link>
         </p>
       </header>
 

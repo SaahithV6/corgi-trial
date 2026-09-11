@@ -4,6 +4,9 @@ import type { Metadata } from "next";
 import { DemoStateBar } from "@/components/funding/DemoStateBar";
 import { FundingSkeleton, FundingView } from "@/components/funding/FundingView";
 import { parseFundingView } from "@/components/funding/demo-state";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 export const metadata: Metadata = {
   title: "Funding · Corgi ops console",
@@ -55,10 +58,14 @@ export default async function FundingPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const view = parseFundingView(await searchParams);
+  // ONE VALUE, TWO SURFACES. The state bar's badge and note, and whether
+  // `FundingView` reads live or refuses, both come from this line, so they
+  // cannot disagree about what this screen read.
+  const noDatabase = !hasDatabase();
 
   return (
     <div className="space-y-6">
-      <DemoStateBar view={view} />
+      <DemoStateBar view={view} noDatabase={noDatabase} />
 
       {/*
         The key carries the business as well as the state. Switching customer
@@ -67,7 +74,7 @@ export default async function FundingPage({
         a financial console is not a cosmetic bug.
       */}
       <Suspense key={`${view.state}:${view.businessId ?? "default"}`} fallback={<FundingSkeleton />}>
-        <FundingView view={view} />
+        <FundingView view={view} noDatabase={noDatabase} />
       </Suspense>
     </div>
   );

@@ -56,6 +56,18 @@ export type CorridorOption = {
 
 const INPUT_CLASS = "rounded border border-border-strong bg-surface px-2.5 py-2 text-sm";
 
+/**
+ * The two refusals that mean money IS committed, not that nothing happened.
+ *
+ * Both are raised because an acceptance already exists on this quote, so the
+ * blanket "nothing was written · your available balance is unchanged" line is
+ * false under exactly these codes and true under every other one.
+ */
+const ALREADY_COMMITTED: ReadonlySet<string> = new Set([
+  "FX_QUOTE_ALREADY_ACCEPTED",
+  "FX_QUOTE_ALREADY_SETTLED",
+]);
+
 function LineList({ lines }: { readonly lines: readonly QuoteLine[] }) {
   return (
     <dl className="divide-y divide-border">
@@ -102,7 +114,18 @@ export function QuoteDesk({
   const offer = quoteState.offer;
   // The receipt belongs to the offer on screen, or to nothing. A result left
   // over from a previous quote must never be read as a verdict on this one.
-  const verdict = acceptState.quoteRef === offer?.quoteRef ? acceptState : null;
+  //
+  // `quoteRef === null` IS ALSO THIS OFFER'S VERDICT. A refusal raised before
+  // the action could read a quote reference — a malformed form, most reachably
+  // a reference field with a comma or an apostrophe in it — comes back with no
+  // ref to match, so the strict comparison threw it away: the customer pressed
+  // Accept, the button finished, and NOTHING appeared. Silence after a press on
+  // a control that commits money is the worst possible answer, and it was the
+  // one a normal invoice reference produced.
+  const verdict =
+    acceptState.quoteRef === null || acceptState.quoteRef === offer?.quoteRef
+      ? acceptState
+      : null;
 
   return (
     <div className="space-y-6">
@@ -270,10 +293,26 @@ export function QuoteDesk({
                 Refused — {verdict.code}
               </p>
               <p className="mt-1 text-sm">{verdict.message}</p>
-              <p className="mt-2 text-xs text-muted">
-                Nothing was written: no acceptance, no hold, no rate locked. Your available
-                balance is unchanged.
-              </p>
+              {/* THIS SENTENCE IS A CLAIM ABOUT THE CUSTOMER'S MONEY AND IT WAS
+                  PRINTED UNDER EVERY CODE. On `FX_QUOTE_ALREADY_ACCEPTED` and
+                  `FX_QUOTE_ALREADY_SETTLED` the refusal is precisely that an
+                  acceptance and a hold DO exist and availability HAS moved — and
+                  pressing Accept a second time on the offer still on screen is
+                  the ordinary way to reach them. So the reassurance is printed
+                  only where it is true: this press wrote nothing, which is a
+                  different statement from nothing having been written. */}
+              {ALREADY_COMMITTED.has(verdict.code ?? "") ? (
+                <p className="mt-2 text-xs text-muted">
+                  This press wrote nothing. An earlier acceptance of this same
+                  quote did, and the money it committed is still held — the two
+                  figures at the top of this page say how much.
+                </p>
+              ) : (
+                <p className="mt-2 text-xs text-muted">
+                  Nothing was written: no acceptance, no hold, no rate locked. Your available
+                  balance is unchanged.
+                </p>
+              )}
             </div>
           ) : (
             <div className="mt-4 rounded border border-border-strong bg-surface-raised px-4 py-3">

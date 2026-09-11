@@ -202,7 +202,16 @@ export type SignResult = {
 const NO_ACTOR =
   "No actor could be resolved for this session, so there is nobody to attribute the check to " +
   "and nothing was written. Every payee row carries a created_by and every verification a " +
-  "checked_by; an unattributable check is not one this system will record.";
+  "checked_by; an unattributable check is not one this system will record. " +
+  // THE REMEDY, NAMED. A code with no next step is a dead end, and this one is
+  // reachable: the session's actor comes from the role control in the header,
+  // resolved to a seeded actor row by predicate. Either no role is selected or
+  // this book has no human staff actor to resolve it to, and those are two
+  // different jobs for two different people — so the message names both rather
+  // than guessing which.
+  "Next step: pick a role in the “Acting as” control at the top of this page and submit " +
+  "again. If a role is already selected, this book has no human staff actor for it to " +
+  "resolve to and somebody with database access has to seed one — the console cannot.";
 
 /**
  * Which providers run when an operator presses the button.
@@ -394,7 +403,11 @@ export async function addPayeeAction(
       code: "INVALID_PAYEE",
       message:
         "The beneficiary is not one this book can hold. Nothing was written. The shape of a " +
-        "payee is decided by one schema, shared with everything else that can produce one.",
+        "payee is decided by one schema, shared with everything else that can produce one. " +
+        "Next step: correct the fields named below and submit again — the form is still " +
+        "open and still holds what you typed. This refusal is about the SHAPE of the " +
+        "beneficiary, not about the bank: a routing number that is well-formed but wrong " +
+        "fails later, at the check, with ROUTING_CHECKSUM_FAILED.",
       issues: candidate.error.issues.map((issue) => ({
         path: issue.path.join(".") || "(payee)",
         message: issue.message,
@@ -527,7 +540,10 @@ export async function recheckPayeeAction(
     return {
       status: "refused",
       code: "INVALID_FORM",
-      message: "That is not a payee id, so nothing was read and nothing was written.",
+      message:
+        "That is not a payee id, so nothing was read and nothing was written. Next step: open " +
+        "the payee from the book at /payees and press Re-check there — every row in that " +
+        "table links to /payees?payee=<id>, which is the only id this action accepts.",
       issues: parsed.error.issues.map((issue) => ({
         path: issue.path.join(".") || "(form)",
         message: issue.message,
@@ -654,8 +670,10 @@ export async function signWarningAction(
       status: "refused",
       code: "INVALID_FORM",
       message:
-        parsed.error.issues.map((issue) => issue.message).join("; ") ||
-        "The form could not be read, so nothing was written.",
+        (parsed.error.issues.map((issue) => issue.message).join("; ") ||
+          "The form could not be read, so nothing was written.") +
+        " Next step: reopen the signature form at /payees?payee=<id>&sign=1 and submit it " +
+        "again — it names the findings it answers, and no acknowledgement row was written.",
       signature: null,
     };
   }

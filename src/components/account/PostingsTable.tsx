@@ -1,7 +1,10 @@
+import Link from "next/link";
+
 import { formatDate, formatTimestamp } from "@/lib/format/datetime";
 import { Money } from "@/components/ui/Money";
 import {
   Badge,
+  FOCUS_RING,
   Panel,
   TD_CLASS,
   TH_CLASS,
@@ -27,17 +30,30 @@ import { runningLedgerBalances } from "./derive";
 export function PostingsTable({
   postings,
   ledgerCents,
+  pageSize,
 }: {
   readonly postings: readonly Posting[];
   readonly ledgerCents: number;
+  /**
+   * How many rows were ASKED FOR. The table below is a page, not the account's
+   * history, and without this the two are indistinguishable — a payment
+   * released four hours ago simply is not on the screen and nothing says why.
+   */
+  readonly pageSize: number;
 }) {
   const balances = runningLedgerBalances(postings, ledgerCents);
+  const capped = postings.length >= pageSize;
 
   return (
     <Panel
       id="activity"
       title="Activity"
-      description="Newest first. Memo postings move availability only; financial postings move the ledger balance and, unless a hold releases against them, availability too."
+      description="Newest first by booking time, not by value date. Memo postings move availability only; financial postings move the ledger balance and, unless a hold releases against them, availability too."
+      actions={
+        <span className="text-xs text-muted">
+          {postings.length} posting{postings.length === 1 ? "" : "s"} shown
+        </span>
+      }
     >
       {postings.length === 0 ? (
         <div className="px-5 py-10">
@@ -50,7 +66,26 @@ export function PostingsTable({
           </p>
         </div>
       ) : (
-        <TableScroll>
+        <>
+          <p className="max-w-prose border-b border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted">
+            {capped ? (
+              <>
+                The newest {pageSize} postings on this account, and no more. Anything booked before
+                the oldest row below is not on this page and is not counted in any figure on it —
+                the balances above are folded over the WHOLE journal, so they and this table do not
+                answer the same question. Ask for more with{" "}
+                <span className="font-mono text-text">?rows=200</span> on this URL.
+              </>
+            ) : (
+              <>
+                Every posting on this account: fewer than the {pageSize} this page asked for came
+                back, so nothing is below the cut.
+              </>
+            )}{" "}
+            Each row names the journal entry it is, so a release event on /approvals that cites an
+            entry id can be found here by matching it.
+          </p>
+          <TableScroll>
           <table className="w-full border-collapse text-sm">
             <caption className="sr-only">
               Postings on this account, newest first, with their effect on the
@@ -108,6 +143,21 @@ export function PostingsTable({
                           {posting.sourceRef}
                         </p>
                       )}
+                      <p className="mt-0.5 font-mono text-[11px] break-all text-muted">
+                        entry {posting.id}
+                        {posting.holdId === null ? null : (
+                          <>
+                            {" · "}
+                            <Link
+                              href={`/accounts/holds/${posting.holdId}`}
+                              className={`underline underline-offset-4 hover:text-text ${FOCUS_RING}`}
+                              title="The hold this posting placed or released, with its event set and the fold behind it."
+                            >
+                              hold {posting.holdId}
+                            </Link>
+                          </>
+                        )}
+                      </p>
                     </td>
 
                     <td className={`${TD_CLASS} text-right`}>
@@ -161,7 +211,8 @@ export function PostingsTable({
               })}
             </tbody>
           </table>
-        </TableScroll>
+          </TableScroll>
+        </>
       )}
     </Panel>
   );

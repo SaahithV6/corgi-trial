@@ -1,5 +1,5 @@
 import { formatDate, formatTimestamp } from "@/lib/format/datetime";
-import { isErr } from "@/lib/result";
+import { err, isErr, type Result } from "@/lib/result";
 import { Badge, MetaList, Note, Panel } from "@/components/ui/primitives";
 
 import { OccurrenceDetail } from "./OccurrenceDetail";
@@ -9,7 +9,7 @@ import { ScheduleTable } from "./ScheduleTable";
 import { StandingErrorPanel } from "./StandingErrorPanel";
 import { StandingSkeleton } from "./StandingSkeleton";
 import { SummaryTiles } from "./SummaryTiles";
-import type { StandingDataSource } from "./data-contract";
+import type { StandingDataSource, StandingView as StandingViewData } from "./data-contract";
 import { standingHref, type StandingFilter } from "./view-state";
 
 export { StandingSkeleton };
@@ -37,10 +37,7 @@ export async function StandingView({
   readonly filter: StandingFilter;
   readonly noDatabase?: boolean;
 }) {
-  const result = await source.load({
-    ...(filter.standingOrderId === null ? {} : { standingOrderId: filter.standingOrderId }),
-    ...(filter.occurrenceId === null ? {} : { occurrenceId: filter.occurrenceId }),
-  });
+  const result = await loadOrReportFailure(source, filter);
 
   if (isErr(result)) {
     return (
@@ -146,7 +143,13 @@ export async function StandingView({
           against.
         </p>
       ) : (
-        <OccurrenceDetail row={view.selected} filter={filter} />
+        <OccurrenceDetail
+          row={view.selected}
+          filter={filter}
+          accountId={
+            view.schedules.find((s) => s.id === view.selected?.standingOrderId)?.accountId ?? null
+          }
+        />
       )}
 
       <PolicyPanel invariants={view.invariants} />
@@ -154,6 +157,42 @@ export async function StandingView({
       <FooterNote filter={filter} />
     </div>
   );
+}
+
+/**
+ * Read the schedule, and turn a THROWN read into the same visible refusal a
+ * returned `Err` gets.
+ *
+ * `StandingDataSource.load` is documented to return a `Result`, and the live
+ * implementation does. But a source that throws — a dropped connection, a
+ * driver that raises before it can shape an error — escaped this component
+ * entirely, and because the view sits behind the page's Suspense boundary the
+ * response that reached the browser was HTTP 200 carrying the skeleton and
+ * nothing else. A schedule nobody could read must not look like a schedule
+ * with nothing in it: on this screen that difference decides whether an
+ * operator goes looking for a missed rent payment.
+ *
+ * Nothing is swallowed: the thrown message is the message the panel prints.
+ */
+async function loadOrReportFailure(
+  source: StandingDataSource,
+  filter: StandingFilter,
+): Promise<Result<StandingViewData>> {
+  try {
+    return await source.load({
+      ...(filter.standingOrderId === null ? {} : { standingOrderId: filter.standingOrderId }),
+      ...(filter.occurrenceId === null ? {} : { occurrenceId: filter.occurrenceId }),
+    });
+  } catch (cause) {
+    return err({
+      code: "STANDING_SCHEDULE_UNREADABLE",
+      message:
+        "The schedule read threw before it could return an answer, so no mandate was listed, " +
+        "no occurrence was read and no invariant was counted. This is not an empty schedule — " +
+        "it is an unread one, and nothing here says a payment did or did not fire. " +
+        `(${cause instanceof Error ? cause.message : String(cause)})`,
+    });
+  }
 }
 
 function Header() {

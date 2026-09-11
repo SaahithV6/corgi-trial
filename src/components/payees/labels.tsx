@@ -30,8 +30,29 @@ import type {
  *      that made it.
  */
 
-export function OutcomeBadge({ outcome }: { readonly outcome: PayeeOutcome | null }) {
+/**
+ * What the last check decided, and — for a warning — whether anybody has
+ * signed for it yet.
+ *
+ * `acknowledged` is read here rather than only underneath the badge because
+ * the badge is the part an operator scans. A warned payee that somebody HAS
+ * signed for was reading NEEDS A SIGNATURE in red above the words "signed by
+ * Dana Okonkwo": a badge demanding an action that had already been taken, on
+ * the one screen whose job is to say which payees are holding payments up.
+ * The warning does not go away when it is signed for — the names still differ —
+ * so the label keeps the word WARNED and adds who settled it.
+ */
+export function OutcomeBadge({
+  outcome,
+  acknowledged = false,
+}: {
+  readonly outcome: PayeeOutcome | null;
+  readonly acknowledged?: boolean;
+}) {
   if (outcome === null) return <Badge tone="quiet">NEVER CHECKED</Badge>;
+  if (outcome === "warned" && acknowledged) {
+    return <Badge tone="neutral">WARNED · SIGNED FOR</Badge>;
+  }
   const tone: BadgeTone =
     outcome === "blocked" ? "negative" : outcome === "warned" ? "negative" : "positive";
   const label =

@@ -249,6 +249,16 @@ const endSchema = z.object({
   memberId: z.uuid(),
   state: z.enum(MEMBER_STATES),
   note: z.string().trim().min(1, { error: "say why" }).max(400),
+  /**
+   * The member's own display name, typed by hand, and required only to remove.
+   *
+   * The form disables its button until this matches, but a server action is a
+   * public POST endpoint and a disabled button enforces nothing, so the match
+   * is re-checked HERE against the name re-read from the database — not against
+   * anything else the same request supplied. Absent for suspend and reinstate,
+   * which are both reversible at both ends.
+   */
+  confirmName: z.string().max(80).optional(),
 });
 
 export async function endMembershipAction(
@@ -260,6 +270,7 @@ export async function endMembershipAction(
     memberId: formData.get("memberId"),
     state: formData.get("state"),
     note: formData.get("note"),
+    confirmName: formData.get("confirmName") ?? undefined,
   });
   if (!parsed.success) {
     return fail("INVALID_REQUEST", `That request could not be read: ${parsed.error.issues[0]?.message ?? "invalid input"}.`);
@@ -267,6 +278,28 @@ export async function endMembershipAction(
 
   const actorId = await actor();
   if (actorId === null) return fail("NO_ACTOR", "No actor could be resolved for this session.");
+
+  // Removal is the only terminal state, and it is the only one that asks for a
+  // gesture. Checked BEFORE `endMembership()`, because that function's first
+  // act is to close the card at the issuer and there is no un-closing it.
+  if (parsed.data.state === "removed") {
+    const target = await readMember(parsed.data.memberId);
+    if (target === null) return fail("NO_SUCH_MEMBER", "That member does not exist, so nobody was removed.");
+    if (target.businessId !== parsed.data.businessId) {
+      return fail("MEMBER_NOT_OWNED", "That member belongs to a different business. Nobody was removed.");
+    }
+    if ((parsed.data.confirmName ?? "").trim() !== target.displayName) {
+      return fail(
+        "REMOVAL_NOT_CONFIRMED",
+        `Removal is terminal and was not confirmed, so nobody was removed and no card was touched at the issuer. Type ${target.displayName} — that member's display name, exactly as it is written here — into the confirmation field on /team and press the button again. Suspension is the reversible option and needs no confirmation.`,
+        [
+          { label: "Member", value: target.displayName },
+          { label: "Name to type", value: target.displayName, mono: true },
+          { label: "Where", value: "/team → Suspend, remove or reinstate" },
+        ],
+      );
+    }
+  }
 
   if (parsed.data.state === "active") {
     const back = await reinstateMember({

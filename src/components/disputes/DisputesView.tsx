@@ -210,6 +210,19 @@ export async function DisputesView({
               </p>
             </div>
           </div>
+          <p className="px-5 pb-4 text-xs text-muted">
+            These three are the WHOLE account at this instant, not this
+            customer&rsquo;s disputes: every card authorisation, inbound credit
+            and payment on the book is in them. The postings that make them up
+            are on{" "}
+            <Link
+              href="/accounts"
+              className={`underline underline-offset-2 ${FOCUS_RING}`}
+            >
+              the deposit directory
+            </Link>
+            , which links each 2100 account to its own activity.
+          </p>
         </Panel>
       )}
 

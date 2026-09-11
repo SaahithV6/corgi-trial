@@ -123,6 +123,15 @@ export type Receipt = {
    * and the reason is not the size of the payment.
    */
   readonly thresholdIsFloor: boolean;
+  /**
+   * The account the money leaves.
+   *
+   * On the receipt so the screen can say where this payment ends up AFTER it is
+   * released: the queue on /approvals drops it at that point and no screen in
+   * this console lists a released payment, but the journal entry the release
+   * posts is on this account's Activity table for good.
+   */
+  readonly accountId: string;
   /** False when this idempotency key had already been queued. Nothing new was written. */
   readonly created: boolean;
 };
@@ -446,6 +455,7 @@ export async function raisePaymentAction(
       approvalsRequired,
       needsApproval: approvalsRequired > 0,
       thresholdIsFloor: policy.thresholdCents === 0n,
+      accountId: fields.accountId,
       created,
     },
   };

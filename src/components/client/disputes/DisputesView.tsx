@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/primitives";
 import { formatUsd } from "@/lib/format/money";
 
+import { BusinessPicker } from "../Chrome";
 import type { CustomerCase, DisputesScreen } from "./contract";
 import { FileDisputeForm, type ChargeOption, type ReasonChoice } from "./FileDisputeForm";
 import { deciderWord } from "./language";
@@ -78,9 +79,21 @@ function CaseCard({ row }: { readonly row: CustomerCase }) {
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Badge tone={row.isClosed ? "quiet" : "neutral"}>{row.status.replaceAll("_", " ")}</Badge>
         <Badge tone={row.advancedCents > 0n ? "positive" : "quiet"}>{advanceWord(row)}</Badge>
-        {row.isClosed ? null : (
+        {/* PAST THE DATE IS NOT A NEGATIVE COUNTDOWN. The figure is
+            `outside_date − CURRENT_DATE`, so a case still open after its
+            deadline printed "-6 days until the network must have finished",
+            which reads as a rendering fault rather than as the real and
+            reportable fact that the network is late. Zero is its own sentence
+            for the same reason. */}
+        {row.isClosed ? null : row.daysToOutsideDate > 0 ? (
           <Badge tone="quiet">
             {row.daysToOutsideDate} days until the network must have finished
+          </Badge>
+        ) : row.daysToOutsideDate === 0 ? (
+          <Badge tone="quiet">the network must finish this today</Badge>
+        ) : (
+          <Badge tone="negative">
+            {-row.daysToOutsideDate} days past the date the network had to finish
           </Badge>
         )}
       </div>
@@ -181,16 +194,33 @@ export function DisputesView({
           </div>
         </div>
 
+        {/* The subject, changeable HERE. Every other client screen carries the
+            picker and this one did not, so a customer who had this screen open
+            for the wrong business had to go to the balance, switch there, and
+            navigate back — on the one screen where getting the subject wrong
+            files a claim against the wrong book. */}
+        <div className="mt-4 border-t border-border pt-3">
+          <BusinessPicker screen="/client/disputes" view={view} header={header} />
+        </div>
+
         <nav className="mt-4 flex flex-wrap gap-2 border-t border-border pt-3">
-          {CLIENT_SCREENS.map((item) => (
-            <Link
-              key={item.href}
-              href={`${item.href}${clientQuery(view)}`}
-              className={`rounded border border-border px-2.5 py-1 text-xs ${FOCUS_RING}`}
-            >
-              {item.label}
-            </Link>
-          ))}
+          {CLIENT_SCREENS.map((item) => {
+            const active = item.href === "/client/disputes";
+            return (
+              <Link
+                key={item.href}
+                href={`${item.href}${clientQuery(view)}`}
+                aria-current={active ? "page" : undefined}
+                className={`rounded border px-2.5 py-1 text-xs ${FOCUS_RING} ${
+                  active
+                    ? "border-border-strong bg-surface-raised font-medium text-text"
+                    : "border-border"
+                }`}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
         </nav>
       </header>
 

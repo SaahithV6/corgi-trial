@@ -11,7 +11,17 @@ import {
 import type { MovementView } from "./data-contract";
 
 /**
- * Every internal transfer, as journal entries.
+ * The internal transfers this customer's pots have seen, as journal entries.
+ *
+ * NOT "every" ONE, AND THE HEADER SAYS SO. `listMovements()` selects
+ * `WHERE e.rail = 'internal' AND e.idempotency_key LIKE 'pot:%'`, newest first
+ * by `booking_seq`, `LIMIT 50`. Both exclusions matter and neither was printed:
+ * the cap silently truncates a busy customer, and the key prefix is the
+ * WRITER'S OWN LABEL, which `v_internal_transfer_impure` on this same screen
+ * already confesses is bypassable — the $50.00 posted out of a pot under an
+ * `ach:` key on 2026-09-11 moved a pot balance and never appeared in this
+ * table. So the description names the order, the cap, and the view that catches
+ * what the key prefix misses.
  *
  * There is no `pot_transfer` table behind this. The rows are `journal_entry`
  * joined to `journal_line`, and both lines of each entry are printed with their
@@ -42,7 +52,7 @@ export function MovementTable({
     <Panel
       id="movements"
       title="Internal transfers"
-      description="Two lines, one customer, one book, rail = internal. Instant because there is nothing external to wait for."
+      description="Two lines, one customer, one book, rail = internal. Instant because there is nothing external to wait for. Newest first by booking sequence, capped at 50: an older transfer than the last row is not shown here. The population is entries whose idempotency key begins pot: — the writer's own label — so an entry that moved pot money without that key is absent from this table and is caught instead by v_pot_line_provenance in the invariants above."
       actions={<Badge tone="quiet">{movements.length} shown</Badge>}
     >
       {movements.length === 0 ? (

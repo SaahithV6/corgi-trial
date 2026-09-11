@@ -159,6 +159,18 @@ export function StatementDocument({
                           {line.rail === null ? null : ` · ${line.rail}`}
                         </span>
                       )}
+                      {/* The journal entry this line folds. Printed in full,
+                          not truncated: it is the only identifier that carries
+                          from a statement line back to the entry behind it —
+                          to the payment release that wrote it, to the audit
+                          trail, to a support ticket. Truncating it would leave
+                          the reader with a value they can only finish resolving
+                          at a terminal. A line has no external ref of its own
+                          on every internal movement, so this is printed
+                          unconditionally and the ref above is not. */}
+                      <span className="mt-0.5 block font-mono text-[11px] text-muted">
+                        entry {line.entryId}
+                      </span>
                     </th>
 
                     <td className={`${TD_CLASS} text-right tabular-nums text-xs text-muted`}>

@@ -1,8 +1,8 @@
 import { Badge, MetaList, Note, Panel } from "@/components/ui/primitives";
 import { formatTimestamp } from "@/lib/format/datetime";
-import { isErr } from "@/lib/result";
+import { err, isErr, type Result } from "@/lib/result";
 
-import type { PayoutsDataSource } from "./data-contract";
+import type { PayoutsDataSource, PayoutsView as PayoutsViewData } from "./data-contract";
 import { PayoutErrorPanel } from "./PayoutErrorPanel";
 import { PayoutSkeleton } from "./PayoutSkeleton";
 import { QuoteDetail } from "./QuoteDetail";
@@ -31,10 +31,7 @@ export async function PayoutsView({
   readonly source: PayoutsDataSource;
   readonly filter: PayoutFilter;
 }) {
-  const result = await source.load({
-    ...(filter.quoteRef === null ? {} : { quoteRef: filter.quoteRef }),
-    ...(filter.businessId === null ? {} : { businessId: filter.businessId }),
-  });
+  const result = await loadOrReportFailure(source, filter);
 
   if (isErr(result)) {
     // The limitation below is rendered HERE TOO, and that is the point of
@@ -69,9 +66,9 @@ export async function PayoutsView({
       <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         <MetaList
           items={[
-            { label: "quotes", value: String(view.rows.length) },
-            { label: "live commitments", value: String(committed) },
-            { label: "priced off the fallback", value: String(simulated) },
+            { label: "quotes shown", value: String(view.rows.length) },
+            { label: "live commitments, of those", value: String(committed) },
+            { label: "priced off the fallback, of those", value: String(simulated) },
             { label: "read", value: formatTimestamp(view.asOf) },
           ]}
         />
@@ -201,8 +198,18 @@ export async function PayoutsView({
 
       <Panel
         title="The quote book"
-        description="Append-only, newest first. Expired quotes stay here exactly as long as accepted ones — the state is derived from whether an acceptance row exists and when, never stored."
+        description="Append-only, newest first, and cut off at the newest page. Expired quotes stay here exactly as long as accepted ones — the state is derived from whether an acceptance row exists and when, never stored."
       >
+        {view.rows.length === 0 ? null : (
+          <p className="max-w-prose px-5 pt-4 text-xs leading-relaxed text-muted">
+            These are the {view.rows.length} most recently raised quotes, not the whole book. The
+            book is append-only and older quotes are still on file — this page does not read them,
+            so a reference you cannot find here is not a reference that does not exist. The two
+            counts above are over these {view.rows.length} rows only: &ldquo;priced off the
+            fallback&rdquo; reading zero means none of <em>these</em> was priced off the fallback,
+            not that none ever was.
+          </p>
+        )}
         {view.rows.length === 0 ? (
           <div className="px-5 py-8">
             <p className="text-sm">No quote has been raised.</p>
@@ -217,6 +224,43 @@ export async function PayoutsView({
       </Panel>
     </div>
   );
+}
+
+/**
+ * Read the book, and turn a THROWN read into the same visible refusal a
+ * returned `Err` gets.
+ *
+ * `PayoutsDataSource.load` is documented to return a `Result`, and the live
+ * implementation does. But a source that throws — a dropped connection, a
+ * driver that raises before it can shape an error — escaped this component
+ * entirely, and because the view sits behind the page's Suspense boundary the
+ * response that reached the browser was HTTP 200 carrying the skeleton and
+ * nothing else. A screen that says "Reading the quote book…" forever is
+ * indistinguishable from a slow one, and an empty quote book is a different
+ * fact from an unread quote book. Both now land on the error panel.
+ *
+ * Nothing is swallowed: the thrown message is the message the panel prints.
+ */
+async function loadOrReportFailure(
+  source: PayoutsDataSource,
+  filter: PayoutFilter,
+): Promise<Result<PayoutsViewData>> {
+  try {
+    return await source.load({
+      ...(filter.quoteRef === null ? {} : { quoteRef: filter.quoteRef }),
+      ...(filter.businessId === null ? {} : { businessId: filter.businessId }),
+    });
+  } catch (cause) {
+    return err({
+      code: "FX_QUOTE_BOOK_UNREADABLE",
+      message:
+        "The quote book read threw before it could return an answer, so no quote was listed " +
+        "and no rate was fetched. This is not an empty book — it is an unread one. Retry is " +
+        `safe: rendering this page raises nothing. (${
+          cause instanceof Error ? cause.message : String(cause)
+        })`,
+    });
+  }
 }
 
 /**

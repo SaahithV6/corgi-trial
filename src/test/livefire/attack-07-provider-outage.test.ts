@@ -159,15 +159,58 @@
  *      can silence the alarm.
  *
  * (2) is not made redundant by (1), which is why the second test below asserts
- * BOTH the escalation and the gate's shape. That probe reads Lithic's own
+ * BOTH the narrowing and the gate's shape. That probe reads Lithic's own
  * delivery log, so its verdict is a function of the delivery loop's health: an
  * endpoint of ours rejecting deliveries reads `unauthorised` and an unreadable
  * `/attempts` reads `unreachable`. Under `every`, either would disarm the alarm
  * at the exact moment deliveries were being lost.
+ * ============================================================================
  *
- * So there is NO remaining limit to record, and the second test asserts the
- * stronger claim the attack's wording implies: a webhook outage now moves the
- * top-level status, proven by inducing one.
+ * ============================================================================
+ * THE LIMIT THAT IS HERE NOW — 2026-09-11, and it replaced a WRONG ASSERTION.
+ *
+ * The second test used to assert `status === "degraded"` at the end of its
+ * induced silence. That assertion has been removed because it was false, and
+ * it was false for a reason worth more than the assertion was:
+ *
+ * Escalation used to be `MAX(webhook_inbox.received_at)` and a clock. That
+ * measures TIME SINCE THE LAST WEBHOOK when the question is ARE WE LOSING
+ * DELIVERIES, and it cannot separate "the provider stopped delivering while
+ * transactions were happening" from "nobody swiped a card". Measured on this
+ * deployment at 17:56Z with no outage in progress: `stale`,
+ * `degradesDeployment: true`, while the liveness probe read `GET /v1/cards ->
+ * 200` in the same response. `/api/health` now narrows that silence against
+ * `card_auth_decision WHERE source = 'provider'` — the ASA record, written
+ * synchronously while Lithic holds an authorisation open at a terminal, on a
+ * channel independent of the inbox whose silence is in question.
+ *
+ * AND THIS ATTACK INDUCES ITS OUTAGE BY SENDING NOTHING. The silence it opens
+ * is genuine and measured, but nothing was owed during it, so the honest
+ * verdict is `dormant` and the endpoint correctly declines to escalate.
+ * Asserting `degraded` here would assert the defect back into existence.
+ *
+ * WHAT IS THEREFORE NOT PROVEN END-TO-END: that a real disabled subscription
+ * reddens the top-level status. A true induction disables the Lithic event
+ * subscription and THEN transacts, so a delivery is genuinely owed and
+ * genuinely does not arrive. It is NOT automated here, on purpose: a
+ * subscription left disabled by a crashed or SIGKILLed run is a broken card
+ * rail during a live demo, and this suite cannot guarantee restoration through
+ * a signal it does not get to handle. It is a scripted human step in
+ * docs/DEMO.md, where the operator holds the restore.
+ *
+ * MEASURED, AND IT MAKES THE HUMAN STEP SAFE: `GET /v1/auth_stream` on this
+ * account reads `{"enrolled": true}`, and ASA enrolment is SEPARATE from the
+ * event subscription. Disabling the subscription therefore stops the
+ * asynchronous clearing feed WITHOUT stopping card authorisation at the
+ * terminal — so the demo's cards keep working while the feed is dark, which is
+ * exactly the state the attack is about.
+ *
+ * What the second test proves instead, without that risk, is the claim the
+ * narrowing actually turns on: replaying THIS outage's own published facts
+ * through `attributeDeliverySilence` — the route's own pure function — with
+ * exactly one input varied (ASA decisions after the last delivery: 0 vs 1), the
+ * alarm is removed on a counted zero and STAYS on a delivery that is owed. The
+ * narrowing can only ever subtract, and it cannot silence real loss.
  * ============================================================================
  */
 import { createHmac, randomUUID } from "node:crypto";
@@ -176,6 +219,9 @@ import { dirname } from "node:path";
 
 import { beforeAll, describe, expect, it } from "vitest";
 
+// The route's OWN modules, not reimplementations of them. The counterfactual
+// below is only worth anything if it runs the same code `/api/health` runs.
+import { attributeDeliverySilence } from "@/app/api/health/initiation";
 import { webhookDeliveryHealth } from "@/lib/integrations/delivery-health";
 import type * as BalancesModule from "@/lib/ledger/balances";
 import type { sql as SqlHandle } from "@/lib/ledger/db";
@@ -1103,11 +1149,38 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     readonly evidence?: string | null;
   }
 
+  /**
+   * `integrations.transactionInitiation` — the field that decides whether this
+   * attack's silence is an outage or a quiet card rail. See the block below.
+   */
+  interface ProviderInitiation {
+    readonly provider: string;
+    readonly source: string | null;
+    readonly verdict: string;
+    readonly initiatedSinceLastDelivery: number | null;
+    readonly oldestUnansweredAgeSeconds: number | null;
+    readonly newestInitiated: string | null;
+    readonly secondsSinceNewestInitiated: number | null;
+    readonly narrowedDeliveryAlarm: boolean;
+    readonly note: string;
+  }
+
+  interface InitiationHealth {
+    readonly source?: string;
+    readonly measured?: boolean;
+    readonly error?: string | null;
+    readonly measuredAt?: string;
+    readonly horizonSeconds?: number;
+    readonly narrowed?: readonly string[];
+    readonly providers?: readonly ProviderInitiation[];
+  }
+
   interface HealthDoc {
     readonly status?: string;
     readonly database?: { readonly reachable?: boolean };
     readonly integrations?: {
       readonly webhookHealth?: WebhookHealth;
+      readonly transactionInitiation?: InitiationHealth;
       readonly slots?: readonly SlotReport[];
     };
   }
@@ -1272,26 +1345,155 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
         `induced outage: after the money test's delivery at ${lithic.lastDelivery} we delivered nothing for ${Math.round((Date.now() - openedAt) / 1000)}s (started '${startedVerdict}' at ${startedLag}s, ${restarts} restart(s)). /api/health then reports lithic verdict '${lithic.verdict}', secondsSinceLastDelivery ${lag} inside its own ${staleAfter}-${quietAfter}s alarm band, note "${lithic.note}". The published lastDelivery matches MAX(webhook_inbox.received_at) for lithic read directly from the live database (${new Date(observed).toISOString()}), so the figure is the real row.`,
       );
 
-      // ---- IT ESCALATES ----------------------------------------------------
-      // This is the claim that used to be a recorded LIMIT (see the header) and
-      // is now asserted. A monitor watching nothing but `status` sees the
-      // outage. All three, because any one of them alone is weaker: the
-      // provider says it is degrading the deployment, the endpoint names it as
-      // the reason, and the top-level verdict actually moved.
+      // ---- WHAT THIS SILENCE ACTUALLY IS -----------------------------------
+      // THIS BLOCK USED TO ASSERT `status === "degraded"`, AND THAT ASSERTION
+      // WAS WRONG. It is worth being exact about why, because the test encoded
+      // the precise defect that was removed from the endpoint underneath it.
+      //
+      // The escalation gate used to be `MAX(webhook_inbox.received_at)` and a
+      // clock, and nothing else. That measures TIME SINCE THE LAST WEBHOOK when
+      // the question is ARE WE LOSING DELIVERIES, and it cannot tell apart two
+      // different facts: the provider stopped delivering while transactions
+      // were happening (loss), and nobody swiped a card (a quiet Thursday).
+      // Measured on this deployment at 17:56Z with no outage at all in
+      // progress: verdict `stale`, `degradesDeployment: true`, while the
+      // liveness probe read `GET /v1/cards -> 200` in the same response.
+      //
+      // `/api/health` now publishes `integrations.transactionInitiation`, which
+      // narrows that silence against `card_auth_decision WHERE source =
+      // 'provider'` — the durable record of Auth Stream Access, written
+      // synchronously while Lithic holds a cardholder's authorisation open at a
+      // terminal, on a channel that touches neither the ledger nor the inbox.
+      // Any such decision after the newest delivery is `transacting`: a
+      // delivery was owed and did not arrive. A counted zero is `dormant`.
+      //
+      // AND THIS ATTACK INDUCES ITS OUTAGE BY SENDING NOTHING. The loop above
+      // opens a genuine silence — it is a real, measured, induced `stale` — but
+      // it is a silence with NO TRAFFIC BEHIND IT. There is nothing Lithic owed
+      // us and failed to send, because nobody asked it for anything. So the
+      // honest reading of this induction is `dormant`, the endpoint correctly
+      // declines to escalate, and asserting `degraded` here would be asserting
+      // the bug back into existence.
+      //
+      // A TRUE INDUCTION — the brief's own wording, "turn off your issuing
+      // provider's webhooks for five minutes mid-demo" — requires DISABLING THE
+      // LITHIC EVENT SUBSCRIPTION AND THEN TRANSACTING, so that a delivery is
+      // genuinely owed and genuinely does not arrive. That is deliberately NOT
+      // automated here: a subscription left disabled by a crashed or timed-out
+      // test run is a broken card rail during a live demo, and this suite
+      // cannot guarantee restoration through a SIGKILL. It is a scripted human
+      // step in docs/DEMO.md instead. The counterfactual below is what this
+      // suite CAN prove without that risk, and it is proven against the real
+      // published facts rather than against a fixture.
       const slots = slotStatuses(current.doc);
-      expect(lithic.degradesDeployment).toBe(true);
-      expect(degradedBy).toContain("lithic");
-      expect(current.doc.status).toBe("degraded");
-      // ...and `degraded` for THIS reason, not for a coincidental one. The
-      // top-level status is `database.reachable && degradedBy.length === 0`, so
-      // a dead database would produce the same word for an unrelated fact and
-      // this assertion would pass while proving nothing.
+      const initiation = current.doc.integrations?.transactionInitiation;
+      const lithicInit = initiation?.providers?.find((p) => p.provider === "lithic");
+
+      if (initiation === undefined || lithicInit === undefined) {
+        const reason =
+          "/api/health publishes webhookHealth but no integrations.transactionInitiation entry for 'lithic', so this deployment cannot tell a provider outage from a quiet card rail and the silence just induced cannot be attributed either way.";
+        record("skip", reason);
+        ctx.skip(reason);
+        return;
+      }
+      if (initiation.measured !== true) {
+        const reason = `/api/health could not read transaction initiation this time (${String(initiation.error)}), so the silence keeps the alarming reading by default and the attribution this attack turns on is unproven.`;
+        record("skip", reason);
+        ctx.skip(reason);
+        return;
+      }
+
+      // The induction is what it is: a silence with nothing behind it.
+      expect(lithicInit.verdict).toBe("dormant");
+      expect(lithicInit.initiatedSinceLastDelivery).toBe(0);
+      expect(lithicInit.source).toBe("card_auth_decision (source = 'provider')");
+      // ...and the endpoint says out loud that this is the field that took the
+      // alarm away, rather than leaving a reader to infer it from two others.
+      expect(lithicInit.narrowedDeliveryAlarm).toBe(true);
+      expect(initiation.narrowed).toContain("lithic");
+      // The delivery verdict is UNTOUCHED — `stale` is a true statement about
+      // MAX(received_at) and stays on the record (asserted above). What changed
+      // is whether that silence is read as loss.
+      expect(lithic.verdict).toBe("stale");
+      expect(lithic.degradesDeployment).toBe(false);
+      expect(degradedBy).not.toContain("lithic");
+      expect(current.doc.status).toBe("ok");
       expect(current.doc.database?.reachable).toBe(true);
-      expect(degradedBy).toEqual(["lithic"]);
 
       record(
         "evidence",
-        `ESCALATED — the outage is not merely reported, it moves the top-level verdict: degradesDeployment=true, degradedBy=[${degradedBy.join(", ")}], status="${String(current.doc.status)}" with database.reachable=true (so 'degraded' is the webhook feed, not a coincidental database failure). Lithic slots at that instant: ${LITHIC_SLOTS.map((s) => `${s}=${slots[s] ?? "absent"}`).join(", ")}. This is the limit attack 7 used to record instead of assert: escalation was gated on EVERY lithic slot reading 'live' while card_webhooks was permanently 'unprobed', so no webhook outage could move status (measured then: stale at 184s, status "ok"). card_webhooks now has a real probe and the gate is 'some' (DECISIONS 028).`,
+        `NOT ESCALATED, CORRECTLY — the silence induced above is real and measured ('stale' at ${lag}s, lastDelivery matched against the live inbox), but it is a silence with NO TRAFFIC BEHIND IT: integrations.transactionInitiation reads lithic verdict 'dormant' from ${String(lithicInit.source)} with initiatedSinceLastDelivery=0 (last initiation ${String(lithicInit.secondsSinceNewestInitiated)}s ago, BEFORE that delivery), narrowedDeliveryAlarm=true, narrowed=[${(initiation.narrowed ?? []).join(", ")}]. So degradesDeployment=false, degradedBy=[${degradedBy.join(", ")}], status="${String(current.doc.status)}". This test previously asserted status==="degraded" and that assertion encoded the exact defect since removed: MAX(webhook_inbox.received_at) plus a clock cannot tell "the provider stopped delivering while transactions were happening" from "nobody swiped a card", and it read 'outage' on this deployment at 17:56Z with GET /v1/cards -> 200 in the same response. Attack 7 induces its outage BY SENDING NOTHING, so 'dormant' is the honest reading of what it induced.`,
+      );
+
+      // ---- AND IT WOULD REDDEN ON A SILENCE THAT IS LOSING DELIVERIES -------
+      // The claim the attack's wording is actually about, proven WITHOUT
+      // disabling anything, by replaying THIS outage's own published facts
+      // through `attributeDeliverySilence` — the same pure function
+      // `/api/health` calls, imported from the route's own module, not a
+      // reimplementation of it. One input changes between the two runs: the
+      // number of provider-sourced ASA decisions recorded after the newest
+      // delivery. Everything else — the instant, the threshold, the lag, the
+      // gate — is the real one, held fixed.
+      const measuredAt = new Date(
+        current.doc.integrations?.webhookHealth?.measuredAt ?? new Date().toISOString(),
+      );
+      const lastDeliveryAt = new Date(lithic.lastDelivery as string);
+      const rawDelivery = webhookDeliveryHealth(
+        { ok: true as const, latencyMs: 0, rows: [{ provider: "lithic", lastDeliveryAt }] },
+        [{ provider: "lithic", integrationLive: true, verifierRegistered: true }],
+        measuredAt,
+      );
+      // The premise, asserted rather than assumed: before any narrowing, this
+      // silence DOES degrade. Otherwise the counterfactual below would be
+      // comparing two ways of not alarming.
+      expect(rawDelivery.providers.find((p) => p.provider === "lithic")?.verdict).toBe("stale");
+      expect(rawDelivery.degradedBy).toEqual(["lithic"]);
+
+      const withInitiations = (count: number, oldest: Date | null) =>
+        attributeDeliverySilence(
+          rawDelivery,
+          {
+            ok: true as const,
+            latencyMs: 0,
+            rows: [
+              {
+                provider: "lithic",
+                lastDeliveryAt,
+                initiatedSinceDeliveryCount: count,
+                oldestInitiatedSinceDeliveryAt: oldest,
+                newestInitiatedAt: oldest ?? lastDeliveryAt,
+                initiatedInHorizonCount: count,
+              },
+            ],
+          },
+          measuredAt,
+        );
+
+      // (a) The quiet card rail — this run's actual state. Alarm removed.
+      const quietRail = withInitiations(0, null);
+      expect(quietRail.initiation.providers.find((p) => p.provider === "lithic")?.verdict).toBe(
+        "dormant",
+      );
+      expect(quietRail.delivery.degradedBy).toEqual([]);
+
+      // (b) The same silence, same instant, same threshold — with ONE card
+      // presented at a terminal after the last delivery. A delivery is owed and
+      // has not arrived. The alarm stays, and status would read "degraded".
+      const owedAt = new Date(lastDeliveryAt.getTime() + 1_000);
+      const losing = withInitiations(1, owedAt);
+      const losingLithic = losing.initiation.providers.find((p) => p.provider === "lithic");
+      expect(losingLithic?.verdict).toBe("transacting");
+      expect(losingLithic?.narrowedDeliveryAlarm).toBe(false);
+      expect(losingLithic?.initiatedSinceLastDelivery).toBe(1);
+      expect(losing.delivery.providers.find((p) => p.provider === "lithic")?.degradesDeployment).toBe(
+        true,
+      );
+      expect(losing.delivery.degradedBy).toEqual(["lithic"]);
+      expect(losing.initiation.narrowed).toEqual([]);
+
+      record(
+        "evidence",
+        `AND IT WOULD REDDEN ON A SILENCE THAT IS LOSING DELIVERIES — replaying THIS outage's own published facts (lastDelivery ${lithic.lastDelivery}, measuredAt ${measuredAt.toISOString()}, verdict stale, gate live) through attributeDeliverySilence, the same pure function /api/health calls, with exactly ONE input varied: provider-sourced ASA decisions recorded after the newest delivery. With 0 (this run's real state) the verdict is 'dormant' and degradedBy=[] — status "ok". With 1, a single card presented at a terminal 1s after the last delivery, the verdict is 'transacting' ("a delivery was owed for each and none arrived"), narrowedDeliveryAlarm=false, degradesDeployment=true and degradedBy=[lithic] — status would be "degraded". The narrowing therefore only ever SUBTRACTS on a counted zero; it cannot silence an outage that is actually losing deliveries. NOT PROVEN BY THIS RUN: that a real disabled subscription produces that second state end-to-end. Inducing it requires disabling the Lithic event subscription and then transacting, which is a scripted human step in docs/DEMO.md and is deliberately not automated — a subscription left disabled by a crashed run is a broken card rail.`,
       );
 
       // ---- AND THE GATE IS TESTED AGAINST WHAT IT GUARDS AGAINST -----------
@@ -1316,19 +1518,14 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       // statement about the deployment, not a convenience.
       expect(slots["card_issuing"]).toBe("live");
 
+      // `measuredAt` and `lastDeliveryAt` are the ones bound above, off the same
+      // published response, so this replay and the initiation counterfactual are
+      // anchored to one instant rather than to two.
       const outage = {
         ok: true as const,
         latencyMs: 0,
-        rows: [
-          {
-            provider: "lithic",
-            lastDeliveryAt: new Date(lithic.lastDelivery as string),
-          },
-        ],
+        rows: [{ provider: "lithic", lastDeliveryAt }],
       };
-      const measuredAt = new Date(
-        current.doc.integrations?.webhookHealth?.measuredAt ?? new Date().toISOString(),
-      );
       const degraded: Record<string, string> = { ...slots, card_webhooks: "simulated" };
       const gate = (shape: "some" | "every"): boolean =>
         shape === "some"

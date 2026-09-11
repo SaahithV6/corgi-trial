@@ -1,6 +1,6 @@
 import Link from 'next/link';
 
-import { FOCUS_RING } from '@/components/ui/primitives';
+import { Badge, FOCUS_RING } from '@/components/ui/primitives';
 
 import {
   DEMO_STATES,
@@ -11,7 +11,33 @@ import {
   type ChaosViewState,
 } from './view-state';
 
-export function ChaosStateBar({ view }: { readonly view: ChaosViewState }) {
+/**
+ * What the bar says when there is nothing to read.
+ *
+ * It replaces the state hint rather than sitting beside it. The `default` hint
+ * reads "read from the live book" and the `edge` hint describes four controls
+ * armed against it; over a screen that opened no connection, either is a second
+ * claim that disagrees with the first.
+ */
+const NO_DATABASE_NOTE =
+  'No database is configured for this deployment. No control was read, no delivery was listed and no invariant view was queried — this screen cannot say whether chaos is armed, and no control on it can be pressed.';
+
+/**
+ * ONE SCREEN, ONE CLAIM ABOUT ITS DATA SOURCE. `noDatabase` comes from
+ * `page.tsx`, which resolved it once with `hasDatabase()` and used the same
+ * value to choose the source `ChaosView` reads through. When it is set on a
+ * live state, this bar carries the screen's only source badge — the dashboard
+ * below it is a refusal and badges nothing.
+ */
+export function ChaosStateBar({
+  view,
+  noDatabase = false,
+}: {
+  readonly view: ChaosViewState;
+  readonly noDatabase?: boolean;
+}) {
+  const refusing = noDatabase && isLiveState(view.state);
+
   return (
     <aside
       aria-label="Demo states"
@@ -41,13 +67,21 @@ export function ChaosStateBar({ view }: { readonly view: ChaosViewState }) {
             );
           })}
         </div>
+
+        {refusing ? <Badge tone="negative">NO DATABASE</Badge> : null}
       </div>
 
       <p className="mt-2 max-w-prose text-[11px] leading-relaxed text-muted">
-        {DEMO_STATE_HINTS[view.state]}
-        {isLiveState(view.state)
-          ? ' The controls on this state are armed against the live book.'
-          : ' Nothing on this state is a statement about a real book, and the controls are disabled.'}
+        {refusing ? (
+          NO_DATABASE_NOTE
+        ) : (
+          <>
+            {DEMO_STATE_HINTS[view.state]}
+            {isLiveState(view.state)
+              ? ' The controls on this state are armed against the live book.'
+              : ' Nothing on this state is a statement about a real book, and the controls are disabled.'}
+          </>
+        )}
       </p>
     </aside>
   );

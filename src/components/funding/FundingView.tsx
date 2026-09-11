@@ -1,7 +1,6 @@
 import Link from "next/link";
 
-import { createLiveFundingSource } from "@/app/(app)/funding/live-source";
-import { ROLE_LABEL, readRole } from "@/components/app-shell/role";
+import { ROLE_LABEL, readRole, type Role } from "@/components/app-shell/role";
 import {
   Badge,
   FieldLabel,
@@ -32,6 +31,7 @@ import type {
 } from "./data-contract";
 import { demoQuery, isLiveState, type FundingView as View } from "./demo-state";
 import { createFixtureSource } from "./fixtures";
+import { FUNDING_SCREEN_UNREADABLE, createUnreadableFundingSource } from "./unreadable";
 
 export { FundingSkeleton };
 
@@ -82,22 +82,27 @@ export { FundingSkeleton };
  * read, a failed read and an empty book can each be shown on demand without
  * arranging one.
  */
-export async function FundingView({ view }: { readonly view: View }) {
+export async function FundingView({
+  view,
+  noDatabase = false,
+}: {
+  readonly view: View;
+  readonly noDatabase?: boolean;
+}) {
   const role = await readRole();
   const live = isLiveState(view.state);
 
-  const source: FundingDataSource = live
-    ? createLiveFundingSource()
-    : // Narrowed by `isLiveState`; the fixture source has no case for the two
-      // live states because writing one would be writing a fake deposit.
-      createFixtureSource(view.state as "loading" | "empty" | "error");
+  const source = await selectSource(view, live, noDatabase);
 
   const result = await source.getSnapshot(view.businessId);
 
   if (isErr(result)) {
+    // No source badge on a refusal. `LIVE` over a screen that opened no
+    // connection is the claim this repair exists to withdraw, and the four
+    // balance figures it would sit above were never read.
     return (
       <div className="space-y-6">
-        <Header role={role} live={live} asOf={null} environment={null} selected={null} />
+        <Header role={role} live={null} asOf={null} environment={null} selected={null} />
         <ErrorPanel error={result.error} />
       </div>
     );
@@ -259,8 +264,15 @@ function Header({
   environment,
   selected,
 }: {
-  readonly role: "staff" | "approver";
-  readonly live: boolean;
+  // `Role`, not the two operator roles spelled out. A customer never reaches
+  // this screen — src/middleware.ts answers 403 OPERATOR_ONLY before it renders
+  // — so narrowing here would be a second, weaker copy of that decision living
+  // in a prop type, and the two would drift.
+  readonly role: Role;
+  // `null` means "this render read nothing, so it badges nothing". LIVE and
+  // FIXTURE are both claims about where four balance figures came from, and a
+  // refusal has no figures and no claim.
+  readonly live: boolean | null;
   readonly asOf: string | null;
   readonly environment: string | null;
   readonly selected: BusinessView | null;
@@ -269,7 +281,9 @@ function Header({
     <header>
       <div className="flex flex-wrap items-baseline gap-3">
         <h1 className="text-lg font-semibold tracking-tight">Funding</h1>
-        <Badge tone={live ? "positive" : "quiet"}>{live ? "LIVE" : "FIXTURE"}</Badge>
+        {live === null ? null : (
+          <Badge tone={live ? "positive" : "quiet"}>{live ? "LIVE" : "FIXTURE"}</Badge>
+        )}
       </div>
       <p className="mt-0.5 text-sm text-muted">
         Money in, from a bank the customer linked themselves — and the return window that decides
@@ -1063,4 +1077,44 @@ function ProviderPanel({ snapshot }: { readonly snapshot: FundingSnapshot }) {
       </div>
     </Panel>
   );
+}
+
+/**
+ * Which source answers this view.
+ *
+ * Live for `default` and `edge`, fixture for the other three — and a REFUSAL
+ * for the two live states when there is no database to read.
+ *
+ * THE LIVE MODULE IS IMPORTED DYNAMICALLY, AND THAT IS THE REPAIR. It used to
+ * be a static `import { createLiveFundingSource } from "@/app/(app)/funding/live-source"`
+ * at the top of this file. That module opens with `import { sql } from "@/lib/ledger/db"`,
+ * which reaches `@/lib/env`, which throws `EnvironmentError` at module scope
+ * without `APP_DATABASE_URL` — deliberately, so a malformed database URL kills
+ * the process at boot rather than at the first request that needs money. A
+ * static import therefore took the whole page module down with it, including
+ * the three fixture states that need no database at all. Measured with the
+ * variable deleted, `/funding` rendered the framework's error page.
+ *
+ * Deferring it means the screen can render the words "no database configured".
+ * `noDatabase` is resolved in `page.tsx` by `@/lib/has-database`, which imports
+ * nothing, so the question cannot be the thing that crashes for the condition
+ * it asks about.
+ *
+ * The three drawn states are checked FIRST and stay drawn either way: they are
+ * demonstrations, and "no database" does not make a drawing any more or less
+ * drawn.
+ */
+async function selectSource(
+  view: View,
+  live: boolean,
+  noDatabase: boolean,
+): Promise<FundingDataSource> {
+  // Narrowed by `isLiveState`; the fixture source has no case for the two live
+  // states because writing one would be writing a fake deposit.
+  if (!live) return createFixtureSource(view.state as "loading" | "empty" | "error");
+
+  if (noDatabase) return createUnreadableFundingSource(FUNDING_SCREEN_UNREADABLE);
+
+  const { createLiveFundingSource } = await import("@/app/(app)/funding/live-source");
+  return createLiveFundingSource();
 }

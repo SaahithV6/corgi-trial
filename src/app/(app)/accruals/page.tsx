@@ -4,8 +4,12 @@ import type { Metadata } from "next";
 import { AccrualSkeleton, AccrualView } from "@/components/accrual/AccrualView";
 import { AccrualStateBar } from "@/components/accrual/AccrualStateBar";
 import { createFixtureAccrualSource } from "@/components/accrual/fixtures";
+import { createUnreadableAccrualSource } from "@/components/accrual/unreadable";
 import { parseAccrualFilter } from "@/components/accrual/view-state";
 import type { AccrualDataSource } from "@/components/accrual/data-contract";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 export const metadata: Metadata = {
   title: "Accruals · Corgi ops console",
@@ -98,11 +102,15 @@ type AccrualsPageProps = {
  */
 export default async function AccrualsPage({ searchParams }: AccrualsPageProps) {
   const filter = parseAccrualFilter(await searchParams);
-  const source = await selectSource(filter.state);
+  // ONE VALUE, TWO SURFACES. The state bar's badge and note, and which source
+  // `AccrualView` reads through, both come from this line, so they cannot
+  // disagree about what this screen read.
+  const noDatabase = !hasDatabase();
+  const source = await selectSource(filter.state, noDatabase);
 
   return (
     <div className="space-y-6">
-      <AccrualStateBar filter={filter} />
+      <AccrualStateBar filter={filter} noDatabase={noDatabase} />
 
       <Suspense
         key={`${filter.state}:${filter.scheduleId ?? ""}:${filter.accrualDayId ?? ""}`}
@@ -115,15 +123,45 @@ export default async function AccrualsPage({ searchParams }: AccrualsPageProps) 
 }
 
 /**
- * Live for `default`, fixture for everything else — and fixture for `default`
- * too when there is no database to read.
+ * Live for `default`, fixture for everything else — and a REFUSAL for
+ * `default` when there is no database to read.
  *
  * The live module is imported dynamically because importing it evaluates
  * `src/lib/env.ts`, which refuses to load without a full set of keys. That is
  * the right behaviour for the app and the wrong behaviour for a page that must
- * be able to render the words "no database configured".
+ * be able to render the words "no database configured" — so the import happens
+ * only on the branch that has already established there is a database to read.
+ *
+ * WHAT THIS FUNCTION USED TO DO, AND WHY IT IS THE DEFECT THIS SCREEN CARRIED.
+ * It asked `hasDatabase()` by destructuring it off
+ * `await import("@/lib/accrual/screen")`, and that module reaches
+ * `@/lib/ledger/db` -> `@/lib/env`, which throws `EnvironmentError` at module
+ * scope without `APP_DATABASE_URL`. The guard was unreachable in the one case
+ * it was written for: the import on its own line only succeeds when a database
+ * IS configured, and the predicate returns false only when one is not.
+ * Measured with the variable deleted, the render threw and the operator got the
+ * framework's error page.
+ *
+ * If it HAD run, it returned `createFixtureAccrualSource("default")`: a
+ * schedule table, a month table, priced days, and the four invariant counts
+ * rendered by `SummaryTiles` as the word EXACT beside "no closed month is a
+ * cent out". Nought rows in `v_accrual_month_drift` means a month summed to its
+ * price to the cent BECAUSE THE VIEW WAS QUERIED; nought from a deployment that
+ * opened no connection is a clean bill on a book nobody looked at. The `gap`
+ * tile is the same failure pointing the other way: a gap of nought is what
+ * tells an operator the tick is keeping up.
+ *
+ * With no database the answer is now a REFUSAL, from
+ * `@/components/accrual/unreadable`, which `AccrualView` renders the same way it
+ * renders a failed read: no schedule, no day, no invariant verdict.
  */
-async function selectSource(state: string): Promise<AccrualDataSource> {
+async function selectSource(
+  state: string,
+  noDatabase: boolean,
+): Promise<AccrualDataSource> {
+  // The four drawn states are checked FIRST, and stay drawn whether or not a
+  // database is configured: they are demonstrations, and "no database" does not
+  // make a drawing any more or less drawn.
   if (state !== "default") {
     return createFixtureAccrualSource(
       state === "loading" || state === "empty" || state === "error" || state === "edge"
@@ -132,8 +170,7 @@ async function selectSource(state: string): Promise<AccrualDataSource> {
     );
   }
 
-  const { hasDatabase } = await import("@/lib/accrual/screen");
-  if (!hasDatabase()) return createFixtureAccrualSource("default");
+  if (noDatabase) return createUnreadableAccrualSource();
 
   const { loadAccrualView } = await import("@/lib/accrual/screen");
   return { load: loadAccrualView };

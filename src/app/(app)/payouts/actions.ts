@@ -313,6 +313,31 @@ export async function acceptQuoteAction(
     };
   }
 
+  // The one control on this screen that commits the firm to anything, so the
+  // one that is not a single click. Accepting writes an append-only row and a
+  // memo hold for the full price, and there is no edit path afterwards — the
+  // only remedy for a wrong acceptance is a new quote. The tick is re-decided
+  // here rather than trusted from the browser, for the reason stated in the
+  // header: a POST assembled by hand reaches the same refusals as the form.
+  if (formData.get("acknowledged") !== "yes") {
+    return {
+      status: "refused",
+      code: "FX_ACCEPTANCE_UNACKNOWLEDGED",
+      message:
+        "Nothing was accepted and nothing was written. Accepting fixes the delivery amount for " +
+        "the whole settlement window and places a memo hold for the full price, and an " +
+        "acceptance is append-only — there is no cancel. Tick the box confirming the customer " +
+        `agreed this rate, then press accept again: /payouts?quote=${parsed.data.quoteRef}`,
+      issues: [
+        {
+          path: "acknowledged",
+          message: "tick the confirmation above the button",
+        },
+      ],
+      quoteRef: parsed.data.quoteRef,
+    };
+  }
+
   const reference = parsed.data.reference;
   const accepted = await acceptQuote({
     quoteRef: parsed.data.quoteRef,

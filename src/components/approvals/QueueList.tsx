@@ -17,6 +17,17 @@ import type { EventView, QueueItem } from "./data-contract";
  * that requires a round trip does not get read.
  */
 
+/**
+ * How many pending instructions the live read asks for.
+ *
+ * It is `limit: 50` in `createLiveApprovalsSource` (src/lib/approvals/screen.ts),
+ * which is not this screen's module to change. It is repeated here so the panel
+ * can say out loud that the count above the rows is a PAGE SIZE and not a total
+ * — the header used to read "50 awaiting decisions" while 573 payments were
+ * pending, which is the same sentence with the wrong noun.
+ */
+const QUEUE_PAGE_SIZE = 50;
+
 const STATE_TONE: Record<PaymentState, BadgeTone> = {
   requested: "neutral",
   approved: "positive",
@@ -86,8 +97,11 @@ function EventRow({ event, asOf }: { readonly event: EventView; readonly asOf: s
         </span>
       )}
       {event.entryId === null ? null : (
-        <span className="font-mono text-[11px] text-muted" title="The journal entry this posted.">
-          entry {event.entryId.slice(0, 8)}
+        <span
+          className="font-mono text-[11px] break-all text-muted"
+          title="The journal entry this event posted. It is on the paying account's Activity table under this timestamp."
+        >
+          entry {event.entryId}
         </span>
       )}
       {event.reason === null ? null : (
@@ -129,6 +143,14 @@ function QueueCard({
             from {item.accountName}
             {item.businessName === null ? null : ` · ${item.businessName}`} · value date{" "}
             {formatDate(item.valueDate)}
+          </p>
+          {/* The id an operator has to quote to ask anybody anything about this
+              payment: it is the instruction's primary key, it is what the
+              release entry's idempotency key is built from
+              (`payment:release:<id>`), and until it is printed the only way to
+              name this row is to describe it. */}
+          <p className="mt-0.5 font-mono text-[11px] break-all text-muted">
+            payment {item.id}
           </p>
         </div>
 
@@ -183,6 +205,8 @@ function QueueCard({
           contentHash={item.contentHash}
           gate={item.gate}
           releaseGate={item.releaseGate}
+          amountCents={item.amountCents}
+          destination={item.destination}
           live={live}
         />
       </div>
@@ -240,18 +264,29 @@ export function QueueList({
       description="Payments raised and not yet released. Ordered newest first; state is folded from the event stream, never read from a status column."
       actions={
         <span className="text-xs text-muted">
-          {items.length} awaiting {items.length === 1 ? "a decision" : "decisions"}
+          {items.length} shown
         </span>
       }
     >
       {items.length === 0 ? (
         <EmptyQueue />
       ) : (
-        <ul className="space-y-4 px-5 py-5">
-          {items.map((item) => (
-            <QueueCard key={item.id} item={item} asOf={asOf} live={live} />
-          ))}
-        </ul>
+        <>
+          <p className="max-w-prose border-b border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted">
+            {items.length} row{items.length === 1 ? "" : "s"} shown, not{" "}
+            {items.length === 1 ? "one payment" : `${items.length} payments`} awaiting a decision.
+            The read takes the newest {QUEUE_PAGE_SIZE} pending instructions on the whole book and
+            stops, so where this count is exactly {QUEUE_PAGE_SIZE} there are older pending
+            payments below the cut and this screen does not say how many. A payment also LEAVES
+            this queue the moment it is released or rejected: after that its lifecycle is on the
+            paying account&rsquo;s Activity table, under the journal entry the release event names.
+          </p>
+          <ul className="space-y-4 px-5 py-5">
+            {items.map((item) => (
+              <QueueCard key={item.id} item={item} asOf={asOf} live={live} />
+            ))}
+          </ul>
+        </>
       )}
     </Panel>
   );

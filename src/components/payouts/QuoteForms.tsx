@@ -278,12 +278,32 @@ export function AcceptQuoteForm({
           />
         </Field>
 
-        <p className="max-w-prose text-xs leading-relaxed text-muted">
-          Accepting fixes <span className="money">{quote.buyLabel}</span> as the amount the
-          beneficiary receives, for <span className="money">{quote.sellLabel}</span>, for the next{" "}
-          {Math.round(quote.settlementWindowSeconds / 3600)} hours — whatever the market does in
-          between. That difference is ours, in both directions.
-        </p>
+        <div className="rounded border border-dashed border-border-strong px-3 py-2">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+            exactly what will be written
+          </p>
+          <p className="mt-1 max-w-prose text-xs leading-relaxed">
+            One <code>fx_quote_acceptance</code> row against {quote.quoteRef}, and a memo hold for{" "}
+            <span className="money">{quote.sellLabel}</span> against the customer&rsquo;s available
+            balance. It fixes <span className="money">{quote.buyLabel}</span> as the amount the
+            beneficiary receives, for <span className="money">{quote.sellLabel}</span>, for the
+            next {Math.round(quote.settlementWindowSeconds / 3600)} hours — whatever the market
+            does in between. That difference is ours, in both directions.
+          </p>
+          <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
+            There is no undo. Acceptances are append-only: a wrong one is superseded by a new
+            quote, never cancelled.
+          </p>
+        </div>
+
+        <label className="flex gap-3 rounded border border-border bg-surface-raised px-3 py-2">
+          <input type="checkbox" name="acknowledged" value="yes" className={`mt-0.5 ${FOCUS_RING}`} />
+          <span className="max-w-prose text-xs leading-relaxed">
+            The customer agreed this rate, and I am committing us to deliver{" "}
+            <span className="money">{quote.buyLabel}</span> for{" "}
+            <span className="money">{quote.sellLabel}</span>.
+          </span>
+        </label>
 
         <button type="submit" className={BUTTON_CLASS} disabled={disabled || pending}>
           {pending ? "Accepting…" : `Accept ${quote.quoteRef}`}

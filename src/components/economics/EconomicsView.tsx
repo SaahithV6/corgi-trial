@@ -86,7 +86,7 @@ export async function EconomicsView({
 
       <Panel
         title="Contribution by customer"
-        description="Income less expense, per business, entirely from journal lines. A house income or expense line belongs to the customer whose own deposit account the same entry moved; interchange is the exception and is attributed by the settlement it prices, because none of that money is the customer's."
+        description="Income less expense, per business, entirely from journal lines. Largest contribution first, ties by legal name, so the businesses this programme loses money on are the last rows rather than the hidden ones. A house income or expense line belongs to the customer whose own deposit account the same entry moved; interchange is the exception and is attributed by the settlement it prices, because none of that money is the customer's."
       >
         <UnitEconomicsTable rows={data.businesses} />
       </Panel>
@@ -100,7 +100,7 @@ export async function EconomicsView({
 
       <Panel
         title="Interchange by merchant category and presentment"
-        description="The two dimensions the Lithic event data actually carries. Net of reversals, because gross revenue on spend that was taken back is the number this feature exists not to report."
+        description="The two dimensions the Lithic event data actually carries. Most interchange first, then by category and presentment. Net of reversals, because gross revenue on spend that was taken back is the number this feature exists not to report."
       >
         <CategoryTable rows={data.categories} />
       </Panel>

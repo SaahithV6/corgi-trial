@@ -61,6 +61,10 @@ export async function TimelineView({
     ? (actions.find((a) => a.actionId === filter.selected) ?? null)
     : null;
   const pages = Math.max(1, Math.ceil(matched / result.pageSize));
+  // The requested page ran off the end of the result. Kept separate from "the
+  // filter matched nothing" because the remedy is different and so is the
+  // truth: these rows exist and are one link away.
+  const pastEnd = result.page + 1 > pages;
 
   return (
     <div className="space-y-6">
@@ -109,7 +113,9 @@ export async function TimelineView({
               ? `Filtered to ${result.filterNote}. `
               : "No filter: this is every action on the business. "}
             {matched === total
-              ? "This screen hides none of them."
+              ? pastEnd
+                ? "This screen hides none of them, and none of them are on this page: the page number is past the end."
+                : "This screen hides none of them."
               : `The ${(total - matched).toLocaleString()} not shown are excluded by the filter above, not by the trail.`}
             {result.bookWideAvailable > 0 ? (
               <>
@@ -199,7 +205,29 @@ export async function TimelineView({
             </Note>
           ) : null}
 
-          {actions.length === 0 ? (
+          {actions.length === 0 && pastEnd ? (
+            // A PAGE PAST THE END IS NOT AN EMPTY RESULT. Both render nought
+            // rows, and saying "none of them match this filter" over a page
+            // number that ran off the end tells an operator the trail is empty
+            // when every one of these actions is sitting on page 1. The pager
+            // below only steps one page at a time, so from `?page=99999` there
+            // was no way back that did not involve clicking it a thousand
+            // times; the link here is the way back.
+            <Note title="That page is past the end of the trail">
+              {matched.toLocaleString()} matching{" "}
+              {matched === 1 ? "action fills" : "actions fill"} {pages}{" "}
+              {pages === 1 ? "page" : "pages"}, and you asked for page{" "}
+              {(result.page + 1).toLocaleString()}. Nothing is missing and no
+              filter excluded these rows.{" "}
+              <Link
+                href={auditHref(filter, { page: pages - 1, selected: null })}
+                className={`underline ${FOCUS_RING} rounded`}
+              >
+                Go to the last page
+              </Link>
+              .
+            </Note>
+          ) : actions.length === 0 ? (
             <Note title="Nothing matches">
               {total === 0
                 ? "This business has no recorded actions at all."
@@ -210,7 +238,7 @@ export async function TimelineView({
             <TimelineTable actions={actions} filter={filter} />
           )}
 
-          {pages > 1 ? (
+          {pages > 1 && !pastEnd ? (
             <nav aria-label="Pagination" className="flex items-center gap-3 text-xs">
               {result.page > 0 ? (
                 <Link

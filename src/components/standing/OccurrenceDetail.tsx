@@ -31,9 +31,17 @@ import { standingHref, type StandingFilter } from "./view-state";
 export function OccurrenceDetail({
   row,
   filter,
+  accountId,
 }: {
   readonly row: OccurrenceRow;
   readonly filter: StandingFilter;
+  /**
+   * The account the mandate debits, when the caller could resolve it from the
+   * mandate list on the same render. `null` when it could not — the occurrence
+   * row does not carry it, and a link that might be to the wrong account is
+   * worse than no link.
+   */
+  readonly accountId?: string | null;
 }) {
   const hasFigures = row.observedAvailableCents !== null;
 
@@ -140,6 +148,24 @@ export function OccurrenceDetail({
             <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
               {row.refusalReason}
             </p>
+            <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
+              What to do about it: this occurrence is closed and will not be retried, so paying
+              this one takes a fresh payment on <Link href="/payments" className={`underline underline-offset-4 ${FOCUS_RING}`}>/payments</Link>, which goes
+              through the same approvals queue. To stop the next occurrence refusing for the same
+              reason, the available balance is what has to change, and{" "}
+              {accountId === null || accountId === undefined ? (
+                <>the account&rsquo;s own page breaks down where the withheld money is</>
+              ) : (
+                <Link
+                  href={`/accounts/${accountId}`}
+                  className={`underline underline-offset-4 ${FOCUS_RING}`}
+                >
+                  the account&rsquo;s own page
+                </Link>
+              )}{" "}
+              — it lists every hold and uncleared credit standing between the ledger balance and
+              the available one, with the date each releases.
+            </p>
           </div>
         ) : null}
 
@@ -156,7 +182,9 @@ export function OccurrenceDetail({
               <Link href="/approvals" className={`underline underline-offset-4 ${FOCUS_RING}`}>
                 Open the approvals queue
               </Link>
-              .
+              . That queue lists payments raised and not yet released, so it does not carry an
+              instruction id to match on and it drops a payment once somebody releases it — an
+              instruction missing from it has been released or rejected, not lost.
             </p>
           </div>
         )}

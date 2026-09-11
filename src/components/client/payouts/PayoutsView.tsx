@@ -107,21 +107,28 @@ export function PayoutsView({
   return (
     <div className="space-y-6">
       <nav aria-label="Your account" className="flex flex-wrap items-center gap-1">
-        {CLIENT_SCREENS.map((item) => (
-          <Link
-            key={item.href}
-            href={clientHref(item.href, { state: view.state, businessId: view.businessId }) as Route}
-            className={`rounded px-3 py-1.5 text-sm text-muted hover:text-text ${FOCUS_RING}`}
-          >
-            {item.label}
-          </Link>
-        ))}
-        <span
-          aria-current="page"
-          className="rounded bg-surface-raised px-3 py-1.5 text-sm font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border)]"
-        >
-          Send money abroad
-        </span>
+        {/* `CLIENT_SCREENS` CONTAINS THIS SCREEN. The trailing "you are here"
+            pill that used to follow this map put a second Send abroad control
+            beside the one in the list — two pills for one screen, one of them a
+            link to the page already open. The current screen is marked inside
+            the map instead. */}
+        {CLIENT_SCREENS.map((item) => {
+          const active = item.href === "/client/payouts";
+          return (
+            <Link
+              key={item.href}
+              href={clientHref(item.href, { state: view.state, businessId: view.businessId }) as Route}
+              aria-current={active ? "page" : undefined}
+              className={`rounded px-3 py-1.5 text-sm ${FOCUS_RING} ${
+                active
+                  ? "bg-surface-raised font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border)]"
+                  : "text-muted hover:text-text"
+              }`}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
       </nav>
 
       <header className="rounded-lg border border-border bg-surface px-5 py-6">

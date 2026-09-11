@@ -1,4 +1,4 @@
-import { ROLE_LABEL, readRole } from "@/components/app-shell/role";
+import { ROLE_LABEL, readRole, type Role } from "@/components/app-shell/role";
 import {
   Badge,
   MetaList,
@@ -189,7 +189,11 @@ function Header({
   claim,
   asOf,
 }: {
-  readonly role: "staff" | "approver";
+  // `Role`, not the two operator roles spelled out. A customer never reaches
+  // this screen — src/middleware.ts answers 403 OPERATOR_ONLY before it renders
+  // — so narrowing here would be a second, weaker copy of that decision living
+  // in a prop type, and the two would drift.
+  readonly role: Role;
   readonly actor: ActorView | null;
   readonly claim: SourceClaim;
   readonly asOf: string | null;

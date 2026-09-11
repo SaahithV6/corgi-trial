@@ -12,7 +12,19 @@ import {
 import type { EpisodeView } from "./data-contract";
 
 /**
- * The edge case, expanded: a dispute LOST after provisional credit was granted.
+ * One case, expanded: every entry it posted and the balance at each step.
+ *
+ * THE HEADING IS DERIVED FROM `episode.status`, NOT WRITTEN. It used to be the
+ * constant string "lost after provisional credit was granted", because this
+ * panel was built for the edge state, which picks a lost-and-recovered case.
+ * But `CaseTable` links EVERY case here, so the constant was printed over cases
+ * that had ended the other way. Measured on 2026-09-11: case
+ * DSP-20260911-HJFWA3 is `closed_won` — the customer kept the money — and this
+ * panel said it was "lost after provisional credit was granted" and that the
+ * money "came back on another" day. The clawback entry it described does not
+ * exist on that case. A heading that states the opposite of what the entries
+ * below it show is worse than no heading, so `headline()` reads the status and
+ * `subtitle()` describes only what the entries can be checked against.
  *
  * This panel exists to make two claims checkable rather than believable.
  *
@@ -29,6 +41,46 @@ import type { EpisodeView } from "./data-contract";
  *    flatness is why taking the money back could not overdraw a customer who did
  *    nothing wrong.
  */
+/**
+ * What this case's status says happened to the money. One clause, no verdict
+ * the entries below cannot be checked against.
+ */
+function headline(status: string): string {
+  switch (status) {
+    case "closed_lost_recovered":
+      return "lost after provisional credit was granted, and recovered";
+    case "lost_pending_recovery":
+      return "lost after provisional credit was granted, not yet recovered";
+    case "closed_lost_written_off":
+      return "lost after provisional credit was granted, and written off";
+    case "closed_won":
+      return "won — the customer kept the money";
+    case "provisional_credit_granted":
+      return "open, provisional credit granted";
+    case "withdrawn":
+      return "withdrawn";
+    default:
+      return status.replaceAll("_", " ");
+  }
+}
+
+/** What the entries below actually show for this ending. */
+function subtitle(status: string): string {
+  switch (status) {
+    case "closed_lost_recovered":
+    case "closed_lost_written_off":
+      return "The money went out to the customer on one day and came back on another. Two entries, two value dates, neither of them a reversal.";
+    case "lost_pending_recovery":
+      return "The money went out to the customer and has not come back yet. The clawback is a separate entry on the day it happens, not a correction of the grant.";
+    case "closed_won":
+      return "The provisional credit stayed with the customer. There is no clawback entry, and the hold that made it unspendable was released when the case closed.";
+    case "provisional_credit_granted":
+      return "The credit is in the customer's ledger balance and held, so none of it is spendable while the network decides.";
+    default:
+      return "Every entry this case posted, with its value date and booking sequence, and the customer's balance at each step.";
+  }
+}
+
 export function EpisodePanel({ episode }: { readonly episode: EpisodeView }) {
   const financial = episode.entries.filter((e) => e.book === "financial");
   const memo = episode.entries.filter((e) => e.book === "memo");
@@ -37,8 +89,8 @@ export function EpisodePanel({ episode }: { readonly episode: EpisodeView }) {
     <div className="space-y-6">
       <Panel
         id="episode"
-        title={`Edge — ${episode.caseRef}: lost after provisional credit was granted`}
-        description="The money went out to the customer on one day and came back on another. Two entries, two value dates, neither of them a reversal."
+        title={`${episode.caseRef} — ${headline(episode.status)}`}
+        description={subtitle(episode.status)}
         actions={
           episode.noReversals ? (
             <Badge tone="positive">no reversal entry — new events, not a correction</Badge>
@@ -251,7 +303,7 @@ export function EpisodePanel({ episode }: { readonly episode: EpisodeView }) {
       {/* ---- the lifecycle ------------------------------------------------ */}
       <Panel
         title="The lifecycle, as it was actually written"
-        description="One row per dispute_event. Illegal orderings are refused by a trigger in 0019_disputes.sql, not by the code that calls it."
+        description="One row per dispute_event, oldest first. Illegal orderings are refused by a trigger in 0019_disputes.sql, not by the code that calls it. The value date is the day the money is dated; the instant under it is when the person recorded the event, and several events share a value date while happening hours apart."
       >
         <TableScroll>
           <table className="w-full border-collapse text-sm">
@@ -275,7 +327,12 @@ export function EpisodePanel({ episode }: { readonly episode: EpisodeView }) {
                     {e.actorName}
                     <span className="ml-1 text-[11px] text-muted">({e.actorKind})</span>
                   </td>
-                  <td className={`${TD_CLASS} money`}>{e.valueDate}</td>
+                  <td className={`${TD_CLASS} money`}>
+                    {e.valueDate}
+                    <p className="mt-1 text-[11px] text-muted">
+                      recorded {e.occurredAt}
+                    </p>
+                  </td>
                   <td className={`${TD_CLASS} money text-[11px]`}>{e.entryId ?? "—"}</td>
                   <td className={`${TD_CLASS} max-w-md text-[11px] text-muted`}>
                     {e.detail ?? "—"}

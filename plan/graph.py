@@ -1679,6 +1679,97 @@ N("J4o", "attack 7 induces its outage BY STAYING QUIET — the defect it should 
        "subscription and THEN transacts, giving a delivery owed and not "
        "arriving. that makes the attack strictly stronger. NOT done blind at "
        "the deadline: leaving a subscription disabled would break the demo")
+N("J4j", "INSTANCE 30: lithic 'stale' could not tell an outage from a quiet hour",
+  "correctness", 40, [], "agent", ["api/health"], "done",
+  risk="production read DEGRADED on f33a288 with no outage in existence. "
+       "staleAfterSeconds 180 on the gating provider, last delivery 489s "
+       "earlier — a burst of test traffic ended and nobody swiped a card. the "
+       "verdict measured TIME SINCE LAST WEBHOOK when the question is ARE WE "
+       "LOSING DELIVERIES. fixed by asking card_auth_decision WHERE source = "
+       "'provider' — the synchronous ASA record, written while Lithic holds an "
+       "authorisation open at a terminal. it works because it is ON A DIFFERENT "
+       "CHANNEL from the thing it measures: first_seen_at, "
+       "card_auth_event.received_at and hold.created_at were all rejected "
+       "because each is written BY THE CONSUMER of the webhook, so none can "
+       "ever be newer than the delivery whose absence is in question. asking "
+       "them returns 'no', always, by construction. 88 of 88 ASA decisions were "
+       "followed by a delivery, p50 lag 0.797s")
+# ---------------------------------------------------------------------------
+# J5 — the final pass. "make sure that all the controls are intuitive like a
+# real banking system and we get no issues", with the brief pasted whole, and
+# then: "we need it absolutely 100% accurate to the brief and everything else."
+#
+# "Intuitive" is not measurable, so it is judged against six things that are:
+# can a person tell what their money is doing; does every refusal name its
+# remedy; is anything DANGEROUS easy and anything SAFE hard; does the copy
+# claim more than the code does; is a zero from "none" distinguishable from a
+# zero from "nothing was read"; can a customer get stuck.
+# ---------------------------------------------------------------------------
+N("J5a", "client surface driven as a banker would: nine screens, five states each",
+  "product", 70, [], "agent", ["app/client", "components/client"], "doing",
+  risk="card controls, pots, disputes and FX acceptance were ALL built in the "
+       "last ninety minutes, so they are the least settled things in the build. "
+       "every control gets CLICKED — two screens here returned HTTP 200 while "
+       "completely dead, and inferring from code is how both survived")
+N("J5b", "operator console driven as a bank ops person would", "product", 80, [],
+  "agent", ["app/(app)", "components"], "doing",
+  risk="the test that matters: can an operator answer 'what happened to this "
+       "money' WITHOUT A TERMINAL — one payment, one authorisation, one break, "
+       "end to end through the UI. live hazard: EndMembership's doc comment "
+       "claims 'Remove is TYPE-TO-CONFIRM' and the form is a plain <select>. a "
+       "screen that removes a person and closes their card on one click while "
+       "documenting a safeguard it does not have is wrong in both directions")
+N("J5c", "every gauntlet item demonstrable in under two minutes, with a click path",
+  "submission", 75, [], "agent", ["test/livefire", "docs/GAUNTLET.md"], "doing",
+  risk="not 'does it work' but 'can a person SHOW it to a panel'. the three "
+       "hardest-graded first — hold model under hostile sequencing, bitemporal "
+       "correction, available derived rather than stored — all three verified "
+       "directly today rather than taken on trust. also owns the attack-7 "
+       "repair under a hard safety rule: if the Lithic subscription cannot be "
+       "GUARANTEED re-enabled including on a crash, DO NOT DISABLE IT. a broken "
+       "card rail before the demo is worse than a documented gap")
+N("J5d", "line-by-line conformance sweep against the brief as written",
+  "submission", 60, [], "agent", ["docs/CONFORMANCE.md"], "todo",
+  risk="'we need it absolutely 100% accurate to the brief and everything else.' "
+       "every sentence of the brief, the five required integrations with their "
+       "live-or-simulated column, the ten gauntlet items, the seven live-fire "
+       "attacks, the six stretch items and the v1 scope list — each marked "
+       "done/partial/absent WITH THE EVIDENCE, and each partial saying which "
+       "half. the mobile app is the one deliberate absence and it is Saahith's "
+       "own repeated call")
+N("J5e", "AUTHZ SHIPPED: a customer is refused by the server, not by a hidden link",
+  "correctness", 0, [], "agent", ["lib/authz", "middleware"], "done",
+  risk="measured over HTTP on a production build: customer /accounts 403, "
+       "/approvals 403, /audit 403, /payments 403, x-corgi-authz: deny; "
+       "OPERATOR_ONLY — while staff and approver are unchanged at 200. DEFAULT "
+       "DENY: the explicit list is the CUSTOMER's two entries, so a "
+       "seventeenth operator screen is covered the moment its directory exists, "
+       "proven on /ledger-exports which has no page. enforcement is in "
+       "MIDDLEWARE, before any route or server action — a layout guard cannot "
+       "stop an action, which runs whether or not its page renders — and the "
+       "layout re-derives the same decision and FAILS CLOSED if the header is "
+       "missing, because a matcher is exactly where coverage goes missing. the "
+       "nav filters through the same authorize(), so a link is painted iff the "
+       "server would serve it: hiding the nav is not the control, the 403 is")
+N("J5f", "the front door still shows a customer the whole book", "correctness",
+  35, ["J5e"], "agent", ["app/(app)/page.tsx"], "doing",
+  risk="the one deliberate hole in J5e, and it is on the URL the submission "
+       "email hands a stranger. / is excluded from the guard because the ROLE "
+       "SWITCH lives there and refusing it would strand a person in the "
+       "customer role with no way back — correct reasoning, wrong end state: a "
+       "customer at / sees platform-wide figures for every business on the "
+       "book. closing it is a PAGE change, not a guard change: / renders per "
+       "principal, switch still reachable for both roles or verify-demo 7-11 "
+       "break")
+N("J5g", "the customer principal is not yet a business-scoped actor", "scope", 0,
+  [], "claude", ["lib/approvals/session"], "todo",
+  risk="disclosed by the authz agent rather than left to be found. "
+       "resolveActor() is untouched, so a customer still resolves to the seeded "
+       "STAFF actor on /client — identical to today's behaviour and therefore "
+       "zero regression risk, which is why it was left. binding it to the "
+       "customer's own signer is authentication-adjacent, and authentication is "
+       "deliberately out of scope: the trial asks for demo credentials for two "
+       "roles and the credential IS the switch")
 N("J2f", "deploy and re-run every scoreboard against one sha",
   "release", 20, ["J2a", "J2b", "J2c", "J2d", "J2e"], "claude", [], status="done",
   risk="the honesty tools check documents against the DEPLOYMENT and never checked "

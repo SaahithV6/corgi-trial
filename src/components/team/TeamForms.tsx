@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useId } from "react";
+import { useActionState, useId, useState } from "react";
 
 import {
   addMemberAction,
@@ -39,6 +39,18 @@ import { Badge, FOCUS_RING, Note, Panel } from "@/components/ui/primitives";
  *    refuses everything it should — but because removal is TERMINAL: nothing
  *    may follow it, and re-adding somebody is a new membership with a new card.
  *    An irreversible button deserves a deliberate gesture.
+ *
+ *    The gesture is the MEMBER'S OWN NAME, not the word "REMOVE", because the
+ *    mistake this guards against is not "pressed the wrong button" — it is
+ *    "pressed the right button on the wrong row". A fixed word is typed once
+ *    and then typed from memory; a name has to be read off the person you
+ *    actually selected. Choosing somebody else clears what you typed.
+ *
+ *    This is the only place in this file where a button is disabled, and it is
+ *    not a contradiction of (3): (3) is about refusals the DATABASE owns, which
+ *    must be provoked and read. Nothing is being hidden here — the field is
+ *    visible, it says what to type, and the server re-checks it, so a POST that
+ *    skips the field is refused with REMOVAL_NOT_CONFIRMED rather than obeyed.
  */
 
 const INPUT = `mt-1 w-full rounded border border-border bg-surface px-2.5 py-1.5 text-sm ${FOCUS_RING} disabled:opacity-60`;
@@ -259,6 +271,15 @@ function EndMembership({
   readonly members: readonly TeamMemberDetail[];
 }) {
   const [result, action, pending] = useActionState(endMembershipAction, TEAM_IDLE);
+  const [memberId, setMemberId] = useState("");
+  const [state, setState] = useState("suspended");
+  const [typed, setTyped] = useState("");
+  const id = useId();
+
+  const chosen = members.find((m) => m.member.memberId === memberId);
+  const removing = state === "removed";
+  const confirmed = chosen !== undefined && typed.trim() === chosen.member.displayName;
+  const outstanding = chosen?.outstanding.length ?? 0;
 
   return (
     <form action={action} className="space-y-4 px-5 py-4">
@@ -266,7 +287,19 @@ function EndMembership({
 
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Member">
-          <select className={INPUT} name="memberId" required defaultValue="">
+          <select
+            className={INPUT}
+            name="memberId"
+            required
+            value={memberId}
+            onChange={(event) => {
+              setMemberId(event.target.value);
+              // Picking a different person invalidates a name typed for the
+              // previous one. Carrying it over is exactly the wrong-row
+              // mistake this field exists to catch.
+              setTyped("");
+            }}
+          >
             <option value="" disabled>
               choose a person
             </option>
@@ -282,7 +315,12 @@ function EndMembership({
           label="To"
           hint="suspended is reversible and PAUSES the card at Lithic. removed is TERMINAL — nothing may follow it, the card is CLOSED at the issuer, and re-adding this person is a new membership with a new card. active reinstates a suspended member and is refused for a removed one."
         >
-          <select className={INPUT} name="state" defaultValue="suspended">
+          <select
+            className={INPUT}
+            name="state"
+            value={state}
+            onChange={(event) => setState(event.target.value)}
+          >
             <option value="suspended">suspended — reversible</option>
             <option value="removed">removed — terminal</option>
             <option value="active">active — reinstate a suspended member</option>
@@ -294,6 +332,62 @@ function EndMembership({
         <input className={INPUT} name="note" required maxLength={400} />
       </Field>
 
+      {removing ? (
+        <Note
+          emphasis
+          title={
+            chosen === undefined
+              ? "Removal is terminal — choose the person first"
+              : `Removing ${chosen.member.displayName} cannot be undone`
+          }
+        >
+          <p>
+            {chosen === undefined
+              ? "Nothing is removed until a person is chosen and their name is typed below."
+              : `Their cards are CLOSED at Lithic, not paused, and re-adding ${chosen.member.displayName} later is a new membership with a new card and a new number. Nothing of theirs is deleted: their memberships, cards, authorisations, holds and journal entries all stand.`}
+          </p>
+          {chosen !== undefined && outstanding > 0 ? (
+            <p className="mt-2">
+              {outstanding === 1
+                ? "One authorisation of theirs is outstanding right now."
+                : `${outstanding} authorisations of theirs are outstanding right now.`}{" "}
+              Removal does not touch them. The merchant has not claimed that money yet and will,
+              days later, for a different amount.
+            </p>
+          ) : null}
+          <div className="mt-3">
+            <Field
+              label="Type their name to confirm"
+              hint={
+                chosen === undefined
+                  ? "Choose a person above and their name appears here."
+                  : `Type ${chosen.member.displayName} exactly. The name is asked for rather than a fixed word so that the person you type is the person you selected.`
+              }
+            >
+              <input
+                className={INPUT}
+                name="confirmName"
+                id={`${id}-confirm`}
+                autoComplete="off"
+                spellCheck={false}
+                disabled={chosen === undefined}
+                value={typed}
+                onChange={(event) => setTyped(event.target.value)}
+                placeholder={chosen?.member.displayName ?? ""}
+                aria-describedby={`${id}-confirm-state`}
+              />
+            </Field>
+            <p id={`${id}-confirm-state`} className="mt-1 text-[11px] text-muted">
+              {chosen === undefined
+                ? "No person is selected, so there is nothing to confirm and the button stays off."
+                : confirmed
+                  ? "The name matches. The button below is live and it is terminal."
+                  : "The name does not match yet, so the button below is off. Nothing has been sent."}
+            </p>
+          </div>
+        </Note>
+      ) : null}
+
       <p className="max-w-prose text-[11px] leading-relaxed text-muted">
         The issuer is called BEFORE the fact is written. If the order were reversed and the
         provider call failed, there would be a window in which this system says the person is
@@ -301,8 +395,14 @@ function EndMembership({
         depend on a third party being reachable — and the receipt says which half succeeded.
       </p>
 
-      <button className={BUTTON} type="submit" disabled={pending}>
-        {pending ? "Revoking…" : "Change their membership"}
+      <button className={BUTTON} type="submit" disabled={pending || (removing && !confirmed)}>
+        {pending
+          ? "Revoking…"
+          : removing
+            ? chosen === undefined
+              ? "Remove permanently"
+              : `Remove ${chosen.member.displayName} permanently`
+            : "Change their membership"}
       </button>
 
       <Receipt result={result} />
