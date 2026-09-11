@@ -427,11 +427,24 @@ GRANT EXECUTE ON FUNCTION team_add_member(uuid, text, text, text, uuid, text, bi
 -- change they ever made, the guard would be permanently red, and a
 -- permanently red guard is a guard nobody reads.
 --
--- `created_at <= tmv.created_at ORDER BY version DESC` and not
--- `effective_from`, deliberately: the FUNCTION reads
+-- `created_at` and not `effective_from`, deliberately: the FUNCTION reads
 -- `v_team_member_current`, which is the newest VERSION regardless of when
 -- it takes effect. The view has to ask the question the gate asked, or the
 -- two disagree and only one of them is enforcing anything.
+--
+-- STRICTLY BEFORE (`v.created_at < tmv.created_at`), and that is a choice
+-- with a reason. `created_at` defaults to `now()`, which in Postgres is
+-- the TRANSACTION timestamp -- so two versions written in one transaction
+-- carry the SAME instant and `<=` would order them by `version`, letting a
+-- terms change made later in a transaction retroactively indict a write
+-- made earlier in it. That is a FALSE POSITIVE on a legitimate write, and
+-- a guard that can go red over something nobody did wrong is a guard
+-- people learn to ignore. The direction is chosen on that asymmetry: the
+-- only state `<` gives up is an author who removes themselves and writes
+-- somebody else's terms inside ONE transaction, and the trigger above
+-- refuses that outright because `v_team_member_current` inside that same
+-- transaction already reads `removed`. Every real path writes one version
+-- per transaction, so the two readings coincide.
 --
 -- INNER lateral, so an author with NO membership of that business is
 -- absent from this view entirely. That is the Corgi-staff break-glass and
@@ -464,7 +477,7 @@ SELECT tmv.id                AS member_version_id,
           JOIN team_member_version v ON v.member_id = atm.id
          WHERE atm.business_id = tm.business_id
            AND atm.actor_id    = tmv.created_by
-           AND v.created_at   <= tmv.created_at
+           AND v.created_at    < tmv.created_at
          ORDER BY atm.membership_seq DESC, v.version DESC
          LIMIT 1
        ) author ON true

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { authoriseScheduled, REFUSAL_HEADERS, unauthorisedBody } from "@/app/api/cron/_auth";
 import { sweepIncompleteHoldPostings } from "@/lib/holds/completion";
 import { sweepExpiredHolds } from "@/lib/holds/expiry";
 import { newRequestId, requestIdFrom } from "@/lib/log";
@@ -30,6 +31,11 @@ export const dynamic = "force-dynamic";
  * Completing first means every hold is withholding what the fold says before
  * anything is allowed to expire.
  *
+ * Auth is `/api/drain`'s: a bearer token, `CRON_SECRET` or `DRAIN_TOKEN`,
+ * checked by `../_auth.ts`. Not `x-vercel-cron` — see D04x and
+ * `docs/SECURITY.md`. A sweep that releases holds and posts through
+ * `ledger_append()` is not something a stranger gets to time.
+ *
  * Neither sweep narrows a guard to succeed. `v_hold_posting_incomplete` is
  * defined `FROM v_hold_drift`, so the repair cannot range over fewer rows than
  * the alarm — and migration 0036 asserts that equality in both directions at
@@ -37,32 +43,36 @@ export const dynamic = "force-dynamic";
  * posting a release there would silence 0011's alarm while leaving a false
  * closure standing.
  */
-function authorised(req: Request): boolean {
-  if (req.headers.get("x-vercel-cron")) return true;
-  const secret = process.env.DRAIN_TOKEN;
-  if (!secret) return false;
-  return (req.headers.get("authorization") ?? "") === `Bearer ${secret}`;
-}
 
 async function run(req: Request): Promise<NextResponse> {
   const requestId = requestIdFrom(req.headers) ?? newRequestId();
-  if (!authorised(req)) {
-    return NextResponse.json(
-      {
-        requestId,
-        error: {
-          code: "UNAUTHORISED",
-          message: "the hold sweep requires the cron header or a bearer token",
-        },
-      },
-      { status: 401, headers: { "cache-control": "no-store" } },
-    );
+  if (!authoriseScheduled(req, "holds", requestId).ok) {
+    return NextResponse.json(unauthorisedBody(requestId, "the hold sweep"), {
+      status: 401,
+      headers: REFUSAL_HEADERS,
+    });
   }
   try {
     const completion = await sweepIncompleteHoldPostings();
     const expiry = await sweepExpiredHolds();
     return NextResponse.json(
-      { requestId, completion, expiry },
+      {
+        requestId,
+        // bigint does not survive JSON.stringify, and money is bigint cents
+        // everywhere below this line. Narrowed here, at the edge, as decimal
+        // strings — never as numbers, which is how a cent goes missing. The
+        // same narrowing `/api/cron/accrual` and `/api/cron/standing` do.
+        //
+        // FOUND BY MEASUREMENT, D04x. Without this the route threw
+        // "Do not know how to serialize a BigInt" on EVERY call — inside the
+        // try, after both sweeps had already committed — so a healthy sweep
+        // answered `500 HOLD_SWEEP_FAILED`. The header on `catch` below says a
+        // silent 500 would look like a book with nothing to sweep; this was
+        // the inverse, an alarm that fired every night on a job that worked,
+        // and it had never returned 200 since the schedule was added.
+        completion: { ...completion, withheldCents: completion.withheldCents.toString() },
+        expiry: { ...expiry, releasedCents: expiry.releasedCents.toString() },
+      },
       { status: 200, headers: { "cache-control": "no-store", "x-request-id": requestId } },
     );
   } catch (e) {

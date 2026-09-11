@@ -27,53 +27,54 @@
  * new code. What this file adds is the one thing that genuinely was missing:
  * putting the instruction on Fedwire afterwards.
  *
- * ─── AND ONE THING THAT DOES NOT WORK, WHICH IS A FINDING ───────────────────
+ * ─── WHERE THE WIRE ABA COMES FROM. DECIDED 2026-09-11 ──────────────────────
  *
- * `destinationSchema`'s wire variant is
+ * This file used to record a finding: `destinationSchema`'s wire variant was
+ * `{ type: 'wire', holderName, bic, accountNumberLast4 }`, a BIC is a SWIFT
+ * identifier for a bank rather than a Fedwire address, so the ABA had nowhere
+ * to live on the instruction and this module resolved it from the payee book
+ * instead. `wireRoutingNumber` then arrived on the schema and
+ * `gatePaymentOnPayee()` began demanding it — and the two halves of the rail
+ * disagreed about where the address came from. That is now settled, and the
+ * full argument is in the header of `src/lib/payees/gate.ts`:
  *
- *     { type: 'wire', holderName, bic, accountNumberLast4 }
+ *   THE CONFIRMED PAYEE BOOK IS AUTHORITATIVE, AND THE INSTRUCTION CARRIES A
+ *   COPY OF THE BOOK'S NUMBER SO THAT IT IS INSIDE THE APPROVED CONTENT HASH.
  *
- * A BIC is a SWIFT identifier for a bank, used on cross-border payments. A
- * domestic Fedwire beneficiary is addressed by a 9-DIGIT ABA — specifically
- * the WIRE variant of it, which is a different number from the same bank's ACH
- * variant. That mismatch has two consequences, one cosmetic and one not:
+ * The short form of why: `payment_instruction.content_hash` is what an
+ * approver must cite, and it covers `counterparty`. Leave the ABA off the
+ * instruction and the one fact that decides WHICH BANK RECEIVES THE MONEY sits
+ * outside the thing two humans signed, re-resolved later from a table that
+ * grows rows. It reads well until somebody archives a payee and appends a
+ * same-name, same-last-four payee at a different bank, at which point an
+ * already-approved wire addresses itself somewhere new and no approval
+ * changed, because no approval ever covered it.
  *
- *   1. THE PAYEE GATE IS A NO-OP ON WIRES. `gatePaymentOnPayee()` opens with
- *      `destination.type === 'ach' ? destination.routingNumber : null`, and
- *      then returns early when the routing number is null. So a wire gets
- *      neither the ABA check-digit arithmetic nor the standing-warning check —
- *      on the one rail where the money cannot be recovered. This module cannot
- *      fix that: `src/lib/approvals/types.ts` is owned elsewhere. It is
- *      reported in docs/WIRES.md §6 with the one-line change that fixes it.
+ * WHAT DID NOT CHANGE, AND IS THE CONTROL THIS RAIL ACTUALLY NEEDS:
  *
- *   2. THE ABA HAS NOWHERE TO LIVE ON THE INSTRUCTION. So this module does not
- *      put it there. It resolves the wire routing number FROM THE PAYEE BOOK,
- *      and refuses to originate when the book does not have one.
+ *   THE BENEFICIARY MUST BE ON THE CONFIRMED BOOK. `gatePaymentOnPayee()`
+ *   deliberately does NOT require a payee to be pre-registered, and its
+ *   reasoning is right for ACH: "it breaks the one-off refund, the emergency
+ *   supplier payment, the payment raised by the MCP agent from an invoice".
+ *   Every one of those costs is a cost of DELAY, and on ACH a delay is
+ *   recoverable because the entry is. On a wire it is not, and the attack is
+ *   business email compromise: a well-formed instruction to a real bank for a
+ *   real-sounding beneficiary, urgent, from a real mailbox. "Emergency
+ *   supplier payment, right now, to a beneficiary nobody has seen before" is
+ *   not an edge case this control breaks — it is a verbatim description of the
+ *   fraud. So on this rail, and only this rail, the beneficiary must be on the
+ *   book, with its routing number checked (`src/lib/payees/aba.ts`) and looked
+ *   up in Increase's routing-number directory (`wire_transfers: "supported"`)
+ *   before anyone can be asked to approve it.
  *
- * ─── WHY RESOLVING FROM THE PAYEE BOOK IS BETTER THAN A FIELD ───────────────
- *
- * Having been forced into it, it is the control this rail actually needs.
- *
- * `gatePaymentOnPayee()` deliberately does NOT require a payee to be
- * pre-registered, and its reasoning is right for ACH: "requiring every payee to
- * be pre-registered is a real product decision with real costs — it breaks the
- * one-off refund, the emergency supplier payment, the payment raised by the
- * MCP agent from an invoice". Every one of those costs is a cost of DELAY, and
- * on ACH a delay is recoverable because the entry is.
- *
- * On a wire it is not, and the attack is business email compromise: a
- * well-formed instruction to a real bank for a real-sounding beneficiary,
- * urgent, from a real mailbox. "Emergency supplier payment, right now, to a
- * beneficiary nobody has seen before" is not an edge case this control breaks
- * — it is a verbatim description of the fraud. So on this rail, and only this
- * rail, the beneficiary must be on the book, with its wire routing number
- * checked (`src/lib/payees/aba.ts`) and looked up in Increase's routing-number
- * directory (`wire_transfers: "supported"`) before anyone can be asked to
- * approve it.
- *
- * The number itself never enters the instruction, never reaches an approver's
- * screen, and never crosses the MCP boundary. The approver sees a beneficiary;
- * the wire is addressed from the confirmed book at release time.
+ * WHAT MOVED. That refusal used to happen HERE and nowhere else — after two
+ * approvals and a ledger entry, which is a refusal two signatures too late.
+ * The gate now makes it at `requestPayment()`, over the same reader
+ * (`loadWireBeneficiaries`, one predicate, one file). This function keeps
+ * making it too, because the gate speaks for the book as it was on the way IN
+ * and this is the last moment before the money is unrecoverable — and it adds
+ * one refusal the gate cannot make, `WIRE_ROUTING_NUMBER_NOT_CONFIRMED`, for
+ * the case where the two moments disagree.
  */
 
 import 'server-only';
@@ -83,7 +84,7 @@ import type { PaymentDestination, QueuedPayment } from '@/lib/approvals/types';
 import { sql, type Sql } from '@/lib/ledger/db';
 import { readAccountIdentity } from '@/lib/ledger/queries';
 import { checkRoutingNumber } from '@/lib/payees/aba';
-import { loadPayeeBook } from '@/lib/payees/store';
+import { loadWireBeneficiaries } from '@/lib/payees/store';
 
 import type { RailOrigination } from '../contract';
 import { usd } from '../types';
@@ -124,17 +125,18 @@ export interface ResolvedWireBeneficiary {
  * Find the wire beneficiary on this business's payee book.
  *
  * Matched on `(rail = 'wire', holderName, accountNumberLast4)` — the three
- * things the instruction actually carries. Deliberately NOT matched on the
- * BIC: a BIC identifies a bank, not an account, and matching a beneficiary on
- * their bank would happily route a payment to the wrong customer of the right
- * bank.
+ * things every wire instruction carries, including the ten that predate
+ * `wireRoutingNumber`. Deliberately NOT matched on the BIC: a BIC identifies a
+ * bank, not an account, and matching a beneficiary on their bank would happily
+ * route a payment to the wrong customer of the right bank. The predicate is
+ * `loadWireBeneficiaries()` and the gate uses the same one.
  *
  * Every refusal below is a REFUSAL and not a warning, which is the opposite of
- * how `gatePaymentOnPayee()` treats its own findings, and deliberately so. It
- * fails OPEN because it sits in front of a recoverable rail and an outage
- * there is the worse risk. This sits in front of an irrecoverable one, after
- * two humans have already approved, at the last moment before the money is
- * unrecoverable — the direction to fail in is reversed.
+ * how `gatePaymentOnPayee()` treats a name-match finding, and deliberately so:
+ * a warning is overridable by a named human because names legitimately differ,
+ * whereas none of these has a legitimate explanation at this point in the
+ * flow. This sits after two humans have already approved, at the last moment
+ * before the money is unrecoverable.
  */
 export async function resolveWireBeneficiary(
   args: {
@@ -151,14 +153,53 @@ export async function resolveWireBeneficiary(
   }
   const destination = args.destination;
 
-  const book = await loadPayeeBook({ businessId: args.businessId }, conn);
-  const candidates = book.filter(
-    (p) =>
-      !p.archived &&
-      p.rail === 'wire' &&
-      p.holderName.trim().toLowerCase() === destination.holderName.trim().toLowerCase() &&
-      p.accountNumberLast4 === destination.accountNumberLast4,
+  // ONE MATCHING RULE, AND IT LIVES IN `src/lib/payees/store.ts`. This used to
+  // be a `loadPayeeBook()` plus a filter written here, which meant the gate at
+  // `requestPayment()` and this function each owned a copy of the predicate
+  // that decides which beneficiary a wire is for. Two copies of that rule is
+  // two answers to "did a human confirm this beneficiary", and the whole
+  // control is that they are the same answer at both moments.
+  const matches = await loadWireBeneficiaries(
+    {
+      businessId: args.businessId,
+      holderName: destination.holderName,
+      accountNumberLast4: destination.accountNumberLast4,
+    },
+    conn,
   );
+
+  // ─── THE APPROVED NUMBER MUST STILL BE THE BOOK'S NUMBER ─────────────────
+  //
+  // The instruction carries the wire ABA — see `gatePaymentOnPayee()`'s header
+  // for the decision and why maker-checker is what settles it — and the gate
+  // proved at `requestPayment()` that it came from the confirmed book. This
+  // proves it is STILL the confirmed book's, now, at the last moment before
+  // the money is unrecoverable.
+  //
+  // WHAT THAT CLOSES, EXACTLY. The payee book is append-only, but it is not
+  // frozen: a payee can be archived and a same-name, same-last-four payee
+  // added at a DIFFERENT bank, both of them appends. Without this check an
+  // instruction approved on Tuesday would address itself to Thursday's book,
+  // silently, with two signatures on a number nobody sent to. With it, the
+  // divergence is a refusal before origination — a reconciliation break, which
+  // this system has a screen for, rather than money at the wrong bank, which
+  // nothing has a remedy for.
+  //
+  // `wireRoutingNumber` is `undefined` on the ten pre-`wireRoutingNumber`
+  // instructions, including the $42.00 wire that really went out. Those keep
+  // exactly the behaviour they had: resolved from the book, ambiguity refused
+  // below. A required field here would rewrite history by refusing to read it.
+  const stated = destination.wireRoutingNumber;
+  const candidates =
+    stated === undefined ? matches : matches.filter((p) => p.routingNumber === stated);
+
+  if (stated !== undefined && candidates.length === 0 && matches.length > 0) {
+    const known = [...new Set(matches.map((p) => p.routingNumber ?? 'none'))];
+    throw new WireOriginationRefused(
+      'WIRE_ROUTING_NUMBER_NOT_CONFIRMED',
+      `The approved instruction addresses "${destination.holderName}" ••${destination.accountNumberLast4} at ${stated}, and this business's payee book does not confirm that beneficiary at that bank — it confirms ${known.join(' or ')}. The book changed after the payment was approved, or the number never came from it. Two people signed for ${stated} and a wire cannot be recalled, so nothing is sent and the number is not quietly swapped for the book's. Re-confirm the beneficiary on /payees and raise the payment again.`,
+    );
+  }
 
   if (candidates.length === 0) {
     throw new WireOriginationRefused(

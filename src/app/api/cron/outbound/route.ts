@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { authoriseScheduled, REFUSAL_HEADERS, unauthorisedBody } from "@/app/api/cron/_auth";
 import { drainOutbound } from "@/lib/events/drain";
 import { newRequestId, requestIdFrom } from "@/lib/log";
 
@@ -14,7 +15,9 @@ export const dynamic = "force-dynamic";
  *
  * Deliberately a mirror of `/api/drain`, including its auth, because the two
  * are the same job in opposite directions and an operator under pressure
- * should not have to remember which one takes a bearer token.
+ * should not have to remember which one takes a bearer token. Both take one:
+ * `CRON_SECRET` or `DRAIN_TOKEN`, checked by `../_auth.ts`. Neither takes
+ * `x-vercel-cron` any more — see D04x and `docs/SECURITY.md`.
  *
  * Without this route the queue drains only when somebody presses "Drain now"
  * on `/events`. A customer's webhook arriving because a human clicked a button
@@ -28,26 +31,14 @@ export const dynamic = "force-dynamic";
  * customer's dead endpoint cannot reach back and stop their own money moving,
  * and that property is structural rather than careful.
  */
-function authorised(req: Request): boolean {
-  if (req.headers.get("x-vercel-cron")) return true;
-  const secret = process.env.DRAIN_TOKEN;
-  if (!secret) return false;
-  return (req.headers.get("authorization") ?? "") === `Bearer ${secret}`;
-}
 
 async function run(req: Request): Promise<NextResponse> {
   const requestId = requestIdFrom(req.headers) ?? newRequestId();
-  if (!authorised(req)) {
-    return NextResponse.json(
-      {
-        requestId,
-        error: {
-          code: "UNAUTHORISED",
-          message: "the outbound drain requires the cron header or a bearer token",
-        },
-      },
-      { status: 401, headers: { "cache-control": "no-store" } },
-    );
+  if (!authoriseScheduled(req, "outbound", requestId).ok) {
+    return NextResponse.json(unauthorisedBody(requestId, "the outbound drain"), {
+      status: 401,
+      headers: REFUSAL_HEADERS,
+    });
   }
   try {
     const result = await drainOutbound();

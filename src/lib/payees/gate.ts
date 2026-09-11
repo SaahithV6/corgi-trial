@@ -27,7 +27,12 @@
  *      without one gets neither check below, so it is refused rather than
  *      waved through — see WHICH DIRECTION IT FAILS IN.
  *
- *   4. A CHECK THAT COULD NOT BE RUN. If the payee-book lookup throws, this
+ *   4. A WIRE WHOSE BENEFICIARY, OR WHOSE BANK, IS NOT ON THE CONFIRMED BOOK.
+ *      WIRE ONLY. See WHERE A WIRE'S ABA COMES FROM, below — this is the
+ *      refusal that makes "the ABA comes from the payee book" a fact about
+ *      the system rather than a habit of one screen.
+ *
+ *   5. A CHECK THAT COULD NOT BE RUN. If the payee-book lookup throws, this
  *      returns a refusal naming the check that did not complete. A payment
  *      that could not be checked is not a payment that has been checked.
  *
@@ -45,6 +50,59 @@
  *     on age would mean a bank holiday and a slow re-check could stop
  *     payroll, and the fix people would reach for is turning the check off.
  *     Age is surfaced; it is not a gate.
+ *
+ * ─── WHERE A WIRE'S ABA COMES FROM. DECIDED 2026-09-11 ─────────────────────
+ *
+ * Two defensible stories were live at once and they disagreed, which is worse
+ * than either of them being wrong.
+ *
+ *   THE RAIL'S STORY was that a wire beneficiary's ABA belongs to the
+ *   CONFIRMED PAYEE BOOK, not to the instruction: `resolveWireBeneficiary()`
+ *   looked it up at send time and refused a beneficiary nobody had checked, so
+ *   `src/lib/rails/wire/outbound.integration.test.ts` deliberately raised a
+ *   BIC-only wire.
+ *
+ *   THIS GATE'S STORY was that a wire must be validated against the number it
+ *   will actually be sent to, so it demanded `wireRoutingNumber` on the
+ *   instruction and refused without one.
+ *
+ * THE DECISION: THE BOOK IS AUTHORITATIVE, AND THE INSTRUCTION CARRIES A COPY
+ * THAT THIS GATE PROVES CAME FROM IT.
+ *
+ * The deciding argument is MAKER-CHECKER, and it is not about payees at all.
+ * `payment_instruction.content_hash` is what an approver must cite, and the
+ * hash covers `counterparty`. If the ABA is not on the instruction then the
+ * single most important fact about a wire — WHICH BANK RECEIVES THE MONEY — is
+ * outside the thing two humans signed, and is instead re-resolved at release
+ * time from a table that grows rows. Archive a payee, add a same-name
+ * same-last-four payee at a different bank, and an already-approved wire
+ * quietly addresses itself somewhere new. Nothing about the approval changed,
+ * because the approval never covered it. A control that can be stepped around
+ * by appending a row is not a control.
+ *
+ * So the number rides on the instruction, inside the hash, on the approver's
+ * screen — and this gate refuses it unless it is the number a human already
+ * confirmed for this beneficiary:
+ *
+ *   `PAYEE_WIRE_PAYEE_NOT_ON_BOOK`          no confirmed wire payee matches
+ *                                           (rail, holderName, last4)
+ *   `PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED` the beneficiary IS on the book,
+ *                                           at a different bank
+ *
+ * Both were previously discovered by `originateApprovedWire()`, after two
+ * approvals and a ledger entry. They are the same refusals, moved to the
+ * front, which is what docs/WIRES.md §7 asked for. THE RAIL STILL MAKES THEM:
+ * the gate runs on the way IN and cannot speak for what the book says at
+ * release time, so `resolveWireBeneficiary()` re-checks the approved number
+ * against the book before addressing the message. Two checks of one rule, at
+ * the two moments that matter, over the reader in `store.ts` that both share.
+ *
+ * WHY THE SECOND RAIL IS NOT TREATED THIS WAY. ACH deliberately does not
+ * require pre-registration — see IT DOES NOT REFUSE — because those costs are
+ * costs of DELAY and an ACH entry is recallable for two banking days. A wire
+ * is not, and "urgent payment, right now, to a beneficiary nobody has seen
+ * before" is a verbatim description of business email compromise. Nothing on
+ * the ACH path below changed.
  *
  * ─── COST ──────────────────────────────────────────────────────────────────
  *
@@ -85,20 +143,22 @@
  * THE ONE CASE THAT STILL PROCEEDS, NAMED EXACTLY, because a bare `catch` over
  * everything is what got us here:
  *
- *     A destination with no payee-book row, on a business with no payee book
- *     at all, proceeds.
+ *     AN ACH destination with no payee-book row, or on a business with no
+ *     payee book at all, proceeds.
  *
  * That is `readAccountIdentity()` answering `null` for `businessId`, and the
  * `SELECT` answering zero rows. Both are ANSWERS, not failures: a deposit
  * account with no business row cannot have a payee book, and an unregistered
- * destination is deliberately allowed (see IT DOES NOT REFUSE, above). WHAT
- * THAT CAN LET THROUGH: a payment to a beneficiary nobody has ever checked,
- * with nothing but the ABA arithmetic in front of it. On ACH that is the
- * accepted trade and the reasoning is above. On WIRE it is not, and it is
- * closed one layer down rather than here — `resolveWireBeneficiary()` refuses
- * to address a Fedwire message to a beneficiary that is not on the confirmed
- * book, so an unregistered wire destination passes this gate and is refused
- * before any money leaves.
+ * ACH destination is deliberately allowed (see IT DOES NOT REFUSE, above).
+ * WHAT THAT CAN LET THROUGH: an ACH payment to a beneficiary nobody has ever
+ * checked, with nothing but the ABA arithmetic in front of it. That is the
+ * accepted trade on the rail where a mistake is recallable for two banking
+ * days, and the reasoning is above.
+ *
+ * ON WIRE IT IS NOT AN ANSWER, IT IS THE REFUSAL. Both of those zero-row
+ * outcomes become `PAYEE_WIRE_PAYEE_NOT_ON_BOOK` — see WHERE A WIRE'S ABA
+ * COMES FROM. A deposit account with no business cannot have confirmed a wire
+ * beneficiary, so a wire from one is a wire nobody has checked.
  */
 
 import "server-only";
@@ -111,8 +171,14 @@ import { isErr, type Result } from "@/lib/result";
 import { checkRoutingNumber, abaNearMisses } from "./aba";
 import { NOT_CHECKED, type RoutingDirectory } from "./directory";
 import { NO_IDENTITY_SOURCE, type IdentityNameSource } from "./identity";
-import { loadBookEntries, savePayee, type SavedPayee } from "./store";
-import type { PayeeCandidate, PayeeCheck } from "./types";
+import {
+  loadBookEntries,
+  loadWireBeneficiaries,
+  savePayee,
+  type PayeeBookEntry,
+  type SavedPayee,
+} from "./store";
+import type { BookEntry, PayeeCandidate, PayeeCheck } from "./types";
 import { verifyPayee } from "./verify";
 
 export type PayeeGateRefusal = {
@@ -236,10 +302,70 @@ export async function gatePaymentOnPayee(
   } catch (thrown) {
     return unavailable("the account's business could not be read", thrown);
   }
-  // An ANSWER, not a failure: a deposit account with no business row cannot
-  // have a payee book, which is exactly what the old inner join said.
-  if (businessId === null) return null;
+  if (businessId === null) {
+    // An ANSWER, not a failure: a deposit account with no business row cannot
+    // have a payee book, which is exactly what the old inner join said. On ACH
+    // that means "nothing to look up" and the payment proceeds. On WIRE it
+    // means the beneficiary cannot possibly have been confirmed, which is the
+    // one thing this rail insists on.
+    return input.destination.type === "wire"
+      ? notOnBook(input.destination.holderName, last4)
+      : null;
+  }
 
+  // ---- 3. a wire is addressed from the confirmed book ---------------------
+  //
+  // WIRE ONLY, and the ACH path below is untouched. See WHERE A WIRE'S ABA
+  // COMES FROM in the header for why the number rides on the instruction and
+  // this is what proves it came from the book.
+  if (input.destination.type === "wire") {
+    let confirmed: readonly PayeeBookEntry[];
+    try {
+      confirmed = await loadWireBeneficiaries(
+        {
+          businessId,
+          holderName: input.destination.holderName,
+          accountNumberLast4: last4,
+        },
+        conn,
+      );
+    } catch (thrown) {
+      return unavailable("the payee book could not be read", thrown);
+    }
+
+    if (confirmed.length === 0) return notOnBook(input.destination.holderName, last4);
+
+    // The beneficiary is known; is this the BANK we know them at? A wire to a
+    // supplier you really do pay, at a bank you have never confirmed for them,
+    // is not a near miss — it is what a redirected invoice looks like from the
+    // inside. The matching rule deliberately leaves the routing number out
+    // (see `loadWireBeneficiaries`) so that this is a separate sentence.
+    const atThisBank = confirmed.filter((p) => p.routingNumber === routingNumber);
+    if (atThisBank.length === 0) {
+      const known = [...new Set(confirmed.map((p) => p.routingNumber).filter((n) => n !== null))];
+      return {
+        code: "PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED",
+        message:
+          `"${input.destination.holderName}" ••${last4} is on your payee book, but not at ` +
+          `${routingNumber}. ` +
+          (known.length === 0
+            ? "The confirmed record carries no routing number at all, so there is no Fedwire address anybody has checked for this beneficiary. "
+            : `The wire routing number somebody confirmed for this beneficiary is ${known.join(" or ")}. `) +
+          "Same supplier, different bank is what a redirected invoice looks like from the " +
+          "inside, and a wire cannot be recalled once it is received. Confirm the change " +
+          "through a channel you already had — not one from the message that asked for it — " +
+          "and add the new details on /payees. Nothing was written and no payment was raised.",
+      };
+    }
+
+    // Newest check first, so this is the CURRENT standing of the beneficiary
+    // at this bank — the same rule the ACH branch applies below.
+    const payee = atThisBank[0];
+    if (payee === undefined) return notOnBook(input.destination.holderName, last4);
+    return unsignedWarning(payee.displayName, payee.outcome, payee.acknowledged);
+  }
+
+  // ---- 4. ACH: a standing warning nobody has signed for -------------------
   let rows: readonly {
     display_name: string;
     outcome: string | null;
@@ -267,24 +393,59 @@ export async function gatePaymentOnPayee(
     return unavailable("the payee book could not be read", thrown);
   }
 
-  const payee = rows[0];
-  // Also an ANSWER: this destination is not on the book. Deliberately allowed
-  // — see IT DOES NOT REFUSE in the header, and the wire rail's own refusal
-  // for why that allowance stops at this rail's edge.
-  if (payee === undefined) return null;
+  const found = rows[0];
+  // Also an ANSWER: this ACH destination is not on the book. Deliberately
+  // allowed — see IT DOES NOT REFUSE in the header, and section 3 above for
+  // why that allowance stops at the wire rail's edge.
+  if (found === undefined) return null;
 
-  if (payee.outcome === "warned" && !payee.acknowledged) {
-    return {
-      code: "PAYEE_WARNING_UNACKNOWLEDGED",
-      message:
-        `The last check on "${payee.display_name}" raised a warning that nobody has signed ` +
-        "for. Open the payee, read what the check found, and record why it is right to pay " +
-        "this account. The payment can then be raised — the warning does not stop it, but " +
-        "somebody has to put their name to it.",
-    };
-  }
+  return unsignedWarning(found.display_name, found.outcome, found.acknowledged);
+}
 
-  return null;
+/**
+ * A wire beneficiary nobody has confirmed.
+ *
+ * The same sentence `resolveWireBeneficiary()` says at send time, said here
+ * instead — which is the entire point of moving it. A refusal that arrives
+ * after two humans have approved and a journal entry has posted has cost two
+ * people's attention and left a reconciliation break to explain; the same
+ * refusal at `requestPayment()` costs a form error.
+ */
+function notOnBook(holderName: string, last4: string): PayeeGateRefusal {
+  return {
+    code: "PAYEE_WIRE_PAYEE_NOT_ON_BOOK",
+    message:
+      `No confirmed wire payee matches "${holderName}" ••${last4} on this business's payee ` +
+      "book. A wire is final on receipt and business email compromise is a WELL-FORMED " +
+      "instruction — an urgent payment to a real-sounding beneficiary at a real bank — so " +
+      "this rail will not address one nobody has checked. ACH deliberately allows it, because " +
+      "an ACH entry is recallable for two banking days and a wire is not. Add the beneficiary " +
+      "on /payees, let the routing number be checked, then raise the payment. Nothing was " +
+      "written and no payment was raised.",
+  };
+}
+
+/**
+ * The standing-warning refusal, for whichever rail found the row.
+ *
+ * One function so the two branches cannot drift into two policies. Note what
+ * it is and is not: not a block on the warning — that is overridable by
+ * anybody in one step — but a refusal to let the override be IMPLICIT.
+ */
+function unsignedWarning(
+  displayName: string,
+  outcome: string | null,
+  acknowledged: boolean,
+): PayeeGateRefusal | null {
+  if (outcome !== "warned" || acknowledged) return null;
+  return {
+    code: "PAYEE_WARNING_UNACKNOWLEDGED",
+    message:
+      `The last check on "${displayName}" raised a warning that nobody has signed ` +
+      "for. Open the payee, read what the check found, and record why it is right to pay " +
+      "this account. The payment can then be raised — the warning does not stop it, but " +
+      "somebody has to put their name to it.",
+  };
 }
 
 /**
@@ -322,10 +483,17 @@ function describeThrown(thrown: unknown): string {
 /* -------------------------------------------------------------------------- */
 
 export type ConfirmPayeeResult = {
-  readonly check: PayeeCheck;
+  /**
+   * NULL WHEN THE CHECK DID NOT HAPPEN.
+   *
+   * Not "happened and found nothing" — that is a `PayeeCheck` with no
+   * findings. Null means one of the legs could not be run at all, so there is
+   * no result to report and none was recorded. See `confirmPayee`.
+   */
+  readonly check: PayeeCheck | null;
   /** Null when the check was blocked, because a blocked candidate is not a payee. */
   readonly saved: SavedPayee | null;
-  /** Present when the check was blocked: what the refusal said. */
+  /** Present when the check was blocked or could not be run: what the refusal said. */
   readonly refusal: PayeeGateRefusal | null;
 };
 
@@ -341,6 +509,48 @@ export type ConfirmPayeeResult = {
  * `directory` and `identity` are parameters rather than module singletons so
  * a test can run the whole path without a network and a demo can run it with
  * one, and so that "which provider answered" is never a global.
+ *
+ * ─── THE THIRD PLACE THIS FAILED OPEN, AND THE WORST OF THEM ───────────────
+ *
+ * Fixed 2026-09-11, after §5b had already closed the same shape in
+ * `gatePaymentOnPayee()`. The book read for the twin probe was
+ *
+ *     const book = await loadBookEntries(businessId, conn).catch(() => []);
+ *
+ * and every consequence of that one line ran downhill. `findConflictingTwin()`
+ * over an empty list finds nothing, so `TWIN_WITH_DIFFERENT_DETAILS` — the
+ * only account-number check a book of last-four digits can perform, and the
+ * one that catches the redirected invoice — could not fire. With no warn-level
+ * finding, `decide()` returned `verified`. And then `savePayee()` wrote that
+ * word into `payee_verification`, a table that is append-only by grant, by
+ * REVOKE and by trigger.
+ *
+ * SO A TRANSIENT READ FAILURE BECAME PERMANENT EVIDENCE OF A CHECK THAT NEVER
+ * HAPPENED, on the book that gates money leaving the building. That is worse
+ * than the gate's version: there the payment proceeded and left nothing
+ * behind, here the row outlives the outage and can never be corrected, only
+ * superseded. Every screen, every freshness band and the payment gate itself
+ * then read a check nobody ran. Nothing downstream can tell the difference,
+ * because nothing downstream was given one.
+ *
+ * IT NOW FAILS CLOSED AND WRITES NOTHING. No payee, no verification, no
+ * refusal row — `payee_candidate_refusal` is for a candidate the ARITHMETIC
+ * refused, and this candidate was not refused, it was not examined. The
+ * caller gets `check: null`, `saved: null` and a refusal naming the leg that
+ * could not run, and the honest remedy is to press the button again.
+ *
+ * THE CASE THAT STILL PROCEEDS, NAMED EXACTLY, because a bare `catch` over
+ * everything is what got us here:
+ *
+ *     `loadBookEntries()` RETURNING ZERO ROWS.
+ *
+ * An empty book is an ANSWER and it is the commonest one: it means this is
+ * the business's first payee. `verifyPayee()` already says so in as many
+ * words — "Empty is a legitimate answer and means 'first payee'; it is never
+ * an error". WHAT THAT CAN LET THROUGH: nothing the twin probe would have
+ * caught, because a twin needs an existing record to be a twin of. The catch
+ * conflated that answer with "the database did not answer", which are the two
+ * things this has to tell apart.
  */
 export async function confirmPayee(
   input: {
@@ -353,9 +563,31 @@ export async function confirmPayee(
   },
   conn: Sql = sql,
 ): Promise<ConfirmPayeeResult> {
-  const book = await loadBookEntries(input.candidate.businessId, conn).catch(
-    () => [] as const,
-  );
+  // THE `try` WRAPS THE CALL AND NOT THE DECISION, the same rule
+  // `gatePaymentOnPayee()` follows. `[]` is a legitimate ANSWER and reaches
+  // `verifyPayee()` as one; a throw is not an answer and stops here, before
+  // anything is written.
+  let book: readonly BookEntry[];
+  try {
+    book = await loadBookEntries(input.candidate.businessId, conn);
+  } catch (thrown) {
+    return {
+      check: null,
+      saved: null,
+      refusal: {
+        code: "PAYEE_BOOK_UNREADABLE",
+        message:
+          "The payee could not be checked: this business's existing payee book could not be " +
+          "read, so the twin probe — the check that asks whether you already pay this same " +
+          "name at a different account — did not run. That is the only account-number check " +
+          "this system can perform, and it is the one that catches a redirected invoice. " +
+          "NOTHING WAS WRITTEN: no payee, no verification, no refusal. A check that could not " +
+          "be completed must not be recorded as a check that succeeded, because " +
+          "`payee_verification` is append-only and the word `verified` in it would outlive " +
+          `this failure for ever. Try again. (${describeThrown(thrown)})`,
+      },
+    };
+  }
 
   const check = await verifyPayee(input.candidate, {
     ...(input.directory === undefined ? {} : { directory: input.directory }),

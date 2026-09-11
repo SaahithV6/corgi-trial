@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { runAccrual } from "@/lib/accrual/accrue";
 import { accrualRunInputSchema } from "@/lib/accrual/types";
+import { authoriseScheduled, REFUSAL_HEADERS, unauthorisedBody } from "@/app/api/cron/_auth";
 import { env } from "@/lib/env";
 import { newRequestId, requestIdFrom } from "@/lib/log";
 
@@ -15,21 +16,26 @@ export const dynamic = "force-dynamic";
  *
  * ─── AUTHENTICATION IS `/api/drain`'S AND `/api/cron/standing`'S ────────────
  *
- * Vercel Cron sends `x-vercel-cron`; an operator sends the bearer token. The
- * same two callers, checked the same way, reusing the same `DRAIN_TOKEN`
- * secret — one shared operator credential for the scheduled jobs rather than a
- * third variable that has to be remembered on every deploy and that is a silent
- * 401 when it is not.
+ * A bearer token, always: `CRON_SECRET` (what Vercel Cron presents) or
+ * `DRAIN_TOKEN` (what an operator holds), compared in constant time by
+ * `../_auth.ts`. The same check the other scheduled routes have.
  *
- * This endpoint MOVES MONEY, which neither of the other two does: the drain
- * processes webhooks and the standing tick raises an instruction into an
- * approvals queue, but an accrual posts a journal entry against a customer's
- * deposit account with no human in between. So it is authenticated, always, and
- * there is no unauthenticated path. Accruing is idempotent — a second call for
- * the same day posts nothing, because the key comes from the schedule and the
- * date and `journal_entry.idempotency_key` is UNIQUE — but "idempotent" is not
- * "harmless": a stranger who can pass `bookDate` can decide WHICH day a fee is
- * dated, and the date is half of what an accrual is.
+ * This endpoint MOVES MONEY, which neither the drain nor the standing tick
+ * does: the drain processes webhooks and the standing tick raises an
+ * instruction into an approvals queue, but an accrual posts a journal entry
+ * against a customer's deposit account with no human in between. Accruing is
+ * idempotent — a second call for the same day posts nothing, because the key
+ * comes from the schedule and the date and `journal_entry.idempotency_key` is
+ * UNIQUE — but "idempotent" is not "harmless": a stranger who can pass
+ * `bookDate` can decide WHICH day a fee is dated, and the date is half of what
+ * an accrual is.
+ *
+ * Until D04x that stranger existed. This route also returned true for any
+ * request carrying `x-vercel-cron`, which the platform sets and nothing
+ * strips, so the gate was one header a client can type. Proven from outside on
+ * 2026-09-11: the same GET with an invalid `bookDate` returned 401 without the
+ * header and 400 INVALID_INPUT with it — the auth gate passed, before any
+ * money was at stake. `docs/SECURITY.md` has the transcript.
  *
  * ─── WHAT `bookDate` CAN AND CANNOT DO ──────────────────────────────────────
  *
@@ -61,13 +67,6 @@ export const dynamic = "force-dynamic";
  * still shows Tuesday's fee. What a tick can never do is accrue a date twice,
  * and that is the property being graded.
  */
-function authorised(req: Request): boolean {
-  if (req.headers.get("x-vercel-cron")) return true;
-  const secret = process.env.DRAIN_TOKEN;
-  if (!secret) return false;
-  const header = req.headers.get("authorization") ?? "";
-  return header === `Bearer ${secret}`;
-}
 
 /**
  * Read `?bookDate=` / `?limit=`, or the JSON body on a POST.
@@ -109,17 +108,11 @@ async function readOptions(
 async function run(req: Request): Promise<NextResponse> {
   const requestId = requestIdFrom(req.headers) ?? newRequestId();
 
-  if (!authorised(req)) {
-    return NextResponse.json(
-      {
-        requestId,
-        error: {
-          code: "UNAUTHORISED",
-          message: "the accrual tick requires the cron header or a bearer token",
-        },
-      },
-      { status: 401, headers: { "cache-control": "no-store" } },
-    );
+  if (!authoriseScheduled(req, "accrual", requestId).ok) {
+    return NextResponse.json(unauthorisedBody(requestId, "the accrual tick"), {
+      status: 401,
+      headers: REFUSAL_HEADERS,
+    });
   }
 
   const options = await readOptions(req);

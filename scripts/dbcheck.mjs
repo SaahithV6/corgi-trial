@@ -351,6 +351,26 @@ const INVARIANT_VIEWS = [
   // against a negative base, $61,277.06 the old rule would have fabricated.
   ["v_advice_delta_unsound", "an advice is never converted against a base an authorised amount cannot take"],
   ["v_hold_closure_unexplained", "no unreversed closure stands over an open authorisation the provider does not explain"],
+  // ---- 0044, folded in ----------------------------------------------------
+  //
+  // FOURTH time an agent has had to park a new invariant in a side array,
+  // always the same cause: it cannot write `src/lib/chaos/invariants.ts`,
+  // which this list is asserted equal to. That is the right call under a write
+  // scope and the wrong resting state, so it gets folded in every time.
+  //
+  // This one watches the defect that was closest to real harm tonight: both
+  // authorship checks in 0033 looked the author up with `AND state <> 'removed'`
+  // and then treated NULL as Corgi staff, so a REMOVED admin was moved out of
+  // the branch that checks and into the branch that trusts — and could mint a
+  // new approver with can_approve = true, manufacturing the second pair of
+  // eyes maker-checker rests on. Removal is meant to be the remedy for a
+  // compromised signer; it was the qualification.
+  //
+  // It is deliberately NOT v_member_approval_without_right widened: that view
+  // reads payment_instruction_event, and the approver this defect mints is
+  // active, correctly-roled and perfectly legitimate at the moment they
+  // approve. The fraud is one level up, in who put them there.
+  ["v_team_terms_by_unauthorised_author", "no member's terms were written by somebody who was not an active admin of that business at the time"],
 ];
 
 // ---------------------------------------------------------------------
@@ -526,6 +546,48 @@ const INVARIANT_VIEWS = [
 // declared per source, which matters, because 0040 §10.3's declared
 // version has since gone stale: 0 of those 52 holds are in
 // `v_refused_auth_hold` today, since 0032's repair took them out of it.
+
+// ---------------------------------------------------------------------
+// MIGRATION 0044'S ONE, AND WHY IT IS IN A SIDE ARRAY AGAIN.
+// ---------------------------------------------------------------------
+//
+// The same mechanical reason every previous side array had, and the
+// paragraphs above that say "the side arrays are gone" were true when
+// they were written: `src/lib/chaos/invariants.test.ts` parses the FIRST
+// array literal out of this file and asserts `src/lib/chaos/invariants.ts`
+// lists exactly the same views in exactly the same order, and
+// `src/lib/chaos/**` is outside this change's write scope — five agents
+// are live tonight and a red `pnpm test` nobody can fix is holding a
+// demo. So: an unrun invariant is a comment, this one runs here, it
+// counts towards the SAME tally, `--prove` proves it like every other
+// view, and nothing about it is softer. Whoever owns `src/lib/chaos/**`
+// moves it into the array above and mirrors it — a two-line edit.
+//
+// ---------------------------------------------------------------------
+// WHAT IT ASSERTS
+// ---------------------------------------------------------------------
+//
+// GREEN on arrival, and it had to be MADE to fail before it was listed.
+//
+// `db/migrations/0033_team.sql:309-322` and `:818-831` both established
+// the author's authority with a lookup filtered `AND state <> 'removed'`
+// and then gated on `IF v_author IS NOT NULL`. NULL is the CORGI-STAFF
+// break-glass branch. So a REMOVED member of the business resolved to
+// NULL and was moved out of the branch that CHECKS into the branch that
+// TRUSTS: what the lookup excluded from itself was exactly the population
+// it existed to stop. Proven twice on this database — a removed admin
+// authored a promotion, and a removed admin called `team_add_member()`
+// and minted a new ACTIVE APPROVER with `actor.can_approve = true`, which
+// is the second pair of eyes maker-checker rests on. Migration 0044 is
+// the repair; this view is the second line behind it.
+//
+// It is NOT `v_member_approval_without_right` widened. That view reads
+// `payment_instruction_event` and asks who approved a PAYMENT; this
+// defect lands in `team_member_version`, and the approver it mints is
+// active, correctly-roled and perfectly legitimate at the instant they
+// approve. The fraud is one level up, in who put them there, and no
+// widening of a view over payment approvals can see a table it does not
+// read.
 
 console.log("\nINVARIANT VIEWS — each MUST return zero rows\n");
 for (const [view, claim] of [...INVARIANT_VIEWS]) {
@@ -1834,6 +1896,57 @@ if (process.argv.includes("--prove")) {
           VALUES ('${t.hold_id}'::uuid,
                   'dbcheck --prove: a closure over an authorisation the network refused',
                   ${ACTOR}, 'test_harness')`);
+        return undefined;
+      },
+    },
+
+    // ---- 0044: the author of a member's terms ---------------------------
+    {
+      view: "v_team_terms_by_unauthorised_author",
+      how: "a member's terms written by an admin who had already been removed",
+      as: "owner",
+      disable: [["team_member_version", "team_member_version_chain"]],
+      note:
+        "the chain trigger is 0044's OWN fix, so it has to be switched off to write the " +
+        "row at all — which is the proof that the repair holds: before 0044 this state " +
+        "was reachable through the front door, by the application role, with every " +
+        "trigger armed. The removed version is BACKDATED one minute because now() is the " +
+        "TRANSACTION timestamp and the view reads the author's terms STRICTLY BEFORE the " +
+        "row it judges, so that a change made later in a transaction can never indict a " +
+        "write made earlier in it",
+      async run(tx) {
+        // An author and a target in the SAME business, and not the same
+        // person — a member editing their own terms is a different question.
+        const seed = await one(tx, `
+          SELECT author.id       AS author_member_id,
+                 author.actor_id AS author_actor_id,
+                 target.id       AS target_member_id
+            FROM team_member author
+            JOIN team_member target ON target.business_id = author.business_id
+                                   AND target.id <> author.id
+            JOIN v_team_member_current ac ON ac.member_id = author.id
+            JOIN v_team_member_current tc ON tc.member_id = target.id
+           WHERE ac.state = 'active' AND tc.state = 'active'
+           ORDER BY author.created_at DESC LIMIT 1`);
+        if (!seed) return "this book has no two active members of one business to model the proof on";
+        // 1. the author is removed, an hour of clock ago.
+        await tx.unsafe(`
+          INSERT INTO team_member_version
+            (member_id, version, effective_from, state, role, note, created_by, created_at)
+          SELECT '${seed.author_member_id}'::uuid,
+                 max(version) + 1, now() - interval '1 minute', 'removed',
+                 (SELECT role FROM v_team_member_current WHERE member_id = '${seed.author_member_id}'::uuid),
+                 'dbcheck --prove: the author is gone', ${ACTOR}, now() - interval '1 minute'
+            FROM team_member_version WHERE member_id = '${seed.author_member_id}'::uuid`);
+        // 2. …and then writes somebody else's terms anyway.
+        await tx.unsafe(`
+          INSERT INTO team_member_version
+            (member_id, version, state, role, note, created_by)
+          SELECT '${seed.target_member_id}'::uuid, max(version) + 1, 'active',
+                 (SELECT role FROM v_team_member_current WHERE member_id = '${seed.target_member_id}'::uuid),
+                 'dbcheck --prove: authored by a removed admin',
+                 '${seed.author_actor_id}'::uuid
+            FROM team_member_version WHERE member_id = '${seed.target_member_id}'::uuid`);
         return undefined;
       },
     },

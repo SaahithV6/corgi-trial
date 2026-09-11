@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { authoriseScheduled, REFUSAL_HEADERS, unauthorisedBody } from "@/app/api/cron/_auth";
 import { env } from "@/lib/env";
 import { newRequestId, requestIdFrom } from "@/lib/log";
 import { runStandingOrders } from "@/lib/standing/fire";
@@ -14,20 +15,27 @@ export const dynamic = "force-dynamic";
  *
  * ─── AUTHENTICATION IS `/api/drain`'S, DELIBERATELY THE SAME ────────────────
  *
- * Vercel Cron sends `x-vercel-cron`; an operator sends the bearer token. Two
- * callers, the same two the drain has, checked the same way and reusing the
- * same `DRAIN_TOKEN` secret — one shared operator credential for the two
- * scheduled jobs, rather than a second variable that has to be remembered on
- * every deploy and that is a silent 401 when it is not.
+ * A bearer token, always: `CRON_SECRET` (what Vercel Cron presents) or
+ * `DRAIN_TOKEN` (what an operator holds), compared in constant time by
+ * `../_auth.ts`. The same check the drain has, on the same two secrets.
  *
- * The drain's endpoint could argue it was harmless if left open, because
- * draining is idempotent. THIS ONE CANNOT MAKE THAT ARGUMENT AND SHOULD NOT
- * TRY. Firing is idempotent — a second call raises no second payment, because
- * the idempotency key comes from the standing order and the scheduled date and
- * `payment_instruction.idempotency_key` is UNIQUE — but a stranger who can make
- * a bank's scheduler run on demand is a stranger who can change WHEN a payment
- * lands, and "when" is half of what a standing order is. So the token is
- * required and there is no unauthenticated path.
+ * It did NOT used to be. Until D04x this route also returned true for any
+ * request carrying `x-vercel-cron`, a header the platform sets and no one
+ * strips — so the paragraph below, which was already written, described a
+ * property the code did not have:
+ *
+ *   The drain's endpoint could argue it was harmless if left open, because
+ *   draining is idempotent. THIS ONE CANNOT MAKE THAT ARGUMENT AND SHOULD NOT
+ *   TRY. Firing is idempotent — a second call raises no second payment,
+ *   because the idempotency key comes from the standing order and the
+ *   scheduled date and `payment_instruction.idempotency_key` is UNIQUE — but a
+ *   stranger who can make a bank's scheduler run on demand is a stranger who
+ *   can change WHEN a payment lands, and "when" is half of what a standing
+ *   order is.
+ *
+ * That was right, and the gate did not implement it. Now it does: the token is
+ * required and there is no unauthenticated path. `docs/SECURITY.md` has the
+ * measurement.
  *
  * ─── THE SCHEDULE VERCEL ACTUALLY RUNS ──────────────────────────────────────
  *
@@ -46,28 +54,15 @@ export const dynamic = "force-dynamic";
  * `refused / STALE_OCCURRENCE` — because a fortnight of rent debited in one
  * batch by a scheduler that has just woken up is worse than not firing.
  */
-function authorised(req: Request): boolean {
-  if (req.headers.get("x-vercel-cron")) return true;
-  const secret = process.env.DRAIN_TOKEN;
-  if (!secret) return false;
-  const header = req.headers.get("authorization") ?? "";
-  return header === `Bearer ${secret}`;
-}
 
 async function run(req: Request): Promise<NextResponse> {
   const requestId = requestIdFrom(req.headers) ?? newRequestId();
 
-  if (!authorised(req)) {
-    return NextResponse.json(
-      {
-        requestId,
-        error: {
-          code: "UNAUTHORISED",
-          message: "the standing-order tick requires the cron header or a bearer token",
-        },
-      },
-      { status: 401, headers: { "cache-control": "no-store" } },
-    );
+  if (!authoriseScheduled(req, "standing", requestId).ok) {
+    return NextResponse.json(unauthorisedBody(requestId, "the standing-order tick"), {
+      status: 401,
+      headers: REFUSAL_HEADERS,
+    });
   }
 
   try {

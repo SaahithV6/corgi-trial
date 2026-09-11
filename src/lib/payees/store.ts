@@ -202,6 +202,52 @@ export async function loadPayeeBook(
   return rows.map(toEntry);
 }
 
+/**
+ * The confirmed wire beneficiaries that match what a wire instruction carries.
+ *
+ * ONE MATCHING RULE, WRITTEN ONCE. Two callers ask this question — the payee
+ * gate at `requestPayment()` and `resolveWireBeneficiary()` at the moment the
+ * Fedwire message is addressed — and if they were to answer it differently
+ * then the beneficiary the gate approved would not be the beneficiary the
+ * money went to, which is the whole failure this rail exists to prevent. So
+ * the predicate lives here and neither caller owns a copy.
+ *
+ * MATCHED ON THE THREE THINGS THE INSTRUCTION ACTUALLY CARRIES:
+ * `(rail = 'wire', holderName, accountNumberLast4)`. Deliberately NOT on the
+ * BIC — a BIC identifies a bank, not an account, so matching on it would
+ * happily route a payment to the wrong customer of the right bank — and
+ * deliberately NOT on the routing number, because whether the number on the
+ * instruction is one this business has confirmed is the QUESTION, and folding
+ * it into the match turns a "you have never confirmed this bank for this
+ * beneficiary" into an indistinguishable "no such payee".
+ *
+ * The name is compared through `lower(btrim(...))` and nothing cleverer.
+ * `nameTokens()` normalisation belongs to the twin probe, where the job is to
+ * notice that two records are the same supplier; here the job is to decide
+ * where money goes, and a looser comparison is a wider target.
+ *
+ * Newest check first, so `[0]` is the current standing of this beneficiary.
+ * Archived payees are excluded: archival is how a beneficiary is withdrawn.
+ */
+export async function loadWireBeneficiaries(
+  match: {
+    readonly businessId: string;
+    readonly holderName: string;
+    readonly accountNumberLast4: string;
+  },
+  conn: Sql = sql,
+): Promise<readonly PayeeBookEntry[]> {
+  const rows = await conn<BookRow[]>`
+    SELECT * FROM v_payee_book
+     WHERE business_id = ${match.businessId}::uuid
+       AND rail = 'wire'
+       AND lower(btrim(holder_name)) = lower(btrim(${match.holderName}))
+       AND account_number_last4 = ${match.accountNumberLast4}
+       AND NOT archived
+     ORDER BY checked_at DESC NULLS LAST, created_at DESC, payee_id DESC`;
+  return rows.map(toEntry);
+}
+
 /** The shape `verifyPayee`'s twin check wants. A projection, not a second query path. */
 export async function loadBookEntries(
   businessId: string,

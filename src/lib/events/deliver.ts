@@ -188,6 +188,43 @@ export async function deliverOnce(deps: DeliverDeps = {}): Promise<DeliverSummar
       resolvedIp,
     });
 
+    const reason = outcome.error ?? "delivery failed with no further detail";
+
+    // A BOUND WAS HIT, SO THIS DELIVERY IS OVER.
+    //
+    // Two cases, both terminal and neither retryable:
+    //
+    //   response_too_large — the endpoint answered with a body past the 8 KiB
+    //     read cap. The next attempt would read the same page off the same
+    //     server, so eight of them buy nothing but eight more truncated reads.
+    //   attempt_deadline — the transport's own hard wall-clock deadline fired,
+    //     which means the socket-level timeout did not. That is the failure
+    //     that used to be a permanently-pending promise and a queue that
+    //     stopped; it is now a dead letter naming the deadline.
+    //
+    // Terminal BEFORE the `ok` branch: a 200 with a 40 KiB body is still a
+    // delivery we could not finish reading, and the status is recorded on the
+    // dead letter so the customer can see their own server answered.
+    if (outcome.limit !== null) {
+      await deadLetter({
+        deliveryId: claim.deliveryId,
+        status,
+        reason: `dead-lettered without retrying (${outcome.limit}): ${reason}`,
+        now: at,
+      });
+      deadLettered += 1;
+      log.error("outbound.dead_letter", {
+        deliveryId: claim.deliveryId,
+        endpointId: claim.endpointId,
+        webhookId: signed.webhookId,
+        attempts: claim.attempts,
+        limit: outcome.limit,
+        status,
+        error: reason,
+      });
+      continue;
+    }
+
     if (outcome.kind === "response" && outcome.ok) {
       await markDelivered({ deliveryId: claim.deliveryId, status: outcome.status, now: at });
       delivered += 1;
@@ -203,8 +240,6 @@ export async function deliverOnce(deps: DeliverDeps = {}): Promise<DeliverSummar
       });
       continue;
     }
-
-    const reason = error ?? "delivery failed with no further detail";
 
     if (claim.attempts >= OUTBOUND_RETRY_POLICY.maxAttempts) {
       await deadLetter({

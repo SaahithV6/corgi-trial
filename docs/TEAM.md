@@ -119,7 +119,10 @@ Four things a new version must satisfy, all asserted by
    people;
 2. **terminality** — nothing follows `removed`;
 3. **the approval envelope** — see below;
-4. **authorship** — the author holds `administer_team` here, or is Corgi staff.
+4. **authorship** — the author is an **active** member holding `administer_team`
+   here, or is Corgi staff. The word *active* is migration 0044's and it is the
+   whole of §11: until 0044 a **removed** admin passed this check rather than
+   failing it.
 
 ### `card_member`, and why it is a table rather than a column
 
@@ -574,16 +577,11 @@ tonight.
    `listDecisions()` currently reaches the two columns by primary key back to the
    base table, which works and is one index lookup off the hot path.
 
-3. **`scripts/dbcheck.mjs` — two lines.** The two invariant views belong in
-   `INVARIANT_VIEWS` beside the others. They are queried by
-   `readTeamInvariants()` and by the screen, so they are not unqueried — but
-   dbcheck is where a guard is *run in the debrief*, and that file is owned
-   elsewhere tonight:
-
-   ```js
-   ["v_approved_auth_for_dead_member", "no purchase was approved for a member who had been removed"],
-   ["v_member_approval_without_right", "no approval by a member whose role did not carry approve_payment"],
-   ```
+3. **`scripts/dbcheck.mjs` — ~~two lines~~ LANDED.** Both invariant views are
+   now in `INVARIANT_VIEWS` beside the others, and both are proved by
+   `--prove`. 0044 added a third, `v_team_terms_by_unauthorised_author`, in a
+   side array — see item 6 for why, and for the one-word caption it leaves
+   behind.
 
 4. **`scripts/seed.mjs` — a team block.** The demo team was created by calling
    `team_add_member()` and `issueCardToMember()` directly. A seed that stands up
@@ -602,6 +600,20 @@ tonight.
    `assert_maker_checker()` reads instead of the column. That changes a function
    0007 explicitly says to leave alone, so it belongs to whoever owns that
    module, not to this one.
+
+6. **`src/lib/chaos/invariants.ts` — one line, and `TeamView.tsx` — one word.**
+   0044's `v_team_terms_by_unauthorised_author` runs in `scripts/dbcheck.mjs`
+   from a side array, for the reason every previous side array existed:
+   `src/lib/chaos/invariants.test.ts` parses the gate's FIRST array literal and
+   asserts the chaos dashboard's copy lists exactly the same views in the same
+   order, and `src/lib/chaos/**` was outside this change's write scope —
+   appending above without the mirroring edit turns `pnpm test` red for a
+   worker who cannot fix it. Whoever owns that module moves the view into the
+   first array and mirrors it, in one commit. Separately,
+   `readTeamInvariants()` now returns **three** invariants and
+   `src/components/team/TeamView.tsx:157` still captions the block "Two
+   invariants from migration 0033". The rows are right and live; the caption is
+   one stale word.
 
 ---
 
@@ -626,3 +638,294 @@ tonight.
 * **Multi-business membership is representable and untested at scale.** The
   schema scopes everything by `(business_id, actor_id)`, so an accountant on two
   teams works; no screen offers it.
+
+---
+
+## 11. The authorship hole, and migration 0044
+
+`docs/TEST-AUDIT.md` §1 found it and proved it twice. This section is the
+repair, measured the same way.
+
+### What was wrong
+
+`assert_team_member_version()` clause (d) and `team_add_member()` both
+established the author's authority with the same lookup and the same gate —
+`0033:309-322` and `0033:818-831`:
+
+```sql
+SELECT tmc.role INTO v_author
+  FROM team_member tm
+  JOIN v_team_member_current tmc ON tmc.member_id = tm.id
+ WHERE tm.business_id = …
+   AND tm.actor_id    = <the author>
+   AND tmc.state <> 'removed'          -- <<<<
+ ORDER BY tm.membership_seq DESC
+ LIMIT 1;
+
+IF v_author IS NOT NULL AND NOT team_role_can(v_author, 'administer_team') THEN
+  RAISE EXCEPTION …
+```
+
+`v_author IS NULL` is the **Corgi-staff break-glass branch** — 0033 says so at
+`:250-252` and `:817`, "an admin of this business, or Corgi staff". Staff carry
+`business_id IS NULL`, match no `team_member` row, and are correctly waved
+through.
+
+But `AND tmc.state <> 'removed'` made the lookup **also** return NULL for a
+removed member of that very business. Removal did not fail the authorship
+check; it moved the actor out of the branch that **checks** and into the branch
+that **trusts**. **What the lookup excluded from itself was exactly the
+population it existed to stop.**
+
+The code could not tell *"no such member"* from *"a member who was removed"*,
+because it asked one question — `role` — and threw the second fact away inside
+the `WHERE` clause. Those are different facts and they deserve opposite answers.
+
+### Why it is worse than an ordinary authorisation hole
+
+`actor.can_approve` is decided **once**, inside `team_add_member()`, and `actor`
+is append-only — §3. So a removed admin did not merely edit a row. They minted
+a **fresh approving principal**: a new `actor` with `can_approve = true`, an
+active `approver` membership, and a live claim on the second pair of eyes the
+whole maker-checker control rests on.
+
+Removal is meant to be the remedy for a compromised signer. It was the
+qualification.
+
+### Why 23 green passes missed it
+
+All 17 membership writes in `team.integration.test.ts` passed `actorId: STAFF`
+(`business_id IS NULL`) — **the NULL branch by construction** — and
+`src/lib/approvals/session.ts:70-78` resolves the console session with
+`WHERE kind = 'human' AND business_id IS NULL`, so the product has no caller
+that can drive the other branch either. The check that
+`src/app/(app)/team/actions.ts:35-40` cites as its reason for having no
+TypeScript copy **had never once executed**. All 275 `team_member_version` rows
+on this book are authored by Corgi staff; that is the measurement, not an
+inference.
+
+### The fix
+
+The state filter comes **out** of the lookup and becomes a **refusal**:
+
+```sql
+SELECT tmc.role, tmc.state INTO v_author_role, v_author_state
+  FROM team_member tm
+  JOIN v_team_member_current tmc ON tmc.member_id = tm.id
+ WHERE tm.business_id = …
+   AND tm.actor_id    = <the author>
+ ORDER BY tm.membership_seq DESC
+ LIMIT 1;
+v_author_found := FOUND;
+
+IF v_author_found THEN
+  IF v_author_state <> 'active' THEN RAISE …   -- names the state
+  IF NOT team_role_can(v_author_role, 'administer_team') THEN RAISE …  -- 0033's sentence, unchanged
+END IF;
+```
+
+**This is not a new idea.** It is exactly the shape the other two triggers in
+0033 already use, twenty lines apart — `assert_team_initiator()` and
+`assert_team_maker_checker()` both take `FOUND` into a boolean and then refuse
+`state <> 'active'` by name. Those two got it right. The two authorship checks
+are the two that did not, and after 0044 all four read the same way.
+
+`suspended` is refused by the same line, for the same reason: 0033 §7 already
+holds that a suspended member may neither raise nor approve a payment, and
+deciding *who else may* is strictly more authority than either.
+
+Both functions are **replaced**, in `db/migrations/0044_team_author_removed.sql`
+— 0033 is applied and hashed and `scripts/migrate.mjs` refuses a file whose
+contents changed. `CREATE OR REPLACE FUNCTION` keeps the OID and therefore the
+ACL; it does **not** keep `proconfig`, so `SET search_path = public, pg_temp` is
+restated in both bodies, and a `DO` block at the foot of 0044 reads `proconfig`,
+`prosecdef`, `proacl` and the trigger's `tgfoid` back out of the catalogue and
+aborts the migration if any of them moved. Verified after applying:
+
+```
+assert_team_member_version  proconfig {search_path=public, pg_temp}  secdef f  acl NULL
+team_add_member             proconfig {search_path=public, pg_temp}  secdef t
+                            acl {neondb_owner=X/neondb_owner,corgi_app=X/neondb_owner}
+```
+
+### Made to fail and made to pass, on the live database
+
+`corgi_app` — **the application role, not the owner** — inside a transaction
+that ended by throwing. Nothing was disabled and nothing was left behind.
+
+```
+current_user = corgi_app
+BEFORE  {"unauthorised_author":0,"approval_without_right":0,
+         "ridgeline_members":205,"ridgeline_approvers":58}
+
+(3) an ACTIVE admin of this business — the non-NULL branch that must STILL PASS
+    active admin promotes a colleague approver -> admin
+      -> ALLOWED   terms version 2 written
+
+    remove that admin (authored by Corgi staff)
+      admin is now state=removed role=admin; their actor.can_approve is still true
+
+(1) the REMOVED member, both functions
+    removed admin authors the colleague's next terms
+      -> REFUSED   actor 9a10de1d-… is a removed member of business e274546d-…
+                   and cannot change a member's terms; only an ACTIVE admin of
+                   this business, or Corgi staff, may. A removed member is not
+                   Corgi staff -- staff hold no membership of any business, and
+                   ending somebody's membership ends their authority rather
+                   than conferring the bank's
+    removed admin calls team_add_member() to mint an approver
+      -> REFUSED   actor 9a10de1d-… is a removed member of business e274546d-…
+                   and cannot add members; only an ACTIVE admin of this
+                   business, or Corgi staff, may. A removed member is not Corgi
+                   staff -- and adding a member is the one moment
+                   actor.can_approve is decided, so this door is how a removed
+                   signer would mint their own second pair of eyes
+
+(2) genuine Corgi staff (kind=human business_id=null can_approve=true)
+    Corgi staff authors the same colleague's terms
+      -> ALLOWED   terms version 3 written
+
+AFTER   {"unauthorised_author":0,"approval_without_right":0,
+         "ridgeline_members":207,"ridgeline_approvers":60}
+DELTA   unauthorised_author 0 -> 0     approval_without_right 0 -> 0
+        ridgeline_members  205 -> 207  ridgeline_approvers   58 -> 60
+
+OUTSIDE, after the rollback  {"unauthorised_author":0,"approval_without_right":0,
+                              "ridgeline_members":205,"ridgeline_approvers":58}
+rows left behind: 0
+```
+
+**Read the deltas carefully.** `ridgeline_members 205 -> 207` and
+`ridgeline_approvers 58 -> 60` are the **two fixture members Corgi staff
+created** — the admin (whose role carries `approve_payment`) and the colleague
+approver. The **Audit Ghost is not in them**: the removed admin's
+`team_add_member()` call was refused, so no third member and no third approver
+appears. Before 0044 the same script ran on the same book and both refusals
+read `ALLOWED`, the second one returning *"a new active approver,
+actor.can_approve = true"*. That before/after pair was measured by applying
+0044's body inside a transaction and rolling it back, before the migration was
+applied for real.
+
+### The invariant
+
+```
+v_team_terms_by_unauthorised_author      0 -> 1
+  a team_member_version whose author was, AT THE INSTANT THEY WROTE IT, a member
+  of that business without being an ACTIVE holder of administer_team
+  (scripts/dbcheck.mjs --prove, and team.integration.test.ts scenario 13)
+```
+
+**It is not `v_member_approval_without_right` widened, and that was considered
+first.** That view reads `payment_instruction_event` and asks who approved a
+*payment*. This defect lands in `team_member_version`, and — worse — the
+approver it mints is `active`, correctly-roled and **perfectly legitimate at the
+instant they approve**. The fraud is one level up, in who put them there. No
+widening of a view over payment approvals can see a table it does not read.
+
+Historically exact, the same way `v_member_approval_without_right` is: the
+author's terms are the ones in force **when the row was written**, never their
+terms today. An admin who wrote a version on Monday and was removed on Friday is
+not a violation, and a guard that said otherwise would turn every removal into a
+retroactive indictment of everything that person ever did, go permanently red,
+and stop being read.
+
+**Strictly before** (`v.created_at < tmv.created_at`), deliberately: `created_at`
+defaults to `now()`, which is the **transaction** timestamp, so two versions
+written in one transaction carry the same instant and `<=` would let a change
+made later in a transaction indict a write made earlier in it — a false positive
+on a legitimate write. The only state `<` gives up is an author who removes
+themselves and writes somebody else's terms inside **one** transaction, and the
+trigger refuses that outright because `v_team_member_current` inside that same
+transaction already reads `removed`.
+
+It is **wider than the defect**, on 0043's argument: it reports every version
+written by a member of that business who was not an active `administer_team`
+holder at the time — removed, suspended, or simply the wrong role. Narrowing it
+to `state = 'removed'` would be an exclusion shaped like the failure, which is
+the sentence this whole finding is about.
+
+`scripts/dbcheck.mjs` reads **37 passed / 4 failed** (was 36/4; the four reds are
+unchanged and none is this work's), and `--prove` covers **25 of 25** invariant
+views.
+
+### The test that would have caught it
+
+`team.integration.test.ts` scenario **13 — the author of a member's terms, the
+non-STAFF branch**. Seven cases, and every one of them passes a **real business
+member** as the author, which nothing else in this repository does:
+
+| case | author | expected |
+| --- | --- | --- |
+| active admin authors a colleague's terms | active `admin` member | **allowed** |
+| active member without `administer_team` | active `initiator` member | refused, 0033's sentence verbatim |
+| **removed admin authors terms** | `removed` `admin` member | **refused, naming `removed`** |
+| **removed admin calls `team_add_member()`** | `removed` `admin` member | **refused; no actor, no membership, no approval right left behind** |
+| suspended admin authors terms | `suspended` `admin` member | refused, naming `suspended` |
+| Corgi staff authors terms | `business_id IS NULL`, member of nothing | **allowed** |
+| the invariant can fail | — | `0 -> 1`, rolled back, `0` outside |
+
+The removed-admin case also asserts that their `actor.can_approve` is **still
+`true`** before the refusal — 0001 owns that column and it is append-only — which
+is the same half-truth §5(2) makes about approvals, now made about authorship:
+the actor row says what a principal *may* be; the membership says whether they
+*are*, at each instant.
+
+The invariant's proof goes through the **front door** on the application role
+with every trigger armed, because the state it reports is one the trigger
+structurally cannot see: the admin is active when they write the row, and the
+removal lands afterwards carrying an earlier `created_at`. No trigger reads
+`created_at`. That is the gate and the guard doing different jobs, which is why
+both exist.
+
+### Does anything else in the schema have this shape?
+
+Every migration was swept for the same pattern — a lookup that excludes the
+disqualified population and then treats the resulting NULL as permission. The
+two in 0033 are the only instances. §11a records the method, the counts, and
+what was checked and cleared.
+
+### 11a. The sweep: does anything else have this shape?
+
+**No. It appears exactly twice in the schema and both are the two 0044 repairs.**
+
+All 40 files in `db/migrations/` (20,646 lines) were swept, both halves of the
+pattern independently:
+
+* the **filter** half — an authority or eligibility `SELECT … INTO` whose
+  `WHERE` excludes the disqualified population (`state <> …`, `NOT IN`,
+  `revoked_at IS NULL`, `AND NOT deleted`, and the rest);
+* the **gate** half — `IF v IS NOT NULL AND NOT <ok> THEN RAISE`,
+  `IF NOT FOUND THEN RETURN NEW`, `IF v IS NULL THEN … RETURN`.
+
+135 `SELECT … INTO` sites exist across 26 files; 33 carry an exclusionary
+predicate and every one was read in full. The filter-half grep returns 15 hits
+schema-wide and only two sit inside an authority lookup: `0033:314` and
+`0033:823`. There is no third instance.
+
+**Why it is rare here:** the house style expresses absence as
+`IS DISTINCT FROM` or as an explicit `IF NOT FOUND THEN RAISE`, and **both
+refuse on NULL**. `assert_card_member()` at `0033:457-472` is the counter-example
+sitting in the same migration as the bug — `IF v_state IS DISTINCT FROM 'active'
+THEN RAISE … COALESCE(v_state, 'not a member')` — which refuses a NULL and even
+prints the reason. The two defective sites were the only places in 20,646 lines
+where an authority lookup pushed a disqualifying predicate *into* its `WHERE`
+clause and then read the result with a plain `IS NOT NULL`.
+
+Checked and cleared, with the reason in each case:
+
+| function | why it is not this bug |
+| --- | --- |
+| `assert_maker_checker()` (0001) | the filtered lookup is a `count(DISTINCT …)`, which returns **0, never NULL**, and the gate is `IF v_approvals < required THEN RAISE` — so the exclusion makes the count *smaller* and pushes toward the **refusing** branch. The inverse of the defect |
+| `assert_payment_lifecycle()` (0007) | same count-based shape, same inverse argument |
+| `assert_team_maker_checker()` (0033) | no state filter at all; `FOUND` into a boolean, then `<> 'active'` raises. **This is the shape 0044 adopts** |
+| `assert_team_initiator()` (0033) | no state filter; `IF NOT FOUND THEN RETURN NEW` is reachable only by an actor with no membership row |
+| `assert_card_member()` (0033) | `IS DISTINCT FROM 'active'` — NULL refuses |
+| `assert_team_member_spell()` (0033) | `IS DISTINCT FROM 'removed'` — NULL refuses |
+| `assert_payee_acknowledgement…()` (0016) | the NULL case **raises** before any comparison |
+| `assert_dispute_intake()` / lifecycle (0019, 0023) | two filtered lookups, both `COALESCE(SUM…,0)` / `count()`; both exclusions make the gate *stricter* |
+| `open_business_accounts()` (0021) | every `NOT FOUND` branch raises — the most defensively written gate in the schema |
+| `assert_standing_order_occurrence()` (0012) | the closest structural rhyme, and the `WHERE` excludes **nothing**: NULL means "never cancelled" |
+| rate-card monotonicity (0024, 0031) | literally `IF v_latest IS NOT NULL AND …`, but `max()` over an **unfiltered** population — NULL means "no rate card exists yet" |
+| `assert_card_auth_event_result()` (0026) | a near-miss worth naming: `IF NEW.result <> 'APPROVED' AND v_kind <> 'declined'` *would* fall permissive on a NULL `v_kind`, but the lookup excludes nothing, `card_auth_event.kind` is `NOT NULL` and `event_id` is FK-backed, so NULL is unreachable |
+| `lock_*()` helpers (0008, 0012, 0020, 0024) | they **return** `v_id IS NOT NULL` as their answer; the caller decides. Not gates |
+| audit (0035), mcp wiring (0037), webhook refusals (0038) | no `SELECT … INTO` at all; 0038 compares only `NEW.*` against `OLD.*` |

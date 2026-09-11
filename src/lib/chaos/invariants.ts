@@ -118,4 +118,12 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
     'v_hold_closure_unexplained',
     'no unreversed closure stands over an open authorisation the provider does not explain',
   ],
+  // 0044. The closest thing to real harm found tonight: a REMOVED admin could
+  // author a member's terms and mint a new approver with can_approve = true,
+  // because the authority lookup filtered `AND state <> 'removed'` and then
+  // treated NULL as Corgi staff.
+  [
+    'v_team_terms_by_unauthorised_author',
+    "no member's terms were written by somebody who was not an active admin of that business at the time",
+  ],
 ] as const;

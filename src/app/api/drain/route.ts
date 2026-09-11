@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { authoriseScheduled, REFUSAL_HEADERS, unauthorisedBody } from "@/app/api/cron/_auth";
 import { env } from "@/lib/env";
 import { newRequestId, requestIdFrom } from "@/lib/log";
 import { drain } from "@/lib/webhooks/drain";
@@ -12,35 +13,35 @@ export const dynamic = "force-dynamic";
 /**
  * Drain the webhook inbox.
  *
- * Three callers, and they need different auth:
+ * Three callers:
  *
- *  - Vercel Cron sends `x-vercel-cron`. It is the guarantee that a row is
- *    eventually processed even if every opportunistic nudge is lost.
- *  - An operator, or the demo, sends the bearer token. This is what gets used
- *    in the debrief: "watch, I will drain it now" beats waiting for a timer.
+ *  - Vercel Cron, which presents `Authorization: Bearer $CRON_SECRET`. It is
+ *    the guarantee that a row is eventually processed even if every
+ *    opportunistic nudge is lost.
+ *  - An operator, or the demo, presenting `Bearer $DRAIN_TOKEN`. This is what
+ *    gets used in the debrief: "watch, I will drain it now" beats waiting for
+ *    a timer.
  *  - `after()` in the webhook route calls drain() directly and never comes
  *    through here at all.
+ *
+ * The first two are ONE check — a bearer token compared in constant time, in
+ * `./../cron/_auth.ts`. It used to be two, and the second was
+ * `if (req.headers.get("x-vercel-cron")) return true`, which is a header any
+ * client can type. `docs/SECURITY.md` has the curl that proved it.
  *
  * Draining is idempotent by construction — the dispatcher claims rows under a
  * lease and every consumer is idempotent — so an unauthenticated caller could
  * not corrupt anything. It is still authenticated, because an open endpoint
  * that does real work is free load for anyone who finds it.
  */
-function authorised(req: Request): boolean {
-  if (req.headers.get("x-vercel-cron")) return true;
-  const secret = process.env.DRAIN_TOKEN;
-  if (!secret) return false;
-  const header = req.headers.get("authorization") ?? "";
-  return header === `Bearer ${secret}`;
-}
 
 async function run(req: Request): Promise<NextResponse> {
   const requestId = requestIdFrom(req.headers) ?? newRequestId();
-  if (!authorised(req)) {
-    return NextResponse.json(
-      { requestId, error: { code: "UNAUTHORISED", message: "drain requires the cron header or a bearer token" } },
-      { status: 401, headers: { "cache-control": "no-store" } },
-    );
+  if (!authoriseScheduled(req, "drain", requestId).ok) {
+    return NextResponse.json(unauthorisedBody(requestId, "drain"), {
+      status: 401,
+      headers: REFUSAL_HEADERS,
+    });
   }
   try {
     const result = await drain();

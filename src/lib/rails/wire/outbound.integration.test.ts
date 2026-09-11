@@ -18,7 +18,8 @@
  * code and watching it behave — so every call below except the last is a
  * function that existed before this rail did.
  *
- * The one new call is `originateApprovedWire()`, and it happens AFTER the
+ * The two new calls are `resolveWireBeneficiary()` and
+ * `originateApprovedWire()`, and the latter happens AFTER the
  * ledger entry and the `released` event have both committed. That order is the
  * argument: an unapproved wire cannot reach Fedwire because it cannot be
  * released, and a wire that left with no ledger entry is impossible because
@@ -38,11 +39,11 @@
  *
  * WHY THE WHOLE SUITE AND NOT ONE TRANSACTION PER TEST, as
  * `src/lib/fx/fx.integration.test.ts` and `src/lib/ledger/ledger.integration.test.ts`
- * do: because this file is not six independent scenarios. It is ONE
- * maker-checker flow told in six steps, and each step reads back the
+ * do: because this file is not seven independent scenarios. It is ONE
+ * maker-checker flow told in seven steps, and each step reads back the
  * instruction the previous step left — by idempotency key, out of the
  * database. Roll back between them and step four has nothing to approve. The
- * six `it` blocks are how the flow is narrated, and turning them into one
+ * seven `it` blocks are how the flow is narrated, and turning them into one
  * enormous test to make the rollback fit would lose that, so the transaction
  * is opened in `beforeAll` and thrown away in `afterAll` instead.
  *
@@ -62,37 +63,55 @@
  * is.
  *
  * ===========================================================================
- * ⚠ THIS SUITE IS CURRENTLY RED, AND NOT BECAUSE OF THE ROLLBACK
+ * WHY THIS SUITE WAS RED, AND WHAT EACH REFUSAL TURNED OUT TO BE
  * ===========================================================================
  *
- * Four of the six tests fail today, and the rollback is not what makes them
- * fail. The two that do not touch `requestPayment()` pass; the other four fail
- * because `requestPayment()` now refuses THIS FILE'S `destination` on the
- * POOL as well, for two reasons that arrived under it:
+ * Four of the original six tests failed, and the rollback was never what made
+ * them fail. `requestPayment()` refused this file's `destination` for two
+ * separate reasons, and the two had DIFFERENT answers. That is the useful
+ * part: one was a design conflict, and one was the system being right.
  *
- *   1. PAYEE_WIRE_ROUTING_NUMBER_MISSING. `gatePaymentOnPayee()` reads
- *      `destination.wireRoutingNumber` and refuses a wire without one. This
- *      file deliberately sends a BIC-only destination — see the comment on
- *      `destination` — because the wire ABA is supposed to be resolved from
- *      the confirmed payee book rather than carried on the instruction, which
- *      is the argument the last test spells out at length. The gate and that
- *      argument now disagree, and that is a design question for whoever
- *      introduced `wireRoutingNumber`, not something a test should paper over.
+ *   1. PAYEE_WIRE_ROUTING_NUMBER_MISSING — A GENUINE DESIGN CONFLICT, NOW
+ *      DECIDED. This file sent a BIC-only destination on the argument that a
+ *      wire beneficiary's ABA belongs to the confirmed payee book and not to
+ *      the instruction. `gatePaymentOnPayee()` demanded it on the instruction,
+ *      so that a wire is validated against the number it will actually be sent
+ *      to. Both are right about something and they cannot both be the rule.
  *
- *   2. PAYEE_WARNING_UNACKNOWLEDGED. Supplying the ABA to get past (1) reaches
- *      a second refusal: the payee this file confirms one test earlier carries
- *      a standing warning nobody has signed for, so the gate stops the
- *      payment. The suite has no acknowledgement step.
+ *      THE DECISION, argued in full in the header of `src/lib/payees/gate.ts`:
+ *      the book is authoritative AND the instruction carries a copy of the
+ *      book's number, because `content_hash` covers `counterparty` and
+ *      maker-checker is worth nothing if WHICH BANK RECEIVES THE MONEY sits
+ *      outside the thing two humans signed. So `destination` below now carries
+ *      `wireRoutingNumber`, and the claim this file makes about the payee book
+ *      is stronger rather than weaker: the gate refuses a wire whose
+ *      beneficiary is not on the book, refuses one that names a bank the book
+ *      does not confirm for them, and `resolveWireBeneficiary()` refuses to
+ *      send if the book stops agreeing between approval and origination. The
+ *      last test asserts all three.
  *
- * MEASURED, not inferred: `requestPayment()` was called on the POOL, outside
- * any transaction, with this exact destination, and returned refusal (1)
- * verbatim.
+ *   2. PAYEE_WARNING_UNACKNOWLEDGED — NOT A DEFECT. THE FIXTURE WAS WRONG.
+ *      MEASURED against the live book rather than guessed: the payee this file
+ *      confirms carries `TWIN_WITH_DIFFERENT_DETAILS`, because
+ *      "Northwind Industrial LLC" is ALREADY on Ridgeline's book at
+ *      021000021 ••3330 and this file registers the same beneficiary at
+ *      ••0000. Same supplier, different account. That is the redirected-
+ *      invoice signal, it is exactly what the twin probe exists to raise, and
+ *      a real person on /payees would see it, read it and sign for it before
+ *      the payment went out. The suite simply never did — which made the
+ *      fixture an unfaithful account of the flow, not the gate wrong.
+ *
+ *      So the acknowledgement is now a step of this suite, with a named human
+ *      (DANA, not the maker) and a sentence, exactly as the screen requires.
+ *      It is NOT the maker: signing for a warning and raising the payment are
+ *      different acts and collapsing them into one actor would be the fixture
+ *      teaching a habit the control exists to prevent.
  *
  * The rollback machinery below is correct and costs nothing — the per-run
- * figures above were verified at ZERO on this red run, because a refused
- * instruction writes nothing either way. It is left in place so that fixing
- * the gate brings the suite back GREEN and FREE rather than green and
- * expensive. Do not "fix" this by relaxing an assertion.
+ * figures above were verified at ZERO on the red run, because a refused
+ * instruction writes nothing either way. Nothing here was fixed by relaxing an
+ * assertion; every assertion the red version made is still made, and three
+ * more are.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -279,10 +298,16 @@ suite('an outbound wire, through requestPayment()', () => {
   const destination = {
     type: 'wire' as const,
     holderName: BENEFICIARY,
-    // A SWIFT BIC, because that is the only bank identifier
-    // `destinationSchema`'s wire variant has room for. A domestic Fedwire
-    // beneficiary is addressed by a 9-digit WIRE ABA, which this shape cannot
-    // carry — see the header of ./outbound.ts and docs/WIRES.md §6.
+    // THE 9-DIGIT WIRE ABA, AND IT IS A COPY OF THE PAYEE BOOK'S. Not a number
+    // this file made up: the test above puts it on the confirmed book and the
+    // gate refuses this destination if the book does not carry it for this
+    // beneficiary. It is here rather than resolved at send time because
+    // `content_hash` covers `counterparty`, so this is the bank DANA and MILES
+    // signed for — see the header, and `src/lib/payees/gate.ts`'s.
+    wireRoutingNumber: WIRE_ROUTING,
+    // Kept, and no longer the only bank identifier. A BIC names a bank on the
+    // SWIFT network, which is a genuine cross-border fact worth carrying and
+    // was never a Fedwire address.
     bic: 'CHASUS33',
     accountNumberLast4: LAST4,
   };
@@ -309,10 +334,43 @@ suite('an outbound wire, through requestPayment()', () => {
     expect(result.refusal).toBeNull();
     expect(result.saved).not.toBeNull();
     // The ABA arithmetic ran, against the WIRE variant.
-    expect(result.check.checksumOk).toBe(true);
-    expect(result.check.routingNumber).toBe(WIRE_ROUTING);
+    expect(result.check?.checksumOk).toBe(true);
+    expect(result.check?.routingNumber).toBe(WIRE_ROUTING);
 
-    // And the rail can find it, with the number the instruction cannot carry.
+    // ─── AND THE CHECK RAISED A WARNING, WHICH IS THE SYSTEM BEING RIGHT ───
+    //
+    // "Northwind Industrial LLC" is already on Ridgeline's book at 021000021
+    // ••3330; this registers the same beneficiary at ••0000. Same supplier,
+    // different account — the only account-number check a book of last-four
+    // digits can perform, and the failure that actually costs businesses
+    // money. Asserted rather than tolerated: if this ever came back
+    // `verified`, the twin probe would have stopped working and the suite
+    // should say so loudly rather than sail past.
+    expect(result.check?.decision).toBe('warned');
+    expect((result.check?.findings ?? []).map((f) => f.code)).toContain(
+      'TWIN_WITH_DIFFERENT_DETAILS',
+    );
+
+    // So a human signs for it, which is what a person on /payees does and what
+    // this fixture never did. DANA, not PRIYA: signing for a warning and
+    // raising the payment are different acts, and a fixture that collapses
+    // them teaches the habit the control exists to prevent. The row carries a
+    // named actor, an instant and a sentence, and `payee_acknowledgement` is
+    // append-only like everything else here.
+    const { acknowledgeWarning } = await import('@/lib/payees/store');
+    const signed = await acknowledgeWarning(
+      {
+        verificationId: result.saved?.verificationId ?? '',
+        actorId: DANA,
+        reason:
+          'Confirmed the ••0000 account with Northwind on the number we already had on file, ' +
+          'not one from the payment request.',
+      },
+      tx,
+    );
+    expect(signed.ok, show(signed)).toBe(true);
+
+    // And the rail can find it, addressed by the number on the confirmed book.
     const resolved = await resolveWireBeneficiary(
       { businessId: RIDGELINE_BUSINESS, destination },
       tx,
@@ -340,6 +398,63 @@ suite('an outbound wire, through requestPayment()', () => {
         tx,
       ),
     ).rejects.toThrow(/WIRE_PAYEE_NOT_ON_BOOK|not on the book|payee book/i);
+
+    // AND THE SAME REFUSAL AT THE FRONT DOOR, which is where it belongs. The
+    // one above arrives after two approvals and a ledger entry; this one
+    // arrives instead of an approvals queue entry. Both exist on purpose: the
+    // gate speaks for the book on the way IN, the rail speaks for it at the
+    // last moment before the money is gone.
+    const { gatePaymentOnPayee } = await import('@/lib/payees');
+    const refused = await gatePaymentOnPayee(
+      {
+        accountId: await depositAccountId(tx),
+        destination: { ...destination, holderName: `Nobody Who Exists ${run}` },
+      },
+      tx,
+    );
+    expect(refused?.code).toBe('PAYEE_WIRE_PAYEE_NOT_ON_BOOK');
+  }, 30_000);
+
+  it('refuses a CONFIRMED beneficiary at a bank the book does not confirm', async () => {
+    // The redirected invoice, in its most plausible form: the supplier is real
+    // and you really do pay them, and only the bank has changed. 026009593 is
+    // Bank of America's wire ABA — a valid number at a real institution, so
+    // the arithmetic has nothing to say about it. The only thing that catches
+    // this is the payee book, and the book is only a control if something
+    // consults it.
+    const elsewhere = { ...destination, wireRoutingNumber: '026009593' };
+
+    const { gatePaymentOnPayee } = await import('@/lib/payees');
+    const refused = await gatePaymentOnPayee(
+      { accountId: await depositAccountId(tx), destination: elsewhere },
+      tx,
+    );
+    expect(refused?.code).toBe('PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED');
+    // It names the number somebody actually confirmed, because "refused" with
+    // no second number is not something a payments clerk can act on.
+    expect(refused?.message).toContain(WIRE_ROUTING);
+
+    // And if one were somehow approved — an instruction raised before the
+    // beneficiary's book entry was archived and replaced, say — the rail will
+    // not quietly swap in the book's number and send it anyway. Two people
+    // signed for 026009593; nobody signed for what the book says now.
+    // Asserted on the CODE, not on the prose: the code is the contract and the
+    // message is the sentence a person reads, and a test that matches the
+    // sentence goes red the day somebody improves the wording.
+    const thrown = await resolveWireBeneficiary(
+      { businessId: RIDGELINE_BUSINESS, destination: elsewhere },
+      tx,
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(thrown).toBeInstanceOf(WireOriginationRefused);
+    expect((thrown as InstanceType<typeof WireOriginationRefused>).code).toBe(
+      'WIRE_ROUTING_NUMBER_NOT_CONFIRMED',
+    );
+    // And it names the number the book actually confirms, because "refused"
+    // with no second number is not something a payments clerk can act on.
+    expect((thrown as Error).message).toContain(WIRE_ROUTING);
   }, 30_000);
 
   /* ---- maker-checker, unchanged, on a rail it never heard of ----------- */
@@ -492,10 +607,19 @@ suite('an outbound wire, through requestPayment()', () => {
     expect(sent.origination.ref).toMatch(/^sandbox_wire_transfer_/);
     expect(sent.origination.amount).toEqual({ amount: 4_200n, currency: 'USD' });
     expect(sent.origination.provider).toBe('increase.wire');
-    // Addressed from the CONFIRMED BOOK, not from the instruction. The wire
-    // ABA never entered `payment_instruction.counterparty` and never reached
-    // an approver's screen.
+    // THREE STATEMENTS OF THE SAME NUMBER, AND THEY AGREE. The bank on the
+    // Fedwire message is the bank on the confirmed payee book, and it is the
+    // bank inside the `content_hash` that DANA and MILES each cited when they
+    // approved. That agreement is the decision this file argued for, checked
+    // rather than asserted: `resolveWireBeneficiary()` reads the book, and it
+    // refuses rather than substitutes if the book has stopped saying this.
     expect(sent.beneficiary.wireRoutingNumber).toBe(WIRE_ROUTING);
+    const approved = await getPayment(found.id, tx);
+    expect(
+      approved.ok && approved.value.instruction.destination.type === 'wire'
+        ? approved.value.instruction.destination.wireRoutingNumber
+        : null,
+    ).toBe(WIRE_ROUTING);
     // The idempotency key is the instruction, so pressing send twice cannot
     // send two wires — Increase returns the original.
     expect(sent.instruction.clientReferenceId).toBe(`payment:${found.id}`);

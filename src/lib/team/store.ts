@@ -620,12 +620,21 @@ export async function listUnassignedCards(
 /* -------------------------------------------------------------------------- */
 
 /**
- * The two views 0033 asserts are empty, counted.
+ * The views 0033 and 0044 assert are empty, counted.
  *
  * Exposed so the team screen can state the claim and its current value rather
  * than assert it in prose. A guard nobody queries is a comment — this build has
  * found seventeen of those — and the screen is one more place that queries
- * these two.
+ * them.
+ *
+ * THE THIRD ONE IS 0044'S. `v_team_terms_by_unauthorised_author` is the guard
+ * on the authorship hole: 0033 established the author's authority with a lookup
+ * filtered `AND state <> 'removed'` and then gated on `IF v_author IS NOT NULL`,
+ * where NULL is the Corgi-staff break-glass — so a REMOVED member fell out of
+ * the branch that checks and into the branch that trusts, and could mint a new
+ * approver. `src/components/team/TeamView.tsx` still captions this block "Two
+ * invariants from migration 0033"; that is one stale word and it is named in
+ * docs/TEAM.md §9, because `src/components/**` is owned elsewhere tonight.
  */
 export async function readTeamInvariants(
   conn: Sql = sql,
@@ -634,6 +643,8 @@ export async function readTeamInvariants(
     SELECT count(*)::int AS n FROM v_approved_auth_for_dead_member`;
   const [right] = await conn<{ n: number }[]>`
     SELECT count(*)::int AS n FROM v_member_approval_without_right`;
+  const [author] = await conn<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM v_team_terms_by_unauthorised_author`;
   return [
     {
       view: "v_approved_auth_for_dead_member",
@@ -646,6 +657,12 @@ export async function readTeamInvariants(
       claim:
         "no payment was approved by a member whose role, at that instant, did not carry approve_payment",
       rows: right?.n ?? 0,
+    },
+    {
+      view: "v_team_terms_by_unauthorised_author",
+      claim:
+        "no member's terms were written by somebody who, at that instant, was a member of that business without being an active admin of it",
+      rows: author?.n ?? 0,
     },
   ];
 }

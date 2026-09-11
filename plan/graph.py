@@ -887,7 +887,7 @@ N("W2L", "Wire the MCP audit sink: agent reads of customer data are recorded NOW
 N("W2M", "Three facts this system cannot record: card issuer, policy author, member removal",
   "correctness", 60, ["W2C"], "agent", ["lib/audit", "db/migrations/0037"],
   risk="approval_policy has no actor AND no timestamp, so who set the "
-       "maker-checker threshold is UNRECORDABLE. 136 cards issued by nobody")
+       "maker-checker threshold is UNRECORDABLE. 136 cards issued by nobody", status="done")
 N("W2N", "A forged webhook leaves no row: refusals are invisible",
   "correctness", 45, [], "agent", ["lib/webhooks/refusals", "db/migrations/0038"],
   risk="webhook_inbox holds only ACCEPTED deliveries, so any trail built on "
@@ -978,26 +978,26 @@ N("GX", "Video script, shot by shot, against the deployed URL",
 # a red one at 05:00.
 # ---------------------------------------------------------------------------
 N("H2A", "Virtual account number per business: inbound credit becomes attributable",
-  "real-gap", 80, [], "agent", ["lib/rails/increase", "db/migrations/0042"], "doing",
+  "real-gap", 80, [], "agent", ["lib/rails/increase", "db/migrations/0042"], "done",
   risk="ONE account number is shared by all six businesses, so an inbound "
        "credit names the programme. this is why item 5 books nothing")
 N("H2B", "Video script, shot by shot, every figure re-measured",
-  "submission", 40, [], "agent", ["video"], "doing",
+  "submission", 40, [], "agent", ["video"], "done",
   risk="Saahith records it and the clock is the constraint. a script naming a "
        "screen that does not exist wastes a take he cannot re-take")
 N("H2C", "Docs sweep: every claim tonight made false",
-  "submission", 45, [], "agent", ["docs"], "doing",
+  "submission", 45, [], "agent", ["docs"], "done",
   risk="honest labelling is GRADED, and four documents still describe a guard "
        "that was repaired hours ago as unsatisfiable")
 N("H2D", "Flake risks: businessDate cycles every 5s, semantics live-vs-seed 30/22",
   "flake-risk", 35, [], "agent", ["test/recon", "scripts/seed"],
   risk="planted-break counts breaks for a whole synthetic date and two "
        "concurrent suites collide inside 5 seconds. a red tree blocks the "
-       "deploy and the cause looks like a money bug")
+       "deploy and the cause looks like a money bug", status="done")
 N("H2E", "A(E) is unfloored: two reversals against one auth took it to -7340",
   "found-open", 40, [], "agent", ["lib/holds"],
   risk="H = max(A-C,0) clamped so no money moved. the CLAMP is the only thing "
-       "between that and a wrong hold, and nothing asserts A >= 0")
+       "between that and a wrong hold, and nothing asserts A >= 0", status="done")
 N("H2F", "Nine money-table suites commit to the live book with no rollback",
   "found-open", 0, [], "claude", ["test"], "cut",
   risk="CUT AT 03:00 DELIBERATELY. they pass; the refactor's failure mode is a "
@@ -1010,3 +1010,52 @@ N("H2H", "Final pass: gate, deploy, re-earn live fire + core loop on the TIP",
   "submission", 50, ["H2A", "H2C", "H2D"], "claude", ["deploy"],
   risk="every number in the submission must trace to ONE commit and ONE "
        "timestamp. ten proven at ten moments is ten anecdotes")
+
+# ---------------------------------------------------------------------------
+# D — DEFECTS. Every one measured tonight, none speculative, each with the file
+# and line that produced it. Ordered by what it costs to leave.
+#
+# The instruction is "the core workflow should run and all these errors need to
+# be diagnosed and patched", so this block is the whole remaining defect list
+# and nothing else. No new scope.
+# ---------------------------------------------------------------------------
+N("D01x", "A REMOVED member passes the authorship check and can mint an approver",
+  "security", 60, [], "agent", ["db/migrations/0044", "lib/team"], "doing",
+  risk="0033:309 and :818 filter the author lookup AND state <> 'removed', "
+       "then treat NULL as Corgi staff. removal is meant to be the REMEDY for "
+       "a compromised signer; here it is the qualification. gauntlet item 10")
+N("D02x", "wire/outbound red 4 of 6: the gate reads a field the instruction refuses to carry",
+  "correctness", 70, [], "agent", ["lib/rails/wire", "lib/payees", "lib/approvals/types"],
+  risk="PAYEE_WIRE_ROUTING_NUMBER_MISSING. the file's argument is that the ABA "
+       "comes from the CONFIRMED PAYEE BOOK, not the instruction — and that "
+       "argument is right. supplying it reaches a second refusal")
+N("D03x", "payees/gate.ts:356 still fails open and writes a permanent verified row",
+  "security", 45, [], "agent", ["lib/payees"],
+  risk="one path still returns a pass it did not earn, and the row it writes "
+       "is PERMANENT. the fail-closed fix tonight missed this branch")
+N("D04x", "Five cron routes authorise on a header a client can type",
+  "security", 50, [], "agent", ["app/api/cron", "middleware"],
+  risk="x-vercel-cron is set by the platform and NOT stripped from an inbound "
+       "request. no middleware.ts exists. /api/drain, standing, accrual, "
+       "outbound, holds all move money or state")
+N("D05x", "events/transport.ts:239 hangs the delivery worker for ever on a >8KiB body",
+  "correctness", 40, [], "agent", ["lib/events"],
+  risk="one oversized customer payload stops EVERY later outbound delivery. "
+       "the queue has no other worker")
+N("D06x", "CI runs no database test: 381 skipped, RUN_DB_TESTS gates 103 sites",
+  "correctness", 55, [], "agent", ["ci", "test/config"],
+  risk="'2,556 passing' is true and silent about the fact that every "
+       "DB-backed suite and all 8 live-fire attacks are in the skipped count")
+N("D07x", "GUARD REACH is hand-typed 15 rows against 24 gated invariants",
+  "correctness", 40, [], "agent", ["scripts/dbcheck"],
+  risk="built BECAUSE a guard that cannot fail is a green tick, and it is "
+       "itself incomplete by construction. two omissions reach 14.7% and 1.2%")
+N("D08x", "corgi_app cannot SELECT two views 0002 says it can; wire park reason is stale",
+  "correctness", 30, [], "agent", ["db/migrations", "lib/webhooks/consumers"],
+  risk="v_webhook_dead_letter and v_webhook_parked are unreadable by the app "
+       "role; 27 wire parks still say 'this build issues no virtual account "
+       "numbers', which 0042 made false")
+N("D09x", "holds.integration.test.ts still commits to the production book",
+  "hygiene", 45, ["D01x"], "agent", ["test/holds"],
+  risk="skipped earlier on a live conflict. scenario 7 races two workers on "
+       "separate connections and genuinely cannot be wrapped")

@@ -118,6 +118,18 @@ export const destinationSchema = z.discriminatedUnion("type", [
      * (`PAYEE_WIRE_ROUTING_NUMBER_MISSING`), which is forward-only by
      * construction: the gate runs on the way in, at `requestPayment()`, and
      * never on the way out.
+     *
+     * AND THE NUMBER IS NOT THE CALLER'S TO INVENT. It is a COPY of one a
+     * human already confirmed on the payee book: the gate refuses a wire whose
+     * beneficiary is not on the book (`PAYEE_WIRE_PAYEE_NOT_ON_BOOK`) or which
+     * names a bank the book does not confirm for them
+     * (`PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED`), and
+     * `resolveWireBeneficiary()` re-checks the approved number against the
+     * book before addressing the Fedwire message. The reason it lives here at
+     * all rather than being looked up at send time is maker-checker: it is
+     * covered by `content_hash`, so the bank two people signed for is the bank
+     * the money goes to. The full argument is in the header of
+     * `src/lib/payees/gate.ts`.
      */
     wireRoutingNumber: z
       .string()

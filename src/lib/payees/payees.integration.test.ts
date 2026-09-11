@@ -252,8 +252,8 @@ run("the book, end to end", () => {
     });
 
     expect(twin.saved).not.toBe(null);
-    expect(twin.check.decision).toBe("warned");
-    expect(twin.check.findings.map((f) => f.code)).toContain("TWIN_WITH_DIFFERENT_DETAILS");
+    expect(twin.check?.decision).toBe("warned");
+    expect((twin.check?.findings ?? []).map((f) => f.code)).toContain("TWIN_WITH_DIFFERENT_DETAILS");
 
     const verificationId = twin.saved?.verificationId ?? "";
 
@@ -280,7 +280,7 @@ run("the book, end to end", () => {
       payeeKey: `${RUN_ID}-noack`,
       actorId: ALEX,
     });
-    expect(clean.check.decision).toBe("verified");
+    expect(clean.check?.decision).toBe("verified");
 
     // The trigger, not the caller.
     const refused = await store.acknowledgeWarning({
@@ -487,7 +487,7 @@ run("the payment gate — the one line that goes in requestPayment()", () => {
       payeeKey: `${RUN_ID}-gate-2`,
       actorId: ALEX,
     });
-    expect(warned.check.decision).toBe("warned");
+    expect(warned.check?.decision).toBe("warned");
 
     const holderName = candidate("Gatefirst").holderName;
     const before = await gate.gatePaymentOnPayee({
@@ -602,7 +602,7 @@ run("the payment gate — the one line that goes in requestPayment()", () => {
       payeeKey: `${RUN_ID}-wiregate-2`,
       actorId: ALEX,
     });
-    expect(warned.check.decision).toBe("warned");
+    expect(warned.check?.decision).toBe("warned");
 
     const holderName = candidate("Wiregate").holderName;
     const before = await gate.gatePaymentOnPayee({
@@ -622,6 +622,90 @@ run("the payment gate — the one line that goes in requestPayment()", () => {
       destination: wireTo({ holderName, accountNumberLast4: "3434" }),
     });
     expect(after).toBe(null);
+  });
+
+  /* ======================================================================== */
+  /* WHERE A WIRE'S ABA COMES FROM. Decided 2026-09-11; see gate.ts's header. */
+  /* ======================================================================== */
+
+  /**
+   * The instruction carries the wire ABA so that it is inside the content hash
+   * two approvers cite — and this gate is what proves the number on it CAME
+   * FROM the confirmed payee book rather than from whoever raised the payment.
+   * Without these two refusals "the ABA comes from the payee book" is a habit
+   * of one screen, not a property of the system: the public API and the MCP
+   * write tool both hand `requestPayment()` a destination directly.
+   *
+   * Neither refusal exists on ACH, and that asymmetry is the decision. An ACH
+   * entry is recallable for two banking days; a wire is final on receipt.
+   */
+  it("refuses a wire to a beneficiary nobody has confirmed", async () => {
+    const refusal = await gate.gatePaymentOnPayee({
+      accountId,
+      destination: wireTo({
+        holderName: `Nobody Has Ever Checked ${RUN_ID}`,
+        accountNumberLast4: "8383",
+      }),
+    });
+    expect(refusal?.code).toBe("PAYEE_WIRE_PAYEE_NOT_ON_BOOK");
+    expect(refusal?.message).toContain("Nothing was written");
+  });
+
+  it("allows the same unknown beneficiary on ACH — the rails differ on purpose", async () => {
+    // The SAME destination, one rail over. This is the assertion that says the
+    // refusal above is a decision about wires rather than a new global rule:
+    // requiring pre-registration breaks the one-off refund and the emergency
+    // supplier payment, and on ACH those costs are costs of delay.
+    const refusal = await gate.gatePaymentOnPayee({
+      accountId,
+      destination: destination({
+        holderName: `Nobody Has Ever Checked ${RUN_ID}`,
+        accountNumberLast4: "8383",
+      }),
+    });
+    expect(refusal).toBe(null);
+  });
+
+  it("refuses a CONFIRMED wire beneficiary at a bank the book does not confirm", async () => {
+    // The redirected invoice in its most plausible form: the supplier is real,
+    // you really do pay them, and only the bank has changed. 026009593 is Bank
+    // of America's wire ABA — a valid number at a real institution, so the
+    // check digit has nothing to say. The payee book is the only thing that
+    // catches this, and a book is only a control if something consults it.
+    const holderName = `Ridgeline Wirebank ${RUN_ID}`;
+    const saved = await gate.confirmPayee({
+      candidate: candidate("Wirebank", {
+        holderName,
+        rail: "wire",
+        routingNumber: "021000021",
+        accountNumberLast4: "5566",
+        accountType: undefined,
+      }),
+      payeeKey: `${RUN_ID}-wirebank`,
+      actorId: ALEX,
+    });
+    expect(saved.refusal).toBe(null);
+
+    const refusal = await gate.gatePaymentOnPayee({
+      accountId,
+      destination: wireTo({
+        holderName,
+        accountNumberLast4: "5566",
+        wireRoutingNumber: "026009593",
+      }),
+    });
+    expect(refusal?.code).toBe("PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED");
+    // It names the number somebody actually confirmed. "Refused" with no
+    // second number is not something a payments clerk can act on.
+    expect(refusal?.message).toContain("021000021");
+
+    // The confirmed bank still goes through, so this is a statement about the
+    // NUMBER and not a block on the beneficiary.
+    const allowed = await gate.gatePaymentOnPayee({
+      accountId,
+      destination: wireTo({ holderName, accountNumberLast4: "5566" }),
+    });
+    expect(allowed).toBe(null);
   });
 
   /* ======================================================================== */
@@ -687,6 +771,122 @@ run("the payment gate — the one line that goes in requestPayment()", () => {
       exploding("connection terminated unexpectedly"),
     );
     expect(refusal).toBe(null);
+  });
+});
+
+/* ========================================================================== */
+/* confirmPayee() fails closed too — and, crucially, writes nothing.          */
+/* ========================================================================== */
+
+/**
+ * THE THIRD FAIL-OPEN, AND THE ONLY ONE THAT LEFT A PERMANENT ROW.
+ *
+ * `confirmPayee()` read the existing book for the twin probe through
+ * `.catch(() => [])`. An empty list is a legitimate answer — "first payee" —
+ * so a read that THREW became a check that found no twin, which became a
+ * `verified` decision, which `savePayee()` then wrote into
+ * `payee_verification`: a table that is append-only by grant, by REVOKE and by
+ * trigger. The outage lasted seconds; the word `verified` lasts for ever, and
+ * every screen, every freshness band and the payment gate itself would read it
+ * as a check that happened.
+ *
+ * These two tests are the difference between "it returns an error now" and "it
+ * did not record a check it did not do", and the second is the one that
+ * matters.
+ */
+run("confirmPayee fails closed, and records nothing when it does", () => {
+  /** A connection that answers every query by throwing. The seam is the conn. */
+  function exploding(message: string): Parameters<typeof gate.confirmPayee>[1] {
+    const tag = (): Promise<never> => Promise.reject(new Error(message));
+    return tag as never;
+  }
+
+  it("REFUSES when the book cannot be read, rather than calling it verified", async () => {
+    const result = await gate.confirmPayee(
+      {
+        candidate: candidate("Failclosed", { accountNumberLast4: "6161" }),
+        payeeKey: `${RUN_ID}-failclosed`,
+        actorId: ALEX,
+      },
+      exploding("connection terminated unexpectedly"),
+    );
+
+    expect(result.refusal?.code).toBe("PAYEE_BOOK_UNREADABLE");
+    expect(result.saved).toBe(null);
+    // NOT "a check that found nothing". There is no check, because none ran.
+    expect(result.check).toBe(null);
+    // It says which leg did not run, and never the driver's own text — that
+    // names internal ids and table structure and this string is rendered on a
+    // screen. The error's CLASS only.
+    expect(result.refusal?.message).toContain("twin probe");
+    expect(result.refusal?.message).not.toContain("connection terminated unexpectedly");
+    expect(result.refusal?.message).toContain("Error");
+  });
+
+  it("writes NO payee, NO verification and NO refusal row", async () => {
+    const key = `${RUN_ID}-failclosed-rows`;
+    const holder = candidate("Failclosedrows").holderName;
+
+    await gate.confirmPayee(
+      {
+        candidate: candidate("Failclosedrows", { accountNumberLast4: "6262" }),
+        payeeKey: key,
+        actorId: ALEX,
+      },
+      exploding("timeout"),
+    );
+
+    // Counted on the LIVE database, scoped to this run's own names so that the
+    // six other things writing to this book cannot make the assertion pass or
+    // fail by accident.
+    const [payees] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM payee WHERE payee_key = ${key}`;
+    expect(payees?.n).toBe(0);
+
+    const [verifications] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n
+        FROM payee_verification v JOIN payee p ON p.id = v.payee_id
+       WHERE p.holder_name = ${holder}`;
+    expect(verifications?.n).toBe(0);
+
+    // And not a `payee_candidate_refusal` either. That table is for a
+    // candidate the ARITHMETIC refused — the caught typo, which is the product
+    // of this feature. This candidate was not refused; it was never examined,
+    // and recording it as a refused destination would be a second false
+    // statement in place of the first.
+    const [refusals] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM payee_candidate_refusal WHERE holder_name = ${holder}`;
+    expect(refusals?.n).toBe(0);
+  });
+
+  it("still proceeds on an EMPTY book, which is an answer and not a failure", async () => {
+    // The one case named in the header, checked rather than asserted: a
+    // business with no payees at all. `[]` reaches `verifyPayee()` as the
+    // legitimate answer it is — "first payee" — and the check runs and is
+    // recorded. Fixed by passing the real connection against a business that
+    // genuinely has an empty book.
+    const [fresh] = await sql<{ id: string }[]>`
+      SELECT b.id FROM business b
+       WHERE NOT EXISTS (SELECT 1 FROM payee p WHERE p.business_id = b.id)
+       LIMIT 1`;
+    if (fresh === undefined) {
+      // Every seeded business already has a payee. Nothing to prove here and
+      // inventing a business would be writing to a table this suite does not
+      // own, so the case is left to the unit coverage in verify.test.ts.
+      return;
+    }
+
+    const result = await gate.confirmPayee({
+      candidate: candidate("Emptybook", {
+        businessId: fresh.id,
+        accountNumberLast4: "6363",
+      }),
+      payeeKey: `${RUN_ID}-emptybook`,
+      actorId: ALEX,
+    });
+    expect(result.refusal).toBe(null);
+    expect(result.check).not.toBe(null);
+    expect(result.saved).not.toBe(null);
   });
 });
 

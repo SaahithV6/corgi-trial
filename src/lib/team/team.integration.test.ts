@@ -916,3 +916,284 @@ dLive("12. a real Lithic card, issued to a real member", () => {
     expect(verdict.rule).toBe("member_per_transaction_limit_exceeded");
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* 13. THE AUTHOR                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE BRANCH NOTHING IN THIS FILE HAD EVER DRIVEN.
+ *
+ * Every one of the seventeen membership writes above passes `actorId: STAFF` —
+ * Dana Okonkwo, `business_id IS NULL`. That is the CORGI-STAFF branch of the
+ * authorship check by construction, and it is the only branch the product can
+ * reach, because `src/lib/approvals/session.ts:70-78` resolves the console
+ * session with `WHERE kind = 'human' AND business_id IS NULL`. So the arm that
+ * REFUSES an unauthorised author had never executed once — not in 23 green
+ * passes, not in production — while `src/app/(app)/team/actions.ts:35-40` cited
+ * it as the reason there is no TypeScript copy of the rule.
+ *
+ * That is the finding underneath the finding, and it is why the hole in
+ * 0033:309-322 and :818-831 survived: the lookup that established the author's
+ * authority was filtered `AND state <> 'removed'` and then gated on
+ * `IF v_author IS NOT NULL`, where NULL is the staff break-glass. A REMOVED
+ * member therefore resolved to NULL and was moved out of the branch that CHECKS
+ * into the branch that TRUSTS — and through `team_add_member()`, which is the
+ * ONE moment `actor.can_approve` is decided, a removed admin could mint a fresh
+ * active approver and manufacture the second pair of eyes maker-checker rests
+ * on. Migration 0044 is the repair.
+ *
+ * These tests all pass a REAL BUSINESS MEMBER as the author. Nothing else in
+ * this repository does.
+ */
+d("13. the author of a member's terms — the non-STAFF branch", () => {
+  /** Terms version N+1, authored by whoever is named. No helper hides this. */
+  async function authorTerms(
+    memberId: string,
+    authorActorId: string,
+    draft: { state: "active" | "suspended" | "removed"; role: "viewer" | "initiator" | "approver" | "admin"; note: string },
+  ): Promise<void> {
+    const [current] = await sql<{ version: number }[]>`
+      SELECT version FROM team_member_version
+       WHERE member_id = ${memberId} ORDER BY version DESC LIMIT 1`;
+    await sql`
+      INSERT INTO team_member_version (member_id, version, state, role, note, created_by)
+      VALUES (${memberId}::uuid, ${(current?.version ?? 0) + 1}, ${draft.state},
+              ${draft.role}, ${draft.note}, ${authorActorId}::uuid)`;
+  }
+
+  async function actorOf(memberId: string): Promise<string> {
+    const [row] = await sql<{ actor_id: string }[]>`
+      SELECT actor_id FROM team_member WHERE id = ${memberId}`;
+    return row?.actor_id ?? "";
+  }
+
+  async function stateOf(memberId: string): Promise<string> {
+    const [row] = await sql<{ state: string }[]>`
+      SELECT state FROM v_team_member_current WHERE member_id = ${memberId}`;
+    return row?.state ?? "";
+  }
+
+  it("lets an ACTIVE admin of this business author a colleague's terms", async () => {
+    // The branch that must still WORK. A fix that refuses everything is not a
+    // fix, and this is the case the `state <> 'removed'` filter was reaching
+    // for. Both are created as `approver` or `admin` so the write does not
+    // trip clause (c), the approval envelope, which is a different rule.
+    const admin = await member("admin", "author-ok-admin");
+    const colleague = await member("approver", "author-ok-peer");
+    await expect(
+      authorTerms(colleague, await actorOf(admin), {
+        state: "active",
+        role: "admin",
+        note: "promoted by the business's own active admin",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses an ACTIVE member whose role does not carry administer_team", async () => {
+    // 0033's sentence, word for word, and 0044 does not touch it.
+    const initiator = await member("initiator", "author-nope");
+    const colleague = await member("viewer", "author-nope-peer");
+    await expect(
+      authorTerms(colleague, await actorOf(initiator), {
+        state: "active",
+        role: "initiator",
+        note: "by somebody who holds no administer_team",
+      }),
+    ).rejects.toThrow(/is a initiator of this business and cannot change a member's terms/);
+  });
+
+  it("REFUSES A REMOVED ADMIN, and names the state", async () => {
+    // THE DEFECT. Before 0044 this write was ALLOWED: the removed admin
+    // resolved to NULL and was waved through as Corgi staff.
+    const admin = await member("admin", "author-removed");
+    const colleague = await member("approver", "author-removed-peer");
+    const actor = await actorOf(admin);
+
+    const removed = await store.setMemberTerms(
+      {
+        memberId: admin,
+        draft: {
+          state: "removed",
+          role: "admin",
+          perTxnLimitCents: null,
+          dailyLimitCents: null,
+          monthlyLimitCents: null,
+          note: "left the company",
+        },
+        actorId: STAFF,
+      },
+      sql as never,
+    );
+    expect(removed.ok).toBe(true);
+    expect(await stateOf(admin)).toBe("removed");
+
+    // Their actor row still says can_approve — 0001 owns that column and it is
+    // append-only. The membership is what changed, and this is where that stops
+    // being a label, for authorship as well as for approval.
+    const [a] = await sql<{ can_approve: boolean }[]>`
+      SELECT can_approve FROM actor WHERE id = ${actor}`;
+    expect(a?.can_approve).toBe(true);
+
+    await expect(
+      authorTerms(colleague, actor, {
+        state: "active",
+        role: "admin",
+        note: "a promotion authored by somebody who was removed this morning",
+      }),
+    ).rejects.toThrow(/is a removed member of business .* and cannot change a member's terms/);
+  });
+
+  it("REFUSES A REMOVED ADMIN calling team_add_member() — no minting a new approver", async () => {
+    // The worse half. `team_add_member()` is the ONE moment actor.can_approve
+    // is decided, so before 0044 a removed admin did not merely edit a row:
+    // they created a new principal with approval rights and an active
+    // `approver` membership. Removal is the remedy for a compromised signer;
+    // this was the qualification.
+    const admin = await member("admin", "minter");
+    const actor = await actorOf(admin);
+    await store.setMemberTerms(
+      {
+        memberId: admin,
+        draft: {
+          state: "removed",
+          role: "admin",
+          perTxnLimitCents: null,
+          dailyLimitCents: null,
+          monthlyLimitCents: null,
+          note: "dismissed",
+        },
+        actorId: STAFF,
+      },
+      sql as never,
+    );
+    expect(await stateOf(admin)).toBe("removed");
+
+    const ghost = await store.addMember(
+      {
+        businessId: BIZ_A,
+        displayName: `Audit Ghost ${RUN_ID}`,
+        email: `ghost-${RUN_ID}@example.test`,
+        role: "approver",
+        actorId: actor,
+        note: "minted by a removed admin",
+      },
+      sql as never,
+    );
+    expect(ghost.ok).toBe(false);
+    if (ghost.ok) return;
+    expect(ghost.message).toMatch(/is a removed member of business .* and cannot add members/);
+
+    // And nothing was left behind — no actor, no membership, no approval right.
+    const [left] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM actor WHERE email = ${`ghost-${RUN_ID}@example.test`}`;
+    expect(left?.n).toBe(0);
+  });
+
+  it("refuses a SUSPENDED admin too — the same hole, one state to the left", async () => {
+    // 0033's filter excluded only `removed`, so a SUSPENDED admin resolved to
+    // `admin` and passed on role alone. 0033 §7 already holds that a suspended
+    // member may neither raise nor approve a payment; deciding who else may is
+    // strictly more authority than either.
+    const admin = await member("admin", "author-susp");
+    const colleague = await member("approver", "author-susp-peer");
+    const actor = await actorOf(admin);
+    await store.setMemberTerms(
+      {
+        memberId: admin,
+        draft: {
+          state: "suspended",
+          role: "admin",
+          perTxnLimitCents: null,
+          dailyLimitCents: null,
+          monthlyLimitCents: null,
+          note: "under investigation",
+        },
+        actorId: STAFF,
+      },
+      sql as never,
+    );
+    await expect(
+      authorTerms(colleague, actor, {
+        state: "active",
+        role: "admin",
+        note: "authored while suspended",
+      }),
+    ).rejects.toThrow(/is a suspended member of business .* and cannot change a member's terms/);
+  });
+
+  it("leaves genuine Corgi staff alone — the break-glass branch is unchanged", async () => {
+    // The branch the NULL was always meant to be, and the only one that should
+    // ever reach it: an actor with no membership of this business at all.
+    const [staff] = await sql<{ kind: string; business_id: string | null }[]>`
+      SELECT kind, business_id FROM actor WHERE id = ${STAFF}`;
+    expect(staff?.business_id).toBeNull();
+    const [anywhere] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM team_member WHERE actor_id = ${STAFF}`;
+    expect(anywhere?.n).toBe(0);
+
+    const colleague = await member("viewer", "author-staff-peer");
+    await expect(
+      authorTerms(colleague, STAFF, {
+        state: "active",
+        role: "initiator",
+        note: "staff break-glass, which is what the NULL branch is for",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("0044's invariant is empty, and CAN fail — made to, and rolled back", async () => {
+    // A guard nobody has seen fail is a claim. Every statement below goes
+    // through the FRONT DOOR, on the application role, with every trigger
+    // armed — nothing is disabled — because the state the view reports is one
+    // the trigger genuinely cannot see: the admin is active when they write
+    // the row, and their removal is BACKDATED afterwards. `created_at` is not
+    // a column any trigger reads, so a clock that disagrees with the order of
+    // writes produces exactly the row 0044 exists to report, and the view
+    // catches what the gate structurally cannot.
+    //
+    // The backdating is also why the view reads the author's terms STRICTLY
+    // before the row it judges: `now()` is the TRANSACTION timestamp, so both
+    // inserts below would otherwise carry the same instant.
+    const admin = await member("admin", "inv-author");
+    const colleague = await member("approver", "inv-target");
+    const actor = await actorOf(admin);
+
+    let delta: { before: number; inside: number } | null = null;
+    try {
+      await sql.begin(async (tx) => {
+        const [before] = await tx<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM v_team_terms_by_unauthorised_author`;
+        // 1. the ACTIVE admin writes a colleague's terms. Allowed, correctly.
+        await tx`
+          INSERT INTO team_member_version (member_id, version, state, role, note, created_by)
+          SELECT ${colleague}::uuid, max(version) + 1, 'active', 'admin',
+                 'written while the author was still an admin', ${actor}::uuid
+            FROM team_member_version WHERE member_id = ${colleague}::uuid`;
+        // 2. …and a removal lands with a created_at an hour of clock earlier.
+        //    Authored by staff, so the trigger allows it — as it must.
+        await tx`
+          INSERT INTO team_member_version
+            (member_id, version, effective_from, state, role, note, created_by, created_at)
+          SELECT ${admin}::uuid, max(version) + 1, now(),
+                 'removed', 'admin', 'the author was already gone', ${STAFF}::uuid,
+                 now() - interval '1 minute'
+            FROM team_member_version WHERE member_id = ${admin}::uuid`;
+        const [inside] = await tx<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM v_team_terms_by_unauthorised_author`;
+        delta = { before: before?.n ?? -1, inside: inside?.n ?? -1 };
+        throw new Error("rollback");
+      });
+    } catch (thrown) {
+      if (!(thrown instanceof Error) || thrown.message !== "rollback") throw thrown;
+    }
+
+    expect(delta).not.toBeNull();
+    expect(delta!.before).toBe(0);
+    expect(delta!.inside).toBe(1);
+
+    const [after] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM v_team_terms_by_unauthorised_author`;
+    expect(after?.n).toBe(0);
+  });
+});
