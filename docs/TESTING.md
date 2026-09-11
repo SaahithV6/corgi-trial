@@ -121,20 +121,101 @@ level up.
 
 ## Why `--no-file-parallelism`
 
-Not a style preference, and not caution. **Measured.**
+Not a style preference, and not caution. **Measured** — and re-measured on
+2026-09-11, either side of wrapping `holds`, because the paragraph this section
+used to carry named the wrong cause.
 
-`holds.integration.test.ts` fails five of its twelve cases when it is run in
-the same parallel pass as `ledger`, `fx`, `pots` and `statements`, and passes
-all twelve when run alone — 100s, same book, same machine, same minute. The
-failures are contention, not defects: these suites share one live book, and
-`ledger_append` takes `pg_advisory_xact_lock` per entity and holds it to end
-of transaction, so a suite-wide transaction in one file stalls or perturbs the
-arithmetic another file is asserting on.
+### What it used to say, and what was wrong with it
 
-A parallel `test:db` therefore reports red about suites that are correct, and
-that is worse than not running them: it manufactures exactly the noise that
-trains people to re-skip. Every `test:*` script above passes
-`--no-file-parallelism` for that reason.
+> `holds.integration.test.ts` fails five of its twelve cases when it is run in
+> the same parallel pass as `ledger`, `fx`, `pots` and `statements` … these
+> suites share one live book, and `ledger_append` takes `pg_advisory_xact_lock`
+> per entity and holds it to end of transaction, so a suite-wide transaction in
+> one file stalls or perturbs the arithmetic another file is asserting on.
+
+The observation was real. **The diagnosis was not, and it was not testable as
+written** — "contention" was inferred from the fact that the suites were
+parallel, never from the amounts. The amounts say something else.
+
+### The measurement
+
+Same command every time, six suite-files in one parallel pass:
+
+```sh
+set -a; . ./.env; set +a
+RUN_DB_TESTS=1 RUN_LIVE_TESTS=1 pnpm vitest run \
+  src/lib/holds/holds.integration.test.ts \
+  src/lib/ledger/ledger.integration.test.ts \
+  src/lib/fx/fx.integration.test.ts \
+  src/lib/pots/pots.integration.test.ts \
+  src/lib/statements/statements.integration.test.ts
+```
+
+| | `holds` (12) | `ledger` (10) | `statements` (6) | `fx` (22) | `pots` (8) | wall |
+| --- | --- | --- | --- | --- | --- | --- |
+| **before**, run 1 | 2 red | — | 1 red | — | — | 115s |
+| **before**, run 2 | — | — | 1 red | — | — | 120s |
+| **before**, run 3 | 4 red | 1 red | 1 red | — | — | 112s |
+| **after**, run 1 | — | — | — | — | — | 124s |
+| **after**, run 2 | 2 red | — | — | — | — | 117s |
+| **after**, run 3 | — | — | — | — | — | 129s |
+| **after**, run 4 | — | — | — | — | — | 120s |
+| **after**, run 5 | 1 red | — | — | — | — | 119s |
+| **after**, run 6 | — | — | — | — | — | 120s |
+
+**The other suites stopped failing completely.** `statements` was red in three
+parallel runs out of three and is red in none of six; `ledger` in one of three
+and none of six. Both failures were the same shape and it was the shape the
+wrapping was predicted to fix — `statements`' is literally
+
+```
+something was booked between the two renders; the two documents are of
+different watermarks and are correctly different: expected 4917 to be 4911
+```
+
+— six journal entries appearing between two renders of the same closed day.
+`holds` was committing twenty-six per run. It is now committing two.
+
+### What is still red, and it is not parallelism
+
+`holds` still failed three cases across six parallel runs, and **every one of
+them was traced to a writer that file parallelism has no authority over.**
+
+- **after-run 2** — `expected 10000n to be 5000n`, then `expected -4000n to be
+  1000n`: a 5,000-cent hold appearing and then being released mid-scenario.
+  Chaos mode, posting `CHAOS_AUTH_CENTS` and `CHAOS_CLEARING_CENTS` onto this
+  suite's fixture business (see the previous section). The financial leaf
+  carries five `card:clearing:<uuid>` entries of exactly **7340** in that
+  window, and the memo leaf the matching **−5000 / +5000** pairs. Chaos mode
+  runs in a different process from vitest; `--no-file-parallelism` does not
+  reach it.
+- **after-run 5** — `expected 122500n to be -2500n`, a discrepancy of exactly
+  **125,000 cents with no journal entry anywhere to explain it**. There was
+  none: an `uncleared_credit` hold of $1,250.00 on the fixture reached its
+  `available_at` of `2026-09-11T13:00:00Z` in the middle of that run.
+  **Availability releases an uncleared credit ON THE CLOCK, with no posting**,
+  so `hold_cents` fell by 125,000 between the scenario's two reads and nothing
+  was written that any diff of the journal could have shown. A watcher polling
+  `ledger_availability()` on the pool once a second through the whole of
+  after-run 6 recorded a single, unchanging line — the terms are rock steady at
+  rest, and they move on a clock.
+
+### So: is `--no-file-parallelism` a workaround or a constraint?
+
+**Keep it, and for a better reason than the one it had.** On the evidence
+above, the contention between these five files is gone — the wrapping removed
+it, and six runs found none. But six runs is not proof, and two of the three
+things that did go red came from outside the vitest process entirely: a chaos
+episode started from the deployed console, and a funds-availability clock. A
+sequential run does not fix either; it only narrows the window in which either
+can land, and narrowing that window is worth having when the alternative is a
+red suite that is correct.
+
+What has changed is what the flag is for. It is no longer load-bearing for
+`ledger` and `statements` — they now pass in parallel because the file that was
+perturbing them stopped writing. It is retained as **margin against a shared
+live book with writers that are not tests**, which is what this database
+actually is.
 
 ## Why `pnpm test:livefire` raises the timeout, and what that found
 
@@ -490,7 +571,16 @@ four call sites do.
 ### Per-test or per-suite?
 
 Per test, by default: `fx`, `ledger`, `plaid/funding`, `disputes`, `statements`,
-`wire` each open and discard one transaction per scenario.
+`wire`, `holds` each open and discard one transaction per scenario.
+
+`holds` is per test even though several of its scenarios look like one story —
+because they are not. Each opens its own card and its own authorisation and
+asserts a delta against its own `before` read, so nothing any scenario leaves
+is read by the next one. The one place a scenario genuinely needs two things to
+see each other, scenario 5's in-order and reversed sequences, they share that
+scenario's single transaction and the comparison between them is the assertion.
+Per test also keeps the `pg_advisory_xact_lock` window down to one scenario —
+three to six seconds — rather than the hundred and ten the whole file takes.
 
 Per suite only when the scenarios are **one story told in steps**, where each
 step reads back what the previous step left — `wire/outbound` (a maker-checker
@@ -545,6 +635,14 @@ cannot exhibit.
 form is `interest.integration.test.ts`: *"could not clean up: `journal_entry`
 has no DELETE for this role, by design."*
 
+**`holds` scenario 7 only** — "the release posts EXACTLY ONCE when two workers
+race it". The whole claim is about two workers that cannot see each other, and
+two transactions that cannot see each other is what a transaction IS. Wrapped,
+both `settleHoldPosting()` calls would share one handle, `lockAuthorization()`
+would be re-entrant, and the assertion would pass without a race having
+happened. The reason is written beside the test, in the file, at length. Its
+eleven siblings are wrapped.
+
 ### Fixtures, not per-run cost
 
 `provisionTestAccount()` in `pots` and `holds` (owner connection, `ON CONFLICT
@@ -574,8 +672,11 @@ changes is only that **our** book no longer keeps a copy of the bookkeeping.
 set -a; . ./.env; set +a
 RUN_DB_TESTS=1 pnpm vitest run --no-file-parallelism <path>
 
-node scripts/dbcheck.mjs            # 38 passed / 4 failed — all four deliberate
-                                    # or red-on-arrival. Leave them failing.
+node scripts/dbcheck.mjs            # 37 passed / 5 failed as of 2026-09-11 13:08Z.
+                                    # FOUR are the deliberate/red-on-arrival
+                                    # findings — leave them failing. The FIFTH
+                                    # is new and is NOT deliberate: see
+                                    # v_hold_release_drift below.
                                     # GUARD REACH must read "26 of 26 views".
 node scripts/dbcheck.mjs --prove    # "covered 26 of 26 invariant views"
                                     # and must stay complete.
@@ -586,9 +687,40 @@ tally moves the day somebody adds a check, and it has, twice: this section read
 "36 passed / 2 failed" and "22 of 22" until it was corrected on 2026-09-11,
 by which time the script itself read 37/4 and 25/25 — and it read 37/4 and
 25/25 until `v_value_date_unexplained` was added the same afternoon, which made
-it **38/4 and 26/26**. The **four** has not moved and must not: it is the same
-four deliberate findings, and the twenty-sixth invariant is green. Quote the
-script, not this file, and if the two disagree the script is right.
+it **38/4 and 26/26**. It read 38/4 for about half an hour. **At 13:00:00Z it
+became 37/5**, and the fifth is not one of the four — see the next paragraph.
+Quote the script, not this file, and if the two disagree the script is right.
+
+### `v_hold_release_drift` — 13 rows, arrived on a clock at 13:00:00Z
+
+Not deliberate, not accepted, and **not the holds suite's**: every one of the
+thirteen is an `uncleared_credit` hold from **Plaid funding**, `external_ref`
+`plaid:…`, created between 2026-09-10 22:36Z and 2026-09-11 03:39Z, and every
+one of them carries `available_at = 2026-09-11T13:00:00.000Z`. The view was
+empty at 12:24Z and at 12:47Z; it was 13 rows at 13:08Z. Nothing wrote them.
+**A clock struck.**
+
+That is the finding. `v_hold_release_drift` is `is_released AND
+memo_balance_cents <> 0`, and an uncleared-credit hold becomes released the
+instant `available_at` passes — with **no posting**, because availability reads
+the clock and the memo book does not. So the memo book goes on carrying money
+availability has already given back, and the gap opens by itself. For CARD
+holds this is exactly the gap `sweepExpiredHolds()` closes, and
+`/api/cron/holds` runs it nightly (vercel.json, 08:11). **There is no
+equivalent for the uncleared-credit half**, and `sweepIncompleteHoldPostings()`
+deliberately does not cover it — see the header on
+`src/app/api/cron/holds/route.ts`: *"Completion deliberately does NOT touch
+`v_hold_release_drift`: posting a release there would silence 0011's alarm
+while leaving a false closure standing."* That reasoning is about a FALSE
+CLOSURE. These thirteen have no closure at all; they were released by the
+clock, exactly as designed. The reasoning does not reach them.
+
+**69 more uncleared-credit holds have an `available_at` still in the future**,
+so this view grows on its own until something posts the release leg for a
+credit whose availability clock has run out. That is a product repair in the
+funding path, not a test repair, and it is not in this change's write scope —
+recorded here so the next reader of `dbcheck` does not file the fifth failure
+under "the four deliberate ones" and stop looking.
 
 > **`package.json` still says 25.** `pnpm test:submission` prints
 > *"(must read: covered 25 of 25 invariant views)"* above the `--prove` run.
@@ -627,14 +759,80 @@ something the suite owns, such as its own idempotency-key prefix or
 | `wire` | the one booking test | 0 |
 | `wire/outbound` | per suite | 0 — **green as of 2026-09-11 03:46**, seven cases, fixed mid-session by another worker. The "RED for an unrelated reason" note this row used to carry is spent. |
 | `recon/planted-break` | per suite | 0 — **wrapped 2026-09-11 12:45**, eight cases, 9.5s. It was never on this table, which is why it was never wrapped: it gates on `APP_DATABASE_URL` rather than `RUN_DB_TESTS`, so it ran on every plain `pnpm test` and was outside the population last night's pass ranged over. It had committed **1,580** entries value-dated 1606–2013. |
-| `holds` | **not yet** | holds, closures, cards, auths and entries per run, plus three `sql.begin` blocks that COMMIT |
+| `holds` | per scenario, except scenario 7 | **1 card, 1 authorisation, 1 hold, 2 card events, 2 memo entries** — scenario 7's footprint and nothing else. Was 12 / 12 / 12 / 22 / 26 before, measured either side of the run on 2026-09-11 05:28 and 05:45 PDT. |
 | `advice-wake` | exempt, by design | 0 in steady state |
 | `accrual`, `interest`, `interchange` | exempt, by design | stated in-file |
 
-`holds.integration.test.ts` is the one that is left. It is wrappable — every
-function it drives takes a connection, and `applyCardTransaction` accepts
-`{ conn }` — with one scenario that is genuinely exempt on the durability
-ground: **"7. the release posts EXACTLY ONCE when two workers race it"** runs
-two `settleHoldPosting` calls concurrently on separate connections, and two
-concurrent workers cannot see each other's uncommitted transaction. That one
-stays committing, with the reason written beside it.
+`holds.integration.test.ts` was the one that was left. It is wrapped as of
+2026-09-11 12:45Z. Every function it drives takes a connection and
+`applyCardTransaction` accepts `{ conn }`, so ten of its twelve cases moved
+inside `rolledBack()` unchanged — not one assertion was weakened to get them
+there, and the suite is green, twelve of twelve, alone and in the parallel
+pass.
+
+**Scenario 7 still commits, and the reason is written beside it in the file.**
+"7. the release posts EXACTLY ONCE when two workers race it" `Promise.all`s two
+`settleHoldPosting` calls on SEPARATE POOL CONNECTIONS. Two concurrent
+transactions cannot see each other's uncommitted rows; wrap it and both workers
+run on one handle, the `lockAuthorization()` is re-entrant, the race never
+happens and `[-6000n, 0n]` passes for a reason that has nothing to do with
+concurrency. That is a guard that cannot fail, wearing the name of one that
+can. Its cost is the one row of the table above.
+
+The two cross-checks at the foot of that file are not wrapped either, for the
+opposite reason: they only read, and the last of them asserts that the WHOLE
+LIVE BOOK is clean. Inside a transaction it would be asserting that over a
+snapshot containing the suite's own uncommitted writes, which is a weaker
+claim wearing the same name.
+
+### The three `sql.begin` blocks that used to COMMIT — what they left
+
+All three were inspected against the live book before anything was changed, by
+reading back every authorisation of a completed run:
+
+- **the block in scenario 7** (records the final capture without settling the
+  hold, so a release is genuinely outstanding when the two workers start) —
+  still commits, with scenario 7, by the argument above. It leaves the hold at
+  memo balance 0 and **no `hold_closure` row**, because `settleHoldPosting()`
+  posts the money and does not close. Not drift: `v_hold_drift` reads
+  `NOT is_released`, and the fold over `E` is 0 there too.
+- **the block in 7b** — the important one. It writes a `hold_closure` on a hold
+  whose event set does not license one, which is precisely the state
+  `v_hold_drift` and `v_hold_closure_not_terminal` exist to catch, and which is
+  how an earlier version of this file left four orphan closures that had to be
+  retired by hand. **It left no residue in its final form**: the two repairs
+  that follow it — `settleHoldPosting()` and then `expireOne()` — ran in every
+  run that got that far, the closure is declared `test_harness` (0040) so it is
+  out of `v_hold_closure_not_terminal` by construction, and `expireOne()` adds
+  the `expiry` fact that makes it genuinely terminal. The exposure was never
+  the block; it was *"in every run that got that far"*. A run that threw in
+  between left the fabricated closure committed. It is now a savepoint inside
+  the scenario's transaction and cannot outlive the assertion it was made for.
+- **the block in 8b** (opens a hold on an authorisation whose `expires_at` is
+  already an hour in the past) — left a hold that the same test's sweep closed
+  and squared in the same run, `source = expiry_sweep`, memo 0. No residue.
+
+So: **none of the three was leaving residue on a run that completed.** What was
+leaving residue was a run that did *not* complete, and scenario 4b is the proof
+— see below.
+
+### What the residue had actually done
+
+Two things, both visible on screens rather than inferred:
+
+1. **`v_overdrawn_accounts` showed the fixture's 2100 leaf at −$858,207.45.**
+   Scenario 4b posts a $500,000 force-post and refunds it four statements
+   later. Committing, any assertion between those two lines that threw left the
+   force-post on the book and the refund unreached — and that assertion is a
+   delta assertion, so a concurrent writer was enough to throw it. It had
+   happened more than once. The view the middle of that test *reads* was
+   reporting the wreckage of earlier runs of that test.
+
+2. **Chaos mode had silently retargeted itself onto this suite's fixture.**
+   `src/lib/chaos/driver.ts:defaultBusinessId()` picks the business with the
+   most cards. Twelve cards a run made *Holds Integration Fixture Co.* the
+   largest cardholder on the book — 345 cards against Ridgeline's 201 — so
+   every `chaos_run` for hours had `business_id` = the holds fixture, landing
+   `CHAOS_AUTH_CENTS` ($50.00) and `CHAOS_CLEARING_CENTS` ($73.40) on the exact
+   account these scenarios measure deltas against. That is the whole of the
+   next section.
