@@ -1997,6 +1997,46 @@ N("J8b", "GAUNTLET 7 IS PROVEN: a closed day re-derives byte-identically", "subm
        "(9,485ms) and 'reproduces the Ridgeline 2026-09-08 correction, and "
        "keeps reproducing it'. so the brief's 'identical every time, "
        "corrections included' is demonstrated, not merely designed for")
+# ---------------------------------------------------------------------------
+# J9 — "the whole thing wasn't implemented as a back to back full neobank."
+# Saahith, ~14:00. Correct: nine client screens existed and the JOURNEY had
+# holes. A customer could not open an account, link a bank, fund, put a card in
+# a colleague's hand, read a statement, or schedule a payment. It was a bank you
+# could operate but not bank with.
+# ---------------------------------------------------------------------------
+N("J9a", "the bitemporal demo group I kept naming is NOT on the 09-08 statement",
+  "reference", 0, [], "agent", ["lib/statements"], "done",
+  risk="TWO CORRECTIONS, both surfaced by a screen refusing to fake it. (1) "
+       "Ridgeline 2026-09-08 has NO PUBLISHED statement — book_day closes it at "
+       "watermark 36 and the newest published Ridgeline rows are 2026-07-25 v3 "
+       "and 07-24 v4. (2) group e397837a at seqs 3915/3916/3917, which I have "
+       "been citing all afternoon as the bitemporal demo, is ABOVE watermark 36 "
+       "and therefore in the 'booked since this day closed' list, not on the "
+       "document. the correction that IS on it is the seeded same-shape group "
+       "at seqs 3/4/5 — the one reproducibility.integration.test.ts actually "
+       "reproduces. gauntlet 6 and 7 hold; I was pointing at the wrong group")
+N("J9b", "client statements: closed days, corrections, hash checked on the render",
+  "product", 0, [], "agent", ["app/client/statements"], "done",
+  risk="statements were operator-only. now a customer reads their own, and the "
+       "screen will not show a tick for a comparison it did not make: a "
+       "closed-but-never-issued day renders at the close watermark with "
+       "matchesStoredHash null and says in words that there is no stored "
+       "fingerprint to check against. reproduction is TWO independent "
+       "renderStatement round trips at two instants — 20:47:00.095Z and "
+       ".261Z — hashed and asserted equal on the page load that shows them. the "
+       "corrections panel carries LINES AND NO NET, because the net is already "
+       "in the closing balance and summing it again would be a second "
+       "definition")
+N("J9c", "client standing orders, with the refusal policy in the customer's words",
+  "product", 0, [], "agent", ["app/client/standing-orders"], "done",
+  risk="gauntlet 8 asks for a WRITTEN POLICY for the day the balance cannot "
+       "cover a mandate, and the screen states it plus the reasoning: refused "
+       "and closed, not sent short, not carried over, not queued. why not "
+       "partial — $2,613.44 is a different payment and it breaks the invoice at "
+       "both ends. why not carry-forward — it lands on a day nobody chose, at a "
+       "size nobody expected, possibly doubled. the check is against AVAILABLE, "
+       "so a payment can be refused on a day the ledger figure looked "
+       "sufficient, and both figures plus the shortfall render on the row")
 N("J2f", "deploy and re-run every scoreboard against one sha",
   "release", 20, ["J2a", "J2b", "J2c", "J2d", "J2e"], "claude", [], status="done",
   risk="the honesty tools check documents against the DEPLOYMENT and never checked "

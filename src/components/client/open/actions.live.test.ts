@@ -91,7 +91,31 @@ describe.skipIf(!RUN)("applyAction", () => {
       if (result.state === "pending") {
         expect(result.handover).not.toBeNull();
         expect(result.detail).toContain("no account");
+        // The half that did not exist: a real applicant row, referenced back
+        // to the person who filed it.
+        expect(result.applicationId).not.toBeNull();
+        // The fold over BOTH legs, read back from the book. Never `approved`:
+        // the director leg is a Stripe Identity session that has just been
+        // created, and the composite reports the weakest leg.
+        expect(result.kybStatus).not.toBe("approved");
       }
+    },
+  );
+
+  it(
+    "a second application for the same EIN returns the FIRST one, not a second entity",
+    { timeout: 30_000 },
+    async () => {
+      const { applyAction } = await import("./actions");
+
+      // Same EIN, written the other way. Normalisation happens in SQL before
+      // the unique index sees it, so a hyphen cannot buy a second entity.
+      const first = await applyAction(IDLE_APPLICATION, form());
+      const second = await applyAction(IDLE_APPLICATION, form({ ein: "123456789" }));
+
+      expect(first.applicationId).not.toBeNull();
+      expect(second.applicationId).toBe(first.applicationId);
+      expect(second.accountOpen).toBe(false);
     },
   );
 });

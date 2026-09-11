@@ -17,6 +17,7 @@
     "test:optin": "set -a; [ -f ./.env ] && . ./.env; set +a; RUN_DB_TESTS=1 RUN_LITHIC_TESTS=1 RUN_POT_DEMO=1 EVENTS_LIVE=1 vitest run --no-file-parallelism src/lib/team src/lib/pots src/lib/events",
     "test:submission": "set -a; [ -f ./.env ] && . ./.env; set +a; rc=0; for s in test test:db test:probes test:livefire; do printf '\\n======== pnpm %s ========\\n' \"$s\"; pnpm run \"$s\" || rc=1; done; printf '\\n======== node scripts/dbcheck.mjs ========\\n(4 failures are the deliberate/red-on-arrival findings; READ them, do not count them)\\n'; node scripts/dbcheck.mjs; printf '\\n======== node scripts/dbcheck.mjs --prove ========\\n(must read: EVERY invariant view is covered -- the fraction is printed, read it)\\n'; node scripts/dbcheck.mjs --prove; exit $rc",
     "migrate": "node scripts/migrate.mjs",
+    "confirm": "set -a; [ -f ./.env ] && . ./.env; set +a; node scripts/confirm.mjs",
     "db:check": "node scripts/dbcheck.mjs",
     "db:reset": "node scripts/dbreset.mjs",
     "typecheck:app": "tsc --noEmit -p tsconfig.json"

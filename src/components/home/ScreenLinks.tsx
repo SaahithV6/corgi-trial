@@ -78,6 +78,38 @@ export const SCREENS: readonly Screen[] = [
     external: false,
   },
   {
+    href: "/client/funding",
+    title: "Add money",
+    summary:
+      "The customer links an external bank and funds the balance from it \u2014 the half of open banking the brief says they do themselves.",
+    why: "A deposit lands as an UNCLEARED CREDIT, not as spendable cash, which is the whole ledger-versus-available story stated in money rather than in a caption: the ledger figure moves and the available figure does not, until it clears. Every row says ORIGINATED, NOT TRANSMITTED on its face, because no ACH entry was sent to any network and a screen that implied otherwise would be the easiest lie in this build. There are two Plaid items on this book on purpose \u2014 one healthy and one deliberately left in ITEM_LOGIN_REQUIRED \u2014 so the screen can be seen telling the truth in both states.",
+    external: false,
+  },
+  {
+    href: "/client/team",
+    title: "Your team",
+    summary:
+      "Add a person, issue them a card, set what it can do, and end a membership \u2014 the brief\u2019s first sentence, on the customer\u2019s own side.",
+    why: "Terms are APPENDED, never updated: a blank monthly limit stays null and a typed zero stores as zero, and those are different facts about what a card may do. Ending a membership closes the card at Lithic BEFORE the fact is written, and deletes nothing \u2014 the person, the card and the assignment all remain, because a bank that forgets who held a card cannot answer a dispute. Removal is type-to-confirm on the member\u2019s own name, re-checked server-side against the name read back from the database, because the hazard is right-button-wrong-row and a disabled button enforces nothing on a public POST.",
+    external: false,
+  },
+  {
+    href: "/client/standing-orders",
+    title: "Recurring payments",
+    summary:
+      "Schedule a payment that fires once and only once, and stop it as easily as you started it.",
+    why: "Once-and-only-once is a UNIQUE index on (mandate, date), not a scheduler behaving \u2014 and the form carries a server-minted key so a double-press hits ON CONFLICT DO NOTHING rather than a second payment. A render never fires anything: firing is a cron and an authenticated POST, and a page that raised a payment because somebody hit reload would be the worst bug in this repository. The insufficient-funds policy is on the screen in the customer\u2019s words, including why the payment is not sent short and not carried over to a day nobody chose.",
+    external: false,
+  },
+  {
+    href: "/client/statements",
+    title: "Your statements",
+    summary:
+      "Closed days only, each rebuilt from the ledger and hash-checked on the page load that shows it.",
+    why: "It rebuilds the document TWICE, at two different instants, and prints both fingerprints \u2014 identical, on that render, not on a run somebody did once. A day that was closed but never issued has no stored fingerprint, and the screen says exactly that rather than showing a tick for a comparison it did not make; /statements once printed HASH REPRODUCED with no database connection open. Where a period holds a correction, the settlement, the reversal and the re-book all appear, and the closing balance already carries the corrected figure.",
+    external: false,
+  },
+  {
     href: "/client/open",
     title: "Open a business account",
     summary:

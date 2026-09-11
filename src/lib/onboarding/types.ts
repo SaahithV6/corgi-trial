@@ -114,3 +114,51 @@ export function leafNameSuffix(parentCode: string): string {
   }
   return composed.slice(prefix.length);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Applying — the step before there is anything to approve                    */
+/* -------------------------------------------------------------------------- */
+
+/** One director as the applicant typed them. A claim, never a fact. */
+export type DirectorClaim = {
+  readonly fullName: string;
+  readonly email: string;
+};
+
+/**
+ * What `business_apply()` said.
+ *
+ * `created` is the field that makes idempotence visible rather than inferred:
+ * a second application for the same EIN returns the FIRST applicant with
+ * `created: false`, so a double-submit is an answer and not an error.
+ *
+ * There is deliberately no `status` here. An applicant's KYB state is folded
+ * by `v_business_kyb` out of legs written by live providers; it is not
+ * something the act of applying returns, because it is not something applying
+ * can influence.
+ */
+export type ApplicantOutcome = {
+  readonly businessId: string;
+  readonly applicationId: string;
+  readonly created: boolean;
+  readonly directorsOnFile: number;
+};
+
+/**
+ * The codes `applyForAccount()` can refuse with, mapped from 0065's `RAISE`s
+ * by SQLSTATE rather than by message text.
+ */
+export const APPLY_REFUSAL = {
+  /** SQLSTATE 22023: the claim is not a readable application. */
+  APPLICATION_INVALID: "APPLICATION_INVALID",
+  /** SQLSTATE 42501: that EIN is a customer already on the book, not an applicant. */
+  EIN_ALREADY_ON_BOOK: "EIN_ALREADY_ON_BOOK",
+  /** SQLSTATE 23503: no entity on this book to apply to. */
+  NOTHING_TO_APPLY_TO: "NOTHING_TO_APPLY_TO",
+  /** SQLSTATE 40001: another application for this EIN committed first. Retry. */
+  APPLICATION_RACED: "APPLICATION_RACED",
+  /** Anything else the database said. Never swallowed, never guessed at. */
+  APPLICATION_FAILED: "APPLICATION_FAILED",
+} as const;
+
+export type ApplyRefusalCode = (typeof APPLY_REFUSAL)[keyof typeof APPLY_REFUSAL];

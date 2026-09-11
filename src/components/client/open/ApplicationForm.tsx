@@ -102,6 +102,25 @@ function StatePanel({ result }: { readonly result: ApplicationResult }) {
           : "Nothing was opened on the strength of this submission, so there is no balance to see and no money can arrive for you."}
       </p>
 
+      {result.applicationId !== null && (
+        <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-current/20 pt-2 text-[11px]">
+          <dt className="opacity-70">Your application</dt>
+          {/* The reference of a row that exists. Rendered only when the server
+              handed one back, so this line can never claim a filing that did
+              not happen. */}
+          <dd className="font-mono break-all">{result.applicationId}</dd>
+          {result.kybStatus !== null && (
+            <>
+              <dt className="opacity-70">Both checks, folded</dt>
+              {/* The WEAKEST leg, read back from v_business_application after
+                  the legs were filed — not the register's answer above, which
+                  is one leg of two. */}
+              <dd className="font-mono">{result.kybStatus}</dd>
+            </>
+          )}
+        </dl>
+      )}
+
       {result.registry !== null && (
         <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-current/20 pt-2 text-[11px]">
           <dt className="opacity-70">Register</dt>

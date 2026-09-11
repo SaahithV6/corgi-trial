@@ -36,24 +36,36 @@
  * those words.
  *
  * ===========================================================================
- * THIS ACTION CREATES NOTHING AT A PROVIDER AND WRITES NO ROW
+ * WHAT THIS ACTION WRITES, AND THE ONE FUNCTION IT WRITES IT THROUGH
  * ===========================================================================
  *
- * `probeRegistry()` is a `GET` against a public, key-less, CC0 index. It writes
- * nothing, it is about an identifier rather than about a business on this book,
- * and its sentinel reference id is not a uuid, so it could not be filed against
- * a business row even by accident.
+ * It used to write nothing, and said so: `db/migrations/0001_ledger.sql:839`
+ * grants `corgi_app` SELECT and only SELECT on `business`, `actor` and
+ * `book_entity`, `src/lib/ledger/db.ts` connects as exactly that role, and
+ * there was no definer function for entity creation the way
+ * `business_accounts_open()` exists for accounts. Least privilege was working
+ * correctly; the missing piece was the function.
  *
- * The second half — appending the answer to `kyb_verification_leg` under a real
- * `business.id`, and starting the live Stripe Identity session for the
- * directors — needs a `business` row, and the application role CANNOT CREATE
- * ONE. `db/migrations/0001_ledger.sql:839` grants `corgi_app` SELECT and only
- * SELECT on `business`, `actor` and `book_entity`, there is no SECURITY DEFINER
- * function for entity creation the way `business_accounts_open()` exists for
- * accounts, and `src/lib/ledger/db.ts` connects as exactly that role. So
- * creating the entity record is an operator act by privilege boundary. This
- * action says so, names the step, and hands it over — it does not try, and it
- * does not pretend the application got further than it did.
+ * `db/migrations/0065_business_apply.sql` is that function and this action is
+ * its only caller. The grant is UNCHANGED — this file still cannot express an
+ * INSERT on `business` — and what it gained is exactly one capability: "record
+ * an applicant". Three things follow, and each is a property of the database
+ * rather than of this file:
+ *
+ *   * `business_apply()` takes NO status argument (0065 section 10.3 asserts
+ *     that against `pg_proc` at migration time), so nothing typed into this
+ *     POST body can become a verdict about the applicant who typed it;
+ *   * it files NO `kyb_verification_leg`, so a fresh applicant has zero legs
+ *     and `v_business_kyb` reads `pending` below two of them;
+ *   * it opens NO account, and `business_accounts_open()` refuses a business
+ *     that is not `approved` — 0065 section 10.4 calls it on a probe applicant
+ *     and requires the refusal before the migration will commit.
+ *
+ * `probeRegistry()` — still a `GET` against a public, key-less, CC0 index — runs
+ * FIRST and writes nothing, so a register that declines costs no row at all.
+ * The legs are filed afterwards by `beginVerification()`, the same function the
+ * operator console calls, running the live Stripe Identity and GLEIF adapters
+ * against a `business.id` that now exists.
  *
  * ===========================================================================
  * EVERYTHING ARRIVING HERE IS A CLAIM
@@ -73,18 +85,26 @@ import { z } from "zod";
 
 import { MAX_DIRECTORS, type ApplicationResult, type ApplicationState, type RegistryAnswerView } from "./application";
 import { strictestOf, type KybStatus } from "@/lib/kyb/types";
-import { probeRegistry } from "@/lib/kyb/wire";
+import { beginVerification, probeRegistry } from "@/lib/kyb/wire";
 import { rootLogger } from "@/lib/log";
+import { applicationState, applyForAccount } from "@/lib/onboarding/apply";
 
 /**
- * The one step this surface genuinely cannot perform, named so it can be handed
- * to a person rather than faked.
+ * The step that is still a person's, named so it is handed over rather than
+ * faked.
+ *
+ * It is no longer "we cannot record you". `business_apply()` records the
+ * applicant; what a reviewer still owns is the DECISION, and 0065 section 3 is
+ * why that cannot move here: the function an applicant calls takes no status
+ * argument and files no verification leg, so nothing on this surface can write
+ * a verdict about the applicant who typed it.
  */
-const ENTITY_RECORD_HANDOVER =
-  "A Corgi reviewer has to create your entity record before the director identity checks can start. " +
-  "The application role this page runs as holds SELECT and only SELECT on the business table " +
-  "(db/migrations/0001_ledger.sql:839), so no screen can create that record — including this one. " +
-  "Your submission and the registry answer below are what the reviewer works from.";
+const REVIEW_HANDOVER =
+  "Your application is on the book and the checks are running against it. What is left is a decision, " +
+  "and it is not one this screen can make: the function this page calls to record you takes no status " +
+  "argument at all (db/migrations/0065_business_apply.sql section 3), so an applicant cannot approve " +
+  "themselves even in principle. Your directors complete their identity check, the register's answer " +
+  "stands as filed, and a reviewer reads both.";
 
 const director = z.object({
   fullName: z
@@ -146,6 +166,8 @@ function refused(code: string, headline: string, detail: string): ApplicationRes
     registry: null,
     accountOpen: false,
     handover: null,
+    applicationId: null,
+    kybStatus: null,
   };
 }
 
@@ -273,8 +295,67 @@ export async function applyAction(
       registry,
       accountOpen: false,
       handover: null,
+      // A declined application writes NOTHING: no business row, no directors,
+      // no application. There is nothing to reference and nothing to withdraw.
+      applicationId: null,
+      kybStatus: null,
     };
   }
+
+  // ---------------------------------------------------------------------
+  // The applicant becomes a row. This is the half that did not exist.
+  // ---------------------------------------------------------------------
+  //
+  // `business_apply()` is a SECURITY DEFINER function granted to `corgi_app`
+  // and to nobody else. It creates the business, its directors as `actor`
+  // rows, and the application that claimed them — and it opens NO ACCOUNT and
+  // files NO KYB LEG, which is what keeps `accountOpen` below false by
+  // construction rather than by this file remembering to say so.
+  const { legalName: name, ein, street1, city, subdivision, postalCode } = parsed.data;
+  const filed = await applyForAccount({
+    legalName: name,
+    ein,
+    registeredAddress: { street1, city, subdivision, postalCode },
+    lei: lei === "" ? null : lei,
+    directors,
+  });
+
+  if (!filed.ok) {
+    log.warn("client.open.apply.refused", { code: filed.error.code });
+    return refused(
+      filed.error.code,
+      "We could not record your application",
+      `${filed.error.message} The register was asked about you and answered, but nothing was recorded against your name, ` +
+        "so there is nothing to withdraw.",
+    );
+  }
+
+  const { businessId, applicationId, created, directorsOnFile } = filed.value;
+
+  // The real checks, filed against the applicant that now exists. The same
+  // function the operator console calls, running the same two live adapters:
+  // Stripe Identity for the directors, GLEIF for the register. A repeat
+  // application refuses here with KYB_ALREADY_STARTED, which is correct — a
+  // second session at a live provider for no new information is litter — and
+  // is not an error to show the applicant, because their legs are already on
+  // file.
+  const begun = await beginVerification(businessId, lei === "" ? {} : { lei });
+  if (!begun.ok && begun.error.code !== "KYB_ALREADY_STARTED") {
+    log.warn("client.open.verification.not_started", { code: begun.error.code });
+  }
+
+  // Read the fold back rather than predicting it. `has_deposit_account` is
+  // computed from the chart of accounts, so "you have no account" is a fact
+  // about the book and not a constant in this file.
+  const filedState = await applicationState(businessId);
+  log.info("client.open.applicant", {
+    businessId,
+    created,
+    directors: directorsOnFile,
+    kybStatus: filedState?.kybStatus ?? null,
+    legsOnFile: filedState?.legsOnFile ?? 0,
+    hasDepositAccount: filedState?.hasDepositAccount ?? false,
+  });
 
   return {
     status: "submitted",
@@ -290,7 +371,12 @@ export async function applyAction(
       "You have no account and no balance yet, and you cannot send or receive money. That is not a delay in switching something on — an account does not exist until the check passes.",
     legalName,
     registry,
-    accountOpen: false,
-    handover: ENTITY_RECORD_HANDOVER,
+    // Read from `v_business_application`, not asserted. False for every
+    // applicant, because a `2100` leaf exists only after
+    // `business_accounts_open()` reads `approved` out of `v_business_kyb`.
+    accountOpen: filedState?.hasDepositAccount ?? false,
+    handover: REVIEW_HANDOVER,
+    applicationId,
+    kybStatus: filedState?.kybStatus ?? null,
   };
 }

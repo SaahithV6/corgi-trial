@@ -185,6 +185,16 @@ export const ROUTE_SURFACE: Readonly<Record<string, Surface>> = {
   "/": "customer",
 
   "/client": "customer",
+  // The four that completed the journey on the last day. A customer could not
+  // previously open an account, link a bank, put a card in a colleague's hand,
+  // or read their own statement — every one of those was the console doing the
+  // customer's job. The runtime already allows these (the `/client` tree is the
+  // allow list); naming them here is the register's half, so that a fifth
+  // arriving tomorrow fails a test rather than appearing silently.
+  "/client/funding": "customer",
+  "/client/team": "customer",
+  "/client/standing-orders": "customer",
+  "/client/statements": "customer",
   "/client/activity": "customer",
   "/client/approvals": "customer",
   "/client/cards": "customer",

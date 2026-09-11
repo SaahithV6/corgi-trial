@@ -220,6 +220,19 @@ const ALLOWED: readonly (readonly [module: string, file: string, refs: number])[
   // that read through the same reader the fix uses would be asserting that one
   // function agrees with itself.
   ["approvals", "src/lib/approvals/reserve.proof.test.ts", 4],
+  // The customer's own standing-orders reader. Its three `account` joins exist
+  // for ONE reason: to carry `acc.business_id = $1` in the SAME STATEMENT as
+  // the mandate read. That is this repository's isolation rule stated exactly —
+  // a predicate evaluated by Postgres before the rows exist, never a filter
+  // applied to rows already fetched, because a filter is a step somebody can
+  // reorder and a predicate is not.
+  //
+  // Moving these behind a named reader would BREAK the property it is here to
+  // protect: the reader would return mandates and the caller would scope them,
+  // which is the shape this rule exists to forbid. The alternative the author
+  // rejected was calling the platform-wide `listStandingOrders()` and
+  // filtering in TypeScript — correctly rejected.
+  ["client", "src/app/(app)/client/standing-orders/reader.ts", 19],
   // Two display joins to reach `account.business_id` for a legal name. Same
   // argument as accrual: `listQueue`'s ordering runs through the join.
   ["approvals", "src/lib/approvals/instructions.ts", 2],

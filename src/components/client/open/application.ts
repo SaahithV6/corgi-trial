@@ -81,6 +81,26 @@ export type ApplicationResult = {
   readonly accountOpen: boolean;
   /** The step a human has to perform, when there is one. Null otherwise. */
   readonly handover: string | null;
+  /**
+   * The application's own reference, once a row exists for it.
+   *
+   * Null while idle, refused, or declined by the register — all three are
+   * states in which NOTHING WAS WRITTEN, and a reference for a row that does
+   * not exist would be the screen claiming more than happened. Non-null means
+   * `business_application` carries this id and a reviewer can find it.
+   */
+  readonly applicationId: string | null;
+  /**
+   * The derived KYB fold for the applicant, read back from
+   * `v_business_application` AFTER the legs were filed.
+   *
+   * Never `approved` on this surface, and not because this file declines to
+   * print it: the director leg is a Stripe Identity session that has just been
+   * created, the composite reports the WEAKEST leg, and
+   * `db/migrations/0065_business_apply.sql` section 10 proves an applicant
+   * cannot reach `approved` through the function that created them.
+   */
+  readonly kybStatus: string | null;
 };
 
 export const IDLE_APPLICATION: ApplicationResult = {
@@ -93,6 +113,8 @@ export const IDLE_APPLICATION: ApplicationResult = {
   registry: null,
   accountOpen: false,
   handover: null,
+  applicationId: null,
+  kybStatus: null,
 };
 
 /** The three states, in the words the applicant is owed. */

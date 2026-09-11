@@ -14,10 +14,21 @@ export {
 } from "./open";
 
 export {
+  applicationState,
+  applyForAccount,
+  type ApplicationClaim,
+  type ApplicationRow,
+} from "./apply";
+
+export {
+  APPLY_REFUSAL,
   leafNameSuffix,
   OPEN_REFUSAL,
   PER_BUSINESS_ROLLUPS,
   type OpenAccountsOutcome,
   type OpenedAccount,
   type OpenRefusalCode,
+  type ApplicantOutcome,
+  type ApplyRefusalCode,
+  type DirectorClaim,
 } from "./types";

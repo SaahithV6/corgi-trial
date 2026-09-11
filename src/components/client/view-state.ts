@@ -61,6 +61,10 @@ export const CLIENT_SCREENS = [
   { href: "/client/disputes", label: "Disputes" },
   { href: "/client/payouts", label: "Send abroad" },
   // Last, because it is the only one a viewer WITHOUT an account can use.
+  { href: "/client/funding", label: "Add money" },
+  { href: "/client/team", label: "Your team" },
+  { href: "/client/standing-orders", label: "Recurring" },
+  { href: "/client/statements", label: "Statements" },
   { href: "/client/open", label: "Open an account" },
 ] as const;
 
