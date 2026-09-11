@@ -441,6 +441,7 @@ suite('an outbound wire, through requestPayment()', () => {
     // Asserted on the CODE, not on the prose: the code is the contract and the
     // message is the sentence a person reads, and a test that matches the
     // sentence goes red the day somebody improves the wording.
+    const { WireOriginationRefused } = await import('./outbound');
     const thrown = await resolveWireBeneficiary(
       { businessId: RIDGELINE_BUSINESS, destination: elsewhere },
       tx,

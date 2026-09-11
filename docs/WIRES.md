@@ -489,44 +489,64 @@ would release a two-approver wire on one signature.
 
 ## 6. Findings for the owners of code this rail could not touch
 
-### a. The wire destination carries a BIC, not a wire ABA — and the payee gate is a no-op because of it
+### a. Where the wire ABA comes from — RESOLVED 2026-09-11
 
-`destinationSchema`'s wire variant (`src/lib/approvals/types.ts`) is
+*This section reported a finding. It was acted on, then the fix and this rail
+disagreed, and the disagreement is now decided. Kept in full because the shape
+is more useful than the answer.*
+
+**The finding, as reported.** `destinationSchema`'s wire variant was
 `{ type: 'wire', holderName, bic, accountNumberLast4 }`. A BIC is a SWIFT
-identifier used on cross-border payments. **A domestic Fedwire beneficiary is
-addressed by a 9-digit ABA — specifically the WIRE variant**, which is a
-different number from the same bank's ACH variant. `src/lib/payees/` already
-knows all of this: it validates the ABA, looks it up in Increase's directory
-(which reports `wire_transfers` as its own field), and stores
-`payee.routing_number` for `rail = 'wire'`.
+identifier used on cross-border payments; **a domestic Fedwire beneficiary is
+addressed by a 9-digit ABA — specifically the WIRE variant**, a different
+number from the same bank's ACH variant. `gatePaymentOnPayee()` opened with
+`destination.type === "ach" ? destination.routingNumber : null` and returned
+early on null, so **a wire received neither the check-digit arithmetic nor the
+standing-warning check** — on the one rail where money cannot be recovered.
 
-The consequence is not cosmetic. `gatePaymentOnPayee()` opens with
+**What happened next.** `wireRoutingNumber` was added to the wire variant and
+the gate began refusing a wire without one
+(`PAYEE_WIRE_ROUTING_NUMBER_MISSING`). That closed the hole and opened a
+conflict: this rail resolved the ABA **from the confirmed payee book** at send
+time, and `outbound.integration.test.ts` deliberately raised a BIC-only wire to
+say so. Four of its six tests went red on a real design disagreement, not on a
+bug.
 
-```ts
-const routingNumber = input.destination.type === "ach" ? input.destination.routingNumber : null;
-```
+**The decision: the payee book is authoritative, and the instruction carries a
+copy of the book's number.** Argued in full in the header of
+`src/lib/payees/gate.ts` and in docs/PAYEES.md §5c. The short form is
+**maker-checker**: `payment_instruction.content_hash` is what an approver must
+cite and it covers `counterparty`, so leaving the ABA off the instruction puts
+*which bank receives the money* outside the thing two humans signed, to be
+re-resolved later from a table that grows rows. The book is append-only but not
+frozen — archive a payee, append a same-name same-last-four payee at a
+different bank, and an already-approved wire addresses itself somewhere new
+with no approval having changed.
 
-and then `if (routingNumber === null || last4 === null) return null;`. So **a
-wire payment receives neither the ABA check-digit arithmetic nor the
-standing-warning check** — on the one rail where the money cannot be recovered.
+**What that changed here.**
 
-**The fix, if you want it:** add `wireRoutingNumber: z.string().regex(/^\d{9}$/)`
-to the wire variant, widen that first line to include `'wire'`, and update
-`describeDestination()` and `buildDestination()` in
-`src/app/(app)/payments/actions.ts`. Four small edits, all outside this scope.
+| Where | Change |
+| --- | --- |
+| `src/lib/payees/store.ts` | `loadWireBeneficiaries()` — the `(rail = 'wire', holderName, accountNumberLast4)` predicate, written **once**. Two copies of it would be two answers to "did a human confirm this beneficiary", at the two moments that decide it. |
+| `gatePaymentOnPayee()` | Refuses `PAYEE_WIRE_PAYEE_NOT_ON_BOOK` and `PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED`, **wire only**. Both refusals already existed inside `originateApprovedWire()`, two approvals and a ledger entry too late. This is §7's item 2, done. |
+| `resolveWireBeneficiary()` | Uses that reader, and adds `WIRE_ROUTING_NUMBER_NOT_CONFIRMED`: the approved number must **still** be the book's at the moment the message is addressed. It refuses rather than quietly substituting the book's current number for the one two people signed for. |
+| `outbound.integration.test.ts` | Now carries `wireRoutingNumber` — a copy of the number the test itself put on the book one step earlier — and asserts the sent wire, the book and the approved instruction all name it. |
 
-**What this rail does meanwhile, and it is arguably the better control anyway:**
-`resolveWireBeneficiary()` resolves the wire ABA **from the payee book**, and
-refuses to originate when the beneficiary is not on it. `gatePaymentOnPayee()`
-deliberately does not require pre-registration, and its reasoning is right for
-ACH — "it breaks the one-off refund, the emergency supplier payment, the
-payment raised by the MCP agent from an invoice". Every one of those costs is a
-cost of **delay**, and on ACH a delay is recoverable because the entry is. On a
-wire it is not, and *"urgent payment, right now, to a beneficiary nobody has
-seen before"* is a verbatim description of the fraud. So on this rail, and only
-this rail, the beneficiary must be confirmed first. The number never enters the
-instruction, never reaches an approver's screen, and never crosses the MCP
-boundary.
+**The pre-`wireRoutingNumber` instructions are untouched.** Ten of them,
+including the $42.00 wire that really went out, carry `{holderName, bic,
+accountNumberLast4}`. `resolveWireBeneficiary()` treats an absent
+`wireRoutingNumber` exactly as before — resolved from the book, ambiguity
+refused — because a required field would rewrite history by refusing to read
+it. The gate runs on the way *in* and never on the way out.
+
+**The ACH asymmetry is preserved and is the point.** `gatePaymentOnPayee()`
+still allows an unregistered ACH destination: "it breaks the one-off refund, the
+emergency supplier payment, the payment raised by the MCP agent from an
+invoice". Every one of those costs is a cost of **delay**, and on ACH a delay is
+recoverable because the entry is. On a wire it is not, and *"urgent payment,
+right now, to a beneficiary nobody has seen before"* is a verbatim description
+of business email compromise. `payees.integration.test.ts` asserts both
+directions: the same unknown beneficiary is refused on wire and allowed on ACH.
 
 ### b. `RailSettlement` carries no direction
 
@@ -594,26 +614,26 @@ four), `buildDestination()` already assembles the `wire` variant, and
 `releasePayment()` already maps wire to house account 1110 with the right
 reasoning already written down. The screen offers the rail today.
 
-**Three things would make it correct**, all of them outside this scope and all
-of them consequences of §6a:
+**Three things would make it correct.** All three are now done, and items 1 and
+2 are what §6a settled:
 
-1. **Replace the BIC field with a 9-digit wire routing number.** It is the
-   field a payments clerk actually has, it is what Fedwire routes on, and it is
-   what `src/lib/payees/` already validates. (`bic` can stay as an optional
-   extra for genuinely cross-border wires; it should not be the only bank
-   identifier.)
-2. **Offer a payee picker on the wire branch**, not a free-text beneficiary.
-   `originateApprovedWire()` refuses a beneficiary that is not on the confirmed
-   payee book, so today a clerk can raise a wire on `/payments` that cannot be
-   sent — a refusal that arrives two approvals too late. The picker moves it to
-   the front.
-3. **Show `required_approvals` on the form before submitting.** A wire needs
-   two humans at any amount, and the receipt currently says "reached the
-   threshold" — which is true and reads oddly next to $42.
-
-Items 1 and 2 also close §6a: with a routing number on the destination,
-`gatePaymentOnPayee()` starts running the ABA arithmetic and the
-standing-warning check on wires with a one-word change.
+1. ~~**Replace the BIC field with a 9-digit wire routing number.**~~ **Done.**
+   `wireRoutingNumber` is on the wire variant and `bic` is demoted to an
+   optional extra for genuinely cross-border wires. It is the field a payments
+   clerk actually has, it is what Fedwire routes on, and it is what
+   `src/lib/payees/` already validates.
+2. ~~**Offer a payee picker on the wire branch.**~~ **Done**, and the refusal
+   moved with it. `originateApprovedWire()` refuses a beneficiary that is not on
+   the confirmed payee book, so a free-text field let a clerk raise a wire that
+   nobody could send — a refusal two approvals and one ledger entry too late.
+   `gatePaymentOnPayee()` now makes it at `requestPayment()`
+   (`PAYEE_WIRE_PAYEE_NOT_ON_BOOK`), the picker makes it unreachable from the
+   screen, and the rail still checks at the moment the money leaves. The picker
+   is **not** the control: the public API and the MCP write tool reach
+   `requestPayment()` without passing this way.
+3. ~~**Show `required_approvals` on the form before submitting.**~~ The wire
+   branch now says two humans at any amount rather than "reached the
+   threshold", which read oddly next to $42.
 
 ---
 

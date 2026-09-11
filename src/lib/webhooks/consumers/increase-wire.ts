@@ -92,24 +92,67 @@
  * The one case that posts real money is `wire_return_of_funds` — see below.
  *
  * ===========================================================================
- * THE TWO REFUSALS, BOTH PARKS, BOTH NAMED
+ * INBOUND WIRES ARE ATTRIBUTED NOW — BY LOOKUP, AND STILL NEVER BY GUESS
  * ===========================================================================
  *
- * INBOUND WIRES PARK. An inbound wire names a destination ACCOUNT NUMBER at
- * Increase, and this build issues no virtual account numbers, so there is no
- * mapping from that number to a customer. `creditInboundWire()` takes a
- * `businessId` and there is nothing here that could honestly supply one —
- * picking "the only business on the book" would be guessing whose money it is,
- * on a rail where the money cannot be sent back by us. This is the IDENTICAL
- * refusal `increase-ach.ts` makes for `inbound_ach_transfer`, for the identical
- * reason, and it parks rather than ignoring because a credit nobody can
- * attribute is exactly what an operator should be shown. Ignoring it would file
- * somebody's money under "recognised and skipped".
+ * This file used to park EVERY inbound wire with the sentence "this build
+ * issues no virtual account numbers". That was true when it was written and it
+ * stopped being true on 2026-09-11: `scripts/provision-account-numbers.mjs`
+ * issued one number per business through `POST /account_numbers`,
+ * `db/migrations/0042_virtual_account_numbers.sql` records whose each one is,
+ * and `increase-ach.ts` has been attributing and BOOKING inbound ACH credits
+ * against that table since. Twenty-seven wire deliveries went on parking under
+ * the old sentence, and a park whose reason is false is worse than no park: an
+ * operator reads it, believes the capability is missing, and stops looking.
+ *
+ * So the inbound branch now does exactly what the ACH one does:
+ *
+ *     findVirtualAccountNumber(inbound.account_number_id, conn)
+ *
+ * THE REFUSAL IS NOT WEAKENED — IT IS THE SAME REFUSAL WITH A TABLE BEHIND IT.
+ * A number nobody has mapped still PARKS, under the same `waitingFor` kind, and
+ * there is no fallback account, no "the only business on the book", and no
+ * "whoever this originator paid last time". The programme's own shared `primary`
+ * number (`sandbox_account_number_96mzhz3n61f5p0jpvytc`) is deliberately mapped
+ * to NOBODY, and every wire that arrived before per-business numbers existed was
+ * addressed to it — so those still park, and that is the honest answer rather
+ * than a tidy screen. What changes is the sentence: it names the account number
+ * that arrived, says how many numbers ARE mapped, and tells the operator what to
+ * do. On this rail that matters more than on ACH, because a wire is final and we
+ * cannot send it back without originating a new payment.
+ *
+ * WHAT IS DIFFERENT FROM ACH, AND IT IS THE WHOLE POINT OF THE RAIL BEING A ROW
+ * OF DATA RATHER THAN AN `if`: the credit is booked by `creditInboundWire()`,
+ * which reads `funds_availability_policy` for rail `wire` and finds 0 banking
+ * days with a 00:00 release — so the hold opens and releases in the same
+ * transaction and the money is spendable the instant it is booked. The ACH path
+ * calls `creditInboundAch()`, the policy row says two banking days for a new
+ * counterparty, and the same code holds the money. Neither behaviour is written
+ * in a consumer. `v_wire_availability_drift` asserts the wire half — one row per
+ * wire credit that became spendable LATER than the moment it was booked — and it
+ * must stay empty.
  *
  * CANCELLED AND REJECTED WIRES PARK. Both mean the money did NOT leave, and
  * both therefore need the release entry reversed and re-booked — which is a
  * correction, and this consumer has no reverse-and-rebook path. Posting a
  * guess at a repair is worse than parking one in front of a person.
+ *
+ * ===========================================================================
+ * WHAT AN INBOUND OBJECT ASSERTS, AND WHY THE DELIVERY'S CATEGORY DOES NOT
+ * DECIDE
+ * ===========================================================================
+ *
+ * Increase fires `inbound_wire_transfer.created` and then
+ * `inbound_wire_transfer.updated`, and the body of both is a POINTER. So the
+ * steps are derived from the OBJECT read back, exactly as `inboundAssertedSteps`
+ * does on the ACH side: every accepted object asserts `.created`, and an object
+ * carrying a `reversal` also asserts `.updated/reversed`. Keying off the
+ * delivery's own category instead would ask `rail_event_semantics` for
+ * `inbound_wire_transfer.updated/accepted`, which is not a row and never should
+ * be — the table classifies FACTS ABOUT THE MONEY, and "we were told again" is
+ * not one. Both deliveries therefore converge on the same steps, in order, and
+ * a redelivery books nothing twice because every key is derived from the
+ * transfer.
  *
  * ===========================================================================
  * WHAT IT DOES BOOK: MONEY THAT CAME BACK
@@ -159,10 +202,23 @@ import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { readAccountIdentity } from "@/lib/ledger/readers";
+import {
+  countVirtualAccountNumbers,
+  findVirtualAccountNumber,
+} from "@/lib/rails/increase/account-numbers";
 import { increaseWireAdapter, type IncreaseWireAdapter } from "@/lib/rails/wire/adapter";
-import { creditInboundWire } from "@/lib/rails/wire/ledger";
-import { returnOfFunds, wireSemanticsKey } from "@/lib/rails/wire/semantics";
-import { isWireDelivery, type IncreaseWireTransfer } from "@/lib/rails/wire/types";
+import type { IncreaseWireClient } from "@/lib/rails/wire/client";
+import {
+  creditInboundWire,
+  debitReturnedInboundWire,
+  WireBookingRefused,
+} from "@/lib/rails/wire/ledger";
+import { inboundCredit, returnOfFunds, wireSemanticsKey } from "@/lib/rails/wire/semantics";
+import {
+  isWireDelivery,
+  type IncreaseInboundWireTransfer,
+  type IncreaseWireTransfer,
+} from "@/lib/rails/wire/types";
 import {
   resolveEventSemantics,
   type ClassifiedResolution,
@@ -384,20 +440,10 @@ async function handleWireDelivery(
     );
   }
 
-  /* ---- inbound: money arriving, and nobody knows whose --------------------- */
+  /* ---- inbound: money arriving, and the table says whose ------------------- */
 
   if (pointer.associatedObjectType === INBOUND_OBJECT) {
-    return parked(
-      "inbound_wire_account_mapping",
-      pointer.associatedObjectId,
-      `inbound wire ${pointer.associatedObjectId} (${pointer.category}): this build issues no ` +
-        `virtual account numbers, so there is no way to tell which customer an inbound credit ` +
-        `belongs to — the object names an account_number_id at Increase and nothing on this book ` +
-        `maps one to a business. NOTHING WAS POSTED and no balance reflects it. ` +
-        `creditInboundWire() would book it correctly the moment an operator says whose it is; ` +
-        `what it will not do is guess, on a rail where we cannot send the money back. This is the ` +
-        `same refusal the ACH consumer makes for an inbound ACH credit, for the same reason.`,
-    );
+    return applyInboundWire({ event, ctx, pointer, adapter, conn, deps });
   }
 
   if (pointer.associatedObjectType !== OUTBOUND_OBJECT) {
@@ -469,6 +515,246 @@ async function handleWireDelivery(
   });
 
   return applyOutboundWire({ event, ctx, transfer, semantics, adapter, conn });
+}
+
+/* -------------------------------------------------------------------------- */
+/* One inbound wire: whose it is, and what the object asserts                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The steps the CURRENT inbound object asserts, in lifecycle order.
+ *
+ * The mirror of `inboundAssertedSteps()` on the ACH side, and the same argument:
+ * the delivery body is a pointer, every delivery about one transfer reads back
+ * the same current object, so what that object ASSERTS is the set of facts that
+ * are true of it now. Two keys, both of which `rail_event_semantics` carries:
+ *
+ *   inbound_wire_transfer.created           -> inbound_wire_credit, value date
+ *                                              payload.acceptance.accepted_at
+ *   inbound_wire_transfer.updated/reversed  -> inbound_wire_returned, value date
+ *                                              payload.reversal.reversed_at
+ *
+ * There is deliberately no `.updated/accepted`: being told a second time is not
+ * a fact about the money.
+ */
+export function inboundWireAssertedSteps(
+  transfer: IncreaseInboundWireTransfer,
+): readonly string[] {
+  const steps = [`${INBOUND_OBJECT}.created`];
+  if (transfer.reversal !== null && transfer.reversal !== undefined) {
+    steps.push(`${INBOUND_OBJECT}.updated/reversed`);
+  }
+  return steps;
+}
+
+async function applyInboundWire(args: {
+  readonly event: InboxEvent;
+  readonly ctx: ConsumerContext;
+  readonly pointer: WireEventPointer;
+  readonly adapter: IncreaseWireAdapter;
+  readonly conn: Sql;
+  readonly deps: IncreaseWireConsumerDeps;
+}): Promise<ConsumerResult> {
+  const { ctx, pointer, conn, deps } = args;
+
+  // THE ONE PIECE OF INFORMATION THAT DECIDES WHOSE THIS IS lives on the
+  // object, not in the delivery: the body is a pointer and carries no
+  // `account_number_id`. So the object is read back, exactly as the outbound
+  // path does.
+  //
+  // The capability check in front of it is about the INJECTED adapter, not
+  // about Increase: a caller can hand this consumer a client that implements
+  // only the outbound half, and a missing method is a TypeError that dispatch
+  // would retry eight times and dead-letter with a stack trace instead of a
+  // sentence. A named park says what is actually wrong. The real
+  // `IncreaseWireClient` always implements it.
+  const readBack = (args.adapter.client as Partial<IncreaseWireClient>).getInboundTransfer;
+  if (typeof readBack !== "function") {
+    return parked(
+      "inbound_wire_account_mapping",
+      pointer.associatedObjectId,
+      `inbound wire ${pointer.associatedObjectId} (${pointer.category}): the wire client in use ` +
+        `cannot read an inbound_wire_transfer back, and the destination account_number_id exists ` +
+        `only on that object — so this credit cannot be matched against the virtual account ` +
+        `numbers this programme has issued, and there is no way to tell whose money it is. ` +
+        `NOTHING WAS POSTED. This is a wiring fault in the deployment, not a fact about the ` +
+        `payment: the shipped client implements the read-back.`,
+    );
+  }
+
+  // NOT wrapped in a try/catch, for the reason the outbound read-back gives: a
+  // provider that did not answer is a bounded retry, not an `ignored` that
+  // marks the row done and loses the event.
+  const inbound: IncreaseInboundWireTransfer = await readBack.call(
+    args.adapter.client,
+    pointer.associatedObjectId,
+  );
+
+  /* ---- the table decides what each asserted step MEANS --------------------- */
+
+  const resolutions: ClassifiedResolution[] = [];
+  for (const key of inboundWireAssertedSteps(inbound)) {
+    const semantics = await resolveEventSemantics(
+      { provider: INCREASE_WEBHOOK_PROVIDER, eventType: key },
+      deps.semanticsRows === undefined ? { conn } : { rows: deps.semanticsRows },
+    );
+    if (semantics.status === "unclassified") {
+      return parked(
+        "rail_event_semantics",
+        semantics.key,
+        `no rail_event_semantics row for '${semantics.key}'; nobody has classified this step as a ` +
+          `correction or a new event, and posting money at a value date no human reviewed is the ` +
+          `one failure this system has no alarm for. NOTHING WAS POSTED.`,
+      );
+    }
+    if (semantics.valueDateAnchor === "original") {
+      return parked(
+        "rail_event_semantics",
+        semantics.key,
+        `rail_event_semantics classifies '${semantics.key}' as a CORRECTION at the original value ` +
+          `date. An inbound wire and its return are two payments and two value dates, so this ` +
+          `consumer books them as new events only and has no reverse-and-rebook path. NOTHING ` +
+          `WAS POSTED.`,
+      );
+    }
+    resolutions.push(semantics);
+  }
+
+  /* ---- WHOSE MONEY IS THIS? A lookup. Never a derivation, never a default -- */
+
+  const owner = await findVirtualAccountNumber(inbound.account_number_id, conn);
+  const amountCents = BigInt(Math.abs(inbound.amount));
+  const reversal = inbound.reversal ?? null;
+
+  ctx.logger.info("increase.inbound_wire_transfer.semantics", {
+    inboxId: args.event.id,
+    transferId: inbound.id,
+    category: pointer.category,
+    status: inbound.status,
+    accountNumberId: inbound.account_number_id,
+    attributedTo: owner === null ? null : `${owner.businessId} (${owner.legalName})`,
+    steps: resolutions.map((r) => `${r.key} -> ${r.row.canonicalKind}`),
+    amountCents: String(amountCents),
+  });
+
+  /* ---- nobody has said whose number this is -------------------------------- */
+
+  if (owner === null) {
+    if (reversal !== null) {
+      // The refusal has been overtaken by events: this arrival was sent back
+      // out of the FBO account before anyone attributed it, so there is no
+      // longer a customer to find and nothing to correct — nothing was ever
+      // booked. Reported and RESOLVED rather than parked, so it stops waking a
+      // human every few minutes about money that has already left.
+      ctx.logger.info("increase.inbound_wire_transfer.returned_unattributed", {
+        inboxId: args.event.id,
+        transferId: inbound.id,
+        amountCents: String(amountCents),
+        reason: reversal.reason,
+        reversedAt: reversal.reversed_at,
+        ledgerEffect:
+          "none — the credit was never attributed, so it was never booked and there is nothing to correct",
+      });
+      return processed([{ kind: "inbound_wire_account_mapping", ref: inbound.id }]);
+    }
+
+    // THE REFUSAL, UNCHANGED IN SUBSTANCE AND TRUE IN ITS WORDING. Park, not
+    // ignore: a credit nobody can attribute is exactly what an operator should
+    // be shown, and filing it under "recognised and skipped" would lose
+    // somebody's money quietly.
+    const mapped = await countVirtualAccountNumbers(conn);
+    return parked(
+      "inbound_wire_account_mapping",
+      inbound.id,
+      `inbound wire ${inbound.id} (${pointer.category}, ${amountCents} cents) is addressed to ` +
+        `account_number_id ${inbound.account_number_id}, and NOTHING ON THIS BOOK SAYS WHOSE ` +
+        `THAT NUMBER IS — there is no virtual_account_number row for it, though ${mapped} ` +
+        `number(s) are mapped. It is most likely the programme's own shared FBO number, which is ` +
+        `deliberately mapped to nobody. NOTHING WAS POSTED and no balance reflects it. An ` +
+        `operator must attribute it by hand, or send it back — and sending a wire back is ` +
+        `ORIGINATING A NEW PAYMENT, because a Fedwire transfer is final on receipt. ` +
+        `creditInboundWire() books it the moment somebody says whose it is; what this consumer ` +
+        `will not do is guess.`,
+    );
+  }
+
+  /* ---- it is somebody's, so book what the object asserts -------------------- */
+
+  const credit = inboundCredit(inbound);
+  if (credit === null) {
+    // No `acceptance` block: Increase has not put the money in the FBO account,
+    // so there is no receipt to book and the value date the table names does
+    // not exist yet. Park rather than invent one.
+    return parked(
+      "inbound_wire_acceptance",
+      inbound.id,
+      `inbound wire ${inbound.id} is attributed to ${owner.legalName} but carries no ` +
+        `'acceptance', so Increase has not credited the FBO account and there is no accepted_at ` +
+        `to date the entry with — rail_event_semantics takes this credit's value date from ` +
+        `payload.acceptance.accepted_at. Status is '${inbound.status}'. NOTHING WAS POSTED.`,
+    );
+  }
+
+  const posted: string[] = [];
+
+  try {
+    const receipt = await creditInboundWire({
+      businessId: owner.businessId,
+      credit,
+      conn,
+    });
+    posted.push(
+      `${INBOUND_OBJECT}.created @ ${receipt.valueDate} -> ${receipt.entryId} ` +
+        `(DR 1110 / CR 2100 ${owner.legalName}, ${receipt.amountCents} cents; hold ` +
+        `${receipt.holdId} ${receipt.availableImmediately ? "released on arrival" : "HELD"}` +
+        `${receipt.created ? "" : "; already booked, nothing posted twice"})`,
+    );
+
+    if (reversal !== null) {
+      // WE SENT IT BACK. A production `POST /inbound_wire_transfers/{id}/reverse`
+      // is this bank originating a payment in the other direction, so it is a
+      // NEW entry at ITS OWN value date — never an edit of the credit, and never
+      // backdated to the arrival, which provably happened.
+      const returned = await debitReturnedInboundWire({
+        businessId: owner.businessId,
+        inboundTransferId: inbound.id,
+        amountCents,
+        reversedAt: reversal.reversed_at,
+        reason: reversal.reason,
+        conn,
+      });
+      posted.push(
+        `${INBOUND_OBJECT}.updated/reversed @ ${returned.valueDate} -> ${returned.entryId} ` +
+          `(DR 2100 ${owner.legalName} / CR 1110, ${returned.amountCents} cents, reason ` +
+          `'${reversal.reason}')`,
+      );
+    }
+  } catch (thrown) {
+    // A REFUSAL IS A PARK, NOT A FAILURE. `WireBookingRefused` carries a code
+    // and a sentence about a state a human has to change — a business with no
+    // deposit leaf, an availability policy nobody wrote. Retrying it eight
+    // times and dead-lettering would bury the sentence. Anything else is a
+    // genuine fault and goes up, where dispatch retries it.
+    if (!(thrown instanceof WireBookingRefused)) throw thrown;
+    return parked("inbound_wire_booking", `${thrown.code}:${inbound.id}`, thrown.message);
+  }
+
+  ctx.logger.info("increase.inbound_wire_transfer.applied", {
+    inboxId: args.event.id,
+    transferId: inbound.id,
+    businessId: owner.businessId,
+    accountNumber: `${owner.routingNumber}/${owner.accountNumber}`,
+    amountCents: String(amountCents),
+    posted,
+  });
+
+  // Naming the transfer AND the mapping wakes every sibling delivery parked on
+  // either — including the ones that parked under the old, now-false reason.
+  return processed([
+    { kind: "inbound_wire_transfer", ref: inbound.id },
+    { kind: "inbound_wire_account_mapping", ref: inbound.id },
+    { kind: "inbound_wire", ref: inbound.id },
+  ]);
 }
 
 /* -------------------------------------------------------------------------- */

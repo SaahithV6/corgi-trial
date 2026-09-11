@@ -599,9 +599,21 @@ const FRESHNESS_NOTE: Record<string, string> = {
  *
  * IT IS NOT THE CONTROL, and it must not be mistaken for one. A POST with any
  * beneficiary at all still reaches `gatePaymentOnPayee()` inside the write
- * transaction, and a wire still reaches `resolveWireBeneficiary()` before
- * anything is put on Fedwire. This is the same refusal, moved to the front,
- * where it costs a clerk nothing instead of costing two approvers their time.
+ * transaction, which refuses a beneficiary that is not on the confirmed book
+ * (`PAYEE_WIRE_PAYEE_NOT_ON_BOOK`) and refuses one carrying a bank the book
+ * does not confirm for them (`PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED`); and a
+ * wire still reaches `resolveWireBeneficiary()` before anything is put on
+ * Fedwire. This screen is not the only door — the public API and the MCP write
+ * tool reach `requestPayment()` without passing this way — so the picker is
+ * the same refusal moved to the front, where it costs a clerk nothing instead
+ * of costing two approvers their time.
+ *
+ * WHY THE NUMBER IS POSTED AT ALL rather than looked up at send time: it is
+ * covered by `payment_instruction.content_hash`, so the bank two approvers
+ * signed for is the bank the money goes to. The argument is in the header of
+ * `src/lib/payees/gate.ts`. This field is therefore a COPY of the book's
+ * number and never a clerk's typing, which is why it is a hidden input
+ * derived from the pick.
  */
 function WireBranch({
   payees,
@@ -620,7 +632,7 @@ function WireBranch({
     <div className="space-y-4">
       <Field
         label="Beneficiary — from the confirmed payee book"
-        hint="A wire cannot be recalled, so this rail will not address a beneficiary nobody has checked. originateApprovedWire() refuses one that is not on this business's book — with a free-text field that refusal arrives after two approvals and a ledger entry, so the choice is made here instead."
+        hint="A wire cannot be recalled, so this rail will not address a beneficiary nobody has checked. gatePaymentOnPayee() refuses one that is not on this business's book, and refuses a bank the book does not confirm for them; originateApprovedWire() checks the same thing again at the moment the money leaves. With a free-text field the first of those refusals arrives after two approvals and a ledger entry, so the choice is made here instead."
       >
         <select
           name="wirePayeeId"

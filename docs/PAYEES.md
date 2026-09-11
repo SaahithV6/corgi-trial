@@ -615,11 +615,141 @@ everything is what got us here:
 
 Both of those are ANSWERS, not failures: a deposit account with no business row
 cannot have a payee book, and an unregistered destination is deliberately
-allowed. **What it can let through:** a payment to a beneficiary nobody has ever
+allowed. **What it can let through:** an ACH payment to a beneficiary nobody has ever
 checked, with nothing but the ABA arithmetic in front of it. On ACH that is the
-accepted trade and the reasoning is below. On WIRE it is not — and it is closed
-one layer down rather than here, because `resolveWireBeneficiary()` refuses to
-address a Fedwire message to a beneficiary that is not on the confirmed book.
+accepted trade and the reasoning is below. **On WIRE neither of those zero-row
+outcomes is an answer any more** — both are `PAYEE_WIRE_PAYEE_NOT_ON_BOOK`, at
+this gate, as of §5c. It used to be closed one layer down instead, by
+`resolveWireBeneficiary()` refusing to address a Fedwire message to a
+beneficiary that is not on the confirmed book; that refusal still exists and
+now has a twin at the front door.
+
+### 5c. WHERE A WIRE'S ABA COMES FROM — a design conflict, decided
+
+Decided 2026-09-11. Two defensible stories were live at once, which is worse
+than either of them being wrong.
+
+* **The rail's story.** `resolveWireBeneficiary()` resolved the wire ABA **from
+  the confirmed payee book** at send time and refused a beneficiary nobody had
+  checked, so `src/lib/rails/wire/outbound.integration.test.ts` deliberately
+  raised a BIC-only wire. Its argument: a wire beneficiary's bank details come
+  from the book, not from whoever typed the instruction.
+* **The gate's story.** §5a had just added `wireRoutingNumber` to the
+  destination and refused a wire without one, so that a wire is validated
+  against the number it will actually be sent to.
+
+Four of that suite's six tests were red on the disagreement.
+
+**The decision: the book is authoritative, AND the instruction carries a copy
+of the book's number.**
+
+The deciding argument is **maker-checker**, and it is not about payees at all.
+`payment_instruction.content_hash` is what an approver must cite — the
+approve-the-hash trigger in 0001 enforces it — and the hash covers
+`counterparty`. Leave the ABA off the instruction and the single most important
+fact about a wire, *which bank receives the money*, sits **outside the thing
+two humans signed**, re-resolved later from a table that grows rows. The payee
+book is append-only but it is not frozen: archive a payee, append a same-name
+same-last-four payee at a different bank, and an already-approved wire
+addresses itself somewhere new with no approval having changed, because no
+approval ever covered it. A control that can be stepped around by appending a
+row is not a control.
+
+So the number rides on the instruction, inside the hash, on the approver's
+screen — and **the gate is what proves it came from the book**:
+
+| Code | When |
+| --- | --- |
+| `PAYEE_WIRE_PAYEE_NOT_ON_BOOK` | No confirmed, unarchived wire payee matches `(rail = 'wire', holderName, accountNumberLast4)` — the same predicate `resolveWireBeneficiary()` matches on, and now literally the same function, `loadWireBeneficiaries()` in `store.ts`. Also the answer when the account has no business at all. |
+| `PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED` | The beneficiary matches, but the instruction names a bank the book does not confirm for them. The message names the number that *is* confirmed. |
+
+Both of these refusals already existed — inside `originateApprovedWire()`,
+**after two approvals and a ledger entry**. They are the same refusals moved to
+the front, which is what docs/WIRES.md §7 asked for. The rail still makes them,
+because the gate speaks for the book on the way *in* and cannot speak for it at
+release time; and the rail gained one the gate cannot make,
+`WIRE_ROUTING_NUMBER_NOT_CONFIRMED`, for when the two moments disagree.
+
+**Why the matching rule leaves the routing number out.** Folding it into the
+match would collapse "you have never confirmed this bank for this beneficiary"
+into an indistinguishable "no such payee" — and those two sentences send a
+payments clerk to two different places. The first is the redirected invoice.
+
+**Nothing on the ACH path changed.** ACH still allows an unregistered
+destination, for the reasons in *What the gate deliberately does not refuse*
+below: those costs are costs of **delay**, and an ACH entry is recallable for
+two banking days. A wire is not, and *"urgent payment, right now, to a
+beneficiary nobody has seen before"* is a verbatim description of business
+email compromise. The asymmetry **is** the decision, and
+`payees.integration.test.ts` asserts it both ways: the same unknown beneficiary
+is refused on wire and allowed on ACH.
+
+**The schema field stays optional.** Ten `payment_instruction` rows predate it,
+including the $42.00 wire that really went out on Fedwire, and
+`parseDestination()` re-validates every stored destination on the way *out*.
+Requiring it would rewrite history by refusing to read it. The gate runs on the
+way in and never on the way out, so the enforcement is forward-only by
+construction.
+
+**And the second refusal that suite hit was not a defect.** Supplying the ABA
+reached `PAYEE_WARNING_UNACKNOWLEDGED`, and **measured** against the live book
+rather than guessed: the payee carries `TWIN_WITH_DIFFERENT_DETAILS`, because
+*Northwind Industrial LLC* is already on Ridgeline's book at `021000021`
+••3330 and the fixture registers the same beneficiary at ••0000. Same supplier,
+different account — exactly what the twin probe exists to raise, and exactly
+what a person on `/payees` would read and sign for before the payment went out.
+**The fixture was failing to acknowledge something a real user would see and
+click.** It now signs, with a named human who is *not* the maker and a sentence,
+because signing for a warning and raising a payment are different acts.
+
+### 5d. THE THIRD HOLE: `confirmPayee()` failed open *and wrote a permanent row*
+
+Fixed 2026-09-11. The same shape as §5b, one layer up, and strictly worse.
+
+```ts
+const book = await loadBookEntries(input.candidate.businessId, conn).catch(
+  () => [] as const,
+);
+```
+
+Every consequence of that one line ran downhill. `findConflictingTwin()` over an
+empty list finds nothing, so `TWIN_WITH_DIFFERENT_DETAILS` — the only
+account-number check a book of last-four digits can perform, and the one that
+catches the redirected invoice — **could not fire**. With no warn-level finding,
+`decide()` returned `verified`. And then `savePayee()` wrote that word into
+`payee_verification`, which is append-only by grant, by REVOKE and by 0001's
+`ledger_row_is_immutable()` trigger.
+
+**So a transient read failure became permanent evidence of a check that never
+happened**, on the book that gates money leaving the building. That is worse
+than §5b: there the payment proceeded and left nothing behind, here the row
+outlives the outage and can never be corrected, only superseded. Every screen,
+every freshness band and the payment gate itself then read a check nobody ran,
+and nothing downstream could tell the difference because nothing downstream was
+given one.
+
+**It now fails closed and writes nothing.** No payee, no verification, and
+deliberately no `payee_candidate_refusal` either — that table is for a candidate
+the *arithmetic* refused, which is the product of this feature; this candidate
+was not refused, it was **not examined**, and filing it as a caught typo would
+be a second false statement in place of the first. The caller gets
+`check: null`, `saved: null` and `PAYEE_BOOK_UNREADABLE` naming the leg that did
+not run.
+
+`ConfirmPayeeResult.check` is nullable for exactly this: `null` means *no check
+happened*, which is a different thing from a `PayeeCheck` with no findings.
+
+**The case that still proceeds, named exactly**, because a bare `catch` over
+everything is what got us here:
+
+> `loadBookEntries()` returning **zero rows**.
+
+An empty book is an ANSWER and it is the commonest one — it means this is the
+business's first payee, and `verifyPayee()` already says so in as many words.
+**What that can let through:** nothing the twin probe would have caught, because
+a twin needs an existing record to be a twin of. The `catch` conflated that
+answer with "the database did not answer", which are the two things this has to
+tell apart.
 
 ### The intermediate case, and why it is not an exception
 
@@ -658,17 +788,26 @@ soft reason, and it is not:
 | `NAME_NOT_VERIFIABLE` | note | The normal case for US ACH. A warning on every payment is no warning |
 | `DIRECTORY_CONFIRMED` / `NAME_CONFIRMED_BY_INSTITUTION` | note | Positive findings, recorded, stop nothing |
 
-### And two refusals the GATE makes that are not `PayeeFinding`s at all
+### And the refusals the GATE makes that are not `PayeeFinding`s at all
 
 `assertBlockIsArithmetic()` polices the ladder above, and it is about what a
-CHECK on a payee may claim. These two are decisions the payment gate makes about
-a payment, and they are deliberately not findings — a finding is a statement
-about a beneficiary, and neither of these is.
+CHECK on a payee may claim. These are decisions the payment gate makes about a
+payment, and they are deliberately not findings — a finding is a statement
+about a beneficiary, and none of these is.
+
+| Code | Rail | What it means |
+| --- | --- | --- |
+| `PAYEE_WIRE_ROUTING_NUMBER_MISSING` | wire | A wire carrying no 9-digit wire routing number. Both checks above are unrunnable on it, so it is refused rather than skipped. A BIC is not a substitute: it names a bank on SWIFT, and Fedwire does not read it. |
+| `PAYEE_WIRE_PAYEE_NOT_ON_BOOK` | wire | No confirmed wire payee matches `(rail, holderName, accountNumberLast4)`. ACH deliberately allows an unknown destination; this rail does not. See §5c. |
+| `PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED` | wire | The beneficiary IS on the book, at a different bank. Same supplier, different bank, is the redirected invoice. See §5c. |
+| `PAYEE_STANDING_CHECK_UNAVAILABLE` | both | The payee-book lookup threw. The payment is refused, and the message names which read failed. See §5b. |
+
+And one the CONFIRMATION step makes, which is not a finding either — it is the
+statement that there is no check to report:
 
 | Code | What it means |
 | --- | --- |
-| `PAYEE_WIRE_ROUTING_NUMBER_MISSING` | A wire carrying no 9-digit wire routing number. Both checks above are unrunnable on it, so it is refused rather than skipped. A BIC is not a substitute: it names a bank on SWIFT, and Fedwire does not read it. |
-| `PAYEE_STANDING_CHECK_UNAVAILABLE` | The payee-book lookup threw. The payment is refused, and the message names which read failed. See §5b. |
+| `PAYEE_BOOK_UNREADABLE` | `confirmPayee()` could not read the existing book, so the twin probe did not run. Nothing is written: no payee, no verification, no refusal row. See §5d. |
 
 ---
 
@@ -722,11 +861,14 @@ fails when they do.
 
 ### Which direction it fails in
 
-**Closed.** `gatePaymentOnPayee` never *throws* — every outcome is a value — but
-"never throws" is not "always proceeds", and conflating those two is what made
-this function a no-op on its own failure. A lookup that fails returns
-`PAYEE_STANDING_CHECK_UNAVAILABLE` and the payment is refused. §5b is the full
-argument, and the one case that still proceeds is named there.
+**Closed, in all three places it used to fail open.** `gatePaymentOnPayee`
+never *throws* — every outcome is a value — but "never throws" is not "always
+proceeds", and conflating those two is what made this function a no-op on its
+own failure. A lookup that fails returns `PAYEE_STANDING_CHECK_UNAVAILABLE` and
+the payment is refused; §5b is the full argument. `confirmPayee()` had the same
+shape one layer up and additionally recorded a permanent `verified` row for a
+check that could not complete; §5d. In both, the case that still proceeds is
+named exactly, because a bare `catch` over everything is what produced them.
 
 ### The screen
 
