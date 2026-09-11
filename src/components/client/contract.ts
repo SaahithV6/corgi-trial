@@ -143,7 +143,21 @@ export type ActivityRow = {
  * sides carry — not a guess made by matching amounts.
  */
 export type CardStory = {
+  /**
+   * The hold's own reference, PROVIDER-QUALIFIED: `lithic:auth-1789059056109-1`.
+   * `ensureAuthorization()` writes it as `${provider}:${providerAuthId}`.
+   * Kept for provenance; it is NOT the key the journal entry carries.
+   */
   readonly externalRef: string;
+  /**
+   * THE JOIN KEY — the provider authorisation id on its own, unqualified.
+   *
+   * `postCardMovement()` stamps the settlement's `journal_entry.external_ref`
+   * with `derived.providerAuthId` and nothing else, while the hold carries the
+   * same id behind a `lithic:` qualifier. One identifier, two spellings, and
+   * the screen that joined the two spellings directly never matched a row.
+   */
+  readonly providerRef: string;
   readonly descriptor: string;
   readonly authorisedCents: bigint;
   readonly clearedCents: bigint;

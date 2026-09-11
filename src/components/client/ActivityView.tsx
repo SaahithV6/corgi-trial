@@ -10,7 +10,7 @@ import {
 
 import type { ActivityRow, ActivityScreen, CardStory } from "./contract";
 import { ClientHeaderBar } from "./Chrome";
-import { cardStorySentence, clockSentence, entryHeadline, railWord } from "./language";
+import { clockSentence, entryHeadline, railWord } from "./language";
 import type { ClientView } from "./view-state";
 import { formatUsd } from "@/lib/format/money";
 
@@ -29,16 +29,22 @@ import { formatUsd } from "@/lib/format/money";
  * The settled amount is a journal line on the customer's account. The
  * authorised amount is not on the journal at all: it is a fold over the card
  * authorisation's event set, held in the memo book. They are joined on the
- * PROVIDER REFERENCE that both sides already carry — `journal_entry.
- * external_ref` and `hold.external_ref` — and on nothing else. Matching them by
- * amount and date is the join a reconciliation engine refuses to make, for the
- * reason that applies exactly here: two $73.40 card payments on the same day
- * are not the same payment.
+ * PROVIDER AUTHORISATION ID that both sides already carry — and on nothing
+ * else. Matching them by amount and date is the join a reconciliation engine
+ * refuses to make, for the reason that applies exactly here: two $73.40 card
+ * payments on the same day are not the same payment.
+ *
+ * The lookup key is `story.providerRef`, NOT `story.externalRef`. The hold
+ * spells that id `lithic:acc10f7c-…` and the settlement spells it `acc10f7c-…`;
+ * keying on the hold's spelling matched nothing on any live book and this
+ * sentence had never rendered. See the header of `readActivityScreen`.
  *
  * When there is no matching authorisation the row simply does not carry the
  * sentence. A force post — a settlement that arrives with no authorisation at
- * all — is a real case on this rail, and inventing an authorised figure for it
- * would be the screen making something up.
+ * all — is a real case on this rail, and there are 211 of them on this book.
+ * It DOES reach a hold, created `clearing_first`, so the story is found; but
+ * A(E) is zero because no authorisation event ever landed, and printing "held
+ * $0.00" would be the screen making something up. That case says so instead.
  *
  * ===========================================================================
  * BOTH CLOCKS, ALWAYS, WHEN THEY DIFFER
@@ -62,7 +68,7 @@ export function ActivityView({
   const { header, rows, cardStories } = screen;
 
   const byRef = new Map<string, CardStory>();
-  for (const story of cardStories) byRef.set(story.externalRef, story);
+  for (const story of cardStories) byRef.set(story.providerRef, story);
 
   // A VIEW over rows that are already scoped to this customer, not a scoping
   // step. The isolation happened in the WHERE clause that produced `rows`;
@@ -124,7 +130,29 @@ export function ActivityView({
                   <TransactionRow
                     key={`${row.entryId}:${row.bookingSeq}`}
                     row={row}
-                    story={row.externalRef === null ? undefined : byRef.get(row.externalRef)}
+                    // Card rows where money LEFT, and only those.
+                    //
+                    // Card rail, because a bare provider reference on another
+                    // rail is a different namespace and a chance collision
+                    // would attach a card's authorisation to a wire.
+                    //
+                    // Money out, because the sentence is about the settlement:
+                    // a refund and the reversal of a clearing share the same
+                    // authorisation and would each repeat "taken when it
+                    // settled" about a row on which nothing was taken.
+                    //
+                    // Originals, because a correction already says what it is
+                    // in its own headline, and three adjacent rows repeating
+                    // one authorisation's story is noise on the row that
+                    // matters. The settlement keeps it.
+                    story={
+                      row.rail !== "card" ||
+                      row.entryType !== "original" ||
+                      row.amountCents >= 0n ||
+                      row.externalRef === null
+                        ? undefined
+                        : byRef.get(row.externalRef)
+                    }
                   />
                 ))}
               </tbody>
@@ -143,6 +171,61 @@ export function ActivityView({
       </Note>
     </div>
   );
+}
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The two figures, in the customer's words, on the row they belong to.
+ *
+ * Every number here is read off the hold fold that `listHoldRows` already
+ * computed — A(E), C(E), H(E). Nothing is recomputed and no second definition
+ * of a hold is introduced; the only arithmetic is C(E) − A(E), which is the
+ * difference the customer is actually asking about and is not a hold.
+ *
+ * "More than expected" is the fuel pump over-capturing and the restaurant
+ * adding a tip — the everyday case, not an error — so it is worded as a fact
+ * rather than a warning. "Less than expected" is the same sentence with the
+ * comparison flipped, and it carries the remaining figure because that money
+ * is still withheld and the customer can see it missing from available.
+ *
+ * A FORCE POST GETS NO INVENTED FIGURE. A settlement that arrives with no
+ * authorisation behind it still creates a hold — `ensureAuthorization()` with
+ * `origin = 'clearing_first'` — so this function is reached with A(E) = 0.
+ * Quoting "held $0.00" would read as a fact about the authorisation, and there
+ * was no authorisation. It says that instead.
+ */
+function customerCardStory(story: CardStory): string {
+  const cleared = formatUsd(story.clearedCents);
+
+  if (story.authorisedCents <= 0n) {
+    return story.clearedCents > 0n
+      ? `Nothing was held for this one — it reached us without an authorisation, and ${cleared} was taken when it settled.`
+      : "Nothing was held for this one — it reached us without an authorisation.";
+  }
+
+  const held = `Held ${formatUsd(story.authorisedCents)} when it was authorised`;
+
+  if (story.clearedCents === 0n) {
+    return story.closed
+      ? `${held} · nothing was ever taken, and that money is yours again.`
+      : `${held} · nothing has settled yet, so ${formatUsd(story.remainingCents)} is still set aside.`;
+  }
+
+  const gap = story.clearedCents - story.authorisedCents;
+  const compared =
+    gap === 0n
+      ? "exactly what was expected"
+      : gap > 0n
+        ? `${formatUsd(gap)} more than expected`
+        : `${formatUsd(-gap)} less than expected`;
+
+  const tail =
+    story.closed || story.remainingCents === 0n
+      ? ""
+      : ` The remaining ${formatUsd(story.remainingCents)} is still set aside.`;
+
+  return `${held} · taken ${cleared} when it settled · ${compared}.${tail}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -177,12 +260,7 @@ function TransactionRow({
 
         {story === undefined ? null : (
           <p className="mt-1 max-w-prose text-xs leading-relaxed">
-            {cardStorySentence(
-              formatUsd(story.authorisedCents),
-              formatUsd(story.clearedCents),
-              formatUsd(story.remainingCents),
-              story.closed,
-            )}
+            {customerCardStory(story)}
           </p>
         )}
 

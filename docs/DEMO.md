@@ -53,11 +53,38 @@ side by side. See [`CORE-LOOP.md`](./CORE-LOOP.md).
 
 ---
 
-## 1. There is nothing to sign into
+## 1. Read anything. Sign in to do anything.
 
-The ops console is open. No email, no password, no magic link, and no seeded
-login to hand over — an authentication system was cut on the first day and the
-console has never had one.
+**This section said "there is nothing to sign into" until 15:23 on the last
+day, and it was true until then.** Authentication was cut at T+2h and rolled
+back at T+46h; the sentence outlived the decision by three commits, which is
+exactly the failure this repository spends its time hunting elsewhere. Corrected
+here rather than quietly deleted.
+
+The posture now:
+
+- **Every screen is READABLE with no credential at all** — the console included.
+  A reviewer arriving from a link can check every claim this repository makes
+  without anyone mailing them a secret.
+- **Every WRITE needs the console passphrase.** Approve a payment, issue a card,
+  run a reconciliation, set a limit: all refused without a session, server-side,
+  before the screen renders. `curl -X POST` any operator route and you get
+  `401` with `x-corgi-authz: deny; SIGN_IN_REQUIRED`.
+- **With the passphrase unset the console still READS and still refuses every
+  write** (`503 CONSOLE_NOT_CONFIGURED`). An unset secret closes the till; it
+  never opens it.
+
+Sign in at **`/signin`**. The passphrase is in the submission email, not in this
+repository — no passphrase literal exists in any tracked file, and the tests
+mint a throwaway one per run.
+
+The trade is real and is argued at the top of `docs/AUTH.md` rather than in a
+footnote: anyone with the link reads every business on this book, and with no
+per-visitor identity there is no record of who read what. That is not a small
+deviation for a bank — it is the absence of the most basic property such a
+console has. It was chosen because the data is a sandbox of seeded fixtures and
+because a reviewer who never signs in never sees the refusal, and a refusal
+nobody observes is indistinguishable from none.
 
 The submission asks for demo credentials for at least two roles, so here is the
 honest version of that: **the credential is a role switch in the header, and the
@@ -80,8 +107,10 @@ stranger is guaranteed to be standing on.
 
 > **Demo URL** — https://corgi-trial-psi.vercel.app
 >
-> There is no login. The console is open, and the two roles are a switch in the
-> top-right of every page, labelled **Acting as**.
+> **Reading needs nothing. Writing needs the passphrase in this email.** Sign in
+> once at `/signin`; the two roles are then a switch in the top-right of every
+> page, labelled **Acting as** — the switch selects WHICH PRINCIPAL you are, it
+> is not the credential.
 >
 > **Role 1 — Staff.** Do nothing. With no cookie the console acts as **Priya
 > Raman**, an operations analyst who can read every balance and prepare money

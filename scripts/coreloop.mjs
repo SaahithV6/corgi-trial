@@ -281,21 +281,87 @@ const HTTP_TIMEOUT_MS = 60_000;
 /** Every request this script makes. Counted, so the transcript can prove it. */
 let httpCalls = 0;
 
+/**
+ * THE OPERATOR SESSION, and why this script now has to hold one.
+ *
+ * The console went behind a passphrase. Reads stayed open; every WRITE needs a
+ * session cookie signed by the server, and an anonymous POST answers
+ * 401 SIGN_IN_REQUIRED. This script is nothing BUT writes — it opens an
+ * account, funds it, issues a card, raises a payment — so without a session
+ * every write leg dies at the door.
+ *
+ * The mechanism below is `scripts/verify-demo.mjs` step 0's, copied rather than
+ * reinvented: POST /signin with `$CONSOLE_PASSWORD`, keep the `corgi_console`
+ * cookie, send it on everything after. There is deliberately only one sign-in
+ * mechanism in this repository, and this is not a second one.
+ *
+ * The passphrase is read from this shell's environment. It is never a literal
+ * in this file, never printed, and never written to the transcript.
+ */
+let consoleSession = "";
+
+/**
+ * `null` once this run holds a session. Otherwise the SENTENCE naming why it
+ * does not — which every write leg prints as its own failure, by name.
+ *
+ * It is a FAILURE and not a skip. A skip would let seven legs fail one at a
+ * time with bare 401s and leave the reader to work out what they had in
+ * common; and a gate the checker cannot get past is the single thing the
+ * operator running it must be told, in one line, at the top.
+ */
+let authFailure = null;
+
 async function http(path, options = {}) {
   httpCalls += 1;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   try {
+    // The session rides ALONGSIDE whatever cookie a caller set for itself (the
+    // role switch sets `corgi_demo_role`) rather than replacing it: they are
+    // different things and this script needs both. Same composition as
+    // verify-demo's `req()`.
+    const supplied = options.headers?.cookie ?? "";
+    const cookie = [consoleSession, supplied].filter((c) => c !== "").join("; ");
     const res = await fetch(`${baseUrl}${path}`, {
       redirect: "manual",
       ...options,
       signal: controller.signal,
-      headers: { "cache-control": "no-cache", ...(options.headers ?? {}) },
+      headers: {
+        "cache-control": "no-cache",
+        ...(options.headers ?? {}),
+        ...(cookie === "" ? {} : { cookie }),
+      },
     });
     return { status: res.status, headers: res.headers, body: await res.text() };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * A non-200 from a write POST, described by its CAUSE rather than its number.
+ *
+ * 401 and 503 are statements about the DOOR, not about the subsystem behind
+ * it. Printing "the funding POST answered 401" sends a reader to debug the
+ * funding rail; printing this sends them to the passphrase, which is where the
+ * problem actually is.
+ */
+function postFailure(what, res) {
+  if (res.status === 401) {
+    return (
+      `${what} answered 401 SIGN_IN_REQUIRED — an AUTHENTICATION failure, not a finding about ` +
+      `the subsystem behind it. This run holds no operator session. ` +
+      (authFailure ?? "The corgi_console cookie was not sent, or the deployment did not accept it.")
+    );
+  }
+  if (res.status === 503) {
+    return (
+      `${what} answered 503 CONSOLE_NOT_CONFIGURED — an AUTHENTICATION failure: the DEPLOYMENT ` +
+      `has no CONSOLE_PASSWORD set, so its console is closed and no passphrase will open it. ` +
+      `Set CONSOLE_PASSWORD on the project and redeploy. See docs/AUTH.md.`
+    );
+  }
+  return `${what} answered ${res.status}`;
 }
 
 const cookieFor = (role) => (role ? { cookie: `corgi_demo_role=${role}` } : {});
@@ -476,6 +542,71 @@ async function submitForm(path, form, overrides, { role = null, actionId = null 
     html: res.body,
     state: res.status === 200 ? readActionState(res.body, { actionId: id, where: overrides }) : null,
   };
+}
+
+/**
+ * SIGN IN, THEN DRIVE. The first thing a person does, and now the first thing
+ * this script does.
+ *
+ * Mechanism copied verbatim from `scripts/verify-demo.mjs` step 0: read the
+ * server-action id off the live /signin page, POST the passphrase to it as
+ * multipart form data, keep the `corgi_console` cookie off the response.
+ *
+ * Returns `null` on success, or the sentence naming the failure. It never
+ * throws and it never prints the passphrase.
+ */
+async function signIn() {
+  const password = process.env.CONSOLE_PASSWORD;
+  if (password === undefined || password === "") {
+    return (
+      "the console passphrase is not set, so the write legs cannot run, and a skip is not a pass. " +
+      "CONSOLE_PASSWORD is absent from THIS SHELL's environment, so this run cannot sign in, and " +
+      "every write below would answer 401 SIGN_IN_REQUIRED at the door — which is an " +
+      "AUTHENTICATION failure and says nothing about KYB, funding, issuing or approvals. " +
+      "Export the value the deployment holds:  set -a; . ./.env; set +a   " +
+      "(or `export CONSOLE_PASSWORD=...`). See docs/AUTH.md."
+    );
+  }
+
+  let page;
+  try {
+    page = await getPage("/signin");
+  } catch (e) {
+    return `GET /signin failed (${e?.message ?? String(e)}), so this run cannot sign in`;
+  }
+  if (page.includes("CONSOLE_NOT_CONFIGURED")) {
+    return (
+      "the DEPLOYMENT has no CONSOLE_PASSWORD set, so its console is closed and no passphrase " +
+      "will open it. This is an AUTHENTICATION failure on the deployment, not a finding about " +
+      "anything behind the door. Set CONSOLE_PASSWORD on the project and redeploy. See docs/AUTH.md."
+    );
+  }
+
+  const id = page.match(/\$ACTION_ID_([a-f0-9]+)/);
+  if (id === null) {
+    return "GET /signin carries no server-action id, so there is no sign-in form to post the passphrase to";
+  }
+  const form = new FormData();
+  form.set(id[0], "");
+  form.set("passphrase", password);
+  const res = await http("/signin", { method: "POST", body: form });
+
+  const raw = res.headers.getSetCookie
+    ? res.headers.getSetCookie()
+    : [res.headers.get("set-cookie") ?? ""];
+  const set = raw.find((c) => c.startsWith("corgi_console="));
+  if (set === undefined) {
+    return (
+      `POST /signin answered ${res.status} and set no corgi_console cookie — the CONSOLE_PASSWORD ` +
+      `in this shell is not the passphrase this deployment holds. An AUTHENTICATION failure; ` +
+      `nothing behind the door was reached. See docs/AUTH.md.`
+    );
+  }
+  if (!/httponly/i.test(set)) {
+    return "the deployment's session cookie is not HttpOnly, so a visitor could mint one — refusing to drive writes through it";
+  }
+  consoleSession = set.split(";")[0];
+  return null;
 }
 
 /**
@@ -1020,27 +1151,80 @@ const candidates = await sql`
    WHERE dep.code = '2100' AND dep.closed_at IS NULL
    ORDER BY b.legal_name`;
 
+// Sign in BEFORE anything is pressed. Pressing the gate anonymously is what
+// produced `NO_STATE(401)` in the column headed by KYB codes, and sent a reader
+// to debug KYB when the actual defect was that nobody had signed in.
+authFailure = await signIn();
+
 const onboardingHtml = await getPage("/onboarding");
 const onboardingForms = parseForms(onboardingHtml);
 const gateAnswers = [];
 for (const candidate of candidates) {
   const form = findForm(onboardingForms, { where: { businessId: candidate.business_id } });
   if (form === null) {
-    gateAnswers.push({ ...candidate, allowed: false, code: "NO_GATE_CONTROL" });
+    // "I found no control to press" is not a KYB verdict, so it is not marked
+    // as a refusal. `answered: false` is what keeps it out of every sentence
+    // below that speaks about what the gate decided.
+    gateAnswers.push({
+      ...candidate,
+      answered: false,
+      allowed: false,
+      httpStatus: null,
+      code: "GATE_NOT_RENDERED",
+      why: `/onboarding renders no verification control for this business, so the gate was never pressed`,
+      message: "",
+    });
     continue;
   }
   const answer = await submitForm("/onboarding", form, {
     businessId: candidate.business_id,
     intent: "gate",
   });
+
+  /**
+   * THREE OUTCOMES, NOT TWO, AND THE THIRD IS THE ONE THAT WAS A LIE.
+   *
+   * `answered` means the gate action ran and returned a verdict. Only then is
+   * `allowed`/`code` a statement about KYB.
+   *
+   * When the POST is turned away at the door — 401 with no session, 503 with
+   * the deployment's passphrase unset — the gate was never reached. The old
+   * code wrote `NO_STATE(401)`, its own fallback for "I could not tell", into
+   * the same `code` field that otherwise carries `KYB_REJECTED` and
+   * `KYB_PENDING`, printed it under a column of KYB codes, and let a reader
+   * conclude the KYB subsystem had refused six businesses. It had not been
+   * asked. The label now names the door.
+   */
+  const answered = answer.state !== null;
+  const atTheDoor = answer.status === 401 || answer.status === 503;
   gateAnswers.push({
     ...candidate,
     actionId: form.actionId,
-    allowed: answer.state !== null && answer.state.status === "ok",
-    code: answer.state?.code ?? `NO_STATE(${answer.status})`,
+    answered,
+    allowed: answered && answer.state.status === "ok",
+    httpStatus: answer.status,
+    code: answered
+      ? answer.state.code
+      : atTheDoor
+        ? `SIGN_IN_REQUIRED(${answer.status})`
+        : `GATE_SILENT(${answer.status})`,
+    why: answered
+      ? null
+      : atTheDoor
+        ? `the POST was refused at the door with HTTP ${answer.status}; canTransact() never ran, so this run has NO KYB reading for this business`
+        : `the POST answered HTTP ${answer.status} and returned no action state; canTransact() may not have run, so this run has NO KYB reading for this business`,
     message: answer.state?.message ?? "",
   });
 }
+
+/**
+ * ALLOWED / REFUSED / UNKNOWN. The third is printed as loudly as the others
+ * precisely because it is the one that used to be dressed as the second.
+ */
+const gateMark = (a) => (a.answered ? (a.allowed ? "ALLOWED " : "REFUSED ") : "UNKNOWN ");
+
+/** Did the gate answer for ANY candidate? If not, this run knows nothing about KYB. */
+const gateWasReached = () => gateAnswers.some((a) => a.answered);
 
 /**
  * How close a refusal is to an allowance, so a run on a book where the gate
@@ -1056,7 +1240,11 @@ const GATE_RANK = {
   KYB_STATE_UNREADABLE: 5,
   KYB_REJECTED: 6,
 };
-const rankOf = (answer) => (answer.allowed ? -1 : (GATE_RANK[answer.code] ?? 9));
+// A gate that never answered is ranked as UNKNOWN (8), between the worst real
+// refusal and the truly unrecognised (9). It is emphatically NOT ranked as a
+// KYB refusal, because it is not one.
+const rankOf = (answer) =>
+  answer.allowed ? -1 : !answer.answered ? 8 : (GATE_RANK[answer.code] ?? 9);
 
 /**
  * How strong the WEAKEST leg's evidence is. Lower is stronger.
@@ -1124,7 +1312,12 @@ if (args.business !== null) {
   subject = chosen[0];
 }
 
-const foil = gateAnswers.find((c) => !c.allowed && c.business_id !== subject?.business_id);
+// A foil is a business the gate ACTUALLY REFUSED. One it never answered for is
+// not a foil — leg 1's claim is "refused with its code", and a business with no
+// reading has no code to be refused with.
+const foil = gateAnswers.find(
+  (c) => c.answered && !c.allowed && c.business_id !== subject?.business_id,
+);
 
 if (subject === undefined) {
   console.error("no business on this book holds both a 2100 deposit account and a 9100 memo account");
@@ -1139,7 +1332,7 @@ if (args.listSubjects) {
   console.log("");
   for (const c of ranked) {
     console.log(
-      `    ${(c.allowed ? "ALLOWED " : "REFUSED ")}${String(c.code).padEnd(22)}` +
+      `    ${gateMark(c)}${String(c.code).padEnd(22)}` +
         ` ${String(c.legal_name).padEnd(34)} evidence ${String(c.kyb_evidence).padEnd(10)}` +
         ` live legs ${c.live_legs}  registry ${c.registry_provider ?? "(none)"}` +
         ` / director ${c.director_provider ?? "(none)"}` +
@@ -1170,6 +1363,12 @@ console.log(`  providers     Lithic sandbox ${process.env.LITHIC_API_KEY ? "LIVE
   ` · Plaid ${process.env.PLAID_SECRET ? "LIVE" : "no key"}` +
   ` · drain ${process.env.DRAIN_TOKEN ? "token held" : "NO TOKEN"}`);
 console.log(`  env           ${envLoaded} values read from .env`);
+console.log(
+  `  session       ` +
+    (authFailure === null
+      ? GREEN("signed in — POST /signin with $CONSOLE_PASSWORD; corgi_console cookie held on every request below")
+      : RED("NONE — the write legs will FAIL by name, not skip")),
+);
 console.log(`  run           ${RUN}   started ${startedAt.toISOString()}`);
 console.log(THIN);
 console.log("  THE BUSINESS — every figure below belongs to this one entity");
@@ -1187,7 +1386,7 @@ console.log(
       "\n                      gate was still asked about every candidate below, live, first",
 );
 for (const answer of ranked) {
-  const mark = answer.allowed ? "ALLOWED " : "REFUSED ";
+  const mark = gateMark(answer);
   const role =
     answer.business_id === subject.business_id
       ? "  <- the subject"
@@ -1213,11 +1412,34 @@ if (subject.kyb_evidence === "simulated") {
   console.log(YELLOW("    the run demonstrates the gate rather than a real KYB check. That is a fact about"));
   console.log(YELLOW("    the book, not a pass: --list-subjects shows what else is here."));
 }
-if (!subject.allowed) {
+if (!gateWasReached()) {
+  // THE MISDIAGNOSIS THIS BLOCK EXISTS TO PREVENT.
+  //
+  // This used to print "The gate allows NO business on this book right now"
+  // whenever `allowed` was false — including when `allowed` was false only
+  // because every probe had been turned away at the door with a 401. A panel
+  // reading that line was sent to debug KYB. Nothing had asked KYB anything.
+  console.log("");
+  console.log(RED("    THE GATE WAS NEVER ASKED — nothing above is a KYB finding."));
+  console.log(
+    RED(`    Every probe was turned away before canTransact() ran (${subject.code}). The codes in`),
+  );
+  console.log(RED("    that column are this script saying IT COULD NOT TELL, not a verdict from the gate."));
+  if (authFailure !== null) {
+    console.log("");
+    for (const line of wrap(authFailure, WIDTH - 6, 0)) console.log(RED(`    ${line.trim()}`));
+  }
+  console.log("");
+  console.log(RED("    The write legs below FAIL by name on this. They do not skip: a skip is not a pass."));
+} else if (!subject.allowed) {
   console.log("");
   console.log(YELLOW("    The gate allows NO business on this book right now. The subject below is the one"));
   console.log(YELLOW(`    closest to allowed (${subject.code}); the legs that need a transactable business`));
   console.log(YELLOW("    will skip, and will say so."));
+} else if (!subject.answered) {
+  console.log("");
+  console.log(YELLOW(`    The gate answered for other businesses but not for ${subject.legal_name}:`));
+  console.log(YELLOW(`    ${subject.why}. This run carries NO KYB reading for the subject.`));
 }
 console.log(RULE);
 console.log("");
@@ -1256,7 +1478,19 @@ const carried = {
 
 if (want(1)) {
   await runLeg(LEGS[0], async (t) => {
-    if (foil === undefined) t.skip("this book holds only one business, so there is no unverified foil to refuse");
+    // The door, first and by name. Pressing the gate without a session answers
+    // 401 and returns no state, and EVERY sentence this leg would then print
+    // about KYB would be this script guessing. So it fails here, on the real
+    // cause, rather than four lines down on a symptom.
+    t.check(authFailure === null, authFailure);
+
+    if (foil === undefined) {
+      t.skip(
+        gateWasReached()
+          ? "no business on this book was REFUSED by the gate, so there is no unverified foil to refuse"
+          : "the gate answered for no business at all, so this run cannot name a foil it refused",
+      );
+    }
 
     // ---- the refusal, which is the interesting half ------------------------
     const onboarding = await getPage("/onboarding");
@@ -1268,8 +1502,12 @@ if (want(1)) {
       businessId: foil.business_id,
       intent: "gate",
     });
-    t.check(refusal.status === 200, `the gate POST answered ${refusal.status}`);
-    t.check(refusal.state !== null, "the gate action returned no state to the re-rendered page");
+    t.check(refusal.status === 200, postFailure("the gate POST", refusal));
+    t.check(
+      refusal.state !== null,
+      `the gate POST answered ${refusal.status} but the action returned no state to the re-rendered ` +
+        `page, so canTransact() gave this run NO reading — this is an unreadable response, not a KYB verdict`,
+    );
     t.check(
       refusal.state.status === "refused",
       `the gate ALLOWED ${foil.legal_name}: ${refusal.state.code}`,
@@ -1319,7 +1557,12 @@ if (want(1)) {
     const subjectForm = findForm(parseForms(onboarding), { where: { businessId: BIZ } });
     t.check(subjectForm !== null, `/onboarding renders no verification form for ${subject.legal_name}`);
     const allowed = await submitForm("/onboarding", subjectForm, { businessId: BIZ, intent: "gate" });
-    t.check(allowed.state !== null, "the gate action returned no state for the subject business");
+    t.check(allowed.status === 200, postFailure("the gate POST for the subject", allowed));
+    t.check(
+      allowed.state !== null,
+      `the gate POST for the subject answered ${allowed.status} and returned no action state, so ` +
+        `canTransact() gave this run NO reading for ${subject.legal_name} — unreadable, not refused`,
+    );
 
     if (allowed.state.status !== "ok") {
       const view = await sql`
@@ -1336,8 +1579,12 @@ if (want(1)) {
         ),
       );
       t.skip(
-        `the deployed gate currently refuses EVERY business on this book — ` +
-          gateAnswers.map((a) => `${a.legal_name}=${a.code}`).join(", ") +
+        `the deployed gate refuses every business it gave this run a reading for ` +
+          `(${gateAnswers.filter((a) => a.answered).length} of ${gateAnswers.length} candidates; the rest ` +
+          `it never answered for, which is not a refusal) — ` +
+          gateAnswers
+            .map((a) => `${a.legal_name}=${a.answered ? a.code : `no reading (${a.code})`}`)
+            .join(", ") +
           `. The refusal half of this leg is proven above; the allowance half needs a business ` +
           `canTransact() lets through, and the KYB legs are being re-observed live right now ` +
           `(v_business_kyb above is the current reading). Nothing here can manufacture one: a ` +
@@ -1372,6 +1619,10 @@ if (want(1)) {
 
 if (want(2)) {
   await runLeg(LEGS[1], async (t) => {
+    // The door, first and by name: this leg writes, and a write with no session
+    // is refused before the subsystem it names is ever reached.
+    t.check(authFailure === null, authFailure);
+
     const probe = await http("/funding", { headers: cookieFor(null) });
     if (probe.status !== 200) {
       t.skip(
@@ -1404,7 +1655,7 @@ if (want(2)) {
       valueDate: today,
       reference,
     });
-    t.check(sent.status === 200, `the funding POST answered ${sent.status}`);
+    t.check(sent.status === 200, postFailure("the funding POST", sent));
     t.check(sent.state !== null, "the funding action returned no state to the re-rendered page");
     t.check(
       sent.state.status === "ok",
@@ -1453,6 +1704,10 @@ if (want(2)) {
 
 if (want(3)) {
   await runLeg(LEGS[2], async (t) => {
+    // The door, first and by name: this leg writes, and a write with no session
+    // is refused before the subsystem it names is ever reached.
+    t.check(authFailure === null, authFailure);
+
     const page = await getPage(CONSOLE_PATH);
     const form = findForm(parseForms(page), { where: { businessId: BIZ }, has: ["formKey", "nickname"] });
     if (form === null) {
@@ -1461,7 +1716,7 @@ if (want(3)) {
 
     const nickname = `corgi core loop ${RUN}`;
     const issued = await submitForm(CONSOLE_PATH, form, { businessId: BIZ, nickname });
-    t.check(issued.status === 200, `the issue-card POST answered ${issued.status}`);
+    t.check(issued.status === 200, postFailure("the issue-card POST", issued));
     t.check(issued.state !== null, "the issue-card action returned no state to the re-rendered page");
     t.check(
       issued.state.status === "ok",
@@ -1516,8 +1771,15 @@ const CLEAR_CENTS = usdToCents(CLEAR_TEXT);
 
 if (want(4)) {
   await runLeg(LEGS[3], async (t) => {
+    t.check(authFailure === null, authFailure);
+
     if (carried.cardToken === null) {
-      t.skip("leg 3 produced no card token, so there is nothing to authorise against");
+      t.skip(
+        "leg 3 produced no card token, so there is nothing to authorise against" +
+          (results.get(3)?.error === null || results.get(3) === undefined
+            ? ""
+            : ` — leg 3's own reason: ${results.get(3).error}`),
+      );
     }
 
     /* ---- the authorisation ------------------------------------------------ */
@@ -1537,7 +1799,7 @@ if (want(4)) {
       mcc: "5542",
       descriptor,
     });
-    t.check(authed.status === 200, `the authorise POST answered ${authed.status}`);
+    t.check(authed.status === 200, postFailure("the authorise POST", authed));
     t.check(authed.state !== null, "the authorise action returned no state");
     t.check(
       authed.state.status !== "refused",
@@ -1615,7 +1877,7 @@ if (want(4)) {
       transactionToken: txnToken,
       amount: CLEAR_TEXT,
     });
-    t.check(cleared.status === 200, `the clearing POST answered ${cleared.status}`);
+    t.check(cleared.status === 200, postFailure("the clearing POST", cleared));
 
     const settled = await waitForDrained("the clearing webhook", async () => {
       const [row] = await sql`
@@ -1740,12 +2002,28 @@ if (want(4)) {
 
 if (want(5)) {
   await runLeg(LEGS[4], async (t) => {
+    // The door, first and by name. This leg used to reach the block below with
+    // `subject.allowed === false` and report "the deployed gate refuses
+    // <business> with NO_STATE(401)" — a sentence about KYB, built out of an
+    // authentication failure, printed as the reason maker-checker was unproven.
+    t.check(authFailure === null, authFailure);
+
+    if (!subject.answered) {
+      t.skip(
+        `this run holds NO gate reading for ${subject.legal_name}: ${subject.why}. Whether the gate ` +
+          `would allow a payment for this business is therefore unknown here — it was not refused, ` +
+          `it was not asked. The maker-checker machinery is unaffected and unproven by this run.`,
+      );
+    }
+
     if (!subject.allowed) {
       t.skip(
         `the deployed gate refuses ${subject.legal_name} with ${subject.code}, and requestPayment() ` +
           `re-reads that gate inside the write transaction, so no payment instruction can be raised ` +
-          `for this business at all. There is no second business on this book the gate allows either ` +
-          `(${gateAnswers.map((a) => `${a.legal_name}=${a.code}`).join(", ")}). The maker-checker ` +
+          `for this business at all. No other business on this book was ALLOWED either ` +
+          `(${gateAnswers
+            .map((a) => `${a.legal_name}=${a.answered ? a.code : `no reading (${a.code})`}`)
+            .join(", ")}). The maker-checker ` +
           `machinery is unaffected and unproven by this run; leg 1 names what is blocking it.`,
       );
     }
@@ -1785,7 +2063,7 @@ if (want(5)) {
       },
       { role: "staff" },
     );
-    t.check(raised.status === 200, `the raise POST answered ${raised.status}`);
+    t.check(raised.status === 200, postFailure("the raise POST", raised));
     t.check(raised.state !== null, "the raise action returned no state");
     t.check(
       raised.state.status === "ok",
@@ -1835,7 +2113,7 @@ if (want(5)) {
       { instructionId: instruction.id, contentHash: controlMap(makerForm).contentHash, intent: "approve" },
       { role: "staff" },
     );
-    t.check(selfTry.status === 200, `the approve POST answered ${selfTry.status}`);
+    t.check(selfTry.status === 200, postFailure("the approve POST", selfTry));
     t.check(selfTry.state !== null, "the decision action returned no state");
     t.check(
       selfTry.state.status === "refused",
@@ -1951,7 +2229,7 @@ if (want(5)) {
       },
       { role: "approver" },
     );
-    t.check(approved.status === 200, `the second approver's POST answered ${approved.status}`);
+    t.check(approved.status === 200, postFailure("the second approver's POST", approved));
     t.check(
       approved.state !== null && approved.state.status === "ok",
       `the second approver was refused: ${JSON.stringify(approved.state).slice(0, 220)}`,
@@ -1997,8 +2275,15 @@ const RETURN_CENTS = usdToCents(RETURN_TEXT);
 
 if (want(6)) {
   await runLeg(LEGS[5], async (t) => {
+    t.check(authFailure === null, authFailure);
+
     if (carried.cardToken === null) {
-      t.skip("leg 3 produced no card, so there is no transaction to correct");
+      t.skip(
+        "leg 3 produced no card, so there is no transaction to correct" +
+          (results.get(3)?.error === null || results.get(3) === undefined
+            ? ""
+            : ` — leg 3's own reason: ${results.get(3).error}`),
+      );
     }
     if (!process.env.LITHIC_API_KEY) {
       t.skip("LITHIC_API_KEY is not in this environment, so the provider cannot be asked to reverse anything");
@@ -2575,6 +2860,15 @@ console.log(RULE);
 console.log("");
 console.log(DIM("  A SKIP is not a pass. It means the leg could not be driven through the deployed"));
 console.log(DIM("  surface in this run, and the reason above names exactly what is missing."));
+if (authFailure !== null) {
+  console.log("");
+  console.log(RED("  AND NEITHER IS A 401 A VERDICT ABOUT ANYTHING BEHIND THE DOOR."));
+  for (const line of wrap(authFailure, WIDTH - 4, 0)) console.log(RED(`  ${line.trim()}`));
+  console.log(
+    DIM("  Nothing above is a finding about KYB, funding, card issuing or approvals: this run"),
+  );
+  console.log(DIM("  never reached them."));
+}
 console.log("");
 
 await sql.end();

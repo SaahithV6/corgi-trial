@@ -316,13 +316,53 @@ function toActivityRow(row: LedgerLineRow): ActivityRow {
 }
 
 /**
+ * `lithic:auth-123` -> `auth-123`. The qualifier the HOLD adds, removed.
+ *
+ * Split on the FIRST colon only: a provider auth id is free to contain one and
+ * `${provider}:${providerAuthId}` is unambiguous from the left. A ref with no
+ * colon is returned unchanged rather than dropped — a hold written before the
+ * qualifier existed still deserves to match.
+ */
+function providerAuthRef(holdExternalRef: string): string {
+  const colon = holdExternalRef.indexOf(":");
+  return colon === -1 ? holdExternalRef : holdExternalRef.slice(colon + 1);
+}
+
+/**
  * Their transactions, and the card story behind the ones that have one.
  *
  * Two reads, both scoped, joined on the provider reference that BOTH SIDES
- * ALREADY CARRY — `journal_entry.external_ref` and `hold.external_ref`. It is
- * not a match on amount and date, which is the join a reconciliation engine
- * refuses to make for exactly the reason it would be wrong here: two $73.40
- * card payments on the same day are not the same payment.
+ * ALREADY CARRY. It is not a match on amount and date, which is the join a
+ * reconciliation engine refuses to make for exactly the reason it would be
+ * wrong here: two $73.40 card payments on the same day are not the same
+ * payment.
+ *
+ * ===========================================================================
+ * THE JOIN WAS RIGHT IN PRINCIPLE AND WRONG BY ONE PREFIX
+ * ===========================================================================
+ *
+ * This file used to key the stories on `hold.external_ref` verbatim and the
+ * view looked them up by `journal_entry.external_ref` verbatim. Both columns
+ * do carry the provider authorisation id — but not the same spelling of it:
+ *
+ *   hold.external_ref           `lithic:acc10f7c-751e-4c03-89c5-98c780c28b03`
+ *     `ensureAuthorization()` writes `${provider}:${providerAuthId}`, because
+ *     `hold_ref UNIQUE (kind, external_ref)` must not collide across providers.
+ *
+ *   journal_entry.external_ref  `acc10f7c-751e-4c03-89c5-98c780c28b03`
+ *     `postCardMovement()` stamps `derived.providerAuthId` bare — the same
+ *     `derived` object, in the same transaction, in `holds/apply.ts`.
+ *
+ * So the two sets never intersected and the sentence had never once fired on a
+ * live book: 0 of 216 card entries on Ridgeline Robotics matched, while 86 of
+ * them have an authorisation sitting right there. `providerRef` strips the
+ * qualifier the hold adds, which is the identity the provider issued and the
+ * one both writers derived their value from. `journal_entry.hold_id` would be
+ * exact and is the obvious candidate, but it is NULL on every settlement:
+ * `postHoldDelta()` passes `holdId`, `postCardMovement()` does not, so the
+ * financial leg genuinely does not carry it. Changing that is a write-path
+ * change to a book that is already posted; this is a read that agrees with
+ * what is on disk today.
  *
  * `accountCode: "2100"` is load-bearing. Without it the customer's own pot
  * sub-accounts (`2100.<uuid>`, migration 0015) and their memo holds would
@@ -358,6 +398,7 @@ export async function readActivityScreen(
       .filter((h) => h.kind === "card_auth")
       .map((h) => ({
         externalRef: h.externalRef,
+        providerRef: providerAuthRef(h.externalRef),
         descriptor: h.descriptor,
         authorisedCents: h.authorisedCents,
         clearedCents: h.clearedCents,

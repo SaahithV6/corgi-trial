@@ -1127,10 +1127,22 @@ point of a week-two list is that things leave it:
   observation* beside the registry's answer rather than overwriting it. The
   alternatives were to weaken the gate or to give a fictional business a real
   company's LEI, and both were disqualifying.
-- **An authentication system.** Cut on day one and still cut. The role switcher
-  is a cookie, it is labelled as one in two file headers, it grants nothing, and
-  the function that replaces it is named in both. Building auth would consume a
-  day and prove nothing about a ledger.
+- **An authentication system.** Cut at T+2h. **Rolled back at T+46h and
+  SHIPPED** — and this entry is corrected here because it said "still cut" for
+  three commits after it was not, which is the second time this document has
+  claimed a shipped feature was cut. The first time was the reason it was
+  rewritten. A cut list that lags the build is worse than none, because it is
+  read as the honest part.
+  What shipped: `src/lib/auth/session.ts` (HMAC-signed, HttpOnly, Secure,
+  SameSite=lax, 8h), `/signin`, a middleware gate in front of every write, and
+  `assertOperatorAction()` re-deriving the decision inside 37 server actions
+  because a server action posts to whatever page the browser is on and a
+  path-shaped guard cannot see it.
+  What is still genuinely cut, named in `docs/AUTH.md` rather than here: per-user
+  identity, hashed credentials, MFA, a revocable session store, and sign-in rate
+  limiting. It is ONE SHARED PASSPHRASE. And reads are deliberately open to
+  anyone holding the link — a trade, argued at the top of that document, so a
+  reviewer can check every claim in this repository without a secret.
 - **Raising the Lithic sandbox daily cap *as an agent*.** §3.4, and the rule is
   unchanged by the fact that the cap was raised: `PATCH /v1/accounts/{token}` is
   blocked by the permission classifier on purpose, changing a provider account's
