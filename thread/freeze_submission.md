@@ -37,6 +37,22 @@ invited.
 
 VIDEO_LINK_HERE
 
+**3:43, one take, no cuts** — one browser window driven end to end, customer side
+then operator side, every figure read live off the deployed system:
+
+| | | |
+|---|---|---|
+| 0:00 | `/client` | availability as five subtracted terms, and the note saying the total is the database's answer rather than the page's sum |
+| 0:40 | `/client/activity` | a $50.00 authorisation that settled at $73.40, named on the row — plus the reversal and re-presentation beside it |
+| 1:20 | `/client/statements` | a corrected day rebuilt twice and matching the fingerprint stored at issue, with both earlier versions still readable |
+| 2:00 | `/approvals` | Approve live on a colleague's payment, greyed on your own — refused by `assert_maker_checker()` with SQLSTATE 42501, not by the UI |
+| 2:32 | `/breaks` | one unexplained break, classified and aged on the value-date clock rather than hidden |
+| 3:04 | `/chaos` | the chaos toggles, and the invariant views measured live while they are armed — including one red left on screen |
+
+The walkthrough was driven by browser automation, so Chrome shows its
+"started debugging this browser" notice across the top throughout. Nothing on the
+pages is stubbed.
+
 **4 · Evidence of the live integrations**
 
 `/api/health` **publishes the webhook delivery log itself**, publicly, with no
@@ -47,7 +63,13 @@ https://corgi-trial-psi.vercel.app/api/health
 It carries Lithic's latest delivery with our endpoint's own HTTP 202 and its
 timestamp, per-provider last-delivery and lag, and the unrounded backlog —
 parked and dead-lettered counts, not a rounded-up "all good". It cannot go
-stale the way a screenshot can. EVIDENCE_EXTRA_HERE
+stale the way a screenshot can.
+
+**You also have the console itself.** Every read surface is open without a
+credential — load any URL above and it renders. Authentication gates the *writes*:
+approving, releasing, arming chaos, editing controls. Sign in at `/signin` with the
+passphrase above and the same screens become operable. That is deliberate, and the
+argument for it is written at the top of `docs/AUTH.md`.
 
 ---
 

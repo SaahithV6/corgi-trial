@@ -1,83 +1,91 @@
-# The video — one continuous take, ~3:00
+# Narration — matched to the recording
 
-Against **https://corgi-trial-psi.vercel.app**, commit `826276a`. Five screens,
-no cuts. Times are cumulative from the start of the recording.
+Video: `2026-09-11 16-52-04.mp4` · **3:43** · 3200×2000 @ 30fps · one Chrome window,
+one tab, six screens, no cuts.
 
-Written to the length of the take, not to a plan. The brief's three
-hardest-graded claims are at **0:15, 0:55 and 1:25** — if anything gets trimmed
-it is the last screen, never those.
+Timecodes are where the screen *changes*, read off the recording itself. Each
+block is sized to be spoken inside its window at a normal pace (~150 wpm).
 
----
-
-**0:00 — 0:15 · `/client` loads**
-
-> "A business current account. Two surfaces over one ledger — what the customer
-> sees, and what the bank sees."
+> The walkthrough was driven by browser automation, which is why Chrome shows
+> "Claude started debugging this browser" across the top. Nothing on the pages is
+> stubbed — every figure is read live from the deployed system.
 
 ---
 
-**0:15 — 0:55 · the subtraction**  ← hold
+## 0:00 — `/client` · what you can actually spend  *(40s, ~95 words)*
 
-> "Sixty-seven thousand in the account. Ten nine-four-seven spendable. The
-> difference is on the page: card payments waiting to settle, money that landed
-> but hasn't cleared, payments already on their way out."
+The customer's own screen. One business, Ridgeline Robotics.
 
-> "That last line says it — *the database's own answer, not a total added up on
-> this page*. There is no `available` column in this database. It's one SQL
-> function with five terms, and every screen calls the same one."
+Availability here is not a column anybody writes. It's five terms, subtracted in
+front of you: sixty-seven seven fifty-nine booked, less twenty-four six ten
+waiting to settle, less twenty-nine seven-oh-one not yet cleared, less
+twenty-five hundred already on its way out. Ten thousand nine forty-seven,
+ninety-three.
 
----
+Read the line under it — that figure is the database's own answer, not a total
+this page added up. If the page and the ledger disagreed, the page would be the
+one that's wrong. So the page doesn't get a vote.
 
-**0:55 — 1:25 · `/client/activity`**  ← hold
+## 0:40 — `/client/activity` · when the merchant takes more than it asked for  *(40s, ~90 words)*
 
-> "A fuel pump authorised fifty dollars. Two days later it settled for
-> seventy-three forty — more than it asked for. The hold released exactly once,
-> the ledger posted the settled amount, and both numbers are on the record
-> because neither was ever wrong."
+A fuel pump authorises fifty dollars. It settles at seventy-three forty.
 
-> "The funding row underneath says *originated, not transmitted* — no entry went
-> to a network, and the screen won't imply it did."
+The row says exactly that: held fifty when it was authorised, took seventy-three
+forty when it settled — twenty-three forty more than expected. The customer
+doesn't reconcile anything; the difference is named on the line.
 
----
+Above it, the same clearing taken back and re-presented — a reversal tagged as a
+correction, and the refund leg beside it. Three rows, one story, nothing
+overwritten.
 
-**1:25 — 2:05 · `/client/statements`**  ← longest hold
+## 1:20 — `/client/statements` · a statement you can re-derive years later  *(40s, ~100 words)*
 
-> "A merchant took back a settlement and re-presented it for less. That day
-> shows all three: the original, the reversal, the re-book — and the closing
-> balance already carries the correction."
+The twenty-fifth of July. A day that closed, then got corrected.
 
-> "Nothing was edited. This ledger has no UPDATE and no DELETE on a money row
-> anywhere. The value date never moves; only the booking position does."
+Four legs: the funding credit, the original clearing, the reversal that took it
+back, the re-presentation at a hundred ninety-eight fifty.
 
-> "And it re-derives — rebuilt twice while this page loaded, same fingerprint
-> both times, matching the one stored when it was issued."
+Now the three hashes — rebuilt just now, rebuilt again a moment later, and the
+fingerprint stored the day it was issued. Identical. The day is frozen at booking
+position nine eighty-two, so rebuilding from the ledger there gives the same
+document every time.
 
----
+And both earlier versions of this day, still issued, still readable. A corrected
+statement is a new document, not an edit of the old one.
 
-**2:05 — 2:40 · `/approvals`**
+## 2:00 — `/approvals` · a rule the screen cannot bend  *(32s, ~80 words)*
 
-> "Three thousand two hundred, above the threshold. I raised it, so the row says
-> **that is you** and all three controls are dead."
+Same window, same tab. This is the ops console.
 
-> "The reason names it: this is not a rule the screen applies.
-> `assert_maker_checker()` refuses the insert with SQLSTATE 42501. The button is
-> disabled so you learn it here rather than after pressing it. The agent surface
-> obeys the same rule — 193 payments requested, zero approved."
+Priya Raman raised the top payment, so Approve and Reject are live. Dana Okonkwo
+raised the one below, and Dana is signed in — tagged "that is you" — so both are
+greyed.
 
----
+Read why. The initiator is never the checker, and this is *not* a rule the screen
+is applying: `assert_maker_checker()` refuses the insert with SQLSTATE 42501.
+Turn the UI off and the rule still holds.
 
-**2:40 — 3:00 · `/breaks`**
+## 2:32 — `/breaks` · reconciliation that classifies rather than hides  *(32s, ~80 words)*
 
-> "Last night's file against our ledger. One unexplained break, two hundred and
-> forty seventy-one — a row deliberately deleted from the file, and this is the
-> screen finding it and ageing it."
+One break, shown rather than swept. In the ledger, not in the file. Unexplained.
+Two hundred forty seventy-one outstanding.
 
-> "Six invariants are red right now and every one has a written argument beside
-> it. And this console is readable by anyone with the link, on purpose — nothing
-> can be *done* to the money without signing in."
+The age reads four hundred fifty-three days *ahead*, because an unexplained break
+is aged from its value date — how long the book has been wrong, and every
+statement issued since. A break already under correction is aged from when we
+learned. Two clocks, and the screen says which one it used.
 
----
+"The engine reported one; this screen classifies them and hides none."
 
-**One command, if they ask:** `pnpm confirm` — the brief, line by line, measured
-now. `node scripts/coreloop.mjs` — the seven arrows in ninety seconds; last run
-PASS 7 / FAIL 0 / SKIP 0.
+## 3:04 — `/chaos` · the invariants, measured while things break  *(39s, ~95 words)*
+
+Webhooks off. Settlement delayed. Deliveries duplicated. Settlement arriving
+before the authorisation it belongs to — each armed against our own outbox.
+
+Below them, the invariants: the same views `dbcheck` asserts, each of which must
+return zero rows, measured live rather than remembered. Every entry sums to zero.
+A released hold withholds nothing. No day re-priced by a rate that came later.
+
+And one red, left on screen — three hundred eleven rows under
+`v_refused_auth_hold`. It's on the register with a written argument, and it's
+showing because a dashboard that only renders its greens isn't evidence.
