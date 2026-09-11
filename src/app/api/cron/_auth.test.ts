@@ -131,8 +131,12 @@ describe("authoriseScheduled — the genuine caller is accepted", () => {
 });
 
 describe("middleware — x-vercel-cron never reaches a route handler", () => {
-  it("deletes a client-supplied x-vercel-cron from the forwarded request", () => {
-    const response = middleware(
+  // `middleware()` became async when the sign-in gate (control 3) shipped: the
+  // session signature is verified with `crypto.subtle`, which is the only HMAC
+  // available on both the Edge runtime and Node. The control asserted here is
+  // unchanged — awaiting the same call is the whole edit.
+  it("deletes a client-supplied x-vercel-cron from the forwarded request", async () => {
+    const response = await middleware(
       new NextRequest("https://example.test/api/drain", {
         headers: { "x-vercel-cron": "1", "x-vercel-id": "trace-1", authorization: "Bearer x" },
       }),
@@ -156,8 +160,8 @@ describe("middleware — x-vercel-cron never reaches a route handler", () => {
     expect(response.headers.get("x-middleware-request-authorization")).toBe("Bearer x");
   });
 
-  it("passes an ordinary request through untouched", () => {
-    const response = middleware(
+  it("passes an ordinary request through untouched", async () => {
+    const response = await middleware(
       new NextRequest("https://example.test/api/cron/holds", {
         headers: { authorization: "Bearer x" },
       }),

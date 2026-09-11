@@ -7,6 +7,7 @@ import { FOCUS_RING } from "../ui/primitives";
 
 import { NavLinks } from "./NavLinks";
 import { RoleSwitcher } from "./RoleSwitcher";
+import { SessionBadge } from "./SessionBadge";
 import { ScopeLine } from "./ScopeLine";
 import { ROLE_SUMMARY, type Role } from "./role";
 
@@ -77,8 +78,28 @@ export function AppHeader({ role }: { readonly role: Role }) {
 
         <NavLinks role={role} />
 
-        <div className="ml-auto flex items-center gap-4">
+        {/*
+          THE ROLE SWITCHER MUST COME FIRST IN THE DOM. Measured, not assumed:
+          putting `SessionBadge` above it broke the deployed demo checker on the
+          spot. `scripts/verify-demo.mjs` submits the no-JavaScript role switch
+          by scraping the FIRST `$ACTION_ID_…` out of the page — that is how a
+          browser-less client performs a server action — so a second <form>
+          rendered earlier in the markup silently steals the post. Step 9
+          ("the Staff button switches back") posted to `signOutAction` and got a
+          303 to /signin instead of a role cookie.
+
+          A comment rather than a test because the ordering is the fix and the
+          checker is the test: `verify-demo.mjs` fails loudly if this is ever
+          reordered, which is the right place for the alarm to live.
+
+          Reading order is also right this way round: what you are ACTING AS is
+          the control an operator uses constantly, and the session badge is
+          status. `SessionBadge` explains why the header now says two different
+          things at once.
+        */}
+        <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-2">
           <RoleSwitcher role={role} />
+          <SessionBadge />
         </div>
       </div>
 

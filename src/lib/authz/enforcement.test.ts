@@ -13,24 +13,81 @@
  * output is quoted in the report. An invariant never seen to fail is not
  * trusted here.
  */
+import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { middleware } from "@/middleware";
+import {
+  CONSOLE_NOT_CONFIGURED,
+  SESSION_COOKIE,
+  SIGN_IN_REQUIRED,
+  mintSession,
+} from "@/lib/auth/session";
 
 import { OPERATOR_ONLY } from "./policy";
 
 const ORIGIN = "https://corgi-trial-psi.vercel.app";
 
-function request(path: string, role?: string, method = "GET"): NextRequest {
+/**
+ * ============================================================================
+ * WHY THIS FILE NOW SIGNS IN FIRST
+ * ============================================================================
+ *
+ * Every check below used to run with no session, because there was nothing to
+ * sign into. `src/middleware.ts` control 3 now requires a verified session on
+ * every operator route, so an unauthenticated request to `/accounts` is
+ * refused BEFORE the role is read — which is the correct order and which made
+ * six assertions in this file fail for the right reason.
+ *
+ * The fix is not to weaken them. Each one is a claim about AUTHORISATION, and
+ * authorisation is what happens after you are through the door: so the
+ * requests carry a valid session cookie, and the gate itself is asserted
+ * separately in its own block at the bottom, including the two states that
+ * matter most — no session, and a forged one.
+ *
+ * The passphrase is generated per run. There is no credential literal in this
+ * repository and there must not be one.
+ */
+const PASSPHRASE = `test-${randomUUID()}`;
+let savedPassword: string | undefined;
+let session = "";
+
+beforeAll(async () => {
+  savedPassword = process.env["CONSOLE_PASSWORD"];
+  process.env["CONSOLE_PASSWORD"] = PASSPHRASE;
+  session = (await mintSession()) ?? "";
+  expect(session, "the test could not mint a session to sign in with").not.toBe("");
+});
+
+afterAll(() => {
+  if (savedPassword === undefined) delete process.env["CONSOLE_PASSWORD"];
+  else process.env["CONSOLE_PASSWORD"] = savedPassword;
+});
+
+function request(
+  path: string,
+  role?: string,
+  method = "GET",
+  options: { readonly signedIn?: boolean; readonly sessionValue?: string } = {},
+): NextRequest {
   const headers = new Headers();
-  if (role !== undefined) headers.set("cookie", `corgi_demo_role=${role}`);
+  const jar: string[] = [];
+  if (role !== undefined) jar.push(`corgi_demo_role=${role}`);
+  const token = options.sessionValue ?? (options.signedIn === false ? undefined : session);
+  if (token !== undefined) jar.push(`${SESSION_COOKIE}=${token}`);
+  if (jar.length > 0) headers.set("cookie", jar.join("; "));
   return new NextRequest(new URL(path, ORIGIN), { method, headers });
 }
 
 /** What the middleware did, in the two terms that matter. */
-async function run(path: string, role?: string, method = "GET") {
-  const res = await middleware(request(path, role, method));
+async function run(
+  path: string,
+  role?: string,
+  method = "GET",
+  options: { readonly signedIn?: boolean; readonly sessionValue?: string } = {},
+) {
+  const res = await middleware(request(path, role, method, options));
   return {
     status: res.status,
     authz: res.headers.get("x-corgi-authz"),
@@ -143,5 +200,95 @@ describe("the platform-header strip", () => {
     });
     const res = await middleware(req);
     expect(res.headers.get("x-stripped-request-headers")).toBe("x-vercel-cron");
+  });
+});
+
+describe("the sign-in gate", () => {
+  /**
+   * THE HOLE THIS CLOSES. Until control 3 shipped, every assertion above rested
+   * on a claim nobody verified: `corgi_demo_role` is a cookie a visitor sets on
+   * themselves, so anyone who knew its name was staff. These checks are the
+   * other half — that the claim is now only ever read from a request that
+   * proved it holds a credential.
+   */
+  it("REFUSES an operator route with no session at all, before the role is read", async () => {
+    const res = await run("/accounts", undefined, "GET", { signedIn: false });
+    expect(res.status, "/accounts answered an unauthenticated request").toBe(401);
+    expect(res.authz).toBe(`deny; ${SIGN_IN_REQUIRED}`);
+    expect(res.body).toContain("/signin");
+  });
+
+  it("REFUSES it however the role cookie is set — a claim is not a credential", async () => {
+    // The whole point: typing `corgi_demo_role=staff` used to BE the grant.
+    for (const role of ["staff", "approver", "customer", "not-a-role"]) {
+      const res = await run("/accounts", role, "GET", { signedIn: false });
+      expect(res.status, `corgi_demo_role=${role} got in without signing in`).toBe(401);
+      expect(res.authz, role).toBe(`deny; ${SIGN_IN_REQUIRED}`);
+    }
+  });
+
+  it("REFUSES a POST, so a server action cannot run unauthenticated either", async () => {
+    const res = await run("/payments", "staff", "POST", { signedIn: false });
+    expect(res.status).toBe(401);
+  });
+
+  it("REFUSES a FORGED session cookie", async () => {
+    const forged = `v1.${Date.now() + 3_600_000}.${randomUUID()}.${Buffer.from(
+      randomUUID(),
+    ).toString("base64url")}`;
+    const res = await run("/accounts", "staff", "GET", { sessionValue: forged });
+    expect(res.status, "a forged session was accepted").toBe(401);
+    expect(res.authz).toBe(`deny; ${SIGN_IN_REQUIRED}`);
+  });
+
+  it("REFUSES an EDITED session cookie — expiry moved, signature kept", async () => {
+    const [, , nonce, signature] = session.split(".");
+    const edited = `v1.${Date.now() + 999_999_999}.${nonce}.${signature}`;
+    const res = await run("/accounts", "staff", "GET", { sessionValue: edited });
+    expect(res.status).toBe(401);
+  });
+
+  it("gates an operator route that does not exist yet — default deny, unchanged", async () => {
+    const res = await run("/ledger-exports", "staff", "GET", { signedIn: false });
+    expect(res.status).toBe(401);
+  });
+
+  it("does NOT gate /, /signin or the customer surface", async () => {
+    // The hard constraint from docs/DEMO.md: `/` is where the role switch
+    // lives, `/signin` is where a signed-out visitor must be able to go, and a
+    // customer is not staff. All three answer with no session.
+    for (const path of ["/", "/signin", "/client", "/client/activity", "/client/open"]) {
+      const res = await run(path, "customer", "GET", { signedIn: false });
+      expect(res.status, `${path} was gated and must not be`).toBe(200);
+    }
+  });
+
+  it("still applies AUTHORISATION behind the gate: a signed-in customer is 403, not 401", async () => {
+    // Authentication and authorisation are two decisions and this proves the
+    // second did not get swallowed by the first.
+    const res = await run("/accounts", "customer");
+    expect(res.status).toBe(403);
+    expect(res.authz).toBe(`deny; ${OPERATOR_ONLY}`);
+  });
+
+  it("FAILS CLOSED when CONSOLE_PASSWORD is unset — 503, named, never open", async () => {
+    const saved = process.env["CONSOLE_PASSWORD"];
+    delete process.env["CONSOLE_PASSWORD"];
+    try {
+      const res = await run("/accounts", "staff");
+      expect(res.status, "an unconfigured deployment served the console").toBe(503);
+      expect(res.authz).toBe(`deny; ${CONSOLE_NOT_CONFIGURED}`);
+      expect(res.body).toContain("CONSOLE_PASSWORD");
+
+      // …and the customer surface is unaffected, which is the other half of
+      // "fail closed": closing the console must not take the product down.
+      const client = await run("/client", "customer");
+      expect(client.status, "an unconfigured deployment also closed /client").toBe(200);
+      expect((await run("/", "customer")).status).toBe(200);
+      expect((await run("/signin", undefined)).status).toBe(200);
+    } finally {
+      if (saved === undefined) delete process.env["CONSOLE_PASSWORD"];
+      else process.env["CONSOLE_PASSWORD"] = saved;
+    }
   });
 });

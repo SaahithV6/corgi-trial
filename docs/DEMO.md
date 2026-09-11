@@ -946,12 +946,38 @@ with neither. The cron itself runs daily rather than hourly, and the reason is i
 The published attack is the brief's own wording: *"Turn off your issuing
 provider's webhooks for five minutes mid-demo and ask what the customer sees."*
 
-**This step is performed by a person, on purpose.** It is deliberately NOT in
-`scripts/livefire.mjs`, and the reason is the whole argument for doing it by
-hand: a Lithic event subscription left disabled by a crashed, timed-out or
-`SIGKILL`ed test run is a broken card rail for the rest of the demo, and an
-automated suite cannot guarantee it will get to run its own restore. A person
-holding the restore command can.
+**This step is driven by a person, on purpose.** It is deliberately NOT in
+`scripts/livefire.mjs`: a Lithic event subscription left disabled by a crashed,
+timed-out or `SIGKILL`ed test run is a broken card rail for the rest of the
+demo, and a suite that fails in the middle of a batch cannot be trusted to get
+to its own restore.
+
+**It is now driven by `scripts/outage.mjs` rather than by loose curl**, because
+the objection above is about *guaranteeing the restore*, and the right answer to
+that is a script built around the guarantee rather than a person remembering a
+command. Five guarantees, in the order they fire:
+
+1. **Prove restore before breaking.** A real no-op PATCH and an independent GET
+   *before* anything is disabled. If the credential cannot PATCH, it refuses to
+   start and nothing is touched.
+2. **Every exit path restores** — `SIGINT`, `SIGTERM`, `SIGHUP`, normal
+   completion, a throw, an unhandled rejection — through one idempotent
+   `restore()` that verifies by GET rather than trusting the PATCH's response.
+3. **An in-process watchdog** (`--max-outage`, default 600 s, always forced
+   above `--auto`) restores even if the main flow is wedged.
+4. **A detached sentinel.** Handlers and timers both die with the process and
+   `kill -9` runs neither, so it forks a detached child whose *only* capability
+   is to re-enable. It survives SIGKILL of the parent and a closed terminal, and
+   because it can only turn the feed **on**, a spurious fire is harmless.
+5. **`--stop` is always the answer**, from any terminal, taking no state from a
+   previous run.
+
+What that still does not cover, plainly: power loss, or both processes killed.
+The manual restore in step 6 below remains the backstop, and the script prints
+it in red on its own failure path.
+
+The rehearsal script for this step — what to say, what to point at, and the
+exact words on the customer's screen — is **`docs/LIVE-FIRE.md` §7**.
 
 ## 9.1 What is safe here, and it was measured
 
@@ -1007,9 +1033,22 @@ curl -s "$BASE/api/health" | jq '.status,
   (.integrations.transactionInitiation.providers[] | select(.provider=="lithic") | {verdict, initiatedSinceLastDelivery})'
 ```
 
-**2 — Turn the webhooks off.** Note the `url` is REQUIRED by Lithic's schema on
-this PATCH; sending `{"disabled": true}` alone answers `400 "url" is a required
-property`.
+**2 — Turn the webhooks off.**
+
+```bash
+node scripts/outage.mjs --start      # disable and hold; Ctrl-C restores
+# or, fully unattended:
+node scripts/outage.mjs --auto 300   # disable, wait 5 min, restore, verify
+```
+
+It prints the preflight, the subscription token, the ASA enrolment, the detached
+sentinel's pid, and the state verified by GET at every step — so a panel watching
+can see the restore happen rather than take it on trust.
+
+By hand, if you must: the `url` is REQUIRED by Lithic's schema on this PATCH;
+sending `{"disabled": true}` alone answers `400 "url" is a required property`.
+This is also the exact shape of the RESTORE call, which is where that 400 would
+have hurt.
 
 ```bash
 curl -s -X PATCH \
@@ -1022,6 +1061,15 @@ curl -s -X PATCH \
 rather than a quiet hour. Use the **Simulate an authorisation** form on
 `/accounts` (a real `POST /v1/simulate/authorize`), or curl it. The card
 authorises — ASA is still enrolled — and the clearing webhook never arrives.
+
+> **On a FIXTURE card only — EIN shaped `00-000000N`.** Lithic does not
+> guarantee replay of events dropped while a subscription is disabled, so a
+> transaction made during the outage can lose its clearing webhook permanently,
+> and on an append-only book that is a permanent gap: a hold that never releases
+> and a settlement that never posts. **Do not use Ridgeline Robotics, Kettle &
+> Crumb Bakery or Silverline Freight** — those are the demo businesses the panel
+> is looking at. `scripts/outage.mjs` prints this warning before it disables
+> anything.
 
 **4 — Wait past 180s** (`staleAfterSeconds` for Lithic) and re-read health. The
 narrowing now has traffic to find:
@@ -1044,6 +1092,17 @@ narrow true thing — there may be events we have not heard about — not the wi
 false one, "your balance is wrong".
 
 **6 — RESTORE. Do this before anything else, and verify it.**
+
+```bash
+node scripts/outage.mjs --stop
+```
+
+It re-enables, then re-reads by an independent GET and prints
+`verified by GET  ENABLED  token ep_…`. It is idempotent and safe to run at any
+time, including when nothing is disabled. `--auto` and Ctrl-C on `--start` both
+do this for you; running it again costs a second and proves it.
+
+By hand, if the script is unavailable:
 
 ```bash
 curl -s -X PATCH \

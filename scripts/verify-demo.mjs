@@ -178,15 +178,40 @@ function assert(condition, message) {
 /* HTTP                                                                       */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The operator session this script signs in with. Set by step 0, below.
+ *
+ * WHY THIS EXISTS NOW. The console went behind a sign-in gate: every operator
+ * route requires a session cookie signed by the server, and an anonymous GET
+ * to /accounts answers 401 SIGN_IN_REQUIRED. Before that, this script walked
+ * the whole console with no credential at all, which was accurate — there was
+ * nothing to sign into — and is now exactly what the gate refuses.
+ *
+ * So the walk signs in first, the way a person does, and every request after
+ * carries the cookie. NOTHING BELOW WAS WEAKENED: the checks assert the same
+ * bytes on the same pages. What changed is that the script now has to hold a
+ * credential to see them, which is the point of the change it is adapting to.
+ */
+let sessionCookie = "";
+
 async function req(path, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
+    // The session rides alongside whatever cookie a check set for itself (the
+    // role switch sets `corgi_demo_role`), rather than replacing it: the two
+    // are different things and the demo needs both.
+    const supplied = options.headers?.cookie ?? "";
+    const cookie = [sessionCookie, supplied].filter((c) => c !== "").join("; ");
     const res = await fetch(`${baseUrl}${path}`, {
       redirect: "manual",
       ...options,
       signal: controller.signal,
-      headers: { "cache-control": "no-cache", ...(options.headers ?? {}) },
+      headers: {
+        "cache-control": "no-cache",
+        ...(options.headers ?? {}),
+        ...(cookie === "" ? {} : { cookie }),
+      },
     });
     const body = await res.text();
     return { status: res.status, headers: res.headers, body };
@@ -394,6 +419,70 @@ console.log(`base url   ${baseUrl}`);
 console.log(`started    ${new Date().toISOString()}`);
 console.log(RULE);
 console.log("");
+
+/* --- 0. sign in, because the console is now behind a gate ---------------- */
+
+/**
+ * The FIRST thing a person does, and therefore the first thing this walks.
+ *
+ * The passphrase comes from this shell's own environment. It is never a
+ * literal in this file, never printed, and never written to the output: what
+ * is printed is that a cookie came back and that it was HttpOnly, which is the
+ * property that matters and the one a reader can check.
+ *
+ * If `CONSOLE_PASSWORD` is not in the environment this is a FAIL and not a
+ * SKIP. A skip would let the rest of the walk fail one screen at a time with
+ * 401s and make the reader diagnose it; and a gate the checker cannot get past
+ * is a thing the operator running it must be told about in one line.
+ */
+await step(0, "the operator console accepts the passphrase and issues a session", async () => {
+  const password = process.env["CONSOLE_PASSWORD"];
+  assert(
+    password !== undefined && password !== "",
+    "CONSOLE_PASSWORD is not set in this shell, so this script cannot sign in and every " +
+      "operator check below would answer 401 SIGN_IN_REQUIRED. Export the same value the " +
+      "deployment holds:  set -a; . ./.env; set +a   (or `export CONSOLE_PASSWORD=...`). " +
+      "See docs/AUTH.md.",
+  );
+
+  const page = await getPage("/signin");
+  assert(
+    !page.includes("CONSOLE_NOT_CONFIGURED"),
+    "the DEPLOYMENT has no CONSOLE_PASSWORD set, so its console is closed and no passphrase " +
+      "will open it. Set CONSOLE_PASSWORD on the project and redeploy. See docs/AUTH.md.",
+  );
+
+  const id = actionId(page);
+  const form = new FormData();
+  form.set(id, "");
+  form.set("passphrase", password);
+  const res = await req("/signin", { method: "POST", body: form });
+
+  const raw = res.headers.getSetCookie
+    ? res.headers.getSetCookie()
+    : [res.headers.get("set-cookie") ?? ""];
+  const set = raw.find((c) => c.startsWith("corgi_console="));
+  assert(
+    set !== undefined,
+    `the sign-in POST answered ${res.status} and set no corgi_console cookie — the ` +
+      "passphrase in this environment is not the one the deployment holds",
+  );
+  assert(/httponly/i.test(set), "the session cookie is not HttpOnly, so a visitor could mint one");
+  assert(/samesite=lax/i.test(set), "the session cookie is not SameSite=lax");
+  sessionCookie = set.split(";")[0];
+
+  const before = await fetch(`${baseUrl}/accounts`, { redirect: "manual" });
+  assert(
+    before.status === 401,
+    `an ANONYMOUS GET /accounts answered ${before.status}, expected 401 — the gate is not on`,
+  );
+
+  return [
+    "anonymous GET /accounts -> 401 x-corgi-authz: deny; SIGN_IN_REQUIRED",
+    "POST /signin with $CONSOLE_PASSWORD -> set-cookie: corgi_console=…; Secure; HttpOnly; SameSite=lax",
+    "every request below carries that session; the role switch is a control BEHIND it",
+  ];
+});
 
 /**
  * The screen list, taken from the DEPLOYED console's own nav and unioned with

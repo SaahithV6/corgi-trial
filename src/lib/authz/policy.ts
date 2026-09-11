@@ -60,7 +60,22 @@ import { isOperator, type Role } from "./roles";
  * render a different page per principal, which is a page change and not a guard
  * change. It is the next thing to do, and it is named in the report.
  */
-const CUSTOMER_EXACT: readonly string[] = ["/"];
+/**
+ * `/signin` is here for a different reason from `/`, and it is the one entry
+ * that is not really about customers at all.
+ *
+ * This list is what `src/middleware.ts` control 3 treats as UNGATED, because
+ * the sign-in gate's population is `surfaceOf() === "operator"`. A sign-in
+ * page a signed-out visitor cannot reach is a locked door with the key inside,
+ * so `/signin` has to be outside the gate — by being on this list, where the
+ * exception is visible and `coverage.test.ts` checks it, rather than by a
+ * special case buried in the middleware that nobody would find again.
+ *
+ * It is `customer` rather than a third surface because this module has exactly
+ * two, and a page that takes a passphrase and renders nothing else leaks
+ * nothing to anyone: there is no figure on it, no business named, no row read.
+ */
+const CUSTOMER_EXACT: readonly string[] = ["/", "/signin"];
 
 /**
  * Path trees a customer may open.
@@ -183,6 +198,9 @@ export function visibleTo<T extends { readonly href: string }>(
  */
 export const ROUTE_SURFACE: Readonly<Record<string, Surface>> = {
   "/": "customer",
+
+  // The sign-in gate. Ungated by construction — see CUSTOMER_EXACT above.
+  "/signin": "customer",
 
   "/client": "customer",
   // The four that completed the journey on the last day. A customer could not

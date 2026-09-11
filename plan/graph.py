@@ -2037,6 +2037,26 @@ N("J9c", "client standing orders, with the refusal policy in the customer's word
        "size nobody expected, possibly doubled. the check is against AVAILABLE, "
        "so a payment can be refused on a day the ledger figure looked "
        "sufficient, and both figures plus the shortfall render on the row")
+N("J9d", "an orphan Lithic card is open at the issuer and bound to nothing",
+  "ops", 0, [], "human", ["ops"], "todo",
+  risk="card token dcb7f647-817a-401a-b78f-16ec48244012. the first issuance "
+       "run targeted the Pots fixture, which has a 2100 leaf and NO 9100 — so "
+       "Lithic created the card and registerCard() CORRECTLY REFUSED to bind "
+       "it, saying so loudly: any authorisation on it would park rather than "
+       "post. the refusal is the system working. it cannot reach any book "
+       "because it is unbound, but it is OPEN AT THE ISSUER and should be "
+       "closed. PATCH /v1/cards/{token} was blocked by the permission "
+       "classifier, so this is Saahith's to close or to leave knowingly")
+N("J9e", "pnpm confirm: the brief, line by line, measured now", "submission", 0,
+  [], "claude", ["scripts/confirm.mjs"], "done",
+  risk="eight verification scripts existed and every one answers a question you "
+       "had to already know to ask, because they are organised by MECHANISM and "
+       "the brief is organised by CAPABILITY. this maps the other way: each row "
+       "is a sentence from the brief and its verdict is a measurement taken "
+       "now. no verdict means 'looks right' — a row whose evidence cannot be "
+       "gathered prints UNPROVEN and says why, never inheriting a neighbour's "
+       "green. it proved itself on the first run: my self-approval query had a "
+       "wrong column name and it printed FAIL with a ? rather than a tick")
 N("J2f", "deploy and re-run every scoreboard against one sha",
   "release", 20, ["J2a", "J2b", "J2c", "J2d", "J2e"], "claude", [], status="done",
   risk="the honesty tools check documents against the DEPLOYMENT and never checked "

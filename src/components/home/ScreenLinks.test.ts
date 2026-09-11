@@ -44,6 +44,15 @@ describe("SCREENS", () => {
     ["/", "the front door itself"],
     ["/accounts/[accountId]", "reached by opening a row on /accounts"],
     ["/accounts/holds/[holdId]", "reached by opening a hold on an account"],
+    [
+      "/signin",
+      "the sign-in gate. Reached by BEING REFUSED — src/middleware.ts links it " +
+        "from the 401 it returns for an operator route with no session — and by " +
+        "the header's own 'Sign in' link. It is deliberately not a front-door " +
+        "tile: the front door is a console, every other entry on it is a screen " +
+        "with something to read, and a tile saying 'Sign in' on a page a signed-" +
+        "out visitor can already see would advertise a door rather than open one.",
+    ],
   ]);
 
   /**
