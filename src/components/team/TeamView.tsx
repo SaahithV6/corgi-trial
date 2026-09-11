@@ -154,7 +154,9 @@ export function TeamView({
 
       <Panel
         title="What the database refuses"
-        description="Three invariants \u2014 two from migration 0033, one from 0044 \u2014 counted on this request. A guard nobody queries is a comment, so the screen is one more place that queries them."
+        description={`${screen.invariants.length} invariant${
+          screen.invariants.length === 1 ? "" : "s"
+        }, counted on this request. A guard nobody queries is a comment, so the screen is one more place that queries them. The count is derived rather than written down, because this caption has twice named a number the list had already moved past.`}
       >
         <TableScroll>
           <table className="w-full border-collapse">
