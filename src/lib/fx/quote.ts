@@ -48,6 +48,8 @@
 
 import {
   BPS_DENOMINATOR,
+  FxCorridorError,
+  MAX_MINOR_EXPONENT,
   RATE_SCALE,
   SELL_CURRENCY,
   requireCorridor,
@@ -80,10 +82,28 @@ function divCeil(numerator: bigint, denominator: bigint): bigint {
   return (numerator + denominator - 1n) / denominator;
 }
 
-/** 10^n as a bigint. `n` is a minor-unit exponent, so 0..6. */
+/**
+ * 10^n as a bigint. `n` is a minor-unit exponent, so 0..`MAX_MINOR_EXPONENT`.
+ *
+ * ONE RANGE, NOT THREE. This guard used to admit 0..18 while its own doc
+ * comment said 0..6, the database CHECK on `fx_quote.buy_exponent` said 0..6,
+ * and `CORRIDORS` produced only {0, 2}. Three ranges for one quantity, and the
+ * widest of them was the one that actually ran — so the function that turns an
+ * exponent into a multiplier would happily have produced 10^18 for a column
+ * that cannot store the row.
+ *
+ * The bound is now `MAX_MINOR_EXPONENT` = 6, the database's own number, stated
+ * once in ./types.ts. It is deliberately WIDER than the {0, 2} the corridor
+ * list produces: this is general arithmetic and narrowing it to today's two
+ * corridors would be the "multiply by a hundred" shortcut the JPY corridor
+ * exists to prevent. What pins an exponent to a currency is migration 0063's
+ * composite CHECK, not a range.
+ */
 export function pow10(exponent: number): bigint {
-  if (!Number.isInteger(exponent) || exponent < 0 || exponent > 18) {
-    throw new Error(`pow10 expects an integer exponent in 0..18, got ${exponent}`);
+  if (!Number.isInteger(exponent) || exponent < 0 || exponent > MAX_MINOR_EXPONENT) {
+    throw new FxCorridorError(
+      `pow10 expects an integer minor-unit exponent in 0..${MAX_MINOR_EXPONENT}, got ${exponent}`,
+    );
   }
   return 10n ** BigInt(exponent);
 }

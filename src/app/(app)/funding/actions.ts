@@ -78,6 +78,8 @@ import { plaidErrorBody, PLAID_ITEM_ERROR_COPY } from "@/lib/rails/plaid/types";
 
 import { readBalanceCents, type BalanceCents } from "./live-source";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 /* -------------------------------------------------------------------------- */
 /* What the form gets back                                                    */
 /* -------------------------------------------------------------------------- */
@@ -288,6 +290,8 @@ export async function fundFromExternalBankAction(
   _previous: FundResult,
   formData: FormData,
 ): Promise<FundResult> {
+  await assertOperatorAction("fundFromExternalBankAction");
+
   const parsed = formSchema.safeParse({
     accountId: formData.get("accountId") ?? "",
     amount: formData.get("amount") ?? "",
@@ -670,6 +674,8 @@ export async function linkExternalBankAction(
   _previous: LinkResultView,
   formData: FormData,
 ): Promise<LinkResultView> {
+  await assertOperatorAction("linkExternalBankAction");
+
   const parsed = linkSchema.safeParse({ businessId: formData.get("businessId") ?? "" });
   if (!parsed.success) {
     return refusedLink(
@@ -818,6 +824,8 @@ export async function probeItemErrorsAction(
   _previous: ProbeResult,
   _formData: FormData,
 ): Promise<ProbeResult> {
+  await assertOperatorAction("probeItemErrorsAction");
+
   const client = new PlaidClient();
   if (!client.configured) {
     return {

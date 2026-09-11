@@ -113,6 +113,8 @@ import type {
   ConsoleIntent,
 } from "@/components/accounts/action-result";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 const PROVIDER = "lithic";
 
 /** Spend limit on a console-issued card. Per transaction, so nothing accrues. */
@@ -280,6 +282,8 @@ export async function issueCardAction(
   _previous: ConsoleActionResult,
   formData: FormData,
 ): Promise<ConsoleActionResult> {
+  await assertOperatorAction("issueCardAction");
+
   const intent: ConsoleIntent = "issue_card";
 
   const parsed = issueSchema.safeParse({
@@ -587,6 +591,8 @@ export async function simulateAuthorizeAction(
   _previous: ConsoleActionResult,
   formData: FormData,
 ): Promise<ConsoleActionResult> {
+  await assertOperatorAction("simulateAuthorizeAction");
+
   const intent: ConsoleIntent = "authorize";
 
   const parsed = authorizeSchema.safeParse({
@@ -754,6 +760,8 @@ export async function simulateClearingAction(
   _previous: ConsoleActionResult,
   formData: FormData,
 ): Promise<ConsoleActionResult> {
+  await assertOperatorAction("simulateClearingAction");
+
   const intent: ConsoleIntent = "clearing";
 
   const parsed = clearingSchema.safeParse({
@@ -919,6 +927,8 @@ export async function drainAction(
   _previous: ConsoleActionResult,
   formData: FormData,
 ): Promise<ConsoleActionResult> {
+  await assertOperatorAction("drainAction");
+
   const intent: ConsoleIntent = "drain";
 
   const parsed = drainSchema.safeParse({ businessId: formData.get("businessId") });

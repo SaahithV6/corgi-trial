@@ -321,10 +321,11 @@ export async function checkCommitmentFunds(
   if (accounts === null) {
     return fail(
       "FX_COMMITMENT_NO_ACCOUNT",
-      `That customer has no ${CUSTOMER_DEPOSIT_CODE} deposit account on this entity's chart, or ` +
-        `the chart has no ${FX_COMMITMENT_MEMO_CODE} memo account to hold against, so the ` +
-        "commitment cannot be withheld and the acceptance was not written. Open the customer's " +
-        "accounts on /accounts before quoting them.",
+      `Your account is not set up to hold a commitment: there is no ${CUSTOMER_DEPOSIT_CODE} ` +
+        `deposit account on this entity's chart, or no ${FX_COMMITMENT_MEMO_CODE} memo account ` +
+        "to hold against. Nothing was written — no acceptance, no hold, no rate locked. This " +
+        "one is ours to fix, not yours: contact support, and once your account is open, quote " +
+        "again at /client/payouts.",
     );
   }
 
@@ -337,9 +338,9 @@ export async function checkCommitmentFunds(
       `Accepting ${input.quoteRef} would commit ${usd(input.sellCents)} and only ` +
         `${usd(available)} is available, so the commitment was refused and nothing was ` +
         "written — no acceptance, no hold, no rate locked. An accepted quote reserves the " +
-        "money it commits, which is why an earlier acceptance still standing reduces what is " +
-        "available here. Fund the account, or settle or let lapse a commitment already " +
-        "standing, and quote again at /payouts.",
+        "money it commits, which is why an earlier acceptance of yours still standing reduces " +
+        "what is available here. Add funds, or settle or let lapse a commitment you already " +
+        "have standing, and quote again at /client/payouts.",
     );
   }
 

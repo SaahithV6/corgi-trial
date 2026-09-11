@@ -99,14 +99,52 @@ export function findCorridor(currency: string): Corridor | undefined {
   return CORRIDOR_BY_CODE.get(currency.toUpperCase());
 }
 
-/** Resolve a corridor, or throw. For a call site that has already decided. */
+/**
+ * Resolve a corridor, or throw an `FxCorridorError` carrying
+ * `FX_CORRIDOR_UNSUPPORTED`. For a call site that has already decided.
+ *
+ * THE ERROR IS NAMED because a bare `Error` here collapsed into whatever the
+ * entry point's catch-all happened to be — `INVALID_FORM` from a form action,
+ * `UNQUOTABLE` from the gate — so two different facts ("we do not pay into
+ * that currency" and "your form is malformed") reached the customer as one
+ * sentence. The code is a member of `FX_REFUSAL_CODES`, so a caller can
+ * surface it the same way it surfaces every other refusal.
+ */
 export function requireCorridor(currency: string): Corridor {
   const corridor = CORRIDOR_BY_CODE.get(currency.toUpperCase());
   if (corridor === undefined) {
-    throw new Error(`no corridor for '${currency}'; quotable: ${CORRIDOR_CODES.join(", ")}`);
+    throw new FxCorridorError(
+      `We do not pay out in '${currency}'. The currencies we quote today are ` +
+        `${CORRIDOR_CODES.join(", ")} — pick one of those and quote again at /client/payouts.`,
+    );
   }
   return corridor;
 }
+
+/**
+ * The exponents the corridor list actually produces, which is the ONLY set
+ * the arithmetic and the database have to agree on.
+ *
+ * THIS EXISTS BECAUSE THERE WERE THREE RANGES FOR ONE QUANTITY: `pow10`'s
+ * guard admitted 0..18, its own doc comment said 0..6, and the database CHECK
+ * on `fx_quote.buy_exponent` said 0..6 — while `CORRIDORS` has only ever
+ * produced {0, 2}. Three spellings of one fact is how a JPY quote at exponent
+ * 2 delivers a hundred times the yen it promised, so there is now one
+ * spelling: this set, `pow10`'s guard (below, 0..6, the widest the database
+ * will accept), and migration 0063's composite CHECK, which pins the exponent
+ * to the currency rather than to a range at all.
+ */
+export const CORRIDOR_EXPONENTS: ReadonlySet<number> = new Set(CORRIDORS.map((c) => c.exponent));
+
+/**
+ * The widest exponent any layer will accept: the database CHECK on
+ * `fx_quote.buy_exponent` (migration 0017 §3), which `pow10` now matches
+ * exactly. Wider than `CORRIDOR_EXPONENTS` on purpose — the arithmetic is
+ * general, the corridor list is what is actually quotable — and never wider
+ * than the column, so a value the arithmetic accepts is a value the row can
+ * hold.
+ */
+export const MAX_MINOR_EXPONENT = 6;
 
 /** The currency the customer always sends. There is no second one. */
 export const SELL_CURRENCY = "USD";
@@ -208,8 +246,8 @@ export function isCommitted(state: QuoteState): boolean {
 /**
  * Why a payout was refused by the quote gate.
  *
- * Five codes rather than one, for the reason `payee_directory_result` has four
- * values rather than two: these are five different facts with five different
+ * Nine codes rather than one, for the reason `payee_directory_result` has four
+ * values rather than two: these are nine different facts with nine different
  * remedies, and an operator holding a single `FX_QUOTE_INVALID` cannot tell
  * "you never quoted this" from "you quoted it and waited too long".
  *
@@ -246,6 +284,21 @@ export const FX_REFUSAL_CODES = [
    * hold cannot be placed is an acceptance that does not happen.
    */
   "FX_COMMITMENT_NO_ACCOUNT",
+  /**
+   * The currency or the minor-unit exponent is not one this system quotes.
+   *
+   * ADDED BECAUSE THE EIGHT CODES ABOVE ALL ASSUME A CORRIDOR. Every one of
+   * them describes something that happened to a quote we were willing to
+   * price; none of them can say "we do not pay into that currency at all", so
+   * `requireCorridor` threw a bare `Error` and the fact collapsed into
+   * `INVALID_FORM` or `UNQUOTABLE` depending on which entry point caught it.
+   * Those two sentences send a customer to two different places and only one
+   * of them is true.
+   *
+   * The message names its own fix — the quotable list and where to re-quote —
+   * which is the house form `FX_COMMITMENT_EXCEEDS_AVAILABLE` set.
+   */
+  "FX_CORRIDOR_UNSUPPORTED",
 ] as const;
 
 export type FxRefusalCode = (typeof FX_REFUSAL_CODES)[number];
@@ -253,6 +306,28 @@ export type FxRefusalCode = (typeof FX_REFUSAL_CODES)[number];
 export interface FxRefusal {
   readonly code: FxRefusalCode;
   readonly message: string;
+}
+
+/**
+ * What `requireCorridor` and `pow10` throw: a refusal with a code on it.
+ *
+ * A thrown error rather than a `Result` because both call sites are the
+ * "already decided" kind — by the time `fetchMidRate` asks for a corridor the
+ * currency came off a closed list — so the throw is the assertion that the
+ * decision was made upstream. The CODE is what is new: a catch block can now
+ * answer with `FX_CORRIDOR_UNSUPPORTED` and this message instead of guessing.
+ */
+export class FxCorridorError extends Error {
+  override readonly name = "FxCorridorError";
+  readonly code: FxRefusalCode = "FX_CORRIDOR_UNSUPPORTED";
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/** Is this a corridor refusal, with its code already attached? */
+export function isFxCorridorError(value: unknown): value is FxCorridorError {
+  return value instanceof FxCorridorError;
 }
 
 /* -------------------------------------------------------------------------- */

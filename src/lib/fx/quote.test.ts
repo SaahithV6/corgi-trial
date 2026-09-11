@@ -8,14 +8,20 @@ import {
   formatBps,
   formatMinorUnits,
   formatRate,
+  pow10,
   priceQuote,
   settlementVariance,
 } from "./quote";
 import {
+  CORRIDOR_EXPONENTS,
   DEFAULT_FEE_BPS,
   DEFAULT_FEE_FLAT_CENTS,
   DEFAULT_SPREAD_BPS,
+  FX_REFUSAL_CODES,
+  MAX_MINOR_EXPONENT,
   RATE_SCALE,
+  isFxCorridorError,
+  type FxCorridorError,
 } from "./types";
 
 /**
@@ -167,9 +173,43 @@ describe("priceQuote", () => {
   });
 
   it("refuses a corridor it does not quote rather than inventing a rate", () => {
-    expect(() =>
-      priceQuote({ sellCents: 100_000n, buyCurrency: "ZAR", midRateScaled: MXN_MID, ...STANDARD }),
-    ).toThrow(/no corridor for 'ZAR'/);
+    const price = () =>
+      priceQuote({ sellCents: 100_000n, buyCurrency: "ZAR", midRateScaled: MXN_MID, ...STANDARD });
+
+    // The message names the fix — the quotable list, and where to re-quote.
+    expect(price).toThrow(/We do not pay out in 'ZAR'/);
+    expect(price).toThrow(/MXN, PHP, INR, BRL, JPY/);
+    expect(price).toThrow(/\/client\/payouts/);
+
+    // AND IT CARRIES A CODE. A bare `Error` here collapsed into whatever the
+    // entry point's catch-all was, so "we do not pay into that currency" and
+    // "your form is malformed" reached the customer as one sentence.
+    try {
+      price();
+      expect.unreachable("priceQuote accepted a currency with no corridor");
+    } catch (caught) {
+      expect(isFxCorridorError(caught)).toBe(true);
+      expect((caught as FxCorridorError).code).toBe("FX_CORRIDOR_UNSUPPORTED");
+      expect(FX_REFUSAL_CODES).toContain("FX_CORRIDOR_UNSUPPORTED");
+    }
+  });
+
+  it("pow10 bounds at the exponent the column accepts, not at 18", () => {
+    // One range, not three. The guard, its doc comment and the database CHECK
+    // on fx_quote.buy_exponent now say the same number.
+    expect(MAX_MINOR_EXPONENT).toBe(6);
+    expect(pow10(0)).toBe(1n);
+    expect(pow10(2)).toBe(100n);
+    expect(pow10(MAX_MINOR_EXPONENT)).toBe(1_000_000n);
+    expect(() => pow10(MAX_MINOR_EXPONENT + 1)).toThrow(/0\.\.6/);
+    expect(() => pow10(18)).toThrow(/0\.\.6/);
+    expect(() => pow10(-1)).toThrow(/0\.\.6/);
+
+    // And every exponent the corridor list actually produces is inside it.
+    for (const exponent of CORRIDOR_EXPONENTS) {
+      expect(exponent).toBeGreaterThanOrEqual(0);
+      expect(exponent).toBeLessThanOrEqual(MAX_MINOR_EXPONENT);
+    }
   });
 
   it("refuses an amount the fee would consume", () => {

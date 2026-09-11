@@ -70,6 +70,8 @@ import type {
 // so a client importing `RECON_RUN_IDLE` from here would receive a stub.
 import type { ReconRunFact, ReconRunResult } from "@/components/recon/run-action-result";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 /**
  * The largest settlement file this form accepts, in bytes.
  *
@@ -148,6 +150,8 @@ export async function rerunReconciliationAction(
   _previous: ReconRunResult,
   formData: FormData,
 ): Promise<ReconRunResult> {
+  await assertOperatorAction("rerunReconciliationAction");
+
   const parsed = rerunSchema.safeParse({ fileId: formData.get("fileId") });
   if (!parsed.success) {
     return fail(
@@ -202,6 +206,8 @@ export async function importAndRunAction(
   _previous: ReconRunResult,
   formData: FormData,
 ): Promise<ReconRunResult> {
+  await assertOperatorAction("importAndRunAction");
+
   const file = formData.get("file");
   if (!(file instanceof File) || file.size === 0) {
     return fail(

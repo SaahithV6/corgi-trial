@@ -40,6 +40,7 @@ import { fail, ok, type Result } from "@/lib/result";
 
 import { getPayment } from "./instructions";
 import { refuse } from "./refusal";
+import { closeApprovalHold } from "./reserve";
 import { describeDestination, type PayoutRail, type QueuedPayment } from "./types";
 
 /**
@@ -177,6 +178,23 @@ export async function releasePayment(
       if (row === undefined) {
         return fail("UNAVAILABLE", "The release was not recorded. Nothing was posted.");
       }
+
+      // The hold the approval placed comes off, in this transaction, after the
+      // `released` event that licenses it. RELEASED IS THE TERMINAL FACT: the
+      // financial debit above now exists, so the money is no longer promised,
+      // it is gone — which is why this is the one condition that may write the
+      // append-only `hold_closure` row (0061 §3, and `./reserve.ts`). If the
+      // event insert above had raised, this would never run and the money would
+      // still be withheld, which is the safe direction.
+      await closeApprovalHold(
+        {
+          instructionId: instruction.id,
+          actorId: input.actorId,
+          reason: "released",
+          note: `Payment ${instruction.id} released by entry ${entryId}`,
+        },
+        tx as unknown as Sql,
+      );
 
       return ok({ instructionId: instruction.id, entryId, idempotencyKey, eventId: row.id });
     });

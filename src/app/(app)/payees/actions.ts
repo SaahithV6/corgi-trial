@@ -89,6 +89,8 @@ import { recheckPayee } from "@/lib/payees/recheck";
 import { NO_IDENTITY_SOURCE } from "@/lib/payees/identity";
 import { payeeCandidateSchema, type NameSource, type PayeeCheck } from "@/lib/payees/types";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 /* -------------------------------------------------------------------------- */
 /* What the forms get back                                                    */
 /* -------------------------------------------------------------------------- */
@@ -352,6 +354,8 @@ export async function addPayeeAction(
   _previous: ConfirmResult,
   formData: FormData,
 ): Promise<ConfirmResult> {
+  await assertOperatorAction("addPayeeAction");
+
   const parsed = addSchema.safeParse({
     businessId: formData.get("businessId") ?? "",
     displayName: formData.get("displayName") ?? "",
@@ -535,6 +539,8 @@ export async function recheckPayeeAction(
   _previous: ConfirmResult,
   formData: FormData,
 ): Promise<ConfirmResult> {
+  await assertOperatorAction("recheckPayeeAction");
+
   const parsed = recheckSchema.safeParse({ payeeId: formData.get("payeeId") ?? "" });
   if (!parsed.success) {
     return {
@@ -660,6 +666,8 @@ export async function signWarningAction(
   _previous: SignResult,
   formData: FormData,
 ): Promise<SignResult> {
+  await assertOperatorAction("signWarningAction");
+
   const parsed = signSchema.safeParse({
     verificationId: formData.get("verificationId") ?? "",
     reason: formData.get("reason") ?? "",

@@ -57,6 +57,8 @@ import { formatUsd } from "@/lib/format/money";
 import { MOVE_DIRECTIONS, type MoveDirection } from "@/lib/pots/model";
 import { movePotFunds, openPot } from "@/lib/pots/transfer";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 /* -------------------------------------------------------------------------- */
 /* Results                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -174,6 +176,8 @@ export async function openPotAction(
   _previous: OpenPotResult,
   formData: FormData,
 ): Promise<OpenPotResult> {
+  await assertOperatorAction("openPotAction");
+
   const parsed = openSchema.safeParse({
     businessId: formData.get("businessId") ?? "",
     name: formData.get("name") ?? "",
@@ -228,6 +232,8 @@ export async function movePotAction(
   _previous: MovePotResult,
   formData: FormData,
 ): Promise<MovePotResult> {
+  await assertOperatorAction("movePotAction");
+
   const parsed = moveSchema.safeParse({
     potId: formData.get("potId") ?? "",
     direction: formData.get("direction") ?? "",

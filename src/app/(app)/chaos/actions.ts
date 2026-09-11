@@ -41,6 +41,8 @@ import { logger } from "@/lib/log";
 
 import type { ChaosActionResult } from "@/components/chaos/action-result";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 const log = logger({ base: { module: "chaos.actions" } });
 
 const armSchema = z.object({
@@ -92,6 +94,8 @@ export async function armControlAction(
   _previous: ChaosActionResult,
   formData: FormData,
 ): Promise<ChaosActionResult> {
+  await assertOperatorAction("armControlAction");
+
   const parsed = armSchema.safeParse({
     control: formData.get("control") ?? "",
     seconds: formData.get("seconds") ?? "",
@@ -135,6 +139,8 @@ export async function disarmControlAction(
   _previous: ChaosActionResult,
   formData: FormData,
 ): Promise<ChaosActionResult> {
+  await assertOperatorAction("disarmControlAction");
+
   const raw = String(formData.get("control") ?? "");
   if (!isChaosControl(raw)) {
     return refused("UNKNOWN_CONTROL", `there is no chaos control called '${raw}'`, null);
@@ -166,6 +172,8 @@ export async function allChaosOffAction(
   _previous: ChaosActionResult,
   _formData: FormData,
 ): Promise<ChaosActionResult> {
+  await assertOperatorAction("allChaosOffAction");
+
   const actor = await actorName();
   try {
     const turnedOff = await disarmAll(actor.name);
@@ -190,6 +198,8 @@ export async function startEpisodeAction(
   _previous: ChaosActionResult,
   formData: FormData,
 ): Promise<ChaosActionResult> {
+  await assertOperatorAction("startEpisodeAction");
+
   const registerFirst = String(formData.get("registerCardFirst") ?? "") === "yes";
   const actor = await actorName();
   try {
@@ -219,6 +229,8 @@ export async function releaseNowAction(
   _previous: ChaosActionResult,
   _formData: FormData,
 ): Promise<ChaosActionResult> {
+  await assertOperatorAction("releaseNowAction");
+
   const actor = await actorName();
   try {
     const released = await releaseDueDeliveries({ actor: actor.name });
@@ -240,6 +252,8 @@ export async function registerCardAction(
   _previous: ChaosActionResult,
   formData: FormData,
 ): Promise<ChaosActionResult> {
+  await assertOperatorAction("registerCardAction");
+
   const runId = String(formData.get("runId") ?? "");
   if (runId === "") {
     return refused("NO_RUN", "no episode was named, so no card was registered", "card");

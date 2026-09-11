@@ -50,6 +50,8 @@ import { endMembership, issueCardToMember, reinstateMember } from "@/lib/team/li
 import { MEMBER_STATES, TEAM_ROLES } from "@/lib/team/roles";
 import { addMember, setMemberTerms, readMember } from "@/lib/team/store";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 // The shape and its idle value live in a PLAIN module, not here. A
 // `"use server"` file may only export async functions: every other export
 // becomes a server reference, so a client importing `TEAM_IDLE` from this file
@@ -106,6 +108,8 @@ export async function addMemberAction(
   _previous: TeamActionResult,
   formData: FormData,
 ): Promise<TeamActionResult> {
+  await assertOperatorAction("addMemberAction");
+
   const parsed = addSchema.safeParse({
     businessId: formData.get("businessId"),
     displayName: formData.get("displayName"),
@@ -188,6 +192,8 @@ export async function setTermsAction(
   _previous: TeamActionResult,
   formData: FormData,
 ): Promise<TeamActionResult> {
+  await assertOperatorAction("setTermsAction");
+
   const parsed = termsSchema.safeParse({
     businessId: formData.get("businessId"),
     memberId: formData.get("memberId"),
@@ -265,6 +271,8 @@ export async function endMembershipAction(
   _previous: TeamActionResult,
   formData: FormData,
 ): Promise<TeamActionResult> {
+  await assertOperatorAction("endMembershipAction");
+
   const parsed = endSchema.safeParse({
     businessId: formData.get("businessId"),
     memberId: formData.get("memberId"),
@@ -390,6 +398,8 @@ export async function issueMemberCardAction(
   _previous: TeamActionResult,
   formData: FormData,
 ): Promise<TeamActionResult> {
+  await assertOperatorAction("issueMemberCardAction");
+
   const parsed = issueSchema.safeParse({
     businessId: formData.get("businessId"),
     memberId: formData.get("memberId"),

@@ -256,6 +256,12 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
     'v_fx_commitment_unheld',
     'every standing FX commitment withholds exactly the price it committed',
   ],
+  [
+    // 0061's. An approved payment withholds what it will pay, from the moment
+    // the second approver signs rather than from the moment it leaves.
+    'v_payment_release_unheld',
+    'every approved, unreleased payment withholds exactly what it will pay',
+  ],
   // 0056's one — the far side of a threshold. `v_advice_delta_unsound`
   // asks whether an advice's implied base is BELOW ZERO; 12 of the 13
   // advices on this book have a base of zero or more and were never

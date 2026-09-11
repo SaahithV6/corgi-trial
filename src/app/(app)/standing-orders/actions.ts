@@ -79,6 +79,8 @@ import {
   createStandingOrder,
 } from "@/lib/standing";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 const log = rootLogger.child({ module: "standing-orders/actions" });
 
 /* -------------------------------------------------------------------------- */
@@ -269,6 +271,8 @@ export async function createStandingOrderAction(
   _previous: CreateMandateResult,
   formData: FormData,
 ): Promise<CreateMandateResult> {
+  await assertOperatorAction("createStandingOrderAction");
+
   const parsed = createSchema.safeParse({
     mandateKey: formData.get("mandateKey") ?? "",
     accountId: formData.get("accountId") ?? "",
@@ -446,6 +450,8 @@ export async function cancelStandingOrderAction(
   _previous: CancelMandateResult,
   formData: FormData,
 ): Promise<CancelMandateResult> {
+  await assertOperatorAction("cancelStandingOrderAction");
+
   const parsed = cancelSchema.safeParse({
     standingOrderId: formData.get("standingOrderId") ?? "",
     reason: formData.get("reason") ?? "",

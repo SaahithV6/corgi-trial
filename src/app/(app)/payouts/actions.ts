@@ -67,6 +67,8 @@ import { acceptQuote, createQuote } from "@/lib/fx/store";
 import { CORRIDOR_CODES, DEFAULT_QUOTE_TTL_SECONDS } from "@/lib/fx/types";
 import { USDC_UNITS_PER_CENT } from "@/lib/rails/stablecoin/types";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 /* -------------------------------------------------------------------------- */
 /* Results                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -193,6 +195,8 @@ export async function requestQuoteAction(
   _previous: QuoteActionResult,
   formData: FormData,
 ): Promise<QuoteActionResult> {
+  await assertOperatorAction("requestQuoteAction");
+
   const parsed = requestSchema.safeParse({
     businessId: formData.get("businessId") ?? "",
     buyCurrency: formData.get("buyCurrency") ?? "",
@@ -298,6 +302,8 @@ export async function acceptQuoteAction(
   _previous: AcceptActionResult,
   formData: FormData,
 ): Promise<AcceptActionResult> {
+  await assertOperatorAction("acceptQuoteAction");
+
   const parsed = acceptSchema.safeParse({
     quoteRef: formData.get("quoteRef") ?? "",
     reference: formData.get("reference") ?? "",
@@ -382,6 +388,8 @@ export async function sendPayoutAction(
   _previous: SendActionResult,
   formData: FormData,
 ): Promise<SendActionResult> {
+  await assertOperatorAction("sendPayoutAction");
+
   const parsed = sendSchema.safeParse({
     quoteRef: formData.get("quoteRef") ?? "",
     amountUsdc: formData.get("amountUsdc") ?? "",

@@ -35,10 +35,13 @@
 import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
-import { ok, type Result } from "@/lib/result";
+import { readAccountIdentity } from "@/lib/ledger/queries";
+import { fail, ok, type Result } from "@/lib/result";
 
 import { requireContentHash } from "./hash";
+import { getPayment } from "./instructions";
 import { refuse } from "./refusal";
+import { closeApprovalHold, InsufficientFundsToApprove, placeApprovalHold } from "./reserve";
 
 export type DecisionInput = {
   readonly instructionId: string;
@@ -128,24 +131,94 @@ async function record(
   const reason = input.reason?.trim();
 
   try {
-    const rows = await conn<DecisionRow[]>`
-      INSERT INTO payment_instruction_event
-        (instruction_id, kind, actor_id, approved_content_hash, reason, value_date)
-      VALUES
-        (${input.instructionId}::uuid,
-         ${kind}::payment_event_kind,
-         ${input.actorId}::uuid,
-         ${kind === "approved" ? conn`decode(${hash}, 'hex')` : conn`NULL`},
-         ${reason === undefined || reason === "" ? null : reason},
-         book_date(now()))
-      RETURNING id, occurred_at`;
+    // ONE TRANSACTION, and the money side is inside it.
+    //
+    // An approval that completes an instruction's policy is the moment the
+    // money is committed, so it is the moment the money is WITHHELD — migration
+    // 0061, and `./reserve.ts` for why here and not at release. A withdrawal is
+    // the moment it stops being withheld. Both the event and the hold commit
+    // together or not at all: `assert_maker_checker()` and
+    // `assert_payment_lifecycle()` still decide whether the event may exist,
+    // and if either refuses, the hold work rolls back with it.
+    return await conn.begin(async (tx) => {
+      const rows = await tx<DecisionRow[]>`
+        INSERT INTO payment_instruction_event
+          (instruction_id, kind, actor_id, approved_content_hash, reason, value_date)
+        VALUES
+          (${input.instructionId}::uuid,
+           ${kind}::payment_event_kind,
+           ${input.actorId}::uuid,
+           ${kind === "approved" ? tx`decode(${hash}, 'hex')` : tx`NULL`},
+           ${reason === undefined || reason === "" ? null : reason},
+           book_date(now()))
+        RETURNING id, occurred_at`;
 
-    const row = rows[0];
-    if (row === undefined) {
-      return refuse(new Error("the decision was not recorded and no error was raised"));
-    }
-    return ok({ eventId: row.id, occurredAt: row.occurred_at.toISOString() });
+      const row = rows[0];
+      if (row === undefined) {
+        return refuse(new Error("the decision was not recorded and no error was raised"));
+      }
+
+      await reserveOrRelease(kind, input, tx as unknown as Sql);
+
+      return ok({ eventId: row.id, occurredAt: row.occurred_at.toISOString() });
+    });
   } catch (thrown) {
+    if (thrown instanceof InsufficientFundsToApprove) {
+      // The approval rolled back with the hold it could not place. Nothing was
+      // written — see `InsufficientFundsToApprove` for why this is a throw.
+      return fail("INSUFFICIENT_FUNDS", thrown.message);
+    }
     return refuse(thrown);
   }
+}
+
+/**
+ * The money side of a decision, inside the decision's own transaction.
+ *
+ * THE STATE IS RE-READ RATHER THAN INFERRED. "Is this instruction now
+ * approved" is a fold over the event set (`./state.ts`), and the event this
+ * transaction just inserted is visible to it, so `getPayment()` inside `tx`
+ * answers it exactly. A first approval on a 2-of-N policy leaves the
+ * instruction `requested` and withholds nothing; the one that completes the
+ * policy is the one that reserves. Counting approvals here instead would be a
+ * second copy of `approvalsRequired`, and the copy that drifts is always the
+ * one nobody tested.
+ */
+async function reserveOrRelease(
+  kind: "approved" | "rejected" | "cancelled",
+  input: DecisionInput,
+  tx: Sql,
+): Promise<void> {
+  if (kind === "rejected" || kind === "cancelled") {
+    await closeApprovalHold(
+      {
+        instructionId: input.instructionId,
+        actorId: input.actorId,
+        reason: "withdrawn",
+        note: `Payment ${input.instructionId} ${kind} before release; the approval hold comes off`,
+      },
+      tx,
+    );
+    return;
+  }
+
+  const loaded = await getPayment(input.instructionId, tx);
+  if (!loaded.ok) return;
+  const payment = loaded.value;
+  // THE APPROVAL THAT COMPLETES THE POLICY IS THE ONE THAT RESERVES. `state`
+  // alone says "approved" after the FIRST approval of a 2-of-N instruction —
+  // `foldState()` takes the furthest state reached and does not count — so the
+  // count comes from `approvalsHeld`/`approvalsRequired`, which `getPayment()`
+  // derives from the policy version the instruction cites.
+  if (payment.state !== "approved") return;
+  if (payment.approvalsHeld < payment.approvalsRequired) return;
+
+  const account = await readAccountIdentity(payment.instruction.accountId, tx);
+  if (account === null || account.businessId === null) return;
+
+  await placeApprovalHold(
+    payment,
+    { entityId: account.entityId, businessId: account.businessId, actorId: input.actorId },
+    tx,
+  );
 }

@@ -1923,6 +1923,59 @@ N("J6n", "the removal race is real and the violating row was NOT committed",
        "on an append-only book — the exact mistake the fifth red already cost "
        "us today. nowhere near the card hot path, so the 6000ms ceiling does "
        "not constrain the fix")
+N("J7a", "removed-member approval: CLOSED in one direction, open in the other",
+  "correctness", 0, [], "agent", ["db/migrations/0062"], "done",
+  risk="proven: approval posted cleanly in 169ms before, BLOCKED 3078ms then "
+       "refused APPROVER_NOT_ACTIVE_MEMBER after. lock_business_team() costs "
+       "0.22ms server-side on a human-paced path. BOTH SIDES take it — a lock "
+       "only one side takes is not a lock — and the migration's DO block "
+       "refuses to commit unless it can prove the definer function actually "
+       "leaves a RowShareLock, because a function that returns true having "
+       "locked nothing passes every other check. STILL OPEN, flagged by the "
+       "agent: the opposite order. an approval that commits first, then a "
+       "removal whose effective_from is already stamped earlier by now() = "
+       "transaction start, retroactively invalidates it. a lock cannot close "
+       "that; an effective_from check on the removal side would")
+N("J7b", "the migration runner applies every file on disk, including unproven ones",
+  "process", 0, [], "claude", ["scripts/migrate.mjs"], "todo",
+  risk="0061 and 0063 were applied by a DIFFERENT agent's migrate run while the "
+       "agents that wrote them were still working and had not yet proven them. "
+       "migrate.mjs takes all files in the directory, so a migration is applied "
+       "the moment it exists on disk rather than when its author is finished. "
+       "harmless here — both reported ok and both are additive — but it means a "
+       "reverted TypeScript change can leave an applied migration behind it. "
+       "worth a --only flag or a pending marker")
+N("J7c", "37 operator actions now re-derive authz; the hole was REAL", "correctness",
+  0, [], "agent", ["lib/authz", "app/(app)/*/actions.ts"], "done",
+  risk="confirmed before/after: an operator action under a CUSTOMER cookie RAN "
+       "ITS BODY and got as far as its database check. the middleware never "
+       "sees it — the action carries the pathname of the /client page the "
+       "browser is on — and the (app) layout never runs for an action that "
+       "renders no page. now assertOperatorAction() reads the cookie itself and "
+       "calls authorize() against a SENTINEL PATH that can never be on the "
+       "customer surface, so it runs the policy's own default-deny branch "
+       "rather than a second hand-rolled copy. covered by a test that WALKS "
+       "src/app and fails by name on any unguarded export, proven by adding a "
+       "throwaway unguarded action and watching it go red")
+N("J7d", "two customer-executable actions are exempt and need a tenant predicate",
+  "correctness", 30, ["J7c"], "agent",
+  ["app/(app)/payments/actions.ts", "app/(app)/approvals/actions.ts"],
+  status="active",
+  risk="the honest residual inside J7c. payments/actions.ts and "
+       "approvals/actions.ts are rendered on /client/pay and /client/approvals, "
+       "so a CUSTOMER must be able to execute them and a role check would "
+       "wrongly refuse them their own screens. but the client surface passes "
+       "businessId FROM THE FORM by design — customer is an unbound demo role, "
+       "not a per-tenant session — so isolation on these two rests entirely on "
+       "their own predicates. the guard's own exemption note names the real "
+       "fix: a both-column read, not a role check")
+N("J7e", "the FX corridor brief I wrote was wrong about the live book", "reference",
+  0, [], "agent", ["db/migrations/0063"], "done",
+  risk="I briefed 'only USD->MXN at exponent 2 exists'. the live book carries "
+       "FIVE corridors — MXN/2 98, PHP/2 9, INR/2 9, BRL/2 7 and JPY/0 1 — 124 "
+       "rows, all already correct, including a JPY quote properly at exponent "
+       "0. the constraint validated every one. second time today a brief of "
+       "mine asserted a fact the agent then measured and corrected")
 N("J2f", "deploy and re-run every scoreboard against one sha",
   "release", 20, ["J2a", "J2b", "J2c", "J2d", "J2e"], "claude", [], status="done",
   risk="the honesty tools check documents against the DEPLOYMENT and never checked "

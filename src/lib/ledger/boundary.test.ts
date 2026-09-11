@@ -212,6 +212,14 @@ const ALLOWED: readonly (readonly [module: string, file: string, refs: number])[
   // silently reordered list; see the note at the bottom of this file.
   ["accrual", "src/lib/accrual/store.ts", 3],
   ["approvals", "src/lib/approvals/approvals.integration.test.ts", 4],
+  // 0061's proof, added on the last day and gated behind RUN_PROOF=1. It reads
+  // the journal directly because it exists to show the defect and the fix side
+  // by side: BEFORE, two approvals of $20,000.00 and $24,000.00 left
+  // availability UNMOVED and both released against $25,000.92 — ledger
+  // -$18,999.08. AFTER, the first withholds and the second is refused. A proof
+  // that read through the same reader the fix uses would be asserting that one
+  // function agrees with itself.
+  ["approvals", "src/lib/approvals/reserve.proof.test.ts", 4],
   // Two display joins to reach `account.business_id` for a legal name. Same
   // argument as accrual: `listQueue`'s ordering runs through the join.
   ["approvals", "src/lib/approvals/instructions.ts", 2],

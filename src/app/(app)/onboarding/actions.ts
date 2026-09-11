@@ -55,6 +55,8 @@ import { rootLogger, type Logger } from "@/lib/log";
 import { openAccountsOnApproval, type OpenAccountsOutcome } from "@/lib/onboarding";
 import type { LegView, RegistryProbeView } from "@/components/onboarding/data-contract";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 /** What the form gets back. Serialised to the client, so: no row contents. */
 export type OnboardingResult = {
   readonly status: "idle" | "ok" | "refused";
@@ -257,6 +259,8 @@ export async function onboardingAction(
   _previous: OnboardingResult,
   formData: FormData,
 ): Promise<OnboardingResult> {
+  await assertOperatorAction("onboardingAction");
+
   const parsed = schema.safeParse({
     businessId: formData.get("businessId"),
     intent: formData.get("intent"),
@@ -408,6 +412,8 @@ export async function registryProbeAction(
   _previous: RegistryProbeResult,
   formData: FormData,
 ): Promise<RegistryProbeResult> {
+  await assertOperatorAction("registryProbeAction");
+
   const raw = formData.get("query");
   const query = typeof raw === "string" ? raw.trim() : "";
 
@@ -495,6 +501,8 @@ export async function reviewAction(
   _previous: OnboardingResult,
   formData: FormData,
 ): Promise<OnboardingResult> {
+  await assertOperatorAction("reviewAction");
+
   const parsed = reviewSchema.safeParse({
     businessId: formData.get("businessId"),
     leg: formData.get("leg"),

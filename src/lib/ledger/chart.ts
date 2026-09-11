@@ -425,6 +425,23 @@ export const CHART: readonly ChartAccount[] = [
     why: "Where an accepted FX quote's commitment is withheld: credited for the committed price the moment a customer accepts a rate, and debited when the payout settles or the settlement window closes, so a customer who accepts five quotes against one balance cannot have all five clear.",
   },
   {
+    // 0061's leaf. 9300 holds an accepted FX RATE; this holds an approved
+    // PAYMENT — different commitments, different lifecycles, so different
+    // leaves rather than one shared "commitments" account whose balance would
+    // answer neither question.
+    //
+    // Same structural property as 9300: availability is scoped by `hold_id`,
+    // never by the account alone, so two customers' approved payments sharing
+    // this leaf cannot contaminate each other.
+    code: "9400",
+    name: "Holds — approved payments",
+    type: "liability",
+    book: "memo",
+    parent: "9000",
+    postable: true,
+    why: "Where an approved payment's money is withheld between the second approver signing and the money leaving: credited the moment the approval completes the instruction's policy, debited when the payment is released or withdrawn. Before it existed, releasePayment() checked availability NOT AT ALL — measured, $44,000.00 left an account with $25,000.92 available.",
+  },
+  {
     code: "9900",
     name: "Memo contra",
     type: "asset",

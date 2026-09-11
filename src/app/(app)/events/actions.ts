@@ -68,6 +68,8 @@ import { z } from "zod";
 
 import { EVENT_TYPES } from "@/lib/events/envelope";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 export type Issue = { readonly path: string; readonly message: string };
 
 export type RegisterResult = {
@@ -112,6 +114,8 @@ export async function registerEndpointAction(
   _previous: RegisterResult,
   form: FormData,
 ): Promise<RegisterResult> {
+  await assertOperatorAction("registerEndpointAction");
+
   const parsed = schema.safeParse({
     businessId: String(form.get("businessId") ?? ""),
     url: String(form.get("url") ?? "").trim(),
@@ -184,6 +188,8 @@ export type SimpleResult = {
  * mechanism. A cron tick is.
  */
 export async function drainOutboundAction(): Promise<SimpleResult> {
+  await assertOperatorAction("drainOutboundAction");
+
   const { drainOutbound } = await import("@/lib/events/drain");
   const result = await drainOutbound({ generateLimit: 200, maxBatches: 3 });
   revalidatePath("/events");

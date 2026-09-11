@@ -578,6 +578,13 @@ const INVARIANT_VIEWS = [
   // none to get wrong, which is not a failure and is not the evidence the
   // tick looks like either. `--prove` is what makes it mean something.
   ["v_fx_commitment_unheld", "every standing FX commitment withholds exactly the price it committed"],
+  // 0061's. Same shape one commitment over: an approved payment withholds what
+  // it will pay. Before it existed releasePayment() checked availability NOT AT
+  // ALL, and $44,000.00 left an account holding $25,000.92 — measured, not
+  // theorised. The 240 instructions approved before the regime instant hold
+  // nothing and are outside this guard by construction, counted rather than
+  // hidden by v_payment_release_census.
+  ["v_payment_release_unheld", "every approved, unreleased payment withholds exactly what it will pay"],
   // ---- 0056's one: hole 3, the far side of a threshold -----------------
   //
   // `v_advice_delta_unsound` asks whether an advice's implied base is
@@ -987,6 +994,31 @@ const GATED_INVARIANTS = [...INVARIANT_VIEWS];
 // and the card says exactly that"). A new red must never inherit an old
 // red's excuse by being printed next to one.
 const RED_REGISTER = {
+  v_memo_line_placement: {
+    rows:
+      "memo entries whose two legs both read as house lines. Every row is a COMMITMENT HOLD: an " +
+      "accepted FX quote on 9300 (0053) or an approved payment on 9400 (0061). Both are single " +
+      "shared house leaves that every customer's commitment parks on, and a house account carries " +
+      "`business_id IS NULL` by definition — so the entry legitimately spans no customer, and a " +
+      "guard written to catch money parked on the WRONG customer's memo account reads that as the " +
+      "thing it was built to find.",
+    stands:
+      "because the view is right about what it sees and wrong about what it means, and the repair " +
+      "is a schema change on a live book with real money standing behind it. The design answer is " +
+      "a per-business memo leaf under each of 9300 and 9400, which is a migration that would have " +
+      "to move existing holds — and moving a hold moves availability. Narrowing the view to skip " +
+      "house leaves is the other exit and it is worse: it would blind the guard to exactly the " +
+      "case it exists for, money parked on a house account that should have been a customer's. " +
+      "That is migration 0026's anti-pattern, which this repository has spent two days undoing. " +
+      "NOTHING IS CONTAMINATED MEANWHILE: availability is scoped by `hold_id`, never by the " +
+      "account alone, so two customers' commitments sharing one leaf cannot reach each other — " +
+      "the property is asserted in 0053's own header and holds for 0061 by the same construction.",
+    changes:
+      "a per-business memo leaf under 9300 and 9400, which removes every row at once; or any row " +
+      "here that is NOT a commitment hold, which would be the real defect and must be treated as " +
+      "new.",
+    cited: "db/migrations/0053_fx_commitment_hold.sql header; db/migrations/0061_payment_release_hold.sql; docs/INVARIANTS.md",
+  },
   v_refused_auth_hold: {
     rows:
       "authorisation events on holds that are still withholding money and carry no APPROVED " +
@@ -1660,6 +1692,24 @@ const REACH = [
     `SELECT COALESCE(SUM(quotes), 0)::int AS n FROM v_fx_commitment_census
       WHERE commitment_scope = 'standing'`,
     `SELECT count(*)::int AS n FROM fx_quote_acceptance`],
+
+  // ---- 0061's one -----------------------------------------------------
+  //
+  // The same shape as 0053's above, one commitment over, and it prints the
+  // same honest EMPTY for the same reason: 240 instructions totalling
+  // $1,424,546.00 were approved BEFORE the regime instant and hold nothing.
+  // They are outside this guard by construction, not by exemption — counted
+  // in `v_payment_release_census` under `predates_the_regime` so the number
+  // is on screen rather than in a comment.
+  //
+  // Backfilling holds for them was never an option: it would move availability
+  // on a live book to make a view green, which is the shape of every defect
+  // this file exists to catch.
+  ["v_payment_release_unheld",
+    "payments approved under the 0061 regime and not yet released or withdrawn",
+    `SELECT COALESCE(SUM(instructions), 0)::int AS n FROM v_payment_release_census
+      WHERE approval_scope <> 'predates_the_regime'`,
+    `SELECT count(*)::int AS n FROM payment_instruction`],
 
   // ---- 0056's one -----------------------------------------------------
   //

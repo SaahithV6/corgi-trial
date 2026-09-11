@@ -60,6 +60,8 @@ import {
 import { sql } from "@/lib/ledger/db";
 import { formatUsd } from "@/lib/format/money";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 /* -------------------------------------------------------------------------- */
 /* Results                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -173,6 +175,8 @@ export async function raiseDisputeAction(
   _previous: RaiseResult,
   formData: FormData,
 ): Promise<RaiseResult> {
+  await assertOperatorAction("raiseDisputeAction");
+
   const parsed = raiseSchema.safeParse({
     disputedEntryId: formData.get("disputedEntryId") ?? "",
     reason: formData.get("reason") ?? "",
@@ -285,6 +289,8 @@ export async function disputeTransitionAction(
   _previous: TransitionResult,
   formData: FormData,
 ): Promise<TransitionResult> {
+  await assertOperatorAction("disputeTransitionAction");
+
   const parsed = transitionSchema.safeParse({
     disputeId: formData.get("disputeId") ?? "",
     intent: formData.get("intent") ?? "",

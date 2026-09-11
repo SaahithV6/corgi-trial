@@ -58,6 +58,8 @@ import {
 
 import { hasDatabase, loadStatementsScreen } from "./live-source";
 
+import { assertOperatorAction } from "@/lib/authz/action-guard";
+
 export type StatementPdfRequest = {
   readonly accountId?: string | undefined;
   readonly businessDate?: string | undefined;
@@ -94,6 +96,8 @@ export type StatementPdfResult =
 export async function statementPdfAction(
   request: StatementPdfRequest,
 ): Promise<StatementPdfResult> {
+  await assertOperatorAction("statementPdfAction");
+
   if (!hasDatabase()) {
     return {
       ok: false,
