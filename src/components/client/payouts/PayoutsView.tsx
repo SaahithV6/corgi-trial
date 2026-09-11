@@ -158,6 +158,7 @@ export function PayoutsView({
                 {screen.businesses.map((b) => (
                   <option key={b.id} value={b.id}>
                     {b.legalName}
+                    {b.hasAccount ? "" : " — no account yet"}
                   </option>
                 ))}
               </select>

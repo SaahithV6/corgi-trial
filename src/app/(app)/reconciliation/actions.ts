@@ -49,11 +49,22 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import { currentActor } from "@/lib/approvals/session";
 import { rootLogger } from "@/lib/log";
-import { importSchemeFile } from "@/lib/recon/ingest";
+// `parse.ts` is pure — no `server-only`, no database handle — so it is safe at
+// module scope. Everything else on this path is not: see the block below.
 import { SchemeFileFormatError } from "@/lib/recon/parse";
-import { runReconciliation } from "@/lib/recon/run";
+
+// Type-only, and therefore erased: naming these here costs the module graph
+// nothing, and it keeps `import()` out of a type position.
+import type { currentActor as CurrentActor } from "@/lib/approvals/session";
+import type {
+  importSchemeFile as ImportSchemeFile,
+  ImportSchemeFileResult,
+} from "@/lib/recon/ingest";
+import type {
+  runReconciliation as RunReconciliation,
+  RunReconciliationResult,
+} from "@/lib/recon/run";
 
 // Not from this module: a `"use server"` file exports only server references,
 // so a client importing `RECON_RUN_IDLE` from here would receive a stub.
@@ -68,11 +79,48 @@ import type { ReconRunFact, ReconRunResult } from "@/components/recon/run-action
  */
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 
+/**
+ * The three functions that reach a database, imported ONLY inside a handler.
+ *
+ * NOT AT MODULE SCOPE, AND THIS IS THE SAME TRAP `/reconciliation/page.tsx`
+ * documents at `selectSource()`. `@/lib/recon/ingest`, `@/lib/recon/run` and
+ * `@/lib/approvals/session` each reach `@/lib/ledger/db` -> `@/lib/env`, which
+ * parses `process.env` at module scope and THROWS when `APP_DATABASE_URL` is
+ * absent — on purpose, so a malformed URL kills the boot rather than the first
+ * request that needs money.
+ *
+ * This module is imported by `RunControls.tsx`, which the breaks screen renders.
+ * A static import here would therefore put `@/lib/env` into the page's module
+ * graph, and the one screen that must be able to render the words "no database
+ * configured" would throw while loading instead of saying them. The panel is
+ * hidden on that deployment anyway (`runnable` is false), but "hidden" is a
+ * render-time decision and a module graph is evaluated before any of it runs.
+ *
+ * Deferring costs one dynamic import on a path that is about to open a
+ * connection regardless.
+ */
+async function connected(): Promise<{
+  readonly currentActor: typeof CurrentActor;
+  readonly importSchemeFile: typeof ImportSchemeFile;
+  readonly runReconciliation: typeof RunReconciliation;
+}> {
+  const [session, ingest, run] = await Promise.all([
+    import("@/lib/approvals/session"),
+    import("@/lib/recon/ingest"),
+    import("@/lib/recon/run"),
+  ]);
+  return {
+    currentActor: session.currentActor,
+    importSchemeFile: ingest.importSchemeFile,
+    runReconciliation: run.runReconciliation,
+  };
+}
+
 function fail(code: string, message: string, facts: readonly ReconRunFact[] = []): ReconRunResult {
   return { status: "failed", code, message, facts, href: null, at: new Date().toISOString() };
 }
 
-async function actorId(): Promise<string | null> {
+async function actorId(currentActor: typeof CurrentActor): Promise<string | null> {
   const session = await currentActor();
   return session?.id ?? null;
 }
@@ -108,7 +156,8 @@ export async function rerunReconciliationAction(
     );
   }
 
-  const actor = await actorId();
+  const { currentActor, runReconciliation } = await connected();
+  const actor = await actorId(currentActor);
   if (actor === null) {
     return fail(
       "NO_ACTOR",
@@ -167,7 +216,8 @@ export async function importAndRunAction(
     );
   }
 
-  const actor = await actorId();
+  const { currentActor, importSchemeFile, runReconciliation } = await connected();
+  const actor = await actorId(currentActor);
   if (actor === null) {
     return fail(
       "NO_ACTOR",
@@ -181,7 +231,7 @@ export async function importAndRunAction(
   const content = await file.text();
   const filename = file.name === "" ? "uploaded-file" : file.name;
 
-  let imported: Awaited<ReturnType<typeof importSchemeFile>>;
+  let imported: ImportSchemeFileResult;
   try {
     imported = await importSchemeFile({ filename, content, importedBy: actor });
   } catch (thrown) {
@@ -247,7 +297,7 @@ export async function importAndRunAction(
  * reconciled nothing, and the word is only earned by a break count of zero.
  */
 function receipt(
-  run: Awaited<ReturnType<typeof runReconciliation>>,
+  run: RunReconciliationResult,
   what: string,
   extra: readonly ReconRunFact[] = [],
 ): ReconRunResult {

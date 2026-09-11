@@ -505,7 +505,7 @@ function GatePanel({
     <Panel
       id="gate"
       title="The KYB gate, read for every business on the book"
-      description="A preview, not the control. The gate that decides runs inside the funding action, before anything is sent to Plaid — so a business approved when this page rendered and revoked a second later is refused at the write, which is the only place it matters."
+      description="A preview, not the control. The gate that decides runs inside the funding action, before anything is sent to Plaid — so a business approved when this page rendered and revoked a second later is refused at the write, which is the only place it matters. Every refusal code in this table is resolved in one place: /onboarding, which holds the evidence each code is about and the form that adds to it."
     >
       {businesses.length === 0 ? (
         <div className="px-5 py-10 text-center">

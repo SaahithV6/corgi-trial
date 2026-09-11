@@ -63,6 +63,26 @@ function isCorrectionClass(value: string | undefined): value is CorrectionClass 
   return CORRECTION_CLASSES.some((c) => c === value);
 }
 
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Is this string shaped like a run id at all?
+ *
+ * A run id reaches the reader as a `uuid` bind parameter, so a value that is
+ * not a uuid does not come back as "no such run" — it comes back as Postgres
+ * refusing to cast it, and the screen drew that as RECON_EXPLAIN_READ_FAILED
+ * with a retry button. The read had not failed and retrying could not help:
+ * the same string would be rejected the same way for ever. Measured on
+ * `/breaks?run=not-a-uuid`.
+ *
+ * The caller checks this before putting the value in a query, so a malformed
+ * run id is answered the same way an absent one is — by name, on the page,
+ * with the way back — instead of by the database.
+ */
+export function isRunId(value: string | null): value is string {
+  return value !== null && RUN_ID.test(value);
+}
+
 /**
  * Read the view out of `searchParams`.
  *

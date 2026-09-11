@@ -41,6 +41,7 @@ import {
   ALL_CORRECTION_CLASSES,
   applyExplainFilter,
   explainHref,
+  isRunId,
   type ExplainFilter,
 } from "./explain-view-state";
 
@@ -72,8 +73,12 @@ export async function ExplainedBreaksView({
   readonly filter: ExplainFilter;
   readonly noDatabase?: boolean;
 }) {
+  // A run id that is not uuid-shaped is never put in the query. It would come
+  // back as a cast failure and be drawn as a failed READ, which is a different
+  // fact with a different remedy: the run branch below answers it by name.
+  const runId = isRunId(filter.runId) ? filter.runId : null;
   const result = await source.load({
-    ...(filter.runId === null ? {} : { runId: filter.runId }),
+    ...(runId === null ? {} : { runId }),
     ...(filter.selected === null ? {} : { selected: filter.selected }),
   });
 
@@ -96,7 +101,48 @@ export async function ExplainedBreaksView({
 
   const view = result.value;
 
-  if (view.run === null) {
+  // TWO DIFFERENT BLANKS. "No run was ever made" and "the run you asked for is
+  // not on this book" are the same `run === null` to the reader and must never
+  // be the same sentence here: the first says there is no work, and printing it
+  // over a mistyped deep link tells an operator the book is clean when six runs
+  // are sitting behind the URL they got wrong.
+  // A malformed run id was never looked up, so `view.run` holds the MOST RECENT
+  // run rather than nothing. Falling through would draw that run's file, breaks
+  // and watermark under a URL that asked for a different one — the quiet
+  // substitution this panel exists to refuse.
+  const runUnresolvable = filter.runId !== null && !isRunId(filter.runId);
+
+  if (view.run === null || runUnresolvable) {
+    if (filter.runId !== null) {
+      return (
+        <div className="space-y-6">
+          <Header />
+          <Panel
+            title="That run is not on this book"
+            description="The run named in the URL was not found, so no file, no break and no correction is shown below."
+          >
+            <div className="px-5 py-10 text-center">
+              <p className="mx-auto max-w-prose text-xs leading-relaxed text-muted">
+                This is not a statement about whether the book has breaks. It
+                says only that <code className="font-mono">{filter.runId}</code>{" "}
+                {isRunId(filter.runId)
+                  ? "matched no reconciliation run."
+                  : "is not shaped like a run id, so it was never looked up."}{" "}
+                The read did not fail and retrying this URL cannot change the
+                answer.
+              </p>
+              <Link
+                href={explainHref(filter, { runId: null, selected: null })}
+                className={`mt-4 inline-flex rounded border border-border-strong px-3 py-1.5 text-xs hover:bg-surface-raised ${FOCUS_RING}`}
+              >
+                Show the most recent run
+              </Link>
+            </div>
+          </Panel>
+        </div>
+      );
+    }
+
     return (
       <div className="space-y-6">
         <Header />
@@ -155,7 +201,7 @@ export async function ExplainedBreaksView({
 
       <Panel
         title="Breaks, classified"
-        description="Every break the engine reports, with what the book can say about each. Worst first. Nothing is hidden and nothing is collapsed."
+        description="Every break the engine reports, with what the book can say about each. Ordered worst severity first, then oldest on its own age axis, then largest outstanding. Nothing is hidden and nothing is collapsed."
         actions={<RunPicker view={view} filter={filter} />}
       >
         <Filters rows={view.rows} filter={filter} />
@@ -376,7 +422,8 @@ function BreaksTable({
         <p className="mx-auto max-w-prose text-xs leading-relaxed text-muted">
           {total > 0 ? (
             <>
-              No break matches this filter. {total} are hidden by it.{" "}
+              No break matches this filter. {total}{" "}
+              {total === 1 ? "is hidden" : "are hidden"} by it.{" "}
               <Link
                 href={explainHref(filter, { kind: null, correctionClass: null, selected: null })}
                 className="underline underline-offset-4"
@@ -495,11 +542,10 @@ function BreaksTable({
                   </td>
 
                   <td className={TD_CLASS}>
-                    <span className="tabular-nums">
-                      {row.ageDays === 0 ? "today" : `${row.ageDays}d`}
-                    </span>
+                    <span className="tabular-nums">{formatAge(row.ageDays, "d")}</span>
                     <span className="mt-0.5 block text-[11px] text-muted">
-                      from {AGING_AXIS_LABELS[row.agingAxis]}
+                      {row.ageDays < 0 ? "dated ahead of" : "from"}{" "}
+                      {AGING_AXIS_LABELS[row.agingAxis]}
                     </span>
                     <span className="mt-0.5 block text-[11px] text-muted">
                       {row.closesCrossed} {row.closesCrossed === 1 ? "close" : "closes"}
@@ -540,6 +586,25 @@ function Absent({
     );
   }
   return <Money cents={value} tone="neutral" />;
+}
+
+/**
+ * How old, in words that stay true when the age is negative.
+ *
+ * `ageDays` is `book_date(now()) - <the axis date>`, so a break whose value
+ * date has not arrived yet measures NEGATIVE. That is a real state on this
+ * book — a settlement file can carry a forward value date — and the column was
+ * printing it as `-453d`, which reads as an age and is not one. A break dated
+ * ahead is not 453 days old; nothing about it is late yet, and the operator
+ * needs to be told which of the two it is.
+ *
+ * `unit` is `"d"` for the table's narrow column and `" days"` for the detail
+ * cards, so both surfaces get the same three cases from one place.
+ */
+function formatAge(ageDays: number, unit: "d" | " days"): string {
+  if (ageDays === 0) return "today";
+  if (ageDays > 0) return `${ageDays}${unit}`;
+  return `${-ageDays}${unit} ahead`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -677,7 +742,7 @@ function AxisCard({
         {inUse ? <Badge tone="neutral">aged on this</Badge> : <Badge tone="quiet">not used</Badge>}
       </div>
       <p className="mt-2 text-sm tabular-nums">
-        {ageDays === 0 ? "today" : `${ageDays} days`} · {closes}{" "}
+        {formatAge(ageDays, " days")} · {closes}{" "}
         {closes === 1 ? "close" : "closes"}
       </p>
       <p className="mt-1 text-[11px] leading-relaxed text-muted">

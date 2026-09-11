@@ -141,4 +141,14 @@ fi
 echo "typecheck..." && pnpm run --silent typecheck || fail "typecheck"
 echo "lint..."      && pnpm run --silent lint      || fail "lint"
 echo "test..."      && pnpm run --silent test      >/dev/null 2>&1 || fail "tests"
+# BUILD IS PART OF THE GATE, and it was not until 12:01 on the last day.
+#
+# `pnpm typecheck` exits 0 on errors `next build` still catches — an agent hit
+# exactly that today: typecheck clean, build red on a missing export in a file
+# it had just written. Every gate before this one could therefore go green on a
+# tree that could not be deployed, which makes the gate a claim about the tests
+# rather than about the build. It is slower by a minute and that is the correct
+# trade: the whole point of this script is that a green result means the thing
+# can ship.
+echo "build..."     && pnpm run --silent build     >/dev/null 2>&1 || fail "build"
 echo "GATE GREEN"

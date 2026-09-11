@@ -8,6 +8,7 @@ import { BreaksTable } from "./BreaksTable";
 import { ReconErrorPanel } from "./ReconErrorPanel";
 import { ReconSkeleton } from "./ReconSkeleton";
 import { RejectsPanel } from "./RejectsPanel";
+import { RunControls } from "./RunControls";
 import { RunHistory } from "./RunHistory";
 import { SummaryTiles } from "./SummaryTiles";
 import type { ReconDataSource } from "./data-contract";
@@ -74,13 +75,14 @@ export async function ReconView({
         >
           <div className="px-5 py-10 text-center">
             <p className="mx-auto max-w-prose text-xs leading-relaxed text-muted">
-              Import a file and run the reconciliation, and this screen fills
-              in. There is nothing to show and nothing has gone wrong — a
-              breaks screen with no runs behind it is an honest blank, not an
-              error.
+              Import a file and run the reconciliation with the form below, and
+              this screen fills in. There is nothing to show and nothing has
+              gone wrong — a breaks screen with no runs behind it is an honest
+              blank, not an error.
             </p>
           </div>
         </Panel>
+        <RunControls runnable={view.source === "live"} current={null} />
       </div>
     );
   }
@@ -137,6 +139,11 @@ export async function ReconView({
       {view.rejects.length === 0 ? null : <RejectsPanel rejects={view.rejects} />}
 
       <RunHistory runs={view.history} current={run} filter={filter} />
+
+      <RunControls
+        runnable={view.source === "live"}
+        current={{ fileId: run.fileId, filename: run.filename, runNo: run.runNo }}
+      />
 
       <FooterNote filter={filter} />
     </div>

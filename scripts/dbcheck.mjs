@@ -1090,6 +1090,87 @@ const RED_REGISTER = {
       "deferred'), which holds the two entry ids; docs/INVARIANTS.md §'The fifth red'; " +
       "db/migrations/0052_pot_line_provenance.sql for what the view is and why it is not narrowable",
   },
+  // ---- THE SIXTH.  TWO MIGRATIONS THAT DISAGREE, A DAY APART ----------
+  //
+  // This one was not found in the data and it was not inflicted by a
+  // probe. It is two files, both careful, asserting opposite conventions
+  // about the same column. 0053 chose a shared house memo leaf for FX
+  // commitments ON PURPOSE, argued it in §1, and wrote down what it
+  // costs. 0054, written the next day, ends its memo guard with an arm
+  // that asserts the opposite, and arrived GREEN only because no FX
+  // commitment existed yet on this book. The first acceptance made it
+  // red and every acceptance since has added a row.
+  //
+  // The register's job here is to stop the disagreement being settled by
+  // whichever file was easier to edit. It is settled below, in writing,
+  // in favour of the guard — and the guard still FAILS, because the book
+  // has not been repaired, only judged.
+  v_memo_line_placement: {
+    rows:
+      "the memo postings that OPEN an accepted FX commitment hold, on the `usdc` rail under " +
+      "`fx-commitment:<id>:open` keys. The count grows by one with every acceptance and the " +
+      "COMPOSITION is the thing to read, not the number: every row has line_count 2, " +
+      "currency_count 1, net_cents 0, no line outside the memo book, exactly ONE line on the memo " +
+      "account its own hold names, and customer_lines_elsewhere = 0 — so the dodge this view was " +
+      "built for, $85,000.00 of withholding parked on another customer's memo leaf, is NOT what " +
+      "fired. Five arms passed and the sixth caught it. After those five, `house_memo_lines <> 1` " +
+      "is equivalent to exactly one sentence: THE HOLD'S OWN MEMO ACCOUNT IS A HOUSE ACCOUNT. It " +
+      "is. `9300 Holds — accepted FX commitments` carries business_id NULL and has ZERO children, " +
+      "while its two siblings 9100 and 9200 are `perBusiness` with six leaves each; 1,179 of this " +
+      "book's 1,190 holds name a per-business memo leaf and the FX commitments are the only ones " +
+      "that do not. The money is live — $471,607.49 withheld across eleven open holds at the time " +
+      "of writing — but on Hold Fuzzer Fixture Co. and Live Fire attack 3, not on Ridgeline, " +
+      "Kettle & Crumb or Silverline, and `v_fx_commitment_unheld` is green, so every commitment " +
+      "withholds exactly the price it committed.",
+    stands:
+      "THE GUARD IS RIGHT AND THE FX DESIGN IS WRONG, and the wrongness is an ATTRIBUTION defect, " +
+      "not a money defect. 0053 §1 took the decision knowingly and priced it in advance: 'a " +
+      "customer's statement renders memo lines from their own 9100/9200 leaves, so an FX " +
+      "commitment hold does not appear there. Availability is right; the statement line is " +
+      "missing.' That argument is SOUND about availability — `v_hold_state` and " +
+      "`ledger_availability()` both fold on `e.hold_id = h.id AND l.account_id = " +
+      "h.memo_account_id`, keyed on the HOLD, so two customers sharing one leaf cannot contaminate " +
+      "each other — and it is silent about what 0054 actually asserts: that a hold's withholding " +
+      "is attributable to a business BY THE CHART, which `account` being SELECT-only puts outside " +
+      "the writer's reach, rather than by `hold.account_id` alone, which the writer picks at " +
+      "insert. On 9300 that cross-check has nothing to check against. THE RED CANNOT BE CLEARED " +
+      "BY ANY MIGRATION, and that is a fact about this database rather than a preference: " +
+      "`hold_no_update_delete` is a BEFORE UPDATE OR DELETE trigger running " +
+      "`ledger_row_is_immutable()` FOR EVERY ROLE, so `memo_account_id` on the eleven standing " +
+      "holds can never be repointed, and `journal_line_no_update_delete` says the same of the " +
+      "twenty-two lines already sitting on 9300. A 0059 that opened per-business leaves would " +
+      "stop the count growing and would leave these eleven red forever — so by 0043/0052/0054's " +
+      "own closing rule it would have to refuse to commit, on a book with $471,607.49 of live " +
+      "withholding on it. It is not shipped today for a second reason that is not about the " +
+      "clock: 0053 §1's own upgrade path is 'inserts the row in per_business_rollup, opens the " +
+      "leaves', and `per_business_rollup` backfills a leaf for EVERY business — which means " +
+      "opening a new account on Ridgeline, Kettle & Crumb and Silverline, and this change is " +
+      "scoped to reads on those three. The two cheap exits were never available. Filtering these " +
+      "entry ids out is 0026's anti-pattern, the origin of the 31 instances this build " +
+      "catalogues. Deleting the `house_memo_lines <> 1` arm is worse than it looks: given the " +
+      "five arms above it, that arm has no other content — it would not narrow the population, it " +
+      "would delete the only assertion on this book that a hold's memo account belongs to " +
+      "somebody, and there is no dodge left for it to catch afterwards to prove the narrowing with.",
+    changes:
+      "an FX commitment accepted by Ridgeline, Kettle & Crumb or Silverline. That is the same row " +
+      "shape, but it turns a fixture-only reporting gap into a real customer whose statement is " +
+      "provably missing a line of live withholding. Any row whose `placement` is not 'the contra " +
+      "side is not a single house memo line' — every other arm of this view is the theft shape it " +
+      "was written for, and none of this entry's argument covers one. And the repair, which is a " +
+      "PAIR and not a migration on its own: `9300` becomes `perBusiness` in " +
+      "`src/lib/ledger/chart.ts` and in `per_business_rollup`, the leaves are opened and " +
+      "backfilled, and `src/lib/fx/hold.ts` resolves the customer's leaf instead of calling " +
+      "`houseAccountId()`. That closes the population FORWARD and nothing else does. The holds " +
+      "standing when it lands stay red permanently, exactly as `v_pot_line_provenance`'s two rows " +
+      "do, and for exactly the same reason.",
+    cited:
+      "db/migrations/0053_fx_commitment_hold.sql §1 'WHY IT IS A HOUSE ACCOUNT AND NOT ONE LEAF " +
+      "PER CUSTOMER', which takes the decision, names the cost and sketches the upgrade; " +
+      "db/migrations/0054_deposit_and_memo_provenance.sql §4 for what the guard asserts and the " +
+      "$85,000.00 dodge it was built for; src/lib/ledger/chart.ts (the 9300 entry) and " +
+      "src/lib/fx/hold.ts `FX_COMMITMENT_MEMO_CODE`, which carry the same trade-off in code; " +
+      "docs/FX.md §6 'Also missing: the memo hold an acceptance should place'",
+  },
 };
 
 console.log("\nINVARIANT VIEWS — each MUST return zero rows\n");
@@ -1209,6 +1290,45 @@ async function explain(view) {
         (r.closure_source === "test_harness"
           ? `  <- e.g. ${r.example}. docs/HOLDS.md §10.4: a fixture's closures. NOT repaired — 0043's header prices both repairs and both are worse.`
           : `  <- e.g. ${r.example}. A closure the model's terminal predicate did not license and the provider's verdicts do not explain.`),
+      );
+    } catch { return []; }
+  }
+  // 0054's memo guard. The register above CLAIMS three things about this
+  // red: every row is the shared-house-leaf arm and not the theft arm,
+  // the money is live, and none of it is on a real customer. All three
+  // are measured here rather than trusted, because the count moves with
+  // every FX acceptance and a count that moves is exactly the shape a new
+  // defect hides inside.
+  if (view === "v_memo_line_placement") {
+    try {
+      const rows = await sql.unsafe(`
+        SELECT p.placement,
+               count(*)::int                                          AS n,
+               count(*) FILTER (WHERE NOT s.is_released)::int          AS live,
+               COALESCE(SUM(s.active_hold_cents)
+                        FILTER (WHERE NOT s.is_released), 0)::text     AS cents,
+               count(*) FILTER (WHERE f.is_fixture IS NOT TRUE)::int   AS on_real_customers,
+               COALESCE(string_agg(DISTINCT b.legal_name, ', '), '(none)') AS businesses
+          FROM v_memo_line_placement p
+          JOIN hold       h ON h.id = p.hold_id::uuid
+          JOIN v_hold_state s ON s.hold_id = h.id
+          JOIN account    a ON a.id = h.account_id
+          LEFT JOIN business b ON b.id = a.business_id
+          LEFT JOIN LATERAL (
+            SELECT (b.legal_name NOT IN ('Ridgeline Robotics, Inc.',
+                                         'Kettle & Crumb Bakery LLC',
+                                         'Silverline Freight Co.')) AS is_fixture
+          ) f ON true
+         GROUP BY p.placement ORDER BY n DESC`);
+      return rows.map((r) =>
+        `${String(r.placement).slice(0, 46).padEnd(48)} ${String(r.n).padStart(3)} entry(s), ` +
+        `${usd(r.cents)} withheld, ${r.live} still live` +
+        (r.placement === "the contra side is not a single house memo line"
+          ? `\n        on: ${r.businesses}` +
+            (r.on_real_customers === 0
+              ? `  <- the shared 9300 house leaf. ON THE REGISTER: an attribution defect, fixtures only, no customer balance touched.`
+              : `  <- ${r.on_real_customers} of these are on a REAL CUSTOMER, whose statement is missing a line of live withholding. The register's 'changes it' clause has fired.`)
+          : `  <- NOT the shared-leaf arm. This is the placement shape 0054 was written for and NOTHING on the register covers it.`),
       );
     } catch { return []; }
   }

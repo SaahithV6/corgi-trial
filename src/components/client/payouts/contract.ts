@@ -68,8 +68,19 @@ export type PayoutsScreen = {
   readonly committedCents: bigint;
   readonly standing: readonly StandingCommitment[];
   readonly quotes: readonly QuoteRow[];
-  /** The customer switcher. This build has no sign-in; see `view-state.ts`. */
-  readonly businesses: readonly { readonly id: string; readonly legalName: string }[];
+  /**
+   * The customer switcher. This build has no sign-in; see `view-state.ts`.
+   *
+   * `hasAccount` is carried because every other client screen's picker suffixes
+   * "— no account yet" and this one did not, so the ONE screen where choosing
+   * the wrong customer commits money was the one screen that did not say the
+   * customer you were about to choose has nothing to commit from.
+   */
+  readonly businesses: readonly {
+    readonly id: string;
+    readonly legalName: string;
+    readonly hasAccount: boolean;
+  }[];
   /** The corridors this bank will quote. A closed list, not a currency table. */
   readonly corridors: readonly {
     readonly currency: string;

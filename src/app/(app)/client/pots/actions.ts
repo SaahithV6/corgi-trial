@@ -293,8 +293,23 @@ export async function moveClientPotAction(
 ): Promise<PotActionResult> {
   const businessId = String(formData.get("businessId") ?? "");
   const potId = String(formData.get("potId") ?? "");
-  const direction: MoveDirection =
-    String(formData.get("direction") ?? "in") === "out" ? "out" : "in";
+
+  // WHICH WAY IS NOT A DEFAULT. The two directions are carried by the two
+  // submit buttons, and a submit button contributes its name only when it is
+  // the one that was pressed — so a form submitted by pressing Enter in the
+  // amount box arrives with no `direction` at all. Reading that as "in" meant
+  // money went INTO a pot without anybody having chosen a direction, which is
+  // the one thing the two-button layout exists to prevent. There is no safe
+  // default between two opposite instructions; the honest answer is to say
+  // which button says which.
+  const rawDirection = String(formData.get("direction") ?? "");
+  if (rawDirection !== "in" && rawDirection !== "out") {
+    return refused(
+      "DIRECTION_NOT_CHOSEN",
+      "Say which way the money goes. Press “Set aside in this pot” to move it into the pot, or “Release back to my balance” to take it out — pressing Enter does not choose one, and nothing was moved.",
+    );
+  }
+  const direction: MoveDirection = rawDirection;
 
   if (!(await ownsPot(potId, businessId))) {
     return refused("POT_NOT_ON_THIS_BUSINESS", NOT_YOURS);

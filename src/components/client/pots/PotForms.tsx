@@ -223,6 +223,22 @@ export function MovePotForm({
             {pending ? "Working…" : "Release back to my balance"}
           </button>
         </div>
+        {/* SAID OUT LOUD, because the browser decides this and the screen was
+            letting it decide silently. Two buttons that move money in opposite
+            directions, and pressing Enter in either box performs the FIRST one
+            — measured, not assumed: typing an amount and a reference and
+            pressing Enter set $10.00 aside without anybody having pressed a
+            button. Standard HTML, and a fine default; a money form must not
+            leave it to be discovered. */}
+        <p className="max-w-prose text-xs leading-relaxed text-muted">
+          Pressing Enter in either box does the same as{" "}
+          <strong className="font-medium text-text">Set aside in this pot</strong>.
+          To take money back out, press{" "}
+          <strong className="font-medium text-text">
+            Release back to my balance
+          </strong>{" "}
+          yourself.
+        </p>
         <p className="max-w-prose text-xs leading-relaxed text-muted">
           You have {availableDisplay} available to set aside. Available is your
           ledger balance less card holds, credits that have not cleared, and

@@ -49,7 +49,7 @@ const QUOTE_LIMIT = 20;
 async function resolveBusiness(
   businessId: string | null,
   conn: Sql,
-): Promise<Loaded<{ readonly businessId: string; readonly legalName: string; readonly all: readonly { readonly id: string; readonly legalName: string }[] }>> {
+): Promise<Loaded<{ readonly businessId: string; readonly legalName: string; readonly all: readonly { readonly id: string; readonly legalName: string; readonly hasAccount: boolean }[] }>> {
   const businesses = await listBusinesses(conn);
   const wanted =
     (businessId === null ? null : await findBusiness(businessId, conn)) ??
@@ -70,7 +70,15 @@ async function resolveBusiness(
     value: {
       businessId: wanted.businessId,
       legalName: wanted.legalName,
-      all: businesses.map((b) => ({ id: b.businessId, legalName: b.legalName })),
+      // `hasAccount` so the picker can say "— no account yet", the way every
+      // other client screen's picker does. Dropping it here made this screen
+      // the only one that offers a customer with nothing to commit from
+      // without saying so.
+      all: businesses.map((b) => ({
+        id: b.businessId,
+        legalName: b.legalName,
+        hasAccount: b.depositAccountId !== null,
+      })),
     },
   };
 }
