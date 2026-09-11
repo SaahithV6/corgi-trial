@@ -4,7 +4,7 @@ Subject: Work trial: Saahith Veeramaneni, Track 3
 
 Hi both,
 
-Track 3, Neobank. Frozen at commit `826276a`.
+Track 3, Neobank. Frozen at commit `99c9dd8`.
 
 **1 · Deployed URL**
 
@@ -131,7 +131,19 @@ Lithic sandbox, Ridgeline moving $14,221.33 → $10,947.93 available.
   from CORGI TREASURY is deliberately unbooked** — nothing on the book can say
   whose it is, and mapping the account number would be guessing.
 
-The decision log, seed script, `.env.example` and cut list are in the repo.
+**Also in the repo, by name**
+
+- **Seed script** — `node scripts/seed.mjs` builds the demo book from empty:
+  businesses, accounts, the corrected statement day, the card episode and the
+  planted reconciliation break. `db/seed/README.md` says what each fixture is
+  for and which claim it exists to support.
+- **Cut list** — `docs/CUT-LIST.md`. What was dropped, when, and the reason,
+  written when the call was made rather than reconstructed afterwards.
+- **Decision log** — `DECISIONS.md` at the repo root, 49 numbered entries. The
+  over-capture argument the invariant red points at is DECISIONS 049.
+- **Migrations** — `db/migrations/`, applied by `node scripts/migrate.mjs`.
+- **`.env.example`** — every variable the app reads, including
+  `CONSOLE_PASSWORD`. No secret in the repo has a real value.
 
 Thanks — looking forward to the debrief.
 
