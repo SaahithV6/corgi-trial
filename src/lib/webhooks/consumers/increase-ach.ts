@@ -107,7 +107,11 @@ import "server-only";
 import { ledgerPosterActorId } from "@/lib/holds/store";
 import { sql, type Sql } from "@/lib/ledger/db";
 import { postEntry } from "@/lib/ledger/post";
-import { readAccountIdentity, resolveChartCodes } from "@/lib/ledger/readers";
+import {
+  findEntryByIdempotencyKey,
+  readAccountIdentity,
+  resolveChartCodes,
+} from "@/lib/ledger/readers";
 import { IncreaseAchRail, type IncreaseAchTransfer } from "@/lib/rails/increase/client";
 import {
   describeResolutions,
@@ -139,6 +143,61 @@ export const FBO_CASH_CODE = "1110";
 /** The object types this consumer models. Anything else is not ours. */
 const OUTBOUND_OBJECT = "ach_transfer";
 const INBOUND_OBJECT = "inbound_ach_transfer";
+
+/**
+ * The idempotency key an inbound ACH credit WOULD be booked under.
+ *
+ * No path on this build writes one — see the inbound section below for the
+ * measurement that says why — and this constant exists so the guard there can
+ * ask the ledger the question instead of assuming the answer. If a future build
+ * gains per-customer account numbers and starts booking inbound credits, this
+ * is the string it must use, and the guard turns itself off by finding one.
+ */
+const INBOUND_CREDIT_KEY_PREFIX = "ach:inbound:";
+
+/**
+ * The inbound ACH object, as Increase actually returns it.
+ *
+ * MEASURED on the sandbox, 2026-09-11, on
+ * `sandbox_inbound_ach_transfer_n8dm6ffh9tijbi27of5b` — a real $2,500.00 credit
+ * created with `POST /simulations/inbound_ach_transfers` and then returned with
+ * `POST /inbound_ach_transfers/{id}/transfer_return`. THE SHAPE IS NOT THE
+ * OUTBOUND SHAPE and the difference is exactly where a value date goes wrong:
+ *
+ *   outbound `ach_transfer`          inbound `inbound_ach_transfer`
+ *   -----------------------------    ------------------------------------
+ *   return.created_at                transfer_return.returned_at
+ *   return.trace_number              trace_number   (on the object itself)
+ *   return.return_reason_code        transfer_return.reason
+ *   settlement.settled_at            settlement.settled_at        (same)
+ *   -                                effective_date, account_number_id
+ *
+ * `rail_event_semantics` shipped the inbound return row with
+ * `value_date_source = payload.return.created_at`, copied from the outbound row
+ * by analogy and never measured, because the branch that would have read it was
+ * unreachable. `db/migrations/0039_inbound_recall.sql` corrects it to
+ * `payload.transfer_return.returned_at` and carries the measurement.
+ */
+export interface IncreaseInboundAchTransfer {
+  readonly id: string;
+  readonly amount: number;
+  readonly account_id?: string | null;
+  readonly account_number_id?: string | null;
+  readonly direction?: string | null;
+  readonly status: string;
+  readonly created_at: string;
+  readonly effective_date?: string | null;
+  readonly trace_number?: string | null;
+  readonly originator_company_name?: string | null;
+  readonly settlement?: { readonly settled_at?: string | null } | null;
+  readonly acceptance?: { readonly accepted_at?: string | null } | null;
+  readonly decline?: { readonly reason?: string | null } | null;
+  readonly transfer_return?: {
+    readonly reason?: string | null;
+    readonly returned_at?: string | null;
+    readonly transaction_id?: string | null;
+  } | null;
+}
 
 /**
  * Increase's own ledger view of a movement we book from the transfer.
@@ -276,7 +335,13 @@ export function assertedSteps(transfer: IncreaseAchTransfer): string[] {
  * different days, and a fallback would quietly book the wrong one.
  */
 export function valueDateFromSource(
-  transfer: IncreaseAchTransfer,
+  // `unknown`, not `IncreaseAchTransfer`, because there are TWO objects on this
+  // rail and the table names a field on whichever one the fact lives on: an
+  // outbound `ach_transfer` and an inbound `inbound_ach_transfer`. The body
+  // already walks the path with runtime checks at every hop, so widening the
+  // parameter removes a cast rather than a guarantee. Every existing caller and
+  // every existing test passes a narrower type and still typechecks.
+  transfer: unknown,
   valueDateSource: string,
 ): string | null {
   const path = valueDateSource.replace(/^payload\./, "").split(".");
@@ -657,12 +722,351 @@ async function applyStep(args: {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. Money arriving — and the recall of money that arrived
+// ---------------------------------------------------------------------------
+//
+// =============================================================================
+// CAN AN INBOUND ACH CREDIT BE ATTRIBUTED ON THIS BUILD? NO, AND IT IS MEASURED
+// =============================================================================
+//
+// The refusal below is not a hunch about the schema. `GET /account_numbers` on
+// the Increase sandbox, 2026-09-11, returns EXACTLY ONE object:
+//
+//     sandbox_account_number_96mzhz3n61f5p0jpvytc
+//     account_number 7467448488   routing_number 123308582   name "primary"
+//     account_id sandbox_account_zkfx1wcn4brwoaiyksj6
+//
+// One number, on the program's own FBO account, and the SIX businesses on this
+// book all share it. An inbound ACH credit names `account_number_id`, and every
+// inbound credit that can ever arrive here names that one — so the field that is
+// supposed to say whose money it is says "the program's", which is not an
+// answer. There is no `account_number -> business` table anywhere in
+// `db/migrations/`, because no path issues per-customer numbers. Posting it to a
+// customer would mean picking one, and "the only business on the book" is a
+// guess wearing a heuristic's clothes. So: PARK. Requirement 4, unchanged.
+//
+// -----------------------------------------------------------------------------
+// WHY THE WIRE RAIL'S ANSWER DOES NOT TRANSFER
+// -----------------------------------------------------------------------------
+//
+// `increase-wire.ts` books exactly one inbound credit, and the reason it can is
+// worth stating precisely because it is the reason ACH cannot follow: a
+// `wire_transfer.updated/reversed` hangs off an OUTBOUND transfer WE sent, whose
+// `Idempotency-Key` is `payment:<instruction id>`, and the instruction names the
+// account and the account names the business. Attribution comes from our own
+// book, not from the inbound message. Nothing is guessed.
+//
+// ACH has no analogue. When an outbound ACH payment of ours comes back it does
+// NOT arrive as an `inbound_ach_transfer`: it arrives as a `return` block on the
+// SAME `ach_transfer` object, which `applyStep`'s `ach_return` arm has booked
+// since it was written — proven on the real $6,000.00 R01 return of
+// `sandbox_ach_transfer_x5vdo5m7b6k924sszlms`. Every `inbound_ach_transfer` is
+// therefore money from a stranger, addressed to a number that identifies the
+// program. There is no second route in.
+//
+// -----------------------------------------------------------------------------
+// SO WHAT IS A RECALL OF AN INBOUND CREDIT HERE, AND WHY IS IT NOT A NO-OP?
+// -----------------------------------------------------------------------------
+//
+// `rail_event_semantics` carries `inbound_ach_transfer.updated/returned ->
+// inbound_ach_return`, and its note said "an inbound credit we already posted
+// has been returned". On this build that premise is FALSE: no inbound credit was
+// ever posted, so there is no entry to correct and no hold to close. The old
+// consumer never found that out, because it parked on `associated_object_type`
+// BEFORE the table was ever consulted. The row was unreachable code guarding a
+// claim, and `docs/GAUNTLET.md` was right to call it that.
+//
+// The ledger consequence of a recall is genuinely nothing. What is NOT nothing
+// is what it does to the INBOX. Before this branch existed, a recalled credit
+// left two deliveries parked — the `.created` and the `.updated` — re-checking
+// every few minutes for five hours and then dead-lettering onto a staff screen
+// under "an operator must attribute it by hand", pointing a human at money that
+// had already gone back to the originator. The recall is the fact that ENDS the
+// operator's question, so this branch reports it and RESOLVES the delivery,
+// naming the transfer so the parked `.created` sibling wakes and converges on
+// the same read-back. Both rows clear. Nothing dead-letters. The park stops
+// being a leak.
+//
+// That is the whole change: the row is reachable, the table decides, the value
+// date comes from the field the table names, and a refusal that has been
+// overtaken by events stops pretending it still needs a person.
+//
+// WHAT THIS BRANCH NEVER DOES: initiate a money movement. Returning an inbound
+// credit we cannot attribute is the right operational disposition and it is an
+// OPERATOR action taken against the Increase API, not something a webhook
+// consumer decides for itself. A consumer that could send money back would be a
+// consumer that could send money.
+
+/** Steps the CURRENT inbound object asserts, keyed as the table keys them. */
+export function inboundAssertedStep(
+  transfer: IncreaseInboundAchTransfer,
+): { readonly eventType: string; readonly steps: readonly string[] } {
+  // The table keys the inbound credit under the BARE `.created` category and
+  // the recall under `.updated/returned`. It does not carry a
+  // `.updated/credit` row, and it should not: the credit is classified once,
+  // where it is created. So a returned object asks about the return only —
+  // asking about a key nobody wrote would park a delivery that is perfectly
+  // classifiable, which is the trap the outbound path already documents.
+  if (transfer.transfer_return !== null && transfer.transfer_return !== undefined) {
+    return { eventType: `${INBOUND_OBJECT}.updated`, steps: ["returned"] };
+  }
+  return { eventType: `${INBOUND_OBJECT}.created`, steps: [""] };
+}
+
+/** Has this book ever booked the credit that is now being recalled? */
+async function inboundCreditEntryId(transferId: string, conn: Sql): Promise<string | null> {
+  const entry = await findEntryByIdempotencyKey(`${INBOUND_CREDIT_KEY_PREFIX}${transferId}`, conn);
+  return entry === null ? null : entry.entryId;
+}
+
+/**
+ * `GET /inbound_ach_transfers/{id}`.
+ *
+ * The key is read at CALL time, never captured at module scope, so a rotated
+ * credential is picked up without a restart — the same rule
+ * `IncreaseAchRail.apiKey()` follows, for the same reason.
+ */
+async function defaultInboundReadBack(id: string): Promise<IncreaseInboundAchTransfer> {
+  const key = process.env["INCREASE_API_KEY"];
+  if (key === undefined || key === "") {
+    throw new Error("INCREASE_API_KEY is not set; cannot read back an inbound ACH transfer");
+  }
+  const base = (process.env["INCREASE_BASE_URL"] ?? "https://sandbox.increase.com").replace(
+    /\/+$/,
+    "",
+  );
+  const res = await fetch(`${base}/inbound_ach_transfers/${id}`, {
+    headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Increase ${res.status} reading inbound ${id}: ${text.slice(0, 200)}`);
+  return JSON.parse(text) as IncreaseInboundAchTransfer;
+}
+
+/**
+ * One inbound ACH delivery, from the read-back to the answer.
+ *
+ * Read the block above §4b for why nothing here posts. What is left, once
+ * posting is off the table, is still worth getting right: WHICH refusal, at
+ * WHAT date, and WHETHER the refusal is still live.
+ */
+async function handleInbound(args: {
+  readonly pointer: EventPointer;
+  readonly event: InboxEvent;
+  readonly ctx: ConsumerContext;
+  readonly readInbound: (id: string) => Promise<IncreaseInboundAchTransfer>;
+  readonly deps: IncreaseConsumerDeps;
+}): Promise<ConsumerResult> {
+  const { pointer, ctx } = args;
+  const conn = args.deps.conn ?? sql;
+
+  // THE ONE try/catch IN THIS FILE, AND THE REASON IT IS SAFE HERE AND NOT
+  // TWENTY LINES DOWN. The outbound read-back is deliberately unguarded: if
+  // the API does not answer we do not know the state, and this consumer is
+  // about to POST. Here nothing posts under any outcome, so a failed read-back
+  // cannot mis-book anything — the worst it costs is the recall detection
+  // below, and the fallback is the identical park the old consumer made
+  // unconditionally, on a bounded schedule that retries the read. Strictly
+  // more information than before, never less.
+  let transfer: IncreaseInboundAchTransfer;
+  try {
+    transfer = await args.readInbound(pointer.associatedObjectId);
+  } catch (thrown) {
+    return parked(
+      "inbound_ach_account_mapping",
+      pointer.associatedObjectId,
+      `inbound ACH ${pointer.associatedObjectId} (${pointer.category}): this build issues no ` +
+        `virtual account numbers, so there is no way to tell which customer an inbound credit ` +
+        `belongs to. Nothing was posted. An operator must attribute it by hand. The object could ` +
+        `not be read back to check whether it has since been returned — ` +
+        `${thrown instanceof Error ? thrown.message : String(thrown)} — so this park is the ` +
+        `attribution refusal only, and the read is retried on the next re-check.`,
+    );
+  }
+
+  // The credit was refused at Increase: the money never reached the FBO
+  // account, so there is nothing to attribute, nothing to post and no value
+  // date to get wrong. Ending the row here is NOT the same answer as a
+  // failure, which would burn the retry budget and dead-letter a non-event.
+  // No table row is consulted because the table classifies MOVEMENTS, and a
+  // declined inbound is the absence of one.
+  if (transfer.decline !== null && transfer.decline !== undefined) {
+    return ignored(
+      `inbound ACH ${transfer.id} was DECLINED at Increase ` +
+        `(${transfer.decline.reason ?? "no reason given"}); no money reached the FBO account and ` +
+        `nothing was posted.`,
+    );
+  }
+
+  // ASK THE TABLE. This is the line `docs/GAUNTLET.md` reported as unreachable:
+  // the old consumer parked on `associated_object_type` before any lookup ran,
+  // so the `inbound_ach_return` row could never be consulted by anything.
+  const asserted = inboundAssertedStep(transfer);
+  const semantics = await resolveEventSemanticsBatch(
+    {
+      provider: INCREASE_WEBHOOK_PROVIDER,
+      eventType: asserted.eventType,
+      nestedSteps: asserted.steps,
+    },
+    args.deps.semanticsRows === undefined ? {} : { rows: args.deps.semanticsRows },
+  );
+
+  if (semantics.status === "unclassified") {
+    return parked(
+      "rail_event_semantics",
+      semantics.key,
+      `no rail_event_semantics row for '${semantics.key}'; nobody has classified this step as a ` +
+        `correction or a new event, and nothing about an inbound credit is decided by default.`,
+    );
+  }
+
+  const resolution = semantics.resolved[0];
+  if (resolution === undefined) {
+    return parked(
+      "rail_event_semantics",
+      asserted.eventType,
+      `rail_event_semantics resolved no step for inbound ACH ${transfer.id}. Nothing was posted.`,
+    );
+  }
+
+  // The same refusal `applyOutbound` makes, kept identical on purpose: a
+  // `correction` row means "repair a past posting at the past posting's date",
+  // which needs `reverseAndRebook()` and a matched target, and this consumer
+  // has no such path for ACH. It cannot fire today — both inbound rows are
+  // `new_event` — and it is kept because the day somebody flips one is the day
+  // this consumer must refuse rather than comply quietly.
+  if (resolution.valueDateAnchor === "original") {
+    return parked(
+      "rail_event_semantics",
+      resolution.key,
+      `rail_event_semantics classifies '${resolution.key}' as a CORRECTION at the original value ` +
+        `date. This consumer books ACH steps as new events only and has no reverse-and-rebook ` +
+        `path for them, so nothing was posted.`,
+    );
+  }
+
+  // THE FIELD THE TABLE NAMES, read off the object rather than chosen here.
+  // For the recall that field is `transfer_return.returned_at` — measured, see
+  // `IncreaseInboundAchTransfer` above — and `db/migrations/0039_inbound_recall.sql`
+  // is what made it resolvable: the row shipped naming `return.created_at`,
+  // copied from the OUTBOUND object, which the inbound object does not carry.
+  // Before that migration this line returned null and parked, which is the
+  // guard doing its job on a row nobody had ever been able to exercise.
+  const valueDate = valueDateFromSource(transfer, resolution.row.valueDateSource);
+  if (valueDate === null) {
+    return parked(
+      "increase_value_date",
+      `${transfer.id}:${resolution.key}`,
+      `rail_event_semantics says the value date for '${resolution.key}' comes from ` +
+        `'${resolution.row.valueDateSource}', and inbound ACH ${transfer.id} does not carry it. ` +
+        `Nothing was posted.`,
+    );
+  }
+
+  ctx.logger.info("increase.inbound_ach_transfer.semantics", {
+    inboxId: args.event.id,
+    transferId: transfer.id,
+    category: pointer.category,
+    status: transfer.status,
+    accountNumberId: transfer.account_number_id ?? null,
+    steps: describeResolutions(semantics.resolved),
+    valueDate,
+  });
+
+  switch (resolution.row.canonicalKind) {
+    case "inbound_ach_credit":
+      // UNCHANGED IN SUBSTANCE, richer in content. The refusal is the schema's,
+      // not the rail's: one account number, shared by every business on the
+      // book, so the field that should say whose money this is says "the
+      // program's". PARK, not ignore — a credit nobody can attribute is exactly
+      // what an operator should be shown, and filing it under "recognised and
+      // skipped" would lose somebody's money quietly.
+      return parked(
+        "inbound_ach_account_mapping",
+        transfer.id,
+        `inbound ACH ${transfer.id} (${pointer.category}): this build issues no ` +
+          `virtual account numbers, so there is no way to tell which customer an inbound credit ` +
+          `belongs to — the object names account_number_id ` +
+          `${transfer.account_number_id ?? "(none)"}, which is the program's single FBO number ` +
+          `and is shared by every business on this book. Nothing was posted. An operator must ` +
+          `attribute it by hand, or return it to the originator. ` +
+          `rail_event_semantics classifies this as '${resolution.row.canonicalKind}' at value ` +
+          `date ${valueDate}, from ${transfer.originator_company_name ?? "an unnamed originator"}, ` +
+          `amount ${Math.abs(transfer.amount)} cents.`,
+      );
+
+    case "inbound_ach_return": {
+      // THE RECALL. Its ledger consequence is nothing, and saying so precisely
+      // is the point: nothing was booked when the credit arrived, because
+      // nothing could be attributed, so there is no entry to reverse and no
+      // 9200 hold to close. The table's own note said "an inbound credit we
+      // already posted has been returned"; on this build that premise is false,
+      // and 0039 rewrites the note to say which build it is true of.
+      const booked = await inboundCreditEntryId(transfer.id, conn);
+      if (booked !== null) {
+        // Cannot happen today: no path writes an `ach:inbound:` key. Kept for
+        // the same reason as the `valueDateAnchor === "original"` guard above —
+        // the day a build gains per-customer account numbers and starts booking
+        // inbound credits is the day this branch must refuse rather than
+        // silently report a recall as a no-op over a real posting.
+        return parked(
+          "inbound_ach_credit_reversal",
+          booked,
+          `inbound ACH ${transfer.id} has been returned, and this book DOES carry entry ${booked} ` +
+            `for the credit (${INBOUND_CREDIT_KEY_PREFIX}${transfer.id}). Reversing it is a ` +
+            `posting this consumer has no rule for. NOTHING WAS POSTED.`,
+        );
+      }
+
+      ctx.logger.info("increase.inbound_ach_transfer.recalled", {
+        inboxId: args.event.id,
+        transferId: transfer.id,
+        amountCents: String(Math.abs(transfer.amount)),
+        reason: transfer.transfer_return?.reason ?? "unknown",
+        returnedAt: transfer.transfer_return?.returned_at ?? null,
+        valueDate,
+        ledgerEffect: "none — the credit was never booked, so there is nothing to correct",
+      });
+
+      // RESOLVED, not parked. The recall is the fact that ENDS the operator's
+      // question: the money has gone back to the originator, so there is no
+      // longer anything to attribute by hand. Naming the transfer wakes the
+      // `.created` sibling still parked on it, which reads back the same
+      // now-returned object and converges here — so both rows clear instead of
+      // re-checking for five hours and dead-lettering onto a staff screen that
+      // points a human at money that has already left.
+      return processed([{ kind: "inbound_ach_account_mapping", ref: transfer.id }]);
+    }
+
+    default:
+      return parked(
+        "increase_canonical_kind",
+        resolution.row.canonicalKind,
+        `rail_event_semantics classifies '${resolution.key}' as canonical kind ` +
+          `'${resolution.row.canonicalKind}', which this consumer has no rule for. Nothing was ` +
+          `posted.`,
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 5. The consumer
 // ---------------------------------------------------------------------------
 
 export interface IncreaseConsumerDeps {
   /** Injected in tests. Defaults to the real sandbox client at call time. */
   readonly getTransfer?: (id: string) => Promise<IncreaseAchTransfer>;
+  /**
+   * The inbound read-back, injectable for the same reason as the outbound one.
+   *
+   * The default is a bare `fetch` rather than a method on `IncreaseAchRail`,
+   * and that is a scope confession, not a design: `src/lib/rails/increase/
+   * client.ts` has a private `request()` that does exactly this with better
+   * error classification, and `getInboundTransfer()` belongs there. It is not
+   * in this change's write set. The follow-up is one method and this default
+   * then deletes.
+   */
+  readonly getInboundTransfer?: (id: string) => Promise<IncreaseInboundAchTransfer>;
   readonly conn?: Sql;
   /**
    * Resolve semantics against these rows instead of the table. The seam is
@@ -684,6 +1088,8 @@ export function createIncreaseAchConsumer(deps: IncreaseConsumerDeps = {}): Webh
       return transfer.raw as IncreaseAchTransfer;
     });
 
+  const readInbound = deps.getInboundTransfer ?? defaultInboundReadBack;
+
   return {
     provider: INCREASE_WEBHOOK_PROVIDER,
 
@@ -697,25 +1103,7 @@ export function createIncreaseAchConsumer(deps: IncreaseConsumerDeps = {}): Webh
       }
 
       if (pointer.associatedObjectType === INBOUND_OBJECT) {
-        // Money we are being SENT. The table classifies it
-        // (`inbound_ach_transfer.created` -> `inbound_ach_credit`), and this
-        // consumer still refuses to post it, for a reason that is about the
-        // schema and not about the rail: an inbound credit names a destination
-        // account NUMBER, and this build issues no virtual account numbers, so
-        // there is no mapping from that number to a customer. Posting it would
-        // mean guessing whose money it is.
-        //
-        // PARK, not ignore. Parking is bounded — twelve re-checks, then a dead
-        // letter in front of a human — and a credit nobody can attribute is
-        // exactly what an operator should be shown. Ignoring it would file
-        // somebody's money under "recognised and skipped".
-        return parked(
-          "inbound_ach_account_mapping",
-          pointer.associatedObjectId,
-          `inbound ACH ${pointer.associatedObjectId} (${pointer.category}): this build issues no ` +
-            `virtual account numbers, so there is no way to tell which customer an inbound credit ` +
-            `belongs to. Nothing was posted. An operator must attribute it by hand.`,
-        );
+        return handleInbound({ pointer, event, ctx, readInbound, deps });
       }
 
       if (pointer.associatedObjectType !== OUTBOUND_OBJECT) {

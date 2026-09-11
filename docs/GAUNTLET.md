@@ -70,6 +70,14 @@ claim is never dressed up as the published one.
 | 9 | Scheme reconciliation with aging | **PROVEN** | fresh |
 | 10 | Maker-checker, including the agent surface | **PROVEN** | fresh |
 
+> **The scoreboard above is the record of the pass and is left exactly as it was
+> measured.** Items **2** and **5** each carry an `### ADDENDUM` at the end of
+> their section, measured *after* the window (09:03Z–09:17Z) and labelled with
+> its own freshness caveat. Item 2's incremental authorisation moves to
+> **PROVEN**; item 5's inbound leg moves from *"no reachable code path"* to
+> **reachable, classified and exercised — and booking nothing, for a reason that
+> is now measured.** Nothing above was edited to say so.
+
 ---
 
 ## 1. Ledger balance versus available balance
@@ -201,6 +209,162 @@ the live database, not delivered through the deployed webhook endpoint. They are
 real rows and the invariants above range over them, but they are **not** evidence
 that the deployed ingestion path handles those shapes. Stated plainly rather than
 folded in.
+
+### ADDENDUM — 2026-09-11T09:03:12Z → 09:04:11Z, after the pass
+
+**The incremental branch has now run on live input. The verdict moves from
+"one transition never demonstrated at all" to PROVEN, and the run found two
+things unit tests could not.**
+
+**Freshness and honesty caveat, first.** This addendum was measured **after** the
+window above closed, against the **live Neon database** and the **live Lithic
+sandbox**, driven **locally** by a new runnable —
+`src/lib/cards/advice-wake.integration.test.ts`,
+`RUN_DB_TESTS=1 pnpm test src/lib/cards/advice-wake`. The deployed origin is
+still `2f863c8` and no code change was needed for this half: the eighteen
+payloads were already in `webhook_inbox`, received and signature-verified **by
+the deployed endpoint**, and the only action taken was `registerCard()`. So the
+*ingestion* is the deployment's; the *drain* that processed them was local.
+
+**What was done.** Six real Lithic cards — not one; the defect report named only
+the most recent — were registered to the customer `attack-02` itself picks (the
+first business with a `2100`/`9100` pair by id): **Kettle & Crumb Bakery LLC**,
+`1151e7b5-b75b-5f58-bdbf-68cd714178ce`. All six were verified to exist at the
+provider (`GET /v1/cards/{token}`, account `2742964f-478f-47ef-a4e9-852dc50d9c44`):
+
+| Card token | Lithic memo | deliveries woken |
+| --- | --- | --- |
+| `8286c472-2d19-4a1b-af0e-5adf0c735ee5` | livefire overcapture-not-terminal MTWGH101 | 4 parked |
+| `86c28a0d-e876-437e-a894-6dbfc1d97d93` | livefire overcapture-not-terminal MTWFOB0Y | 4 parked |
+| `aaa0c8b6-02d2-4257-a3ae-8f3d06273a80` | livefire overcapture-not-terminal MTWFP25K | 4 parked |
+| `9d673124-0d76-4194-8158-b34a60b1f372` | overcapture-incremental probe | 6 parked |
+| `732415b1-d257-4c62-ba75-ab3061b52f6b` | overcapture-incremental probe 2 | 8 parked |
+| `49a4c0e8-3c65-40c8-a916-23cdc5d2c3f7` | a3 correction probe | **8 dead-lettered, requeued** |
+
+Then `unparkWaitingFor([{kind:'card', ref}])` — the same call the dispatcher
+makes when a consumer reports a card ref — and `drain()`. One drain:
+`claimed 41, processed 34, parked 7, deadLettered 0`, 74.3s.
+
+**Result.** All **18** `AUTHORIZATION_ADVICE` deliveries are `state = 'done'`
+(were 14 parked + 4 dead). `card_auth_event.incremental_authorization`:
+**0 → 8**, every one `result = 'APPROVED'`, `provider_step =
+'AUTHORIZATION_ADVICE'`:
+
+| Provider event id | Advice says | Stored as | A(E) after |
+| --- | --- | --- | --- |
+| `720b4cec-1f4f-4919-b734-c8802a4c90e8` | 6000 | incremental 6000 | 6000 |
+| `96341b20-795d-4caf-9314-e213ae9eee52` | 9000 | **incremental 3000** | 9000 |
+| `18a1f550-aba3-42df-b512-6f67a38a58e3` | 9000 | incremental 9000 | 9000 |
+| `d94e58f6-c395-472d-a1b9-11d1a233ce3d` | 6500 | incremental 6500 | 6500 |
+| `fedb5fc7-f128-413c-aa14-69017a18196b` | 9000 | incremental 9000 | 9000 |
+| `8e6b0809-cf1c-4afa-8363-c83461452401` | 9000 | incremental 9000 | 9000 |
+| `bdae6687-e3c2-4da8-81a6-4adb4cc11e31` | 9000 | incremental 9000 | 9000 |
+| `535f87ec-7e6a-4599-8b8f-db3c8e0c5957` | **0** | **incremental 7340** | 0 |
+
+**An advice REPLACES, and the proof is the second row.** Transaction
+`1df0baa5-319c-46cb-8e19-fcec89b55f56` carries two advices, 6000 then 9000. The
+second is stored as a delta of **+3000**, not +9000. Had the conversion been an
+addition, A(E) would have settled at 15000 against a $90.00 fuel stop and
+**$150.00 of a customer's money would have been withheld — with the book
+balanced, the hash chain verified and every invariant green.** There is no alarm
+for that answer. It is now asserted against the provider's own bytes.
+
+**H(E) afterwards, and the hold releasing exactly once.** Transaction
+`4d9ddc8d-…` (card `8286c472-…`): `AUTHORIZATION 5000 DECLINED | CLEARING 7340 |
+AUTHORIZATION_ADVICE 9000 | CLEARING 1660`. Hold
+`29217d35-36fc-44ad-9812-d510ec53ac52` — **opened once** by the advice
+(memo entry `be1c9deb-…`, `hold:29217d35…:after:fedb5fc7-…`, 9900 +1660 / 9100
+−1660) and **released once** by the final clearing (memo entry `5f05af8c-…`,
+9900 −1660 / 9100 +1660). Final `memo_balance_cents` 0, `active_hold_cents` 0.
+Financial: `card:clearing:49f2c15c-…` 7340 and `card:clearing:a126f07f-…` 1660,
+with their two interchange entries — $90.00, once. Across all nine woken
+authorisations: memo 0, active 0, **`hold_closure` 228 → 228** (no new closure,
+none duplicated).
+
+**Nothing double-counted, and no invariant moved.** Journal entries
+3,531 → 3,577; **trial balance 0** on both sides; Kettle & Crumb's `2100`
+−3,905,603 → −3,839,423 (a **$661.80** net debit of real card spend);
+`v_refused_auth_hold` **149 → 149** — `node scripts/dbcheck.mjs` still reads
+**35 passed, 1 failed**, the same deliberate one. `v_entry_unbalanced`,
+`v_book_not_zero`, `v_hold_drift`, `v_hold_release_drift`,
+`v_hold_closure_not_terminal`, `v_hold_posting_incomplete`, `v_line_denorm_drift`
+— all 0 rows after.
+
+### Two things the real payloads found that unit tests had not
+
+**1. `A(E)` is unfloored, and real provider data drove it negative.** Transaction
+`5892c550-b966-4afb-b681-a6456e1cf3c4` (card `49a4c0e8-…`, delivered
+2026-09-10T22:35Z, dead-lettered, requeued here). Its six events, **sorted by
+`created`** — which is not the order Lithic delivers them in:
+
+```
+22:35:26  AUTHORIZATION          5000  APPROVED   A = 5000
+22:35:27  CLEARING               7340  APPROVED   C = 7340
+22:35:31  AUTHORIZATION_REVERSAL 7340  APPROVED   A = -2340   <-- negative
+22:35:32  AUTHORIZATION_REVERSAL 5000  APPROVED   A = -7340
+22:35:35  AUTHORIZATION_ADVICE      0  APPROVED   delta +7340, A = 0
+22:35:37  CLEARING               7340  APPROVED   C = 14680
+```
+
+Lithic reversed **7340** against an authorisation of **5000** — the clearing's
+amount, not the authorisation's — and `deriveCardEvents` subtracts a reversal
+from the running authorised total with no floor, so `A(E)` went to −7340. The
+next advice, an **absolute 0**, was then converted against that negative base and
+stored as an `incremental_authorization` of **7340**. No money was affected:
+`H = max(A − C, 0)` clamps, and the hold stayed at 0 throughout. But
+`authorisedCents` was reported as a negative number on a real transaction, and a
+clamp is the only thing standing between that and a wrong hold. Reported, not
+repaired — `src/lib/holds/**` was out of this change's write set, and the repair
+(floor `A` at 0, or reject a reversal larger than the outstanding authorisation)
+is a decision about the model, not a bug fix.
+
+**2. The absolute→delta conversion is order-free per payload and NOT order-free
+across payloads.** `src/lib/holds/lithic-events.ts` says the advice conversion is
+"a pure function of the payload and therefore still order-free". Per payload,
+true. Across the eighteen deliveries it is not, because they are eighteen
+**snapshots** of six transactions: delivery 3 carries a prefix of what delivery 4
+carries, `deriveCardEvents` converts an advice against the running total **of the
+snapshot it is handed**, and `insertCardEvents` writes with
+`ON CONFLICT (auth_id, provider_event_id) DO NOTHING`. **The first snapshot to
+carry an advice fixes that advice's delta for ever**, and a later, fuller one
+cannot correct it. On `535f87ec-…` the stored delta is +7340, the fullest
+snapshot's answer; the three-event prefix snapshot would have stored −5000, and
+whichever was drained first would have won. A(E) immediately after the advice is
+the advice's absolute amount either way — that is what makes "replaces" robust —
+but reversals arriving afterwards would then fold onto a different base. That is
+why the runnable asserts the **identity** (*after each advice, A(E) equals the
+advice's absolute amount*) rather than re-deriving each delta, and why the naive
+assertion failed first.
+
+### And the published happy path, which the pass could not drive
+
+Card `49a4c0e8-…`'s backlog is from **2026-09-10T22:35Z**, before the sandbox
+daily spend cap was exhausted, and it contains what the cap denied this pass:
+`AUTHORIZATION 5000 **APPROVED**` followed by `CLEARING 7340` — the brief's own
+$50 → $73.40 over-capture, on a real signature-verified delivery. Two honesty
+notes on it. First, it is **historical input processed fresh**, not a fresh
+authorisation. Second, **no hold was ever opened for it**: the fullest snapshot
+was drained first, and the fold over the complete event set gives A = 0 against
+C = 14680, so the hold delta was 0 at every step. The ledger took $146.80 in two
+clearings (`card:clearing:45701807-…`, `card:clearing:60e8438f-…`). The
+authorised amount and its approval are on the book; the hold lifecycle is not
+demonstrated by this transaction and is not claimed from it.
+
+The same card's second transaction, `85ab32c9-a155-4a2f-b0a6-41220d1863cc`
+(`authorization_amount 0`, events `[RETURN −7340, RETURN_REVERSAL 7340]`), went
+through the **correction** path on real input: refund entry
+`d570a14b-2b4f-443d-9608-beb4508c83bd` (`card:refund:38e64623-…`, value date
+**2026-09-10**), then `817e2cb3-0b0e-40e4-9b86-ba316ced26f6`,
+`entry_type = 'reversal'`, `reverses_entry_id = d570a14b-…`, correction group
+`d570a14b-…`, **value date 2026-09-10 — the original's** — with the interchange
+entry reversed alongside it (`bbae1089-…` → `03e5bad5-…`). That is item 6's
+machinery firing on a delivery that had been dead-lettered.
+
+**Revised verdict for item 2: PROVEN for the incremental authorisation, on eight
+real advices across six real transactions, with the hold opening once and
+releasing once and no invariant moved. The published $50/$73.40 happy path is
+proven up to its ledger postings on historical real input and NOT as a hold
+lifecycle. Two model findings are reported above and deliberately not repaired.**
 
 ---
 
@@ -456,6 +620,161 @@ Only `increase.wire:credit:*` (8 entries) and their holds were ever written.
 real return code, hours before this pass. An inbound recall has never happened in
 this system, cannot currently happen through the deployed pipeline, and is
 reported here as not demonstrated rather than inferred from a table row.
+
+### ADDENDUM — 2026-09-11T08:53Z → 09:17Z, after the pass
+
+**The question was asked properly and the answer is NO — an inbound ACH credit
+cannot be attributed on this build, and it is measured, not argued. The
+unreachable row was therefore NOT deleted: it was made reachable, and the moment
+it was reachable it turned out to be WRONG.**
+
+**Freshness and honesty caveat, first.** The provider calls, the webhook
+deliveries and the database are all live and fresh. The consumer change and
+`db/migrations/0039_inbound_recall.sql` are **applied to the live Neon database**
+but the deployed origin is still `2f863c8`, so the drain that processed these
+deliveries ran **locally** against the live database. The three deliveries
+themselves were received and signature-verified **by the deployed endpoint**.
+
+#### 1. Can an inbound ACH credit be attributed? Measured: no.
+
+```
+GET https://sandbox.increase.com/account_numbers   (2026-09-11)
+-> exactly ONE object:
+   sandbox_account_number_96mzhz3n61f5p0jpvytc
+   account_number 7467448488   routing_number 123308582   name "primary"
+   account_id sandbox_account_zkfx1wcn4brwoaiyksj6
+```
+
+One account number, on the programme's own FBO account, **shared by all six
+businesses on this book.** An inbound ACH credit names `account_number_id`, so
+the field that should say whose money it is names the programme. There is no
+`account_number → business` table in `db/migrations/` and no path that issues
+per-customer numbers. The refusal is the schema's, and it is correct.
+
+**And the wire rail's answer does not transfer — which was the specific thing
+worth checking.** `increase-wire.ts` books an inbound credit in exactly one case,
+`wire_transfer.updated/reversed`, and it can only do so because attribution comes
+from **our own outbound transfer**: `Idempotency-Key: payment:<instruction id>` →
+`payment_instruction` → account → business. Nothing is read off the inbound
+message. ACH has no analogue, because when an outbound ACH payment of ours comes
+back it does not arrive as an `inbound_ach_transfer` at all — it arrives as a
+`return` block on the **same** `ach_transfer` object, which is the $6,000.00 R01
+already proven above. There is no second route in.
+
+#### 2. So the row was made reachable — and was wrong
+
+The consumer now reads the inbound object back and asks the table **before** it
+refuses (`src/lib/webhooks/consumers/increase-ach.ts` §4b). Doing so exposed a
+defect nothing could previously have exposed. Measured, fresh, end to end:
+
+```
+POST /simulations/inbound_ach_transfers {amount: 250000, "ACME SUPPLY CO"}
+  -> sandbox_inbound_ach_transfer_n8dm6ffh9tijbi27of5b
+     status "accepted", effective_date "2026-09-11",
+     trace_number "848154134534850", transfer_return null      08:53:53Z
+
+POST /inbound_ach_transfers/{id}/transfer_return
+     {reason: "credit_entry_refused_by_receiver"}
+  -> status "returned", ONE new block:
+     "transfer_return": {"reason": "credit_entry_refused_by_receiver",
+                         "returned_at": "2026-09-11T08:53:59Z",
+                         "transaction_id": "sandbox_transaction_wqd6t4p2k5berabecln8"}
+```
+
+The seeded row said the recall's value date comes from
+`payload.return.created_at`. **The inbound object has no `return` key and no
+`created_at` inside one.** That path is the *outbound* object's shape, copied
+across by analogy and never measured — because the only code that would have read
+it could not be reached. `valueDateFromSource()` would have returned `null` and
+parked on every recall for ever.
+
+`0039_inbound_recall.sql` corrects it to `payload.transfer_return.returned_at`.
+This is the one case `docs/RAIL-SEMANTICS.md` §5 sanctions changing a live row
+without a repair pass alongside: **the row has dated zero postings.**
+`SELECT count(*) FROM journal_entry WHERE idempotency_key LIKE 'ach:inbound:%'`
+was 0 before and is 0 after. The same migration rewrites both inbound notes,
+which described a build that credits a `2100` leaf and opens a `9200` hold — a
+capability this build does not have. `canonical_kind` and `semantics` were not
+touched: both classifications were right.
+
+#### 3. What the recall now does, end to end, on real deliveries
+
+Three signature-verified deliveries about that transfer reached the **deployed**
+endpoint:
+
+| Inbox id | Increase event id | Category | Received |
+| --- | --- | --- | --- |
+| `68a6c694-a7fd-40e2-bf02-fe0522e8e653` | `sandbox_event_001m27trqh0yenq86vd5051adke` | `inbound_ach_transfer.updated` | 08:53:55.138Z |
+| `eff43123-a0ee-44ef-b799-2ace9aafa050` | `sandbox_event_001m27trqfr15eprg7vfwj95gxx` | `inbound_ach_transfer.created` | 08:53:55.164Z |
+| `56ebb594-6699-4c45-a472-66515ce8262d` | `sandbox_event_001m27trxvap0pb8jn5a933s7jj` | `inbound_ach_transfer.updated` | 08:54:01.201Z |
+
+Under `2f863c8` all three parked on `inbound_ach_account_mapping` and were on
+their way to a dead letter. After the change, drained at **09:17:23.885Z /
+09:17:24.414Z / 09:17:24.844Z** — **all three `state = 'done'`**, including the
+`.created` arrival notification, which converged because every delivery reads the
+same current object back and sees the return.
+
+**The ledger consequence is nothing, and that is the honest answer rather than a
+disappointing one.** No entry was written: `ach:inbound:%` is still 0 keys, the
+trial balance is 0, and `node scripts/dbcheck.mjs` still reads **35 passed,
+1 failed** — the same deliberate `v_refused_auth_hold`, unchanged at 149 rows.
+There was no position to correct, because the credit was never bookable.
+
+**What did change is the inbox, and it is the part that matters
+operationally.** Before, a recalled credit left two deliveries re-checking for
+five hours and then dead-lettering onto a staff screen under *"an operator must
+attribute it by hand"* — pointing a human at money that had already gone back to
+the originator. The recall is the fact that **ends** that question, so the
+consumer resolves the delivery and names the transfer, which wakes the parked
+arrival delivery. Both clear. **The park stopped being a leak.**
+
+#### 4. The credit that has NOT been recalled is still parked, on purpose
+
+`sandbox_inbound_ach_transfer_07x75nyvzd1oxihtvuoe` — the $10,000.00 from
+"CORGI TREASURY", `status accepted`, the one the defect report found
+dead-lettered — is back in `parked` (redriven) and stays there, with a reason
+that now names what it refused and why:
+
+> *"…the object names account_number_id `sandbox_account_number_96mzhz3n61f5p0jpvytc`,
+> which is the programme's single FBO number and is shared by every business on
+> this book. Nothing was posted. An operator must attribute it by hand, or return
+> it to the originator. rail_event_semantics classifies this as
+> `inbound_ach_credit` at value date 2026-09-11, from CORGI TREASURY, amount
+> 1000000 cents."*
+
+That is real, unattributable money and a live question for a person. **The
+consumer never returns it itself** — returning an inbound credit is an operator
+action against the provider API, and a webhook consumer that could send money
+back is a webhook consumer that could send money.
+
+`0039` adds the operator surface the refusal never had,
+`v_inbound_ach_unattributed` — **a report, not an invariant; rows are expected,
+and it must not be added to `scripts/dbcheck.mjs`**:
+
+| inbound_transfer_id | age_days | deliveries | still_parked | resolved | recalled |
+| --- | --- | --- | --- | --- | --- |
+| `sandbox_inbound_ach_transfer_07x75nyvzd1oxihtvuoe` | 0 | 2 | 2 | 0 | **false** |
+| `sandbox_inbound_ach_transfer_n8dm6ffh9tijbi27of5b` | 0 | 3 | 0 | 3 | **true** |
+
+#### Revised verdict for item 5
+
+**Outbound: PROVEN, historical** — unchanged from above; the real $6,000.00 R01.
+
+**Inbound: the recall is now REACHABLE, CLASSIFIED BY THE TABLE, DATED FROM THE
+FIELD THE TABLE NAMES, AND EXERCISED ON A REAL INCREASE RECALL — and it books
+nothing, because this build cannot attribute an inbound credit and therefore
+never booked one.** The brief's sentence *"the corrected position appears on the
+day it happened"* is **not** demonstrated for the inbound leg and is not claimed:
+there was no position to correct. What is demonstrated is the refusal, measured
+rather than asserted, and a recall that releases the refusal instead of leaking
+into the dead-letter pile.
+
+**The row was not deleted.** Deleting it would have thrown away the only thing
+that turned out to be worth knowing — that it named a field the provider does not
+send — and would have removed the classification a build with per-customer
+account numbers will need on day one. Making it reachable was the cheaper answer
+and the more honest one: the table now says what happens, and what happens is
+what the consumer does.
 
 ---
 

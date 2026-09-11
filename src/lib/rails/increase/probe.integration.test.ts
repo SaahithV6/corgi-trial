@@ -19,14 +19,24 @@
  * by anyone holding the credential — so the matrix cell can be re-earned in
  * eight seconds instead of believed.
  *
- * WHAT IT DOES NOT EARN, AND THE DISTINCTION IS THE WHOLE POINT.
- * `originate`, `observe`, `settle` and `reverse` stay `unexercised`. Reading
+ * WHAT IT DOES NOT EARN, AND THE DISTINCTION IS THE WHOLE POINT. Reading
  * `/accounts` proves the credential authenticates and the host answers; it
  * proves nothing whatsoever about whether `POST /ach_transfers` maps our
  * `TransferRequest` correctly, whether the settlement promotion fires, or
  * whether an R01 arrives shaped the way `research/ach/NOTES.md` guessed. A
  * probe that was allowed to promote its neighbours would be liveness by
  * presence wearing a round trip as a disguise.
+ *
+ * THOSE FOUR HAVE SINCE BEEN EARNED ELSEWHERE, AND NOT BY THIS FILE. The whole
+ * ACH lifecycle has since run against the sandbox — `originate`, `settle` and
+ * `reverse` on `sandbox_ach_transfer_x5vdo5m7b6k924sszlms`, and `observe` in
+ * ./observe.integration.test.ts against the stored verified bytes. docs/RAILS.md
+ * §3 carries the ids, the two ledger entries and the re-run commands. The last
+ * case below still pins all four to `unexercised` because that is what
+ * `INCREASE_SUPPORT` in ../adapters/ach.ts still DECLARES, and this file's job
+ * is to keep the published table and the declaration in step — so it goes red
+ * the moment somebody makes the declaration true, which is the point at which
+ * this comment and that assertion are both replaced.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -77,10 +87,13 @@ suite('the Increase ACH probe, against Increase', () => {
     expect(probe.label).toBe('SIMULATED');
   });
 
-  it('declares probe `measured` and every other Increase operation `unexercised`', () => {
+  it('pins the published table to what the adapter actually declares', () => {
     const supports = adapter().supports;
     // The matrix in docs/RAILS.md is generated from exactly these values, so
-    // this is the assertion that keeps the published table honest.
+    // this is the assertion that keeps the published table and the declaration
+    // in step. It is NOT a claim that the four below have not been run — they
+    // have; see the header and docs/RAILS.md §3. It is the tripwire that fires
+    // when the declaration is corrected and the table is not regenerated.
     expect(supports.probe).toMatchObject({ supported: true, proof: 'measured' });
     for (const op of ['originate', 'observe', 'settle', 'reverse'] as const) {
       expect(supports[op]).toMatchObject({ supported: true, proof: 'unexercised' });

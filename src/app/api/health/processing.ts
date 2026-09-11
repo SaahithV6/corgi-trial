@@ -79,16 +79,48 @@ import {
  *                   so this is reported and never alarmed on. It is the early
  *                   warning for `dropping`.
  *
- *   dropping        Deliveries have been DEAD-LETTERED recently: accepted,
- *                   verified, retried to exhaustion, and abandoned. This is
- *                   the one verdict in this endpoint that describes something
- *                   we did rather than something that failed to happen.
+ *   dropping        Deliveries have been DEAD-LETTERED recently AND nothing
+ *                   from this provider has been consumed since. Accepted,
+ *                   verified, retried to exhaustion, and abandoned, with no
+ *                   evidence that the pipeline has worked since. This is the
+ *                   one verdict in this endpoint that describes something we
+ *                   did rather than something that failed to happen.
+ *
+ *                   THE SECOND CLAUSE IS NEW, AND IT IS THE POINT. 167
+ *                   Increase deliveries were dead-lettered with "no consumer
+ *                   registered for provider 'increase'" inside a 48-minute
+ *                   window on 2026-09-11. A consumer was registered
+ *                   afterwards; 54 deliveries from the same provider were
+ *                   consumed after that, and nothing died again. The
+ *                   deployment went on reading `degraded`, quoting the dead
+ *                   sentence, for another five hours — because the verdict
+ *                   was computed from a timestamp that cannot express "and
+ *                   then we fixed it". A degraded status nobody can clear is
+ *                   a status people stop reading, which is the same failure
+ *                   as a guard that cries wolf; it is also how a REAL drop,
+ *                   arriving into a permanently red field, gets missed.
+ *
+ *                   `MAX(dead_lettered_at) > MAX(processed_at)` is the whole
+ *                   test, and it is deliberately a fact about the data rather
+ *                   than a flag an operator sets. There is no acknowledge
+ *                   button here, no snooze, and no state in this module: the
+ *                   alarm clears when the system demonstrably works again,
+ *                   and it comes straight back the moment a delivery dies
+ *                   after a success.
  *
  *   never_consumed  Deliveries have arrived and not one has ever been
  *                   consumed. Distinct from `idle` for the same reason
  *                   delivery-health keeps `never` and `stale` apart: "the
  *                   consumer was never wired" and "the consumer has gone
  *                   quiet" are different faults with different fixes.
+ *
+ *   superseded      Deliveries were dead-lettered, and this provider has
+ *                   successfully consumed one SINCE the newest of them. The
+ *                   fault that killed them is behind us; the rows are still
+ *                   there and are still unbooked, and `scripts/redrive.mjs`
+ *                   is what clears them. See the note on `dropping` below for
+ *                   why this is a different fact and not a softer word for
+ *                   the same one.
  *
  *   idle            Nothing has arrived to consume, or nothing has arrived
  *                   recently. The normal state of a KYC feed at 3am.
@@ -99,6 +131,7 @@ export type ProcessingVerdict =
   | 'consuming'
   | 'backlogged'
   | 'dropping'
+  | 'superseded'
   | 'never_consumed'
   | 'idle'
   | 'unmeasured';
@@ -108,6 +141,7 @@ export const PROCESSING_VERDICTS: readonly ProcessingVerdict[] = [
   'consuming',
   'backlogged',
   'dropping',
+  'superseded',
   'never_consumed',
   'idle',
   'unmeasured',
@@ -130,6 +164,17 @@ export interface ProcessingRow {
   readonly deadOldestAt: Date | null;
   /** The most recent dead letter's own reason, verbatim and truncated. */
   readonly deadReason: string | null;
+  /**
+   * Dead letters that this provider's own later success has NOT superseded —
+   * `state = 'dead' AND dead_lettered_at > MAX(processed_at)`.
+   *
+   * COUNTED IN SQL rather than inferred from the two maxima already on this
+   * row. The two are the same number in every case either can describe, and
+   * the count survives the case the comparison cannot: a provider dropping a
+   * steady trickle while consuming the rest reads `3` here and would read
+   * "superseded, nothing to see" from a comparison of the newest of each.
+   */
+  readonly deadSinceConsumedCount: number;
 }
 
 export type ProcessingRead =
@@ -188,7 +233,18 @@ export async function readWebhookProcessing(
                where w.provider = p.provider and w.state = 'dead') as dead_oldest_at,
              (select w.processing_error from webhook_inbox w
                where w.provider = p.provider and w.state = 'dead'
-               order by w.dead_lettered_at desc nulls last limit 1) as dead_reason
+               order by w.dead_lettered_at desc nulls last limit 1) as dead_reason,
+             -- Deaths NO LATER SUCCESS HAS SUPERSEDED. minus-infinity is the
+             -- coalesce so that a provider which has never consumed anything
+             -- counts every one of its dead letters here rather than none:
+             -- "we have never processed one of these" must not read as
+             -- "nothing is wrong".
+             (select count(*) from webhook_inbox w
+               where w.provider = p.provider and w.state = 'dead'
+                 and w.dead_lettered_at > coalesce(
+                       (select max(d.processed_at) from webhook_inbox d
+                         where d.provider = p.provider and d.state = 'done'),
+                       '-infinity'::timestamptz)) as dead_since_consumed
         from unnest(${providers}::text[]) as p(provider)
     `;
     const result = (await Promise.race([query, timeout])) as readonly unknown[];
@@ -223,6 +279,7 @@ function toRow(raw: unknown): ProcessingRow {
     deadNewestAt: toDate(row['dead_newest_at']),
     deadOldestAt: toDate(row['dead_oldest_at']),
     deadReason: typeof reason === 'string' && reason !== '' ? reason.slice(0, 200) : null,
+    deadSinceConsumedCount: toCount(row['dead_since_consumed']),
   };
 }
 
@@ -264,6 +321,21 @@ export interface ProviderProcessingHealth {
     readonly newestAgeSeconds: number | null;
     readonly oldestAgeSeconds: number | null;
     readonly reason: string | null;
+    /**
+     * How many of `count` died AFTER the newest delivery this provider
+     * successfully consumed. Zero means every one of them predates a later
+     * success: they are a backlog to redrive, not evidence of current loss.
+     */
+    readonly sinceLastConsumed: number;
+    /**
+     * True when there are dead letters and none of them is `sinceLastConsumed`.
+     * Published beside `reason` on purpose: it is the flag that says the
+     * quoted sentence is archaeology rather than a live fault, so nobody has
+     * to infer that from two timestamps.
+     */
+    readonly supersededByConsumption: boolean;
+    /** What clears them. Null when there is nothing to clear. */
+    readonly clearedBy: string | null;
   };
   readonly verdict: ProcessingVerdict;
   readonly degradesDeployment: boolean;
@@ -334,7 +406,15 @@ function reportFor(
       lastDelivery: null,
       secondsSinceLastDelivery: null,
       parked: { count: 0, oldestAgeSeconds: null },
-      deadLettered: { count: 0, newestAgeSeconds: null, oldestAgeSeconds: null, reason: null },
+      deadLettered: {
+        count: 0,
+        newestAgeSeconds: null,
+        oldestAgeSeconds: null,
+        reason: null,
+        sinceLastConsumed: 0,
+        supersededByConsumption: false,
+        clearedBy: null,
+      },
       verdict: 'unmeasured',
       degradesDeployment: false,
       note: 'webhook processing could not be read; this is not a verdict about the consumer',
@@ -354,16 +434,34 @@ function reportFor(
   // two windows to defend per provider is how one of them stops being read.
   const alarmWindow = quietAfterSeconds(staleAfterSeconds);
 
+  // "IS ANYTHING DYING NOW" versus "DID SOMETHING DIE ONCE".
+  //
+  // `superseded` is the second, and it is a fact about the data: every dead
+  // letter on this provider was abandoned BEFORE the newest delivery we
+  // successfully consumed from it. That is proof the pipeline works now, so
+  // the rows are a backlog with a named remedy rather than an outage — and
+  // they still show, in full, in `deadLettered`, because a backlog that stops
+  // being counted is a backlog nobody clears.
+  const superseded = row.deadCount > 0 && row.deadSinceConsumedCount === 0;
+
   const verdict: ProcessingVerdict =
-    row.deadCount > 0 && deadNewestAge !== null && deadNewestAge <= alarmWindow
+    // Recent AND unsuperseded. Either half alone over-alarms: a death from
+    // last night is history, and a death that a later success has overtaken is
+    // a row to redrive.
+    row.deadSinceConsumedCount > 0 && deadNewestAge !== null && deadNewestAge <= alarmWindow
       ? 'dropping'
       : row.lastDeliveryAt !== null && row.lastConsumedAt === null
         ? 'never_consumed'
         : row.parkedCount > 0 && parkedAge !== null && parkedAge > staleAfterSeconds
-          ? 'backlogged'
-          : consumedAge !== null && consumedAge <= staleAfterSeconds
-            ? 'consuming'
-            : 'idle';
+          ? // Parking is the live state and it outranks a cleared backlog:
+            // `backlogged` is the early warning for the next drop, while
+            // `superseded` is a receipt for the last one.
+            'backlogged'
+          : superseded
+            ? 'superseded'
+            : consumedAge !== null && consumedAge <= staleAfterSeconds
+              ? 'consuming'
+              : 'idle';
 
   // ---------------------------------------------------------------------
   // WHAT IS ALLOWED TO MAKE THE DEPLOYMENT `degraded`
@@ -391,6 +489,16 @@ function reportFor(
   // `backlogged` does NOT degrade. A parked delivery is a designed state with
   // a retry behind it: it is the early warning for `dropping`, reported so an
   // operator can act before the ladder runs out, not an outage in itself.
+  //
+  // `superseded` does NOT degrade either, and that is the judgement call in
+  // this file. The rows are real, unbooked deliveries and they are still
+  // counted in full — but the loss they record is in the past tense, the
+  // pipeline has demonstrably worked since, and `scripts/redrive.mjs` is the
+  // named action that clears them. Degrading on it would leave a red field
+  // that nothing this endpoint can observe will ever turn green, which is the
+  // condition that trains people to stop reading it. The alarm is not being
+  // softened: it comes back the instant `sinceLastConsumed` is non-zero, and
+  // that number is on the row for anyone who wants to check.
   const degradesDeployment = verdict === 'dropping' || verdict === 'never_consumed';
 
   return {
@@ -405,35 +513,67 @@ function reportFor(
       newestAgeSeconds: deadNewestAge,
       oldestAgeSeconds: deadOldestAge,
       reason: row.deadReason,
+      sinceLastConsumed: row.deadSinceConsumedCount,
+      supersededByConsumption: superseded,
+      clearedBy: row.deadCount > 0 ? 'node scripts/redrive.mjs --apply' : null,
     },
     verdict,
     degradesDeployment,
-    note: noteFor(verdict, row, staleAfterSeconds),
+    note: noteFor(verdict, row, staleAfterSeconds, deadNewestAge),
   };
 }
 
+/**
+ * The sentence a human reads.
+ *
+ * `deadNewestAge` is passed in rather than recomputed, because the note used
+ * to say "the newest just now" unconditionally — on a row whose newest dead
+ * letter was two hours and fifteen minutes old. A note that asserts a time it
+ * has not measured is the same class of mistake as a verdict computed from an
+ * input that cannot express the failure, one layer of prose down.
+ */
 function noteFor(
   verdict: ProcessingVerdict,
   row: ProcessingRow,
   staleAfterSeconds: number,
+  deadNewestAge: number | null,
 ): string {
+  /** Appended wherever a cleared backlog would otherwise be invisible. */
+  const supersededClause =
+    row.deadCount > 0 && row.deadSinceConsumedCount === 0
+      ? ` ${row.deadCount} dead letter(s) remain from an earlier fault, all of them older than the newest delivery consumed here` +
+        `${row.deadReason === null ? '' : ` ("${row.deadReason}")`} — history, not a live drop; clear them with scripts/redrive.mjs.`
+      : '';
+
   switch (verdict) {
     case 'dropping':
       return (
-        `${row.deadCount} delivery(ies) accepted and then DEAD-LETTERED, the newest just now — ` +
+        `${row.deadSinceConsumedCount} of ${row.deadCount} dead letter(s) were abandoned AFTER the last delivery this provider consumed` +
+        `${deadNewestAge === null ? '' : `, the newest ${deadNewestAge}s ago`} — ` +
         `arrival is not processing, and these were never booked` +
         (row.deadReason === null ? '' : `: ${row.deadReason}`)
+      );
+    case 'superseded':
+      return (
+        `${row.deadCount} delivery(ies) were dead-lettered and NONE since the newest one this provider consumed: ` +
+        `the fault that killed them is behind us and the consumer is working` +
+        `${row.deadReason === null ? '' : ` (their recorded reason was "${row.deadReason}")`}. ` +
+        `They are still unbooked — redrive them with scripts/redrive.mjs — and they do not degrade the deployment, ` +
+        `because a red field nobody can clear is one nobody reads.`
       );
     case 'never_consumed':
       return 'deliveries have arrived from this provider and not one has ever been consumed — the consumer is missing, not the feed';
     case 'backlogged':
-      return `${row.parkedCount} delivery(ies) parked waiting for a referent for longer than ${staleAfterSeconds}s; retried, not lost — the early warning for a drop`;
+      return `${row.parkedCount} delivery(ies) parked waiting for a referent for longer than ${staleAfterSeconds}s; retried, not lost — the early warning for a drop.${supersededClause}`;
     case 'consuming':
-      return `a delivery was consumed within ${staleAfterSeconds}s`;
+      return `a delivery was consumed within ${staleAfterSeconds}s.${supersededClause}`;
     case 'idle':
-      return row.lastDeliveryAt === null
-        ? 'nothing has ever arrived from this provider, so there is nothing to consume'
-        : `nothing consumed within ${staleAfterSeconds}s, and nothing is parked or dead — the feed is quiet, not broken`;
+      return (
+        (row.lastDeliveryAt === null
+          ? 'nothing has ever arrived from this provider, so there is nothing to consume'
+          : `nothing consumed within ${staleAfterSeconds}s, and nothing is parked that is overdue — the feed is quiet, not broken`) +
+        `.${supersededClause}`
+      );
     case 'unmeasured':
       return 'webhook processing could not be read';
   }

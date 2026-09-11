@@ -20,6 +20,28 @@
  * survives the trip to a browser as itself. The server formats; the browser
  * renders characters and multiplies nothing. See
  * `src/components/payouts/data-contract.ts`.
+ *
+ * ── AND THAT IS WHERE THE FIXTURE LABEL LIVES ───────────────────────────────
+ *
+ * Seven of the eight rows in `fx_quote_settlement` were written against the
+ * live database by `fx.integration.test.ts`. They are marked in
+ * `fx_quote_fixture` (0041) and they are NOT hidden — a filter that drops test
+ * rows from the quote book is one careless edit away from dropping a real
+ * failure from it.
+ *
+ * So they are labelled, and the label is built HERE, in the same pass and by
+ * the same rule as every other figure: the server decides the characters, the
+ * browser renders them. `beneficiaryRef` and `txHash` are the two strings
+ * `QuoteTable` and `QuoteDetail` already print for every quote, so the label
+ * lands in the two places a reader looks — the Beneficiary column of the book,
+ * and the `tx` line of the Settlement panel, right beside the hash somebody
+ * would otherwise take to Basescan.
+ *
+ * The better version is an `isFixture` field on `QuoteView` and a badge next
+ * to `RateEvidenceBadge`, which is what `evidence` already gets. That is a
+ * change to `src/components/payouts/**`, which this change does not own, and
+ * it is week two. What is NOT acceptable in the meantime is a truthful
+ * database and a screen that does not say so.
  */
 
 import type { ArithmeticRow, QuoteView } from "@/components/payouts/data-contract";
@@ -82,11 +104,57 @@ export interface QuoteFacts {
   readonly settlementMidRateScaled: bigint | null;
   readonly settlementCostCents: bigint | null;
   readonly varianceCents: bigint | null;
+
+  /**
+   * `fx_quote_fixture` (0041): this row was written by a test, not by a
+   * customer.
+   *
+   * OPTIONAL, and the two callers are why. The live source reads it off
+   * `v_fx_quote_marked` and always supplies it. `src/components/payouts/
+   * fixtures.ts` — which serves four of the screen's five demo states — does
+   * not, and should not: a SCREEN fixture is a different thing from a DATABASE
+   * fixture, it corresponds to no row anywhere, and the state bar already
+   * labels the whole page `fixture` when one is showing. Absent means false.
+   */
+  readonly isFixture?: boolean;
 }
 
 /** A signed USD figure with its sign shown. Deltas need the sign; totals do not. */
 export function signedUsd(cents: bigint): string {
   return `${cents > 0n ? "+" : ""}${formatUsd(cents)}`;
+}
+
+/**
+ * The words the label uses. One constant, because it is matched on.
+ *
+ * `FIXTURE` rather than `TEST` because "test" is ambiguous in a system whose
+ * every integration is a provider's *test* mode: a test-mode card authorised a
+ * real sandbox transaction and that row is entirely real. This one is not a
+ * record of anything that happened.
+ */
+export const FIXTURE_PREFIX = "FIXTURE —";
+
+/** The beneficiary as the book should print it, fixture label included. */
+export function beneficiaryLabel(facts: QuoteFacts): string {
+  return facts.isFixture === true
+    ? `${FIXTURE_PREFIX} ${facts.beneficiaryRef}`
+    : facts.beneficiaryRef;
+}
+
+/**
+ * The transaction hash as the settlement panel should print it.
+ *
+ * The hash is the single most load-bearing string on this screen: it is what a
+ * reader copies into Basescan, and a hash that does not resolve there after
+ * this system printed it under the heading "Settlement" is the exact shape of
+ * a claim nobody made but everybody heard. So the label goes ON THE HASH, not
+ * near it.
+ */
+export function txHashLabel(facts: QuoteFacts): string | null {
+  if (facts.txHash === null) return null;
+  return facts.isFixture === true
+    ? `${facts.txHash}  ${FIXTURE_PREFIX} no such transaction exists on any chain`
+    : facts.txHash;
 }
 
 /**
@@ -191,7 +259,7 @@ export function quoteView(facts: QuoteFacts, now: string): QuoteView {
   return {
     quoteRef: facts.quoteRef,
     businessName: facts.businessName,
-    beneficiaryRef: facts.beneficiaryRef,
+    beneficiaryRef: beneficiaryLabel(facts),
     destinationAddress: facts.destinationAddress,
     rail: facts.rail,
     state: facts.state,
@@ -235,7 +303,7 @@ export function quoteView(facts: QuoteFacts, now: string): QuoteView {
     settlementWindowSeconds: facts.settlementWindowSeconds,
 
     settledAt: facts.settledAt,
-    txHash: facts.txHash,
+    txHash: txHashLabel(facts),
     settlementCostLabel:
       facts.settlementCostCents === null ? null : formatUsd(facts.settlementCostCents),
     varianceLabel: facts.varianceCents === null ? null : signedUsd(facts.varianceCents),

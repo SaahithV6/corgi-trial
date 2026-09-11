@@ -734,7 +734,20 @@ d("card holds, against the live database", () => {
     // The closure lands. The release posting does not — this is the crash.
     await sql.begin(async (raw) => {
       const tx = raw as unknown as typeof sql;
-      await store.closeHold(identity.holdId, "simulated crash before release", actorId, tx);
+      // `test_harness`, declared: migration 0040 makes a closure say which
+      // writer produced it, and this one is a test fabricating a row the hold
+      // model never licensed. Declaring it is what keeps it OUT of
+      // `v_hold_closure_not_terminal` by construction rather than by wording —
+      // and what makes `dbcheck`'s census able to count the four rows an
+      // earlier version of this very test left behind before it grew the
+      // `expireOne()` tidy-up below.
+      await store.closeHold(
+        identity.holdId,
+        "simulated crash before release",
+        actorId,
+        tx,
+        "test_harness",
+      );
     });
 
     const afterClosure = await bal.availableBalance(businessId);

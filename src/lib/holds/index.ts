@@ -53,6 +53,7 @@ export {
   registerCard,
   resolveCard,
   type AuthorizationIdentity,
+  type ClosureSource,
   type CardBinding,
 } from "./store";
 

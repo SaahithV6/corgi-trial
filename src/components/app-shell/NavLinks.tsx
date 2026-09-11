@@ -55,11 +55,34 @@ export const LIVE = [
   { href: "/chaos", label: "Chaos harness" },
 ] as const;
 
+/**
+ * `flex-wrap` on the nav below is load-bearing, and its absence was measured
+ * on the DEPLOYED build: at 1440x900 the page scrollWidth was 1841 against a
+ * clientWidth of 1440 — 401px of sideways overflow, with six nav items painted
+ * past the right edge (Chaos harness sat at x=1769-1841). 481px at 1280x800.
+ *
+ * The nav is 21 links on one line, 1673px wide. `AppHeader` wraps it in a
+ * `flex flex-wrap` container, but that wraps only ITS own children; this <nav>
+ * is a single flex item and `min-width: auto` refuses to shrink it below its
+ * content, so it simply overhung.
+ *
+ * Two reasons it mattered more than it looked. It broke the house rule inside
+ * the shell itself — wide content scrolls in its own container and the page
+ * body never scrolls sideways — so every TableScroll in the build was honouring
+ * that rule while the chrome undid it. And `/transactions` and `/economics`
+ * were added to this nav precisely because "shipped and linked from nowhere"
+ * is this codebase's recurring failure; painted outside the viewport they were
+ * linked from nowhere again.
+ *
+ * `NavLinks.test.ts` asserts the nav CARRIES every front-door screen. It cannot
+ * see whether a link is REACHABLE on the screen a reader is using, which is the
+ * same failure it was written to catch, one layer down.
+ */
 export function NavLinks() {
   const pathname = usePathname();
 
   return (
-    <nav aria-label="Primary" className="flex items-center gap-1">
+      <nav aria-label="Primary" className="flex flex-wrap items-center gap-1">
       {LIVE.map((item) => {
         const current = pathname.startsWith(item.href);
         return (

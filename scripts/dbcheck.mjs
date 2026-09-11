@@ -405,8 +405,51 @@ const INVARIANT_VIEWS_0031 = [
   ["v_interchange_rate_drift", "no settlement has been re-priced by a rate that came later"],
 ];
 
+// ---------------------------------------------------------------------
+// MIGRATION 0040'S ONE, AND WHY IT IS IN A THIRD ARRAY.
+// ---------------------------------------------------------------------
+//
+// Same reason as the two paragraphs above, and it is the LAST time this
+// should be necessary: `src/lib/chaos/invariants.test.ts` parses the
+// FIRST array out of this file and asserts the chaos dashboard's copy in
+// `src/lib/chaos/invariants.ts` matches it exactly, and `src/lib/chaos/**`
+// was outside this change's write scope. Appending there without the
+// mirroring edit turns `pnpm test` red for a worker who cannot fix it, and
+// a red tree is currently holding a deploy.
+//
+// So the same trade: an unrun invariant is a comment, this one runs here,
+// it counts towards the same tally and `--prove` proves it like every
+// other. Whoever owns `src/lib/chaos/**` should move all four views from
+// the two arrays below into the first one and mirror them in one commit.
+//
+// ---------------------------------------------------------------------
+// WHAT IT ASSERTS, AND WHY IT IS RED ON ARRIVAL
+// ---------------------------------------------------------------------
+//
+// A card hold's expiry is stored TWICE. `ledger_availability()` reads
+// `hold.expires_at`; `v_card_auth_hold` reads
+// `card_authorization.expires_at`. `ensureAuthorization()` writes one
+// value into both rows — so they are MEANT to be the same instant, and
+// nothing in the schema says they must be. No foreign key, no CHECK, and
+// until 0040 no view that would say anything if they diverged. Two bodies
+// deriving "has this hold expired?" from two different columns is 0022's
+// stored-balance defect wearing a timestamp instead of a number.
+//
+// NINE HOLDS ON THIS BOOK ALREADY DISAGREE, by 135-158 MILLISECONDS. Every
+// one is a fixture that bypassed `ensureAuthorization()` and ran two
+// separate `now() + interval '7 days'` statements. Exposure today is ZERO
+// CENTS: all nine are closed, released and withholding nothing.
+//
+// It is NOT narrowed to make it pass. `WHERE external_ref NOT LIKE
+// 'lithic:team-test-%'` would be safe, and would still be an exclusion
+// shaped like the failure — which is the sentence 0032 wrote about the
+// other deliberate red on this list.
+const INVARIANT_VIEWS_0040 = [
+  ["v_hold_expiry_drift", "one card hold, one expiry instant — the two readers agree"],
+];
+
 console.log("\nINVARIANT VIEWS — each MUST return zero rows\n");
-for (const [view, claim] of [...INVARIANT_VIEWS, ...INVARIANT_VIEWS_0031]) {
+for (const [view, claim] of [...INVARIANT_VIEWS, ...INVARIANT_VIEWS_0031, ...INVARIANT_VIEWS_0040]) {
   try {
     const rows = await sql.unsafe(`SELECT count(*)::int AS n FROM ${view}`);
     const n = rows[0]?.n ?? 0;
@@ -501,37 +544,30 @@ const REACH = [
         AND ev.kind IN ('authorization','incremental_authorization')`],
   // REACH IS THE VIEW'S OWN PREDICATE, NOT THE TABLE'S SIZE.
   //
-  // This read `SELECT count(*) FROM hold_closure` and printed 228, while the
-  // view filters `reason = ANY (ARRAY[...five string literals...])` and can
-  // only ever see 126. So the section written to state each guard's reach
-  // overstated this one by 102 rows — 45% of the population invisible, while
-  // the line claiming to measure exactly that printed the larger number.
+  // This line read `SELECT count(*) FROM hold_closure` and printed 228, while
+  // the view filtered `reason = ANY (ARRAY[...five string literals...])` and
+  // could only ever see 126. The section written to state each guard's reach
+  // overstated this one by 102 rows -- 45% of the population invisible, while
+  // the line claiming to measure exactly that printed the larger number. The
+  // reach query excluded precisely what the guard excluded, which is the
+  // pattern this section exists to end, reproduced inside the mechanism built
+  // to end it.
   //
-  // That is the pattern this section exists to end, reproduced inside the
-  // mechanism built to end it: the reach query excluded precisely what the
-  // guard excludes. A reach figure is only worth printing if it is derived
-  // the same way the view selects, so it now counts rows the view's own
-  // predicate admits, and prints the shortfall beside it.
-  //
-  // The underlying defect stands and is NOT fixed here: discriminating a
-  // closure on free text means migration 0032's own closures fell outside
-  // the list by WORDING rather than intent. The real repair is a
-  // CHECK-constrained `source` column on hold_closure, filtered on that.
-  // Printing the gap is how it stops being invisible until then.
-  ["v_hold_closure_not_terminal", "permanent hold closures the view's reason filter admits",
-    `SELECT count(*)::int AS n FROM hold_closure hc
-      WHERE hc.reason = ANY (ARRAY[
-        'authorisation closed or expired by the network',
-        'final capture received',
-        'authorisation expiry reached',
-        'authorisation fully reversed',
-        'authorisation expired unused'])`,
-    "SELECT count(*)::int AS n FROM hold_closure"],
+  // MIGRATION 0040 REMOVED THE POSSIBILITY RATHER THAN THE SYMPTOM. A closure
+  // now declares its WRITER in a CHECK-constrained `hold_closure.source`, the
+  // view filters on that column, and the reach is no longer a query written
+  // here at all: `v_hold_closure_census` derives `in_guard` from the same
+  // column the view filters on, so the two cannot drift. It is printed in full
+  // below this table, per source, with the one column that stops "outside the
+  // guard" ever meaning "unexamined" again.
   ["v_wire_availability_drift", "uncleared-credit holds with a wire memo entry",
     `SELECT count(*)::int AS n FROM hold h
       WHERE h.kind = 'uncleared_credit'
         AND EXISTS (SELECT 1 FROM journal_entry je
                      WHERE je.hold_id = h.id AND je.book = 'memo' AND je.rail = 'wire')`],
+  ["v_hold_expiry_drift", "card holds carrying an authorisation, i.e. two expiry clocks",
+    `SELECT count(*)::int AS n FROM hold h
+       JOIN card_authorization ca ON ca.hold_id = h.id`],
 ];
 
 console.log("\nGUARD REACH — the population each invariant ranges over (not a pass/fail)\n");

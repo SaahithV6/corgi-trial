@@ -32,6 +32,7 @@ function row(over: Partial<ProcessingRow> = {}): ProcessingRow {
     deadNewestAt: null,
     deadOldestAt: null,
     deadReason: null,
+    deadSinceConsumedCount: 0,
     ...over,
   };
 }
@@ -97,6 +98,10 @@ describe('the Increase case — received everything, processed nothing', () => {
     deadNewestAt: new Date('2026-09-11T05:00:29.349Z'),
     deadOldestAt: new Date('2026-09-11T03:58:18.202Z'),
     deadReason: "dead-lettered after 8 failed attempts: no consumer registered for provider 'increase'",
+    // Every one of them died AFTER the last thing we consumed. At 05:20 that
+    // was the truth, and it is why this must still read `dropping`: nothing had
+    // got through since, so there was no evidence the pipeline worked.
+    deadSinceConsumedCount: 179,
   });
 
   it('reads `dropping`, not fresh', () => {
@@ -176,6 +181,9 @@ describe('the other branches', () => {
   it('an old dead letter outside the alarm window stops being an alarm', () => {
     // Lithic's cadence is 3m, so the window is 15m. A drop from yesterday is
     // history: it is still reported in the counts, and it no longer degrades.
+    // It reads `superseded` rather than `consuming` because 18 unbooked
+    // deliveries are a fact worth a word of its own — the feed being healthy
+    // does not make them disappear.
     const health = webhookProcessingHealth(
       read(
         row({
@@ -186,14 +194,109 @@ describe('the other branches', () => {
           deadNewestAt: new Date('2026-09-10T23:59:42.218Z'),
           deadOldestAt: new Date('2026-09-10T16:34:34.552Z'),
           deadReason: 'referent never arrived',
+          deadSinceConsumedCount: 0,
         }),
       ),
       NOW,
     );
     const r = find(health, 'lithic');
-    expect(r.verdict).toBe('consuming');
+    expect(r.verdict).toBe('superseded');
     expect(r.degradesDeployment).toBe(false);
     expect(r.deadLettered.count).toBe(18);
+    expect(r.deadLettered.supersededByConsumption).toBe(true);
+  });
+
+  describe('"dying now" versus "died once and was never cleared"', () => {
+    /** The state the 167 Increase dead letters were actually in at 09:04Z. */
+    const cleared = row({
+      provider: 'increase',
+      // Consumed 33 seconds ago; the newest death was two and a half hours
+      // before that. The consumer demonstrably works.
+      lastConsumedAt: new Date('2026-09-11T05:19:30.000Z'),
+      lastDeliveryAt: new Date('2026-09-11T05:19:30.000Z'),
+      deadCount: 167,
+      deadNewestAt: new Date('2026-09-11T04:46:06.024Z'),
+      deadOldestAt: new Date('2026-09-11T03:58:18.202Z'),
+      deadReason: "dead-lettered after 8 failed attempts: no consumer registered for provider 'increase'",
+      deadSinceConsumedCount: 0,
+    });
+
+    it('does NOT degrade the deployment when every death predates a later success', () => {
+      // This is the whole fix. The newest death is 2,034s old — well inside
+      // Increase's 30h alarm window — so recency alone still calls it
+      // `dropping`, and the deployment reads `degraded` for a fault that was
+      // fixed hours ago and can never be un-fixed by waiting.
+      const health = webhookProcessingHealth(read(cleared), NOW);
+      const r = find(health, 'increase');
+      expect(r.verdict).toBe('superseded');
+      expect(r.degradesDeployment).toBe(false);
+      expect(health.degradedBy).not.toContain('increase');
+    });
+
+    it('still publishes the rows in full, so a cleared alarm is not a hidden one', () => {
+      const r = find(webhookProcessingHealth(read(cleared), NOW), 'increase');
+      expect(r.deadLettered.count).toBe(167);
+      expect(r.deadLettered.sinceLastConsumed).toBe(0);
+      expect(r.deadLettered.supersededByConsumption).toBe(true);
+      expect(r.deadLettered.reason).toContain('no consumer registered');
+      expect(r.deadLettered.clearedBy).toBe('node scripts/redrive.mjs --apply');
+      expect(r.note).toContain('redrive');
+    });
+
+    it('comes straight back the moment ONE delivery dies after a success', () => {
+      // No acknowledge button, no snooze, no state: one unsuperseded death and
+      // the alarm is live again, even while the provider is consuming.
+      const r = find(
+        webhookProcessingHealth(
+          read(row({ ...cleared, deadSinceConsumedCount: 1, deadNewestAt: new Date('2026-09-11T05:19:50.000Z') })),
+          NOW,
+        ),
+        'increase',
+      );
+      expect(r.verdict).toBe('dropping');
+      expect(r.degradesDeployment).toBe(true);
+      expect(r.deadLettered.supersededByConsumption).toBe(false);
+      expect(r.note).toContain('1 of 167');
+    });
+
+    it('a provider that never consumed anything counts every death as current', () => {
+      // The `-infinity` coalesce in the query, asserted at the fold: a feed
+      // with no successes must not read `superseded` — there is nothing for
+      // its deaths to be superseded BY.
+      const r = find(
+        webhookProcessingHealth(
+          read(
+            row({
+              provider: 'plaid',
+              lastDeliveryAt: new Date('2026-09-11T05:19:00.000Z'),
+              deadCount: 4,
+              deadNewestAt: new Date('2026-09-11T05:10:00.000Z'),
+              deadOldestAt: new Date('2026-09-11T05:00:00.000Z'),
+              deadSinceConsumedCount: 4,
+            }),
+          ),
+          NOW,
+        ),
+        'plaid',
+      );
+      expect(r.verdict).toBe('dropping');
+      expect(r.degradesDeployment).toBe(true);
+    });
+
+    it('never claims a time it has not measured', () => {
+      // The old note said "the newest just now" on every dropping row,
+      // including one whose newest dead letter was 8,123 seconds old.
+      const r = find(
+        webhookProcessingHealth(
+          read(row({ ...cleared, deadSinceConsumedCount: 167, deadNewestAt: new Date('2026-09-11T03:04:37.000Z') })),
+          NOW,
+        ),
+        'increase',
+      );
+      expect(r.verdict).toBe('dropping');
+      expect(r.note).toContain('8123s ago');
+      expect(r.note).not.toContain('just now');
+    });
   });
 
   it('a feed with nothing to consume reads `idle`', () => {

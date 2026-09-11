@@ -815,3 +815,58 @@ gas    44843 @ 6000000 wei = 269058000000 wei
 sender 18.500000 USDC -> 16.520479 USDC
 entry  027255d5-ee38-4eed-ac50-9771ba8d589a   value date 2026-09-11
 ```
+
+---
+
+## One real settlement, seven fixtures, and how to tell
+
+`fx_quote_settlement` holds **eight rows. One of them is the payout above.**
+
+The other seven were written against the live database by
+`src/lib/fx/fx.integration.test.ts`, which runs with `RUN_DB_TESTS=1` and used
+to commit everything it wrote. They carry `tx_hash = '0x' + 'a'×64` — a literal
+typed into a test file, not a keccak-256 digest of anything — no `entry_id`, no
+destination address, and no rate observation behind their settlement mid.
+
+```
+FXQ-XYRJF6AJ   real      0x0acfad50d866e99c…   entry 027255d5-…   block 46666112
+FXQ-ZD7Z60ZD   fixture   0xaaaaaaaaaaaaaaaa…   no entry
+FXQ-DP8CWQE5   fixture   0xaaaaaaaaaaaaaaaa…   no entry
+FXQ-DKZZS1BG   fixture   0xaaaaaaaaaaaaaaaa…   no entry
+FXQ-VF9PT1BR   fixture   0xaaaaaaaaaaaaaaaa…   no entry
+FXQ-93FZN43H   fixture   0xaaaaaaaaaaaaaaaa…   no entry
+FXQ-RWA5QEPH   fixture   0xaaaaaaaaaaaaaaaa…   no entry
+FXQ-YYZA37KX   fixture   0xaaaaaaaaaaaaaaaa…   no entry
+```
+
+This matters here rather than only in `docs/FX.md` because *"a stablecoin
+payout that actually confirms on a testnet"* is the claim this document exists
+to make, and a settlement table reading `count = 8` beside it is the shape of a
+bigger claim than the one being made. **One transfer confirmed on Base Sepolia.
+One. Every hash in this document is that transfer or a named recovery of it.**
+
+The seven are **not deleted**, for the same reason nothing else in this build
+is: `fx_quote_settlement` is append-only at two layers — `corgi_app` holds no
+DELETE, and `ledger_row_is_immutable()` catches the table owner as well — and
+routing around a control with the privilege the control exists to deny would be
+worse than the rows. They are **labelled** instead, by
+`db/migrations/0041_fixture_marking.sql`:
+
+```sql
+SELECT quote_ref, is_fixture, has_entry, tx_hash
+  FROM v_fx_quote_settlement ORDER BY settled_at;
+```
+
+`is_fixture` comes from `fx_quote_fixture`, a marker table joined on, never
+filtered by. `has_entry` is derived from the foreign key into `journal_entry`
+rather than from `entry_id IS NOT NULL`, because a settlement's claim to have
+posted is worth exactly what the journal says about it. `/payouts` prints both,
+and prints the label **on the hash**, where a reader about to copy it into
+Basescan will see it.
+
+The schema now refuses the next one outright —
+`fx_quote_settlement_tx_hash_not_placeholder`, because no digest of anything is
+64 repetitions of one character — and the suite that wrote them runs inside
+transactions that are rolled back. `docs/FX.md` §12 is the full account: the
+decision, the argument against deleting, the one scenario that genuinely has to
+commit and what it does about it.

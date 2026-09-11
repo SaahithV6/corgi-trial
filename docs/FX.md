@@ -12,6 +12,7 @@ quote the customer accepts first."*
 | Off-ramp partner | **none.** The last mile is not built, and §7 says so at length |
 | Journal entries written | **zero.** A quote is not a transaction; §6 |
 | Refusal code for an unquoted payout | `FX_QUOTE_NOT_ACCEPTED` |
+| Rows in `fx_quote_settlement` | **8 — one real, seven test fixtures, each labelled as one.** §12 |
 
 ---
 
@@ -568,6 +569,12 @@ real and then re-derives the stored integer from the characters the source
 printed, by hand, in the test — which is the whole no-floats claim, checked
 against a live response rather than a fixture.
 
+**That suite writes to the live database, and it used to leave what it wrote
+there.** Since §12 it does not: every scenario runs inside a transaction that is
+rolled back, the one scenario that cannot marks what it commits, and the last
+suite in the file asserts the settlement count did not move across the run.
+Running the command above is now free rather than cumulative.
+
 ---
 
 ## 11. The gate, wired — and where the residual landed
@@ -794,3 +801,235 @@ Acceptance should attach to the payment request, the request should carry the
 quote into the approval, and the send script's gate should degrade from *the*
 control to defence in depth. That is a schema change in a directory this work
 does not own, which is why it is written down rather than done.
+
+---
+
+## 12. Seven of the eight settlements are test artefacts, and they are labelled
+
+*Appended after an audit of what the integration suite had written to the live
+database. §11 above describes the one real payout; this section is about the
+seven rows sitting next to it and what was done about them.*
+
+### The finding
+
+`fx.integration.test.ts` runs against the **production** Neon database when
+`RUN_DB_TESTS=1`, and every row it wrote **committed**. Eleven runs on
+2026-09-11 left 63 quotes, 63 rate observations and — the ones that matter —
+**seven rows in `fx_quote_settlement`**.
+
+There have been **eight settlements in this system's entire history and exactly
+one of them is real**:
+
+| | settlements | tx hash | journal entry |
+| --- | --- | --- | --- |
+| real | **1** | `0x0acfad50…77d79e`, Base Sepolia block 46666112 | `027255d5-…` |
+| fixtures | **7** | `0x` + `a`×64 — a literal typed into a test file | none |
+
+The seven carry no `entry_id`, no destination address and no rate observation
+behind their settlement mid. They all claim `settlement_cost_cents = 101817`
+and `variance_cents = -2167`, because they are eleven copies of one scenario.
+
+**Nobody meant to claim eight cross-border payouts confirmed on chain.** That
+is what makes this worth a section rather than a commit message. A reader runs
+`SELECT count(*) FROM fx_quote_settlement`, gets 8, picks a hash, finds it
+confirms on Basescan, and has been handed the shape of a false claim by a
+system whose entire thesis is that its records can be trusted. No dishonesty is
+required anywhere in that chain — only a test that writes to the book people
+read.
+
+### They are not deleted, and there are three independent reasons
+
+**They cannot be.** §7 of `0017` grants `corgi_app` SELECT and INSERT on
+`fx_quote_settlement` and revokes UPDATE, DELETE and TRUNCATE, then adds
+`ledger_row_is_immutable()` triggers because *privileges do not bind the table
+owner*. A DELETE here is refused at two layers, and the second layer exists
+precisely so that a migration — a file exactly like `0041` — cannot sail past
+the first. A migration that dropped the trigger, deleted the rows and put it
+back would be the single most dishonest artefact in this repository: it would
+defeat a control by using the privilege the control was written to deny.
+
+**They should not be.** The trial's automatic fail is *"UPDATE or DELETE on
+money rows. Anywhere. Ever."* `fx_quote_settlement` is guarded with the same
+function, the same GRANT shape and the same trigger pair as `journal_entry`; it
+carries `settlement_cost_cents`, a signed `variance_cents` that is a real P&L
+position on account `4300`, and a foreign key into `journal_entry`. If it is
+not a money row it is indistinguishable from one, and *"I judged this table to
+be only mostly append-only"* is not an argument anybody should have to accept.
+
+**And the one I would give first if asked:** *"seven bogus settlements were
+written to production by a test suite on 2026-09-11"* is a **true and useful
+fact about this system**. Deleting the evidence of a bug is not cleaning up
+after it. The honest correction to a wrong row in an append-only book is
+another row — which is the rule this whole build runs on, applied to itself.
+
+### What was built instead — `db/migrations/0041_fixture_marking.sql`
+
+**A marker table, not a column.** A column is the obvious first idea and it is
+unimplementable: `ADD COLUMN` would work and then the backfill is an `UPDATE`,
+refused by the privilege *and* by the trigger. A column that can never be
+written on an existing row is a column that is always false. So a new fact gets
+a new row, which is the shape `fx_quote_acceptance`, `hold_closure` and
+`payee_archival` already use.
+
+```sql
+CREATE TABLE fx_quote_fixture (
+  quote_id  uuid PRIMARY KEY REFERENCES fx_quote(id),
+  marked_at timestamptz NOT NULL DEFAULT now(),
+  marked_by uuid NOT NULL REFERENCES actor(id),
+  source    text NOT NULL,   -- a file path, so a reader can open it
+  reason    text NOT NULL    -- why it is not a customer commitment
+);
+```
+
+It keys on **`fx_quote`**, not on the settlement, because the quote is the root
+of the lineage: mark the quote and its observation, its acceptance and its
+settlement are all accounted for by one row. A suite that raises a quote and
+never settles it is covered by the same mechanism.
+
+**The backfill is checked against a second, independent criterion.** The
+selector is the suite's own signature — `RUN_ID = 'it-' + Date.now()
+.toString(36)`, appended to every `beneficiary_ref` it writes. A regex backfill
+is a guess unless it is checked, so `0041` refuses to apply unless that
+criterion selects **exactly** the settlements a completely different test does:
+a `tx_hash` of 64 repetitions of one hex digit, which no keccak-256 digest has
+ever been. On the live database the two agree on 7 of 8, and the eighth is the
+Base Sepolia payout. Either direction of disagreement raises and the migration
+aborts.
+
+**A view, and it filters nothing.**
+
+```sql
+CREATE VIEW v_fx_quote_marked AS
+SELECT v.*, (f.quote_id IS NOT NULL) AS is_fixture, f.source, f.reason
+  FROM v_fx_quote v LEFT JOIN fx_quote_fixture f ON f.quote_id = v.quote_id;
+```
+
+The tempting fix is `WHERE tx_hash <> '0x' || repeat('a', 64)` in the payouts
+query, and it is the **worst available answer**. A filter that hides fixtures
+is one widened predicate away from hiding a real failure, and it hides it from
+the screen whose entire job is to be the record. `LEFT JOIN`, never `WHERE`.
+The count on `/payouts` does not move; the label does the work.
+
+`v_fx_quote_settlement` is the settlement book with the same treatment, plus
+one column worth calling out: **`has_entry` is derived from the foreign key
+into `journal_entry`, not from `entry_id IS NOT NULL`.** A settlement's claim
+to have posted is only worth what the journal says.
+
+**And a constraint, so the schema refuses the next one.**
+
+```sql
+ALTER TABLE fx_quote_settlement
+  ADD CONSTRAINT fx_quote_settlement_tx_hash_not_placeholder
+  CHECK (tx_hash !~ '^0x([0-9a-f])\1{63}$') NOT VALID;
+```
+
+`NOT VALID` is not a weakening — **every INSERT from now on is checked**; it
+only skips the scan of existing rows, which is the point, because those seven
+rows fail it and an append-only table cannot be repaired. `pg_constraint
+.convalidated = false` then becomes a permanent, queryable statement that this
+table contains rows predating the rule, recorded in the catalogue where it
+cannot drift from a paragraph in a document.
+
+### What `/payouts` shows now
+
+The fixtures are **on the screen**, in the book, in state order, with the label
+built in `src/lib/fx/view.ts` — the same place every other figure is formatted,
+under the data contract's own rule that *the server formats and the browser
+renders characters*:
+
+```
+FXQ-YYZA37KX  settled   FIXTURE — Settled it-mtwkhksl
+        tx  0xaaaa…aaaa  FIXTURE — no such transaction exists on any chain
+
+FXQ-XYRJF6AJ  settled   Off-ramp partner — testnet demo
+        tx  0x0acfad50d866e99ce4db08f3c09a2c8ca1d2771fd00ebcb6b0678fb75777d79e
+```
+
+The label goes **on the hash**, not near it. The hash is the single most
+load-bearing string on that screen — it is what a reader copies into Basescan —
+and a reference that resolves nowhere, printed by this system under the heading
+*Settlement*, is exactly the shape of a claim nobody made but everybody heard.
+
+The word is `FIXTURE` rather than `TEST` deliberately: every integration in
+this build runs in a provider's **test** mode, and a test-mode card authorising
+a real sandbox transaction produces an entirely real row. These are not records
+of anything that happened.
+
+A dedicated `isFixture` field on `QuoteView` and a badge beside
+`RateEvidenceBadge` — which is what `evidence` already gets — is the better
+version and is week two. What was not acceptable in the meantime was a truthful
+database and a screen that did not say so.
+
+### The test does not do it any more
+
+Every scenario in `fx.integration.test.ts` now runs inside a transaction that
+is **rolled back** — the shape `src/lib/team/team.integration.test.ts` §9
+introduced after the same class of bug left orphan holds in the memo book. The
+rows exist, the triggers fire, the generated columns are computed by the server
+and every assertion is made against real Postgres; then it is thrown away.
+
+Two things about that are worth writing down.
+
+**`store.ts` calls `conn.begin()`, and a postgres.js transaction handle does
+not have one.** `begin` is assigned to the pool object only; a transaction
+scope gets `savepoint` instead. So the suite installs `begin` as a savepoint on
+the handle it passes down — otherwise the only way to run these scenarios in a
+transaction would be to stop calling the production functions and hand-write
+their INSERTs in the test, which would mean the suite no longer tests the code
+that runs.
+
+**One scenario genuinely cannot roll back, and it is the expiry control.**
+`now()` is `transaction_timestamp()` — fixed at the first statement and never
+advancing — which `0017` §4 relies on and states: *"two statements in one
+transaction must agree on whether the offer was still open."* So `expires_at`,
+`accepted_at` and `v_fx_quote.state` all read the same instant inside one
+transaction, `accepted_at` can never exceed `expires_at`, and a quote can never
+be observed expired by any statement that raised it. **A quote that expires is
+a thing that happens between transactions.**
+
+There is a version that stays inside one — pass an explicit `accepted_at` two
+seconds ahead and the trigger's first branch fires — and it proves the
+comparison without proving the feature: not `state = 'expired'`, not the
+application's translation to `FX_QUOTE_EXPIRED`, and not *"the expired quote is
+still on file afterwards"*, which is §5 of this document in one assertion.
+
+So that test commits **one** quote per run and pays for it: it writes its own
+`fx_quote_fixture` row **in the same transaction**, so there is no instant in
+which an unlabelled fixture is visible to anybody, and no follow-up step that
+could be forgotten. It cannot delete instead, and that is the design rather
+than an obstacle.
+
+Per run, before and after:
+
+| | quotes | observations | acceptances | **settlements** |
+| --- | --- | --- | --- | --- |
+| before | +9 | +9 | +4 | **+1** |
+| after | +1, marked | +1 | 0 | **0** |
+
+### The regression test
+
+The last suite in the file is the one that catches a recurrence:
+
+* the settlement count did not move across the run — with the delta in the
+  failure message;
+* every settlement carrying an impossible hash **is** marked, with a source and
+  a reason;
+* every settlement **not** marked has a plausible hash **and** a journal entry
+  that actually exists;
+* the Base Sepolia payout is on file, unmarked, with `settlement_cost_cents =
+  198` and `variance_cents = 1` — so if this document, `docs/STABLECOIN.md` and
+  the database ever disagree about it, the test says which.
+
+### Verifying this section
+
+```bash
+set -a; . ./.env; set +a
+RUN_DB_TESTS=1 pnpm test src/lib/fx
+
+psql "$APP_DATABASE_URL" -c \
+  "SELECT quote_ref, is_fixture, has_entry, tx_hash FROM v_fx_quote_settlement ORDER BY settled_at"
+psql "$APP_DATABASE_URL" -c \
+  "SELECT count(*) FILTER (WHERE is_fixture) AS fixtures,
+          count(*) FILTER (WHERE NOT is_fixture) AS real
+     FROM v_fx_quote_settlement"        -- 7 and 1
+```

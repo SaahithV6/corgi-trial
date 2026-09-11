@@ -143,7 +143,7 @@ export async function expireOne(
       return false;
     }
 
-    return closeHold(identity.holdId, "authorisation expired unused", args.actorId, tx);
+    return closeHold(identity.holdId, "authorisation expired unused", args.actorId, tx, "expiry_sweep");
   });
 
   const settled = await settleHoldPosting(

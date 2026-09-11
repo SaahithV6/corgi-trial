@@ -5,9 +5,10 @@
  * ── THREE RULES IT KEEPS ────────────────────────────────────────────────────
  *
  * 1. IT NEVER UPDATES ANYTHING. `corgi_app` holds SELECT and INSERT on all
- *    four tables and nothing else (0017 §7), so this is a privilege rather
- *    than a convention — an UPDATE written here would not compile into a
- *    working query, it would be refused by the server.
+ *    five tables and nothing else (0017 §7 for the four, 0041 §6 for
+ *    `fx_quote_fixture`), so this is a privilege rather than a convention — an
+ *    UPDATE written here would not compile into a working query, it would be
+ *    refused by the server.
  *
  * 2. IT LETS THE CONTROLS FIRE AND TRANSLATES THE RESULT. The expiry is not
  *    re-checked in TypeScript before the INSERT. `fx_quote_acceptance_guard()`
@@ -20,8 +21,21 @@
  *    can lapse.
  *
  * 3. IT NEVER READS A STATE COLUMN, BECAUSE THERE IS NOT ONE. Everything comes
- *    through `v_fx_quote`, which derives `state` from the presence of rows and
- *    a comparison against `now()`.
+ *    through `v_fx_quote_marked`, which is 0017's `v_fx_quote` — `state`
+ *    derived from the presence of rows and a comparison against `now()` — with
+ *    0041's provenance columns LEFT JOINed on.
+ *
+ * ── AND ONE MORE, ADDED AFTER IT WENT WRONG ─────────────────────────────────
+ *
+ * 4. IT DOES NOT HIDE A FIXTURE, IT LABELS ONE. `fx.integration.test.ts` used
+ *    to commit against the live database, and seven of the eight rows in
+ *    `fx_quote_settlement` are what it left behind. The fix is `0041`, and the
+ *    shape of the fix matters: `is_fixture` is a COLUMN on every row, never a
+ *    predicate in the query below. A filter that drops test rows from the
+ *    quote book is one widened predicate away from dropping a real failure
+ *    from it, and it would be dropping it from the screen whose entire job is
+ *    to be the record. `loadQuotes` returns the fixtures; `quoteView()` prints
+ *    the label; the count on `/payouts` does not move.
  *
  * ── WHOSE NAME GOES ON AN ACCEPTANCE ────────────────────────────────────────
  *
@@ -118,6 +132,18 @@ export interface QuoteRecord {
   readonly varianceCents: bigint | null;
 
   readonly state: QuoteState;
+
+  /**
+   * Written by a test, not by a customer. `fx_quote_fixture`, 0041.
+   *
+   * NOT a reason to hide the row — it is the reason the row can be shown. See
+   * rule 4 in the header.
+   */
+  readonly isFixture: boolean;
+  /** What wrote it: a file path, so a reader can open it. `null` when real. */
+  readonly fixtureSource: string | null;
+  /** Why it is not a customer commitment, in a sentence. `null` when real. */
+  readonly fixtureReason: string | null;
 }
 
 type QuoteRow = {
@@ -165,6 +191,9 @@ type QuoteRow = {
   settlement_cost_cents: bigint | null;
   variance_cents: bigint | null;
   state: string;
+  is_fixture: boolean;
+  fixture_source: string | null;
+  fixture_reason: string | null;
 };
 
 function toRecord(row: QuoteRow): QuoteRecord {
@@ -219,6 +248,9 @@ function toRecord(row: QuoteRow): QuoteRecord {
     settlementCostCents: row.settlement_cost_cents,
     varianceCents: row.variance_cents,
     state: row.state,
+    isFixture: row.is_fixture,
+    fixtureSource: row.fixture_source,
+    fixtureReason: row.fixture_reason,
   };
 }
 
@@ -260,8 +292,10 @@ async function selectQuotes(
            to_char(settle_by AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS settle_by,
            to_char(settled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS settled_at,
            tx_hash, entry_id, settlement_mid_rate_scaled, settlement_cost_cents, variance_cents,
-           state
-      FROM v_fx_quote
+           state,
+           -- 0041. A COLUMN, never a predicate: see rule 4 in the header.
+           is_fixture, fixture_source, fixture_reason
+      FROM v_fx_quote_marked
      WHERE (${where.businessId}::uuid IS NULL OR business_id = ${where.businessId}::uuid)
        AND (${where.quoteRef}::text IS NULL OR quote_ref = ${where.quoteRef}::text)
      ORDER BY created_at DESC
@@ -751,4 +785,152 @@ export async function recordQuoteSettlement(
   } catch (thrown) {
     return err(refusalFrom(thrown));
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Provenance                                                                 */
+/* -------------------------------------------------------------------------- */
+
+export interface MarkFixtureInput {
+  readonly quoteRef: string;
+  /** What wrote it. A file path, so the next reader can open it. */
+  readonly source: string;
+  /** Why it is not a customer commitment, in a sentence somebody can act on. */
+  readonly reason: string;
+}
+
+/**
+ * Declare a quote — and therefore its observation, acceptance and settlement —
+ * a test artefact rather than a customer commitment.
+ *
+ * ── WHY THIS FUNCTION EXISTS AT ALL ─────────────────────────────────────────
+ *
+ * `fx.integration.test.ts` now runs inside transactions that are rolled back,
+ * so almost nothing it writes survives. There is exactly ONE scenario that
+ * cannot: the expiry control. Proving it needs the wall clock to advance
+ * between the moment an offer is raised and the moment it is accepted, and
+ * `now()` inside a Postgres transaction is `transaction_timestamp()` — it does
+ * not advance, by design, because two statements in one transaction must agree
+ * on whether the offer was still open. A quote raised and expired inside one
+ * transaction is not a thing that can exist.
+ *
+ * So that one test commits, and this is how it pays for it: it marks what it
+ * commits, in the same transaction, as it commits it. There is no window in
+ * which an unlabelled fixture is visible to anybody, and no follow-up step
+ * that could be forgotten.
+ *
+ * ── WHY IT CANNOT INSTEAD DELETE ────────────────────────────────────────────
+ *
+ * Because `fx_quote` is append-only at two layers — `corgi_app` holds no
+ * DELETE, and `ledger_row_is_immutable()` catches the table owner as well —
+ * and that is the correct design, not an obstacle to route around. The honest
+ * correction to a row in an append-only book is another row. 0041 is the long
+ * version of this paragraph.
+ *
+ * Idempotent by PRIMARY KEY: marking twice is one row and a no-op, so a
+ * re-run cannot fail on its own tidiness.
+ */
+export async function markQuoteAsFixture(
+  input: MarkFixtureInput,
+  conn: Sql = sql,
+): Promise<Result<true, ErrorShape>> {
+  try {
+    const rows = await conn<{ quote_id: string }[]>`
+      INSERT INTO fx_quote_fixture (quote_id, marked_by, source, reason)
+      SELECT q.id, a.id, ${input.source}, ${input.reason}
+        FROM fx_quote q
+       CROSS JOIN LATERAL (
+         SELECT id FROM actor
+          WHERE kind = 'system' AND display_name = 'ledger-poster'
+          LIMIT 1
+       ) a
+       WHERE q.quote_ref = ${input.quoteRef}
+      ON CONFLICT (quote_id) DO NOTHING
+      RETURNING quote_id`;
+    // Zero rows means either "already marked" or "no such quote". Only the
+    // second is a failure, and it is worth separating: a marker that silently
+    // did nothing is exactly the failure mode this whole change is about.
+    if (rows.length === 0) {
+      const existing = await conn<{ n: bigint }[]>`
+        SELECT count(*) AS n FROM fx_quote WHERE quote_ref = ${input.quoteRef}`;
+      if ((existing[0]?.n ?? 0n) === 0n) {
+        return fail(
+          NOT_FOUND,
+          `There is no quote ${input.quoteRef}, so nothing was marked.`,
+        );
+      }
+    }
+    return ok(true);
+  } catch (thrown) {
+    return err(refusalFrom(thrown));
+  }
+}
+
+/** One settlement, with the evidence for whether it is real beside it. */
+export interface SettlementRecord {
+  readonly quoteRef: string;
+  readonly businessName: string;
+  readonly beneficiaryRef: string;
+  readonly settledAt: string;
+  readonly txHash: string;
+  readonly entryId: string | null;
+  /** Derived from the journal, not from `entry_id` being non-null. */
+  readonly hasEntry: boolean;
+  readonly settlementCostCents: bigint;
+  readonly varianceCents: bigint;
+  readonly isFixture: boolean;
+  readonly fixtureSource: string | null;
+  readonly fixtureReason: string | null;
+}
+
+/**
+ * Every settlement ever recorded. UNFILTERED, and that is the feature.
+ *
+ * "How many cross-border payouts has this system actually settled" used to be
+ * `SELECT count(*) FROM fx_quote_settlement`, which answered eight with no way
+ * to tell that seven were a test's. It is this instead, where the answer
+ * carries its evidence on the row — `isFixture`, and `hasEntry` taken from the
+ * journal rather than from the settlement's own claim to have posted.
+ *
+ * The `WHERE` belongs to the reader. A count that has already decided which
+ * rows the reader is allowed to see is not a count of anything.
+ */
+export async function loadSettlementBook(conn: Sql = sql): Promise<readonly SettlementRecord[]> {
+  const rows = await conn<
+    {
+      quote_ref: string;
+      business_name: string;
+      beneficiary_ref: string;
+      settled_at: string;
+      tx_hash: string;
+      entry_id: string | null;
+      has_entry: boolean;
+      settlement_cost_cents: bigint;
+      variance_cents: bigint;
+      is_fixture: boolean;
+      fixture_source: string | null;
+      fixture_reason: string | null;
+    }[]
+  >`
+    SELECT quote_ref, business_name, beneficiary_ref,
+           to_char(settled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS settled_at,
+           tx_hash, entry_id, has_entry,
+           settlement_cost_cents, variance_cents,
+           is_fixture, fixture_source, fixture_reason
+      FROM v_fx_quote_settlement
+     ORDER BY settled_at`;
+  return rows.map((r) => ({
+    quoteRef: r.quote_ref,
+    businessName: r.business_name,
+    beneficiaryRef: r.beneficiary_ref,
+    settledAt: r.settled_at,
+    txHash: r.tx_hash,
+    entryId: r.entry_id,
+    hasEntry: r.has_entry,
+    settlementCostCents: r.settlement_cost_cents,
+    varianceCents: r.variance_cents,
+    isFixture: r.is_fixture,
+    fixtureSource: r.fixture_source,
+    fixtureReason: r.fixture_reason,
+  }));
 }

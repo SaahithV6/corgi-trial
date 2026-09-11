@@ -6,8 +6,12 @@ that lifecycle step. There is a test that proves exactly that
 
 Before this was wired the table had 22 seeded rows and zero readers
 (DECISIONS 027, finding 2). It now has one reader,
-`src/lib/rails/semantics.ts`, and one consumer that asks it,
-`src/lib/webhooks/consumers/lithic-card.ts`.
+`src/lib/rails/semantics.ts`, and **three** consumers that ask it:
+`consumers/lithic-card.ts`, `consumers/increase-wire.ts`, and
+`consumers/increase-ach.ts` — the last of which asks on **both** legs of the
+ACH rail as of 2026-09-11 (§4b). Thirty rows are live: the 22 seeded, plus the
+eight wire rows migration `0025_wires.sql` inserted directly. See §7 for what that
+gap means, and for the one field the live table is currently ahead of the seed on.
 
 ---
 
@@ -168,6 +172,101 @@ not "the ledger reads the table".
 
 ---
 
+## 4b. The inbound ACH rows: what being unreachable hid
+
+**2026-09-11, after `docs/GAUNTLET.md` was written.** The gauntlet reported the
+two inbound ACH rows as **unreachable code**:
+
+```
+ach / increase / inbound_ach_transfer.created           -> inbound_ach_credit
+ach / increase / inbound_ach_transfer.updated/returned  -> inbound_ach_return
+```
+
+`increaseAchConsumer` parked every `inbound_ach_transfer` delivery on
+`associated_object_type` *before* any semantics lookup ran, so neither row could
+ever be consulted. The consumer now consults them
+(`src/lib/webhooks/consumers/increase-ach.ts` §4b), and the first thing that
+happened when it did was that **one of the two turned out to be wrong.** That is
+the whole case against leaving a row unreachable: an unread row cannot be
+falsified by anything, so it stays plausible for ever.
+
+### The measurement
+
+`rail_event_semantics` shipped the recall row with
+`value_date_source = payload.return.created_at`, which is the **outbound**
+`ach_transfer` shape, copied across by analogy. The inbound object does not have
+it. Measured end to end on the Increase sandbox, 2026-09-11:
+
+```
+POST /simulations/inbound_ach_transfers
+     {account_number_id: sandbox_account_number_96mzhz3n61f5p0jpvytc,
+      amount: 250000, company_name: "ACME SUPPLY CO"}
+  -> sandbox_inbound_ach_transfer_n8dm6ffh9tijbi27of5b
+     status "accepted", effective_date "2026-09-11", transfer_return null
+
+POST /inbound_ach_transfers/{id}/transfer_return
+     {reason: "credit_entry_refused_by_receiver"}
+  -> status "returned", and the ONE new block on the object:
+     "transfer_return": {"reason": "credit_entry_refused_by_receiver",
+                         "returned_at": "2026-09-11T08:53:59Z",
+                         "transaction_id": "sandbox_transaction_wqd6t4p2k5berabecln8"}
+```
+
+| | outbound `ach_transfer` | inbound `inbound_ach_transfer` |
+| --- | --- | --- |
+| the return block | `return` | **`transfer_return`** |
+| its instant | `return.created_at` | **`transfer_return.returned_at`** |
+| the reason code | `return.return_reason_code` | `transfer_return.reason` |
+| the trace number | `return.trace_number` | `trace_number`, on the object itself |
+
+`valueDateFromSource()` walks the path the table names and returns `null` when it
+is absent, and the consumer parks rather than guessing a date. So the row as
+shipped could never have dated a recall even once the branch existed.
+`db/migrations/0039_inbound_recall.sql` corrects it to
+`payload.transfer_return.returned_at`.
+
+### Why correcting was allowed here, when §5 says "don't"
+
+§5's rule is that a wrong row needs the row **plus a correction pass over the
+entries it mis-dated**, and the pass is the hard half. There was nothing to
+correct: the row was unreachable for its entire life, so it has dated **zero**
+postings — `SELECT count(*) FROM journal_entry WHERE idempotency_key LIKE
+'ach:inbound:%'` was 0 before the change and is 0 after it. This is the cheap
+case the rule contemplates, and it is the only kind of row change that should be
+made without a repair alongside it.
+
+### The claim that was withdrawn at the same time
+
+Both notes described a build that posts an inbound credit to a customer's `2100`
+leaf and opens a `9200` uncleared-credit hold. **This build cannot**, and one
+measurement says why:
+
+```
+GET /account_numbers -> exactly ONE object
+  sandbox_account_number_96mzhz3n61f5p0jpvytc  (7467448488 / 123308582)
+  on the programme's own FBO account sandbox_account_zkfx1wcn4brwoaiyksj6
+```
+
+Six businesses share that number. An inbound ACH credit names
+`account_number_id`, so the field that is supposed to say whose money it is names
+the programme; there is no `account_number -> business` table in the schema and
+no path that issues per-customer numbers. So an inbound credit cannot be
+attributed, is never booked, and the recall row's premise — *"an inbound credit
+we already posted has been returned"* — is false here. `canonical_kind` and
+`semantics` were **not** touched: both classifications were right. What was wrong
+was one field name and two sentences of scope.
+
+The wire rail's answer does not transfer, and it is worth knowing why rather than
+assuming it should: `increase-wire.ts` books an inbound credit in exactly one
+case, `wire_transfer.updated/reversed`, where attribution comes from **our own
+outbound transfer** (`Idempotency-Key: payment:<instruction id>` → instruction →
+account → business). ACH has no analogue, because when an outbound ACH payment of
+ours comes back it does not arrive as an `inbound_ach_transfer` at all — it
+arrives as a `return` block on the same `ach_transfer`, which `applyStep`'s
+`ach_return` arm has booked since it was written.
+
+---
+
 ## 5. How to add a row safely
 
 Rows live in `RAIL_EVENT_SEMANTICS` in `scripts/seed.mjs`. That array is the
@@ -217,9 +316,47 @@ it mis-dated, and the correction pass is the hard half.
 | Path | Role |
 | --- | --- |
 | `db/migrations/0001_ledger.sql` | the table, `PRIMARY KEY (provider, provider_event_type)` |
-| `scripts/seed.mjs` | `RAIL_EVENT_SEMANTICS` — the 22 rows, source of truth |
+| `db/migrations/0025_wires.sql` | the eight wire rows, inserted directly with their measurements |
+| `db/migrations/0039_inbound_recall.sql` | the inbound ACH recall row corrected, and the inbound credit note's claim withdrawn (§4b) |
+| `scripts/seed.mjs` | `RAIL_EVENT_SEMANTICS` — the 22 rows, source of truth for those 22 |
 | `src/lib/rails/semantics.ts` | the reader. No default, ever |
-| `src/lib/rails/semantics.test.ts` | 22 assertions, one per row, plus the characterisation test |
-| `src/lib/webhooks/consumers/lithic-card.ts` | the consumer that asks |
+| `src/lib/rails/semantics.test.ts` | 22 assertions, one per seeded row, plus the characterisation test |
+| `src/lib/webhooks/consumers/lithic-card.ts` | the card consumer that asks |
+| `src/lib/webhooks/consumers/increase-wire.ts` | the wire consumer that asks |
+| `src/lib/webhooks/consumers/increase-ach.ts` | the ACH consumer that asks — outbound in §4, inbound in §4b |
 | `research/ledger/DESIGN.md` §6.1, §14 | the design |
 | `DECISIONS.md` 019, 027 | the measurement, and the over-claim it corrects |
+
+---
+
+## 7. The live table is 30 rows; `scripts/seed.mjs` seeds 22
+
+**State this before anyone re-seeds.** `scripts/seed.mjs` is the source of truth
+for the 22 rows it carries, and it is not the source of truth for the table,
+because two migrations have written rows directly:
+
+| | rows | what it wrote |
+| --- | --- | --- |
+| `scripts/seed.mjs` | 22 | the card, ACH and USDC rows |
+| `0025_wires.sql` | +8 | the wire rows, with the Fedwire measurements in each note |
+| `0039_inbound_recall.sql` | 0 | **changed** two existing rows: one `value_date_source`, two notes |
+
+`RUN_DB_TESTS=1 pnpm test src/lib/rails/semantics.test.ts` asserts
+`live ↔ seed` and **has been red since 0025**, on the length check
+(`expected live to have a length of 22 but got 30`). It was red before
+0039 and is red after it, for the same reason and by the same eight rows.
+`pnpm test` without credentials is unaffected — the live comparison is gated.
+
+**Required follow-up, for whoever owns the seed.** 0039's correction is one
+field, and until it is mirrored a re-seed silently reverts a measured fix,
+because the seed's insert is `ON CONFLICT ... DO UPDATE`. Two one-line changes:
+
+1. `scripts/seed.mjs`, `RAIL_EVENT_SEMANTICS`, the
+   `inbound_ach_transfer.updated/returned` row:
+   `valueDateSource: "payload.return.created_at"` →
+   `valueDateSource: "payload.transfer_return.returned_at"`.
+2. `src/lib/rails/semantics.test.ts`, `EXPECTED`, the same row: the same string.
+
+Both notes should be brought across too; they are long, and they are the review.
+Neither file was in the write set of the change that measured this, which is why
+this section exists instead of the edit.

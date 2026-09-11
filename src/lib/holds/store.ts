@@ -342,6 +342,37 @@ export async function memoHoldBalance(
 }
 
 /**
+ * WHO decided to close a hold, as a value rather than as a sentence.
+ *
+ * `hold_closure.reason` is free text for a human. It is NOT a discriminator,
+ * and migration 0028 used it as one: `v_hold_closure_not_terminal` selected its
+ * population with `reason IN (...five English sentences...)`, which left 102 of
+ * 228 closures outside the invariant — including migration 0032's own twelve,
+ * excluded by WORDING rather than by intent. `source` is the discriminator, it
+ * is CHECK-constrained in migration 0040, and the view filters on it.
+ *
+ * The set is the writers, derived from the call sites rather than invented:
+ * this is the complete list of `INSERT INTO hold_closure` in the repository.
+ */
+export type ClosureSource =
+  /** `applyDerivedEvents()`, when `closed(E)` licenses a permanent row. */
+  | "posting_path"
+  /** `expireOne()` / `sweepExpiredHolds()` — the clock, not an event. */
+  | "expiry_sweep"
+  /** The ACH uncleared-credit availability sweep (`rails/plaid/adapter.ts`). */
+  | "availability_sweep"
+  /** The zero-day wire release (`rails/wire/ledger.ts`). */
+  | "wire_availability"
+  /** A dispute resolving its provisional-credit hold (`disputes/store.ts`). */
+  | "dispute"
+  /** A migration undoing a hold that was never owed (0026, 0032). */
+  | "repair"
+  /** A human overriding the model. 0011 §3: the operator wins. */
+  | "operator"
+  /** A test writing against this shared book on purpose. */
+  | "test_harness";
+
+/**
  * Close a hold. `PRIMARY KEY (hold_id)` makes this exactly-once BY
  * CONSTRUCTION: there is no second row to write, so there is no flag anyone can
  * set twice and no counter anyone can double-increment.
@@ -353,16 +384,26 @@ export async function memoHoldBalance(
  * as this row existing. So if the process dies between the two, the customer's
  * available balance is already correct and the posting is bookkeeping that
  * lands on the next event or on the expiry sweep.
+ *
+ * `source` is optional ONLY because two of this function's five call sites —
+ * `rails/plaid/adapter.ts` and `rails/wire/ledger.ts` — are outside the write
+ * scope of the change that added it. Both close `uncleared_credit` holds, which
+ * `v_hold_closure_not_terminal` cannot see at all (it INNER JOINs
+ * `card_authorization`), so neither omission can hide a row from that guard.
+ * An omission is not silent either way: `dbcheck` fails on the first card-auth
+ * closure that arrives without a source, and prints the per-source census —
+ * including `(undeclared)` — under GUARD REACH on every run.
  */
 export async function closeHold(
   holdId: string,
   reason: string,
   actorId: string,
   conn: Sql,
+  source?: ClosureSource,
 ): Promise<boolean> {
   const rows = await conn`
-    INSERT INTO hold_closure (hold_id, reason, actor_id)
-    VALUES (${holdId}::uuid, ${reason}, ${actorId}::uuid)
+    INSERT INTO hold_closure (hold_id, reason, actor_id, source)
+    VALUES (${holdId}::uuid, ${reason}, ${actorId}::uuid, ${source ?? null})
     ON CONFLICT (hold_id) DO NOTHING
     RETURNING hold_id`;
   return rows.length > 0;

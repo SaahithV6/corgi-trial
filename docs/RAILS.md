@@ -147,13 +147,20 @@ the one failure that table exists to prevent.
 
 ### Reading the rows
 
-**The Increase row is `~` except for `probe`, and the exception is the point.**
-A sandbox `INCREASE_API_KEY` exists now, and exactly one operation has been run
-with it: `probe` sent `GET /accounts?limit=1` to `sandbox.increase.com` and got
-**200 on 2026-09-11**, from `increaseAchAdapter().probe()` itself. That call is
-committed as `src/lib/rails/increase/probe.integration.test.ts` — gated on
-`RUN_LIVE_PROBES=1` and the key, skipped everywhere else — so the cell can be
-re-earned in eight seconds rather than believed:
+**The Increase ACH row's four `~` cells are now UNDERSTATED, and the direction
+matters.** Everything below was written when `probe` was the only Increase
+operation anybody had run. Since then the whole ACH lifecycle has been driven
+against `sandbox.increase.com`, and this section is the correction. `~` means
+"supported, never run against the provider"; for `originate`, `settle`,
+`reverse` and — as of this change — `observe`, that sentence is **false**, and
+it is false in the safe direction: the table claims less than has been proven,
+rather than more. It is still wrong, and here is exactly how wrong, cell by
+cell.
+
+`probe` is unchanged and still earned the same way: `GET /accounts?limit=1` to
+`sandbox.increase.com`, **200 on 2026-09-11**, from `increaseAchAdapter().probe()`
+itself, committed as `src/lib/rails/increase/probe.integration.test.ts` — gated
+on `RUN_LIVE_PROBES=1` and the key, skipped everywhere else:
 
 ```
 set -a; . ./.env; set +a; RUN_LIVE_PROBES=1 pnpm vitest run \
@@ -164,22 +171,96 @@ The same test points a deliberately wrong-but-well-formed key at Increase and
 asserts the verdict is `unauthorised`, not `live` — the pasted-placeholder case,
 run for real against the provider rather than argued about.
 
-**`originate`, `observe`, `settle` and `reverse` stay `~`, and moving them would
-be the same bug in a better disguise.** A read of `/accounts` proves a
-credential authenticates and a host answers. It proves nothing about whether
-`POST /ach_transfers` maps a `TransferRequest` correctly, whether the
-`submitted + settlement.settled_at → settled` promotion fires, or whether an R01
-arrives shaped the way `research/ach/NOTES.md` guessed — and not one line of
-that file is marked `[MEASURED]`. Two specific facts keep those four cells
-honest rather than merely cautious:
+**One transfer carries the other four cells, and it is a real one.**
+`sandbox_ach_transfer_x5vdo5m7b6k924sszlms`, **$6,000.00**, created
+2026-09-11T04:15:05Z, now `returned`:
 
-- The sandbox account holds one returned ACH transfer, and **this adapter did
-  not create it**: its `idempotency_key` is null, and `initiateCredit` always
-  sends `Idempotency-Key: <clientReferenceId>`.
-- Two real Increase deliveries have reached the deployed webhook endpoint and
-  had their signatures verified — and **both were dead-lettered**, "no consumer
-  registered for provider `increase`". `parseEvent` has still never seen a real
-  delivery, so `observe` is `~`.
+| Cell | What was run, against Increase | What it left behind |
+|---|---|---|
+| `originate` | `POST /ach_transfers` through `IncreaseAchRail.initiateCredit` | the transfer above, carrying `Idempotency-Key: test:approvals:1789097931095:gate` |
+| `settle` | `POST /simulations/ach_transfers/{id}/settle`, then the adapter's own read-back | `settlement.settled_at = 04:15:06Z` on a transfer whose `status` stayed `submitted`, promoted to our `settled` by `mapTransfer` |
+| `reverse` | `POST /simulations/ach_transfers/{id}/return`, reason `insufficient_fund` | `return.raw_return_reason_code: "R01"`, trace `644288470109390` |
+| `observe` | the five stored, signature-verified deliveries replayed through `parseEvent` | the `returned` event, `600000` cents, `R01`, matching the book |
+
+**The paragraph this replaces said the sandbox's one returned transfer "carries
+no `Idempotency-Key`, so it did not come from here". That was true of a
+different transfer.** There are two returned ACH transfers in this sandbox now.
+The older one (`sandbox_ach_transfer_s2iljuavdzp2p68rh7v7`, $742.19) does have a
+null idempotency key and still did not come from here. The $6,000 one has
+`test:approvals:1789097931095:gate`, which is the idempotency key of a released
+payment instruction from the maker-checker suite, and **the only code in this
+repo that sends an `Idempotency-Key` to `/ach_transfers` is
+`createAchTransfer`**. Origination is not inferred from a passing test; it is
+inferred from a key only one function can have written, read back off the
+provider's own object.
+
+**`settle` and `reverse` are on the book, not only on the wire.** The
+deliveries that followed those simulations were consumed and posted exactly two
+entries, both keyed off the transfer rather than the delivery:
+
+```
+ach:settled:sandbox_ach_transfer_x5vdo5m7b6k924sszlms
+  1110 Cash — FBO settlement account at sponsor bank   -600000
+  2300 ACH payable — outbound in transit               +600000
+
+ach:return:sandbox_ach_transfer_x5vdo5m7b6k924sszlms:644288470109390
+  1110 Cash — FBO settlement account at sponsor bank   +600000
+  2100 Ridgeline Robotics, Inc. — current account      -600000
+```
+
+The settlement stands on the settlement day and the return posts on the return
+day, which is the `new_event` row in `rail_event_semantics` doing its job. The
+`submitted + settlement.settled_at → settled` promotion that this section used
+to call "handled, untested" is the only reason the first entry exists at all:
+Increase never sends the word `settled`.
+
+**`observe` was the last one standing, and it is now measured too.** Until this
+change, `IncreaseAchRail.parseEvent()` had never been handed a real delivery —
+the consumer in `src/lib/webhooks/consumers/increase-ach.ts` reimplements the
+branch, so every live delivery went past the adapter. `src/lib/rails/increase/observe.integration.test.ts`
+closes that: it reads the **exact signed bytes** of the five real
+`ach_transfer.*` deliveries out of `webhook_inbox.raw_body` — bytes that reached
+the deployed endpoint over the public internet and had their signature verified
+before the row was allowed to exist — and runs `parseEvent` on each, against the
+sandbox. The same standard the wire row's `observe` cell was earned to. Re-earn
+it in three seconds:
+
+```
+set -a; . ./.env; set +a; RUN_LIVE_PROBES=1 pnpm vitest run \
+  src/lib/rails/increase/observe.integration.test.ts
+```
+
+It asserts three things worth naming. All five deliveries resolve to **one**
+verdict, because the body is a pointer and every read-back returns the current
+transfer — out-of-order delivery is harmless here, observably rather than by
+argument. The return carries its own amount (`600000n`, `bigint` cents) and its
+own R-code. And the adapter's reading of those bytes **agrees with what the
+consumer independently booked**: same transfer, same amount, same trace number,
+looked up through the ledger's own readers. Two implementations of one rail is a
+drift risk, and that test is the thing that measures the drift rather than
+assuming it away.
+
+**It also stands the old regression up in front of us.** `parseEvent` used to
+gate on `associated_object_id.startsWith('ach_transfer_')`, and every id in this
+sandbox is `sandbox_ach_transfer_…`, so the entire rail was classified
+`unmodelled_event` and answered 200. Silently. The fixture for that assertion is
+not a body somebody here typed — it is the provider's own spelling, out of the
+inbox, which is the only kind of fixture that could have caught it. The routing
+is on `associated_object_type`, and a fourth test feeds a real `wire_transfer.*`
+delivery from the same subscription through the ACH adapter and asserts it comes
+back `unknown` / `unmodelled_event` rather than being classified by a prefix.
+
+**So why does the table still say `~`?** Because the glyph is generated from
+`INCREASE_SUPPORT` in `src/lib/rails/adapters/ach.ts`, and this change did not
+own that file. The cells are earned; the declaration has not caught up. The edit
+is four `proof: 'unexercised'` → `proof: 'measured'` with the evidence strings
+above, plus regenerating this block and updating the last assertion in
+`probe.integration.test.ts`, which currently pins all four to `unexercised` and
+is therefore the thing that will turn red the moment somebody makes the
+declaration true. **Until that edit lands, read this row as understating itself,
+and read this section rather than the glyphs.** A table that claims less than
+was proven is a bug; a table that claims more is a failed submission, and the
+two are not the same size.
 
 **Lithic cannot originate.** A card rail never originates a payment — the
 merchant's acquirer does, the network routes, and Lithic tells us afterwards,
@@ -348,6 +429,32 @@ never received it.
 
 - ~~**`achRailHealth()` labels the ACH slot `LIVE` from `INCREASE_API_KEY` being
   a non-empty string, with no round trip.**~~ **Fixed 2026-09-11.** See §7.
+- **The Increase ACH row's `originate`, `observe`, `settle` and `reverse` cells
+  are declared `unexercised` and all four have been exercised.** The evidence is
+  in §3 with the transfer id, the two ledger entries and the re-run command. The
+  declaration lives in `INCREASE_SUPPORT` in `src/lib/rails/adapters/ach.ts`,
+  which the change that measured them did not own, so the generated table
+  understates the row until somebody flips four strings and regenerates §3. Left
+  understating rather than quietly corrected, because a glyph and its source of
+  truth disagreeing is exactly the drift the generated table exists to prevent —
+  and the fix is a declaration change, not a documentation one.
+- **The ACH consumer reimplements `parseEvent` rather than calling it**
+  (`src/lib/webhooks/consumers/increase-ach.ts`). Its header still gives the
+  reason as the `startsWith('ach_transfer_')` gate, which was fixed: the adapter
+  routes on `associated_object_type` now, and
+  `increase/observe.integration.test.ts` proves it against the sandbox ids that
+  broke it. Two implementations of one rail remain, and the drift between them
+  is measured rather than assumed — the third case in that file asserts the
+  adapter's reading of the live bytes matches the entries the consumer booked.
+  Collapsing the consumer onto `observe()` is a consumer change and is owned
+  elsewhere.
+- **`park()` in `src/lib/webhooks/inbox.ts` writes `parked_reason` and leaves
+  `processing_error` untouched.** So a delivery that failed once and later
+  parked carries two fields disagreeing about itself: a correct, current parked
+  reason beside a stale error from an earlier attempt. 122 Increase rows were in
+  that state on 2026-09-11 and `scripts/redrive.mjs` cleared the stale half, but
+  the next park will recreate it. The durable fix is one more column in that
+  UPDATE; `src/lib/webhooks/**` is owned elsewhere.
 - **Nothing outside `src/lib/rails/` consumes the contract yet.** The five
   bespoke probes in `integrations/probe.ts` and the card path through
   `src/lib/holds/` are the callers that should collapse onto it, and both are

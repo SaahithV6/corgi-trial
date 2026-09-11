@@ -373,7 +373,7 @@ async function recordFacts(
     // append-only, so a closure written there could never be undone by the
     // authorisation that follows. See the note on `HoldState.terminallyClosed`.
     const closurePosted = state.terminallyClosed
-      ? await closeHold(identity.holdId, closureReason(state), ctx.actorId, tx)
+      ? await closeHold(identity.holdId, closureReason(state), ctx.actorId, tx, "posting_path")
       : false;
 
     // Steps 6 and 7. THE COMPARE-AND-APPEND, in this transaction.

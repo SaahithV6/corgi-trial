@@ -350,6 +350,17 @@ export async function GET(request: Request): Promise<Response> {
     // used this integration" cannot produce one. Making loss wait for the
     // silence guard's clauses would be the same blind spot again, one module
     // further along.
+    //
+    // WHAT IT DOES REQUIRE is that the loss be in the present tense. A
+    // provider whose every dead letter predates a later successful
+    // consumption reads `superseded` and does not appear in `degradedBy` —
+    // see the note on `dropping` in ./processing.ts. That is not the alarm
+    // being softened: it is the difference between "deliveries are dying" and
+    // "deliveries died once and nobody cleared the row", and conflating them
+    // left this deployment `degraded` for five hours on a fault that had
+    // already been fixed. A status that cannot go back to `ok` is a status
+    // people stop reading, and then the next real drop arrives into a field
+    // that was already red.
     const status =
       database.reachable &&
       webhookHealth.degradedBy.length === 0 &&
