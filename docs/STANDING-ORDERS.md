@@ -209,9 +209,42 @@ exactly what §2 of this document already argues at length — **a wrong key is 
 second payment** — so the guard now checks the thing the prose beside it always
 claimed it checked.
 
-It was demonstrated rather than reasoned: an unpadded, `DateStyle`-dependent key
-was planted on a real occurrence on the live book. The new body returns one row,
-listing both spellings. The old body returned nothing for the same plant.
+#### It has now been watched failing, and the delta is quoted
+
+Migration 0023 recorded the demonstration as a comment
+(`SELECT * FROM v_standing_order_double_fire;  -- one row, instructions = 2`).
+Between that migration and 2026-09-11, **nobody ran it.** A demonstration
+written into a file is a description of a measurement, not a measurement — which
+is the precise mistake the paragraph above is about, so it is closed here rather
+than repeated.
+
+Run against this database, in a transaction that was rolled back:
+
+```
+before                                         0 rows
+-- a second payment_instruction on the SAME occurrence, in the mandate's
+-- keyspace, under a different spelling of the derived key:
+--   standing:6d27bdba-c9ab-4df1-912c-cd6ff033a6b0:2026-09-11
+--     ... the real one, written by the firing routine
+--   standing:6d27bdba-c9ab-4df1-912c-cd6ff033a6b0:2026-9-11#retry-after-a-restart
+--     ... the plant: an unpadded, DateStyle-dependent key from a retry
+after                                          1 row
+    standing_order_id  6d27bdba-c9ab-4df1-912c-cd6ff033a6b0
+    scheduled_date     2026-09-11
+    instructions       2
+    instruction_keys   {both of the above}
+after ROLLBACK                                 0 rows
+```
+
+The row names **both** keys, which is the whole point: the UNIQUE index on
+`payment_instruction.idempotency_key` is perfectly satisfied by that pair, so
+the constraint the old body leaned on is exactly the one that cannot see this
+failure.
+
+It is no longer a one-off. `node scripts/dbcheck.mjs --prove` builds that state
+on every run, asserts the count moves `0 -> 1`, and then re-reads the view
+outside the transaction to assert the rollback left nothing behind — alongside
+the same treatment for all twenty-two invariant views on the gate's list.
 
 **Its blind spot, stated because a guard whose limits are not written down is
 back to being believed for the wrong reason:** an instruction raised *outside*
@@ -227,7 +260,13 @@ reason**, after `v_hold_drift`, whose `WHERE NOT is_released AND memo <> target`
 excludes a spuriously-closed hold *by construction* and therefore cannot see the
 exact failure it exists to catch (`CUT-LIST.md` §3.2). The pattern is the honest
 through-line: **a zero-row invariant proves nothing until somebody has watched it
-return a row.** Both are now in `pnpm db:check`, which is 25 checks.
+return a row.**
+
+That sentence is now executable rather than aspirational. `pnpm db:check` runs
+the invariant views on every pass; `node scripts/dbcheck.mjs --prove` makes
+**every one of them** fail on purpose in a rolled-back transaction, and coverage
+is computed from the same list the gate checks, so a view added without a proof
+is a named failure on the next run rather than a quiet gap.
 
 ### It does not build a second way to move money
 

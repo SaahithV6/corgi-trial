@@ -74,4 +74,30 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
     'v_member_approval_without_right',
     'no approval stands from a member who lacked the right at the time',
   ],
+  // 0031's three and 0040's one. They lived in side arrays in dbcheck.mjs
+  // because the agents that added them could not write THIS file, and the two
+  // lists are asserted equal below. That kept them checked and provable, which
+  // was the right call under a write scope — but left permanently it would
+  // mean this dashboard checking four fewer invariants than CI, which is the
+  // same failure as claiming four more.
+  [
+    'v_interchange_unreversed',
+    'no revenue stands on a settlement the network took back',
+  ],
+  [
+    'v_interchange_drift',
+    'every priced settlement carries the interchange it is now worth',
+  ],
+  [
+    'v_interchange_rate_drift',
+    'no settlement has been re-priced by a rate that came later',
+  ],
+  // Non-empty on arrival — 9 rows, all released, zero cents of exposure. Kept
+  // rather than narrowed: v_card_auth_hold reads card_authorization.expires_at
+  // and ledger_availability() reads hold.expires_at, and that they agree is a
+  // convention inside one function rather than a constraint.
+  [
+    'v_hold_expiry_drift',
+    'one card hold, one expiry instant — the two readers agree',
+  ],
 ] as const;

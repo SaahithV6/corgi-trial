@@ -1157,17 +1157,21 @@ while the declined-hold bug ran, because the thing that was wrong was *upstream
 of both of them*. 0032 wrote it down at the time: what caught that one was
 joining to **what the provider actually said**, retained verbatim in
 `webhook_inbox` — a third input neither derivation had. `v_standing_order_double_fire`
-is the degenerate version: it joined `payment_instruction` on a UNIQUE column
-and asked for `count > 1`, so it could not return a row under any state of the
-database, and its emptiness was quoted in a test, a document and
-`compliance.mjs` as proof.
+was the degenerate version: as 0012 shipped it, it joined `payment_instruction`
+on a UNIQUE column and asked for `count > 1`, so it could not return a row under
+any state of the database, and its emptiness was quoted in a test, a document
+and `compliance.mjs` as proof. 0023 repaired the body; **nobody watched the
+repaired one return a row until §10.3 of this file made it do so** — 0 → 1, both
+spellings of the key in the row, rolled back.
 
 **Two: it excluded exactly the state it existed to catch.** `v_refused_auth_hold`
 shipped with `AND r.result IS NOT NULL` over an INNER JOIN — and *missing the
 verdict* was the failure it was written for, so the state it was blindest to was
-the state the bug produced. `v_hold_closure_not_terminal` discriminates on five
-free-text reason strings and cannot see 35% of the closures in this database.
-`v_accrual_month_drift` is `WHERE month_complete` over zero complete months.
+the state the bug produced. `v_hold_closure_not_terminal` discriminated on five
+free-text reason strings and could not see 45% of the closures in this database
+— **repaired by migration 0040, §10 below**. `v_accrual_month_drift` is
+`WHERE month_complete` over zero complete months; its predicate is sound and its
+population is empty, which is a different thing and is now printed as such.
 `scripts/audit-claims.mjs` validates documents against a deployment that
 predates the tree and cannot see that it is doing so.
 
@@ -1296,3 +1300,201 @@ Every instance on this build's list of nineteen reported healthy on a broken
 book. This is the first that reported broken on a healthy one, and it is the
 same defect: the population the assertion ranged over included the correct
 behaviour.
+
+---
+
+## 10. A closure says who wrote it — migration 0040
+
+### 10.1 What was wrong
+
+`v_hold_closure_not_terminal` (0028) is the guard that catches the cause one
+step before `v_hold_release_drift` sees the damage: a permanent closure row,
+never reversed, over an authorisation the fold still calls **open**. It chose
+its population like this:
+
+```sql
+WHERE hc.reason IN (
+  'authorisation closed or expired by the network',
+  'final capture received',
+  'authorisation expiry reached',
+  'authorisation fully reversed',
+  'authorisation expired unused')
+```
+
+Five English sentences, matched against `hold_closure.reason`, which is free
+text written by the very code paths the guard exists to police. 0028 wrote the
+cost down — "a new `closureReason()` branch added to `apply.ts` without being
+added here is silently outside the invariant" — and shipped anyway.
+
+Measured on this database before 0040: **228 closures, 126 visible to the
+guard. 102 rows — 45% — outside the invariant by construction.** Migration
+0032's own twelve closures were among them, excluded by the *wording* of their
+message rather than by anyone's intent. A posting-path closure reworded by one
+character would leave the guard's population silently and for ever.
+
+### 10.2 What 0040 did, and how a column gets added to an append-only table
+
+`hold_closure` now carries `source`: a CHECK-constrained value naming **who
+decided to close**, and the view filters on that instead of on prose. A reason
+is a sentence for a human; a source is a fact for a machine, and they stop being
+the same field.
+
+The set of values is derived from the code rather than invented — every `INSERT
+INTO hold_closure` in the repository (two in application code, two in
+migrations) and then every call site of the two functions that contain them:
+
+| source | written by |
+|---|---|
+| `posting_path` | `holds/apply.ts`, when `closed(E)` licenses a permanent row |
+| `expiry_sweep` | `holds/expiry.ts` — the clock, not an event |
+| `availability_sweep` | `rails/plaid/adapter.ts` — ACH uncleared-credit maturity |
+| `wire_availability` | `rails/wire/ledger.ts` — the zero-day wire release |
+| `dispute` | `disputes/store.ts`, when a dispute resolves its grant hold |
+| `repair` | a migration undoing a hold that was never owed (0026, 0032) |
+| `operator` | a human overriding the model — 0011 §3. **No writer emits it today**, and the census prints `operator 0` rather than leaving that in a comment |
+| `test_harness` | `holds.integration.test.ts` case 7b, writing against this shared book on purpose |
+
+**Adding the column took no `UPDATE` and disabled no trigger.**
+`hold_closure_no_update_delete` refuses `UPDATE` to the *owner* as well as to
+`corgi_app` — that is its entire purpose (0001 §13) — so `UPDATE hold_closure
+SET source = …` is not available, and `DISABLE TRIGGER … UPDATE … ENABLE
+TRIGGER` is a migration switching off the immutability guard on a money-adjacent
+table, which is the one thing this build's whole argument says is never
+necessary.
+
+It is not necessary. `ALTER TABLE` is DDL: it rewrites the heap and row-level
+UPDATE triggers do not fire for it. And `ALTER COLUMN … TYPE … USING <expr>` is
+the one form of DDL whose expression may read the row's **own** columns. So the
+backfill is expressed as a type change that happens to keep the type:
+
+```sql
+ALTER TABLE hold_closure ADD COLUMN source text;            -- all NULL
+ALTER TABLE hold_closure ALTER COLUMN source TYPE text
+  USING (CASE WHEN reason = 'final capture received' THEN 'posting_path'
+              ... END);                                     -- classified
+```
+
+Verified in a rolled-back transaction before the migration was written: the
+`CASE` evaluated per row, the trigger did not fire, and an ordinary `UPDATE
+hold_closure SET source = source` in the same session was still refused with
+55006. `hold_id`, `reason`, `actor_id` and `closed_at` come out bit-identical —
+the column being filled did not exist when the row was written, so this
+classifies history rather than rewriting it.
+
+The backfill attributed **228 of 228** rows. The `ELSE NULL` arm — "we cannot
+say who wrote this" — matched none, and the migration refuses to apply if a
+`card_auth` closure is left unattributed, because that view's population is
+exactly the card-auth closures and a hole in it is the defect all over again.
+
+### 10.3 What the guard ranges over now, and what is deliberately outside
+
+```
+v_hold_closure_not_terminal — ranges over 126 of 228 closures, BY DECLARED WRITER
+    IN   expiry_sweep         70 closure(s) on card_auth holds
+    IN   posting_path         56 closure(s) on card_auth holds
+    out  repair               52 closure(s) on card_auth holds  <- 52 carry the defect shape ($2,551.00)
+    out  dispute              23 closure(s) on uncleared_credit holds
+    out  test_harness         15 closure(s) on card_auth holds  <-  4 carry the defect shape ($132.00)
+    out  wire_availability    12 closure(s) on uncleared_credit holds
+```
+
+The two `IN` sources are the writers that claim **the hold model's terminal
+predicate** licensed a permanent row, which is the only thing this invariant
+asserts. The `repair` line has to be argued rather than asserted: all 52 of
+those closures stand over authorisations the fold still calls open, and they are
+*right* to. 0026 and 0032 closed holds whose network verdict was `DECLINED` and
+whose verdict never reached `card_auth_event` — the fold's **input** is what is
+wrong. Had `repair` been admitted, the view would have reported 52 correct rows
+on the day it shipped. The guard that owns that population is
+`v_refused_auth_hold`, which reads the provider's verdict rather than the fold,
+and which is red on exactly that evidence.
+
+This is provable in both directions, and `dbcheck --prove` proves it both ways
+on every run: the same closure row over the same open authorisation moves the
+guard **0 → 1** declared `posting_path` and **0 → 0** declared `repair`.
+
+### 10.4 The four rows nobody could see
+
+`test_harness` is the finding. **Four closures stand over $33.00 authorisations
+the fold still calls open**, memo book already at zero, written by an early
+version of `holds.integration.test.ts` case 7b — before that test grew the
+`expiry.expireOne()` tidy-up it now ends with. Their hold ids:
+
+```
+6fd4ff31-6509-433c-b7de-514ae0a5e73b   auth-1789059056109-7b   2026-09-10T16:51Z
+8df083ba-9a0f-492c-a135-901aef79d29f   auth-1789059102546-7b   2026-09-10T16:52Z
+052ba6c6-5f23-404f-98b1-5f00bf50452c   auth-1789059231213-7b   2026-09-10T16:54Z
+c4ee66e9-e7a0-4000-b7c2-499d8bc52e3c   auth-1789059686167-7b   2026-09-10T17:02Z
+```
+
+**No guard on this build could see them.** `v_hold_drift` is `WHERE NOT
+is_released` and the closure released them. `v_hold_release_drift` needs a
+non-zero memo balance and theirs is zero. `v_hold_closure_not_terminal` did not
+admit their wording. They are outside the *repaired* guard too, and for a reason
+rather than by accident: the model's terminal predicate never licensed them, a
+test fabricated them to simulate a crash.
+
+So the repair is not only the column. `v_hold_closure_census` — printed by
+`dbcheck`'s GUARD REACH on every run — carries a `defect_shape` column counting
+rows the guard does **not** range over that carry its shape anyway. *Outside the
+guard* is a legitimate answer. *Outside the guard and therefore nobody looked*
+is the failure this build keeps rediscovering, and that column is the difference
+between the two.
+
+They are not repaired here, and the reasoning is recorded rather than the
+symptom hidden. The two honest repairs are both worse than leaving them:
+appending a synthetic `expiry` event would put a **false statement in an
+append-only table** (their seven-day clocks have not run out — the test forged a
+future `now()` to force the sweep, and forging it again in a migration is the
+sin 051 named), and a `hold_closure_reversal` would reopen four holds whose memo
+books are at zero, turning a silent inconsistency into $132.00 of
+`v_hold_drift`. The exposure is zero cents; the customers' available balances
+are already correct. What was missing was anybody being able to *see* them, and
+that is now fixed on every run.
+
+### 10.5 `v_hold_expiry_drift` — two views disagree about one clock
+
+Found by a from-scratch rebuild of the book, and added in the same migration
+because it is the same class of defect.
+
+A card hold's expiry is stored **twice**: `hold.expires_at`, which
+`ledger_availability()` reads, and `card_authorization.expires_at`, which
+`v_card_auth_hold` reads. `ensureAuthorization()` takes one `expiresAt` argument
+and writes it into both rows — so they are *meant* to be the same instant, and
+nothing in the schema says they must be. No foreign key, no CHECK, and until now
+no view that would say anything if they diverged. Two bodies deriving "has this
+hold expired?" from two different columns is 0022's stored-balance defect
+wearing a timestamp instead of a number.
+
+**Nine holds on this book already disagree, by 135–158 milliseconds.** Every one
+is a fixture that bypassed `ensureAuthorization()` and ran two separate `now() +
+interval '7 days'` statements, so each row kept its own `now()`:
+
+```
+25d3bdf6-…  lithic:completion-1789108208963-bypass   +149.404 ms
+36a36a47-…  lithic:team-test-mtwjm6co-t7pkl7         +135.502 ms
+619da0df-…  lithic:team-test-mtwjzy0q-qabwth         +140.552 ms
+62d65e62-…  lithic:team-test-mtwjmxtw-isn5e1         +136.830 ms
+70bf2f39-…  lithic:completion-1789107851091-bypass   +151.392 ms
+715f7471-…  lithic:team-test-mtwkl4z6-y1q3jo         +148.924 ms
+8c24d59f-…  lithic:team-test-mtwkhl23-yto6ke         +157.832 ms
+95bf0c0a-…  lithic:team-test-mtwkfjed-szl3mb         +148.856 ms
+9a95a564-…  lithic:team-test-mtwjnocr-4ub3jt         +144.395 ms
+```
+
+**Exposure today is zero cents.** All nine are closed, released and withholding
+nothing. The defect is not the money: it is that for the width of that gap, the
+two bodies would answer "is this hold expired?" differently and **nothing would
+say so**. That is not hypothetical either — `dbcheck --prove` turns exactly that
+asymmetry into money against `v_balance_definition_drift`: a card hold whose own
+clock has run out while its authorisation's has not is dropped by
+`ledger_availability()` and kept by `v_hold_state`, and the customer's available
+balance and the hold model then disagree about the same dollars, **0 → 1**.
+
+**The view is non-empty on arrival, with nine rows, and that is correct.** It is
+not narrowed to make it pass. `WHERE external_ref NOT LIKE 'lithic:team-test-%'`
+would be safe, and would still be an exclusion shaped like the failure — which
+is the sentence 0032 wrote about `v_refused_auth_hold`, the other deliberate red
+on this list. The nine are not repaired either: repairing them means rewriting
+`expires_at` on rows in two append-only tables, which is the one thing this
+system does not do. Recording the reasoning is the repair.

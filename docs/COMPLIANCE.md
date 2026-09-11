@@ -579,64 +579,202 @@ change's remit — would turn the suite red. **So the chaos dashboard currently
 checks 15 invariants where `dbcheck` checks 16**, and the fix is a two-line
 addition to `src/lib/chaos/invariants.ts`.
 
-#### `v_hold_closure_not_terminal` discriminates on free text
+#### `v_hold_closure_not_terminal` discriminated on free text — REPAIRED by 0040
 
-The one finding that is not yet repaired, and the one most likely to become the
-nineteenth instance. The view's population is
+**This section is kept as written and then answered, because the fix it asked
+for is the one that shipped.** What it said, at the time:
+
+> The view's population is
+>
+> ```sql
+> WHERE hc.reason = ANY (ARRAY[
+>   'authorisation closed or expired by the network', 'final capture received',
+>   'authorisation expiry reached', 'authorisation fully reversed',
+>   'authorisation expired unused'])
+> ```
+>
+> — five string literals matched against a free-text `reason` column written by
+> the very code paths the guard exists to police. The intent is right: it
+> separates a **posting-path** closure (a bug, if the fold still says the
+> authorisation is open) from an **operator** closure (legitimate — 0011: "the
+> operator overrides the model"). The mechanism is a string.
+>
+> The fix is the one `card_auth_event_result.source` already models: give
+> `hold_closure` a `source` column, CHECK-constrained, written at every call
+> site, and filter the view on that. It is not done here because `hold_closure`
+> is append-only — an added column is NULL on all existing rows for ever.
+
+By the time `db/migrations/0040_hold_closure_source.sql` was written the book
+had grown: **228 closures, of which the reason list could see 126. 102 rows —
+45% — were outside the invariant by construction**, and migration 0032's own
+twelve closures were among them, excluded by the *wording* of their message
+rather than by anyone's intent.
+
+**The objection above was wrong, and that is the interesting part.** "An added
+column is NULL on all existing rows for ever" assumes the only way to fill one
+is `UPDATE`, which `hold_closure_no_update_delete` refuses — to the owner as
+well as to `corgi_app`, which is exactly its job (0001 §13). But `ALTER TABLE`
+is DDL, and `ALTER COLUMN ... TYPE ... USING <expr>` is the one form of DDL
+whose expression may read the row's own columns. So the backfill is a type
+change that keeps the type:
 
 ```sql
-WHERE hc.reason = ANY (ARRAY[
-  'authorisation closed or expired by the network', 'final capture received',
-  'authorisation expiry reached', 'authorisation fully reversed',
-  'authorisation expired unused'])
+ALTER TABLE hold_closure ADD COLUMN source text;            -- all NULL, DDL
+ALTER TABLE hold_closure ALTER COLUMN source TYPE text
+  USING (CASE ... END);                                     -- classified, DDL
 ```
 
-— five string literals matched against a free-text `reason` column written by
-the very code paths the guard exists to police. The intent is right: it
-separates a **posting-path** closure (a bug, if the fold still says the
-authorisation is open) from an **operator** closure (legitimate — 0011: "the
-operator overrides the model"). The mechanism is a string.
+No `UPDATE` is executed, no trigger is disabled, and `UPDATE hold_closure SET
+source = source` in the very next statement is still refused with 55006 —
+verified in a rolled-back transaction before the migration was written.
+`hold_id`, `reason`, `actor_id` and `closed_at` come out of the rewrite
+bit-identical: this classifies history, it does not rewrite it.
 
-Measured over 184 closures on card authorisations:
+**The set of values is derived from the code, not invented** — every `INSERT
+INTO hold_closure` in the repository, and then every call site of the two
+functions that contain them: `posting_path` (`holds/apply.ts`),
+`expiry_sweep` (`holds/expiry.ts`), `availability_sweep`
+(`rails/plaid/adapter.ts`), `wire_availability` (`rails/wire/ledger.ts`),
+`dispute` (`disputes/store.ts`), `repair` (migrations 0026 and 0032),
+`test_harness` (`holds.integration.test.ts` case 7b) and `operator`, which has
+no writer today and is in the CHECK because 0011 §3 and 0028 both reason about
+one. The backfill attributed **228 of 228** rows; the `ELSE NULL` arm matched
+none, and the migration refuses to apply if a `card_auth` closure is left
+unattributed.
 
-| | |
-|---|---|
-| closures inside the reason list — the guard's whole population | **90** |
-| closures outside it, invisible by construction | **64 (35%)** |
-| rows the view would report if the reason filter were dropped | **56** |
+The view now filters `source IN ('posting_path','expiry_sweep')` — the two
+writers that claim *the hold model's terminal predicate* licensed a permanent
+row, which is the only thing the invariant asserts.
 
-All 56 are legitimate operator closures today — disputes, the wire availability
-sweep, the chaos driver's `simulated crash before release`, and the refusal
-repairs 0026 and 0032 wrote. The guard is correct right now. It is correct **by
-the wording of a sentence**: 0032's own closures landed outside the list by the
-accident of how their message reads, not by any declared intent, and a
-posting-path closure reworded by one character leaves the guard's population
-silently and for ever.
+**Why the other 102 are out, with the numbers:**
 
-The fix is the one `card_auth_event_result.source` already models: give
-`hold_closure` a `source` column (`posting_path` / `operator` / `migration`),
-CHECK-constrained, written at every call site, and filter the view on that. It
-is not done here because `hold_closure` is append-only — an added column is
-NULL on all 184 existing rows for ever, and "NULL means we do not know which
-path wrote this" is the same unanswered state 5.1 is about. It wants the same
-treatment: a new column, a backfill from what can be proven, `NULL` where it
-cannot, and a guard that reports the NULLs rather than excluding them.
+| source | rows | in the guard | carries the guard's defect shape |
+|---|---|---|---|
+| `posting_path` | 56 | **yes** | 0 |
+| `expiry_sweep` | 70 | **yes** | 0 |
+| `repair` | 52 | no | **52 — $2,551.00** |
+| `test_harness` | 15 | no | **4 — $132.00** |
+| `dispute` | 23 | no | n/a (no card authorisation) |
+| `wire_availability` | 12 | no | n/a (no card authorisation) |
+| `operator`, `availability_sweep` | 0 | — | — |
 
-#### The rest, checked and clear
+The `repair` line is the one that has to be argued. All 52 of those closures
+stand over authorisations the fold still calls OPEN and they are *right* to:
+0026 and 0032 closed holds whose network verdict was `DECLINED` and whose
+verdict never reached `card_auth_event`, so the fold's **input** is what is
+wrong. Had `repair` been admitted, this view would have reported 52 rows on the
+day it shipped, every one of them correct. The guard that owns that population
+is `v_refused_auth_hold`, which reads the provider's verdict rather than the
+fold, and which is red on exactly that evidence.
 
-| guard | can it fail? | evidence |
+**The `test_harness` line is a finding, and it is printed rather than filed.**
+Four closures written by an early version of `holds.integration.test.ts` case 7b
+— before that test grew the `expiry.expireOne()` tidy-up it now ends with —
+stand over $33.00 authorisations the fold still calls open, memo book already at
+zero. No guard on this build could see them: `v_hold_drift` is `WHERE NOT
+is_released`, `v_hold_release_drift` needs a non-zero memo balance, and
+`v_hold_closure_not_terminal` did not admit their wording. They are outside the
+repaired guard too, because the model's terminal predicate never licensed them
+— a test fabricated them to simulate a crash.
+
+So the repair is not only the column. `v_hold_closure_census`, and the
+`GUARD REACH` section that prints it, carries a `defect_shape` column: rows the
+guard does **not** range over that carry its shape anyway. *Outside the guard*
+is a legitimate answer. *Outside the guard and therefore nobody looked* is the
+failure this build keeps rediscovering, and that column is the difference.
+
+**And the rule that keeps it honest is enforced in the gate, not in a trigger.**
+A card-auth closure written without a `source` would be NULL, fall outside the
+view, and reproduce 0028's defect in a new field — so `dbcheck` carries
+"every card-auth closure declares its writer" as a pass/fail check. A BEFORE
+INSERT trigger was written and worked (23514 on an undeclared card-auth closure,
+an undeclared uncleared-credit closure allowed, `source = 'nonsense'` refused by
+the CHECK) and is deliberately **not** in the migration: a migration lands the
+instant it runs while the deployed build is whatever was last pushed, and §5.2
+of this file is about that gap lasting eight hours. In that window the trigger
+would refuse a *correct* closure written by a deployed `apply.ts` that cannot
+know about a column which did not exist when it was built, and a customer's card
+hold would sit on their money until the deploy caught up. Refusing a correct
+write to enforce a label on it is the wrong trade; turning CI red on the first
+offending row is the same rule collected a few minutes later.
+
+#### The rest: every one of them made to fail, on purpose
+
+**This table used to be an argument. It is now a measurement.** It read "can it
+fail? — yes", with a sentence of reasoning beside each view, for nineteen views
+of which exactly two had ever been watched doing it. Three of those sentences
+had already turned out to be wrong somewhere else in this file. Reasoning about
+whether a guard *can* fail is how `v_standing_order_double_fire` spent days
+being quoted as proof while being unsatisfiable.
+
+`node scripts/dbcheck.mjs --prove` now builds the violating state for **every
+invariant view on the list**, inside a transaction that is rolled back, asserts
+the count moves, and then re-reads the view outside the transaction to assert
+the rollback left nothing. Coverage is *computed*, not claimed: the driver walks
+the same arrays the gate checks, and a view with no proof registered is a named
+FAILURE on the next run.
+
+```
+--prove covered 22 of 22 invariant views
+(24 proofs, 8 of them needing a trigger disabled on the owner connection)
+```
+
+| view | delta | how it was made to fail |
 |---|---|---|
-| `v_entry_unbalanced`, `v_line_denorm_drift`, `v_book_not_zero` | yes | plain aggregates over 2,700+ entries |
-| `v_hold_drift` / `v_hold_release_drift` | yes | complementary predicates (`NOT is_released` / `is_released`) cover every hold between them — 0011's blind spot is closed |
-| `v_deposit_control_drift` | yes | subtree sum vs reported sum, no exclusions |
-| `v_accrual_ledger_drift`, `v_interest_ledger_drift`, `v_interest_rate_drift` | yes | made to fail by 0024, over 34 and 25 posted days |
-| `v_accrual_month_drift` | **vacuous today** | `WHERE month_complete` over **0 complete accrual months**. The predicate is sound; there is nothing in its population. Reported by GUARD REACH, not counted as a failure |
-| `v_standing_order_double_fire` | yes | 0023 repointed it at the mandate keyspace; 22 occurrences in reach |
-| `v_dispute_ledger_double_count` | yes | the `UNION` in `v_dispute_ledger` de-duplicates on four columns, so two dispute events citing one entry under different kinds survive it and collide on `(dispute_id, entry_id, ordinal)` — 150 lines in reach |
-| `v_balance_definition_drift` | yes | two independent bodies compared at one instant, 7 accounts in reach |
-| `v_refused_auth_hold` | yes, **now** | `--prove`, both verdicts, above |
-| `v_hold_closure_not_terminal` | yes, over 49% of its subject | see above |
-| `v_wire_availability_drift` | yes | `--prove`, above |
+| `v_entry_unbalanced` | 0 → 1 | one extra line appended to a balanced entry |
+| `v_line_denorm_drift` | 0 → 1 | a line dated a day ahead of its entry (+1/−1, so the entry still balances and only the clock drifts) |
+| `v_book_not_zero` | 0 → 1 | one unbalanced line takes an entity's whole book off zero |
+| `v_deposit_control_drift` | 0 → 1 | customer money booked to the HOUSE `2100` root, inside the control total and outside every customer's balance |
+| `v_hold_drift` | 0 → 1 | an incremental authorisation the memo book was never told about |
+| `v_hold_release_drift` | 0 → 1 | an operator closure over a hold still carrying memo money |
+| `v_hold_closure_not_terminal` | 0 → 1 | a `posting_path` closure over an authorisation the fold calls open |
+| `v_hold_closure_not_terminal` | 0 → **0** | *the same row declared `repair`* — 0 is the pass, and it is the `source` column working in the negative direction |
+| `v_hold_expiry_drift` | 9 → 10 | a hold and its authorisation given expiry instants one second apart |
+| `v_balance_definition_drift` | 0 → 1 | a card hold whose own clock ran out while the authorisation's has not — the same asymmetry, turned into money |
+| `v_refused_auth_hold` (refused) | 0 → 1 | a `DECLINED` verdict on a live hold's authorisation |
+| `v_refused_auth_hold` (unanswered) | 149 → 150 | an authorisation event with no verdict at all — the one 0026's body could not express |
+| `v_wire_availability_drift` | 0 → 1 | a wire credit spendable an hour after it was booked |
+| `v_accrual_month_drift` | 0 → 1 | **a whole February built first** — this guard's population is empty, so the month had to be created before it could be broken |
+| `v_accrual_ledger_drift` | 0 → 1 | an accrual day posted against an entry belonging to a different day |
+| `v_interest_ledger_drift` | 0 → 1 | an interest posting citing another day's entry |
+| `v_interest_rate_drift` | 0 → 4 | a rate row backdated behind `interest_rate_policy_forward_only` |
+| `v_standing_order_double_fire` | 0 → 1 | **a second instruction for one occurrence under a different spelling of the derived key — see §5.8** |
+| `v_dispute_ledger_double_count` | 0 → 2 | two dispute events of different kinds citing one entry; the delta is one row per LINE of that entry |
+| `v_approved_auth_for_dead_member` | 0 → 1 | an approval recorded against a member version that says `removed` |
+| `v_member_approval_without_right` | 0 → 1 | an approval filed by a member whose role at the time was `viewer` |
+| `v_interchange_unreversed` | 0 → 1 | the network takes a settlement back and the interchange is left standing |
+| `v_interchange_drift` | 0 → 1 | the same reversal, asked what the interchange is now *worth* |
+| `v_interchange_rate_drift` | 0 → 77 | one backdated rate row re-prices every settlement in that category |
+
+**Where a trigger had to be disabled, the output says so, and that is evidence
+rather than an apology.** Eight of the twenty-four proofs run on the OWNER
+connection because `corgi_app` cannot disable a trigger at all — which is layer
+1 holding, not a limitation being routed around. A view whose violating state
+cannot be written through the product is a view standing *behind* a constraint
+that already refuses the bug, and the pair is worth printing:
+
+| view | triggers that had to be switched off | what that proves |
+|---|---|---|
+| `v_accrual_month_drift`, `v_accrual_ledger_drift` | `accrual_posting_lifecycle` | the lifecycle trigger derives `accrual:<schedule>:<date>` itself and refuses a posting that cites an entry it did not key |
+| `v_interest_ledger_drift` | `interest_posting_lifecycle` | same, for interest |
+| `v_interest_rate_drift`, `v_interchange_rate_drift` | the two `*_forward_only` triggers | a backdated re-rate is unwritable through the product; the view is what would see it if it ever were |
+| `v_dispute_ledger_double_count` | `dispute_event_lifecycle` | a dispute cannot re-enter a state it has already passed |
+| `v_approved_auth_for_dead_member` | `team_member_version_chain` | the *removed-member version* is the hard part: 0033's version chain refuses one appended out of band |
+| `v_member_approval_without_right` | `payment_instruction_event_maker_checker` **and** `payment_instruction_event_team` | **two** triggers, which is the finding: 0001's maker-checker and 0033's team check COMPOSE rather than overlap |
+
+`v_entry_unbalanced` is the mirror image and is printed too: its violating state
+*is* writable, because `journal_line_balanced` is `DEFERRABLE INITIALLY
+DEFERRED` and fires at COMMIT. The proof forces the check early with
+`SET CONSTRAINTS journal_line_balanced IMMEDIATE` and records the refusal beside
+the delta, so both halves are on the record — the constraint refuses the commit,
+and the view would see the state if the constraint ever failed to.
+
+**No view on this list turned out to be structurally incapable of returning a
+row.** `v_accrual_month_drift` came closest and is a different thing: its
+predicate is sound and its *population* is empty (zero complete accrual months
+on this book), which `GUARD REACH` has always printed as `EMPTY … green because
+there is nothing to be green about`. The proof builds the population before
+breaking it, which is the only way to tell the two apart.
 
 ### 5.7 The one this audit could not close
 
@@ -652,3 +790,67 @@ The cheap fix is mechanical — `/api/health` already publishes
 differ. It is not done here because `scripts/audit-claims.mjs` was outside this
 change's remit. Until it is, "the deployed endpoint is the authority" carries an
 unstated second clause: *and nothing checks that the authority is current.*
+### 5.8 `v_standing_order_double_fire` has now been watched failing
+
+0012 shipped it joining `payment_instruction` on a **UNIQUE** column and asking
+for `count(DISTINCT pi.id) > 1` — unsatisfiable, `WHERE false` with extra steps
+— and its emptiness was quoted as proof in a test, in a document and in
+`compliance.mjs`. 0023 repaired the body by pointing it at the mandate's
+*keyspace* rather than at one derived key.
+
+Between 0023 and now, **nobody had seen the repaired body return a row.** It has
+now, against this database, in a transaction that was rolled back:
+
+```
+before                                  0 rows
+INSERT a second payment_instruction on the SAME occurrence, under a
+different spelling of the derived key:
+  standing:6d27bdba-…:2026-09-11                     (the real one)
+  standing:6d27bdba-…:2026-9-11#retry-after-a-restart (the plant)
+after                                   1 row, instructions = 2
+after ROLLBACK                          0 rows
+```
+
+The row names both keys in `instruction_keys`, which is the whole point: the
+UNIQUE index on `idempotency_key` is perfectly satisfied by that pair, so the
+constraint the old body leaned on is exactly the one that cannot see this. It is
+`node scripts/dbcheck.mjs --prove` from now on, on every run.
+
+### 5.9 `v_hold_expiry_drift` — the second deliberate red
+
+A card hold's expiry is stored **twice**: `hold.expires_at`, which
+`ledger_availability()` reads, and `card_authorization.expires_at`, which
+`v_card_auth_hold` reads. `ensureAuthorization()` writes one value into both, so
+they are *meant* to be identical — but that is a convention inside one function.
+No foreign key, no CHECK, and until migration 0040 no view that would say
+anything if they diverged.
+
+**Nine holds on this database already disagree, by 135–158 milliseconds**, all
+of them fixtures that bypassed `ensureAuthorization()` and ran two separate
+`now() + interval '7 days'` statements. **Exposure today is zero cents:** all
+nine are closed, released and withholding nothing.
+
+The view is therefore **non-empty on arrival, and that is correct**.
+`WHERE external_ref NOT LIKE 'lithic:team-test-%'` would make it green and would
+still be an exclusion shaped like the failure — the sentence §5.3 already
+records about the other deliberate red. `dbcheck` now reads **36 passed, 2
+failed**, and both failures are the honest kind.
+
+It is not hypothetical. `--prove` turns the same asymmetry into money against a
+different guard: a card hold whose own clock has run out while its
+authorisation's has not is dropped by `ledger_availability()` and kept by
+`v_hold_state`, so the customer's available balance and the hold model disagree
+about the same dollars — `v_balance_definition_drift` 0 → 1.
+
+**One thing this could not close.** `v_hold_expiry_drift` runs from a second
+array in `scripts/dbcheck.mjs`, not from `INVARIANT_VIEWS`, because
+`src/lib/chaos/invariants.test.ts` asserts that list equals the chaos
+dashboard's copy in `src/lib/chaos/invariants.ts`, and `src/lib/chaos/**` was
+outside this change's write scope. Appending to the first array without the
+mirroring edit turns `pnpm test` red for someone who cannot fix it. It is
+checked, it counts towards the same tally and `--prove` proves it like every
+other view; what is missing is the chaos dashboard counting it. Four views now
+sit in that position (`v_interchange_*` and this one) and they should be moved
+into `INVARIANT_VIEWS` and mirrored in one commit by whoever owns that
+directory.
+

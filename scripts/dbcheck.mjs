@@ -316,6 +316,23 @@ const INVARIANT_VIEWS = [
   // counts an invariant is a dashboard; a gate that counts it is a test.
   ["v_approved_auth_for_dead_member", "no authorisation is approved for a member who has been removed"],
   ["v_member_approval_without_right", "no approval stands from a member who lacked the right at the time"],
+  // ---- 0031 and 0040, folded back in --------------------------------------
+  //
+  // These four lived in side arrays for one honest reason: the agents that
+  // added them could not write `src/lib/chaos/invariants.ts`, and this list is
+  // asserted equal to that one by `src/lib/chaos/invariants.test.ts`. Splitting
+  // was the right call for a worker with a write scope — it kept them checked,
+  // counted and provable rather than dropped.
+  //
+  // As a permanent arrangement it is the failure this file exists to catch. The
+  // chaos dashboard would check N while the gate checked N+4, and a screen
+  // claiming less coverage than CI has is the same bug as one claiming more:
+  // the two numbers stop being comparable, and nobody notices which is right.
+  // Both lists carry all of them now and the side arrays are gone.
+  ["v_interchange_unreversed", "no revenue stands on a settlement the network took back"],
+  ["v_interchange_drift", "every priced settlement carries the interchange it is now worth"],
+  ["v_interchange_rate_drift", "no settlement has been re-priced by a rate that came later"],
+  ["v_hold_expiry_drift", "one card hold, one expiry instant — the two readers agree"],
 ];
 
 // ---------------------------------------------------------------------
@@ -399,11 +416,6 @@ const INVARIANT_VIEWS = [
 // this database — 56 correctly repaired settlements reported as
 // unrepaired after the audit table was rebuilt. Both read journal_entry
 // and journal_line and nothing else.
-const INVARIANT_VIEWS_0031 = [
-  ["v_interchange_unreversed", "no revenue stands on a settlement the network took back"],
-  ["v_interchange_drift", "every priced settlement carries the interchange it is now worth"],
-  ["v_interchange_rate_drift", "no settlement has been re-priced by a rate that came later"],
-];
 
 // ---------------------------------------------------------------------
 // MIGRATION 0040'S ONE, AND WHY IT IS IN A THIRD ARRAY.
@@ -444,12 +456,9 @@ const INVARIANT_VIEWS_0031 = [
 // 'lithic:team-test-%'` would be safe, and would still be an exclusion
 // shaped like the failure — which is the sentence 0032 wrote about the
 // other deliberate red on this list.
-const INVARIANT_VIEWS_0040 = [
-  ["v_hold_expiry_drift", "one card hold, one expiry instant — the two readers agree"],
-];
 
 console.log("\nINVARIANT VIEWS — each MUST return zero rows\n");
-for (const [view, claim] of [...INVARIANT_VIEWS, ...INVARIANT_VIEWS_0031, ...INVARIANT_VIEWS_0040]) {
+for (const [view, claim] of INVARIANT_VIEWS) {
   try {
     const rows = await sql.unsafe(`SELECT count(*)::int AS n FROM ${view}`);
     const n = rows[0]?.n ?? 0;
@@ -1522,7 +1531,7 @@ if (process.argv.includes("--prove")) {
   // script already checks, so a view added above without a proof here is a
   // named FAILURE on the next run rather than a quiet gap. That is the same
   // mistake this whole section exists to stop being possible.
-  const ALL_VIEWS = [...INVARIANT_VIEWS, ...INVARIANT_VIEWS_0031, ...INVARIANT_VIEWS_0040];
+  const ALL_VIEWS = INVARIANT_VIEWS;
   const proven = new Set();
 
   for (const [view] of ALL_VIEWS) {
