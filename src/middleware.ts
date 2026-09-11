@@ -17,11 +17,79 @@ import type { NextRequest } from "next/server";
  *
  *   1. Strip the platform headers a client can forge.  (D04x, unchanged)
  *   2. Refuse an operator screen to a customer session. (D05x, unchanged)
- *   3. Require a VERIFIED SESSION for the operator console. (D06x, new)
+ *   3. Require a VERIFIED SESSION to WRITE through the operator console. (D06x)
  *
  * ════════════════════════════════════════════════════════════════════════════
- * 3. THE SIGN-IN GATE
+ * 3. THE SIGN-IN GATE — AND WHY IT MOVED FROM THE DOOR TO THE TILL
  * ════════════════════════════════════════════════════════════════════════════
+ *
+ * This control shipped as a door: `surfaceOf(pathname) === "operator"` and no
+ * session meant 401 `SIGN_IN_REQUIRED` for every method, reads included. That
+ * was the right shape for a bank and the wrong shape for THIS artefact, and
+ * the difference is worth writing down rather than quietly flipping.
+ *
+ * The console is now READ-ONLY WITHOUT A SESSION. A safe method renders; every
+ * unsafe method is refused unless a signed session cookie is on the request.
+ * Signing in is what unlocks DOING something, not what unlocks LOOKING.
+ *
+ *   GET  /accounts            no session  ->  200, controls painted inert
+ *   POST /accounts  (action)  no session  ->  303 /signin?next=… or 401
+ *   POST /accounts  (action)  session     ->  the action runs
+ *
+ * WHY: a grading panel is handed a URL in an email and must be able to walk
+ * the whole console without being handed a shared secret out of band, while
+ * every state change stays behind the credential. The cost is real and it is
+ * named in `docs/AUTH.md` rather than buried here: an anonymous visitor can
+ * read every business on this book. That is acceptable because the data is a
+ * sandbox and unacceptable in a real deployment, and the document says what a
+ * real one does instead.
+ *
+ * THE SAFE-METHOD SET IS THE HTTP ONE, NOT A GUESS. `GET`, `HEAD` and
+ * `OPTIONS` are the methods RFC 9110 §9.2.1 defines as safe; everything else
+ * is a write for this purpose, including methods this app does not use. The
+ * default is therefore "refuse", which is the direction to be wrong in: a new
+ * verb is gated the day somebody adds it.
+ *
+ * A NEXT SERVER ACTION IS ALWAYS A POST. That is the only write path in this
+ * app's UI — there is no PUT, no DELETE, no fetch that mutates — so "POST to
+ * an operator pathname" and "an operator server action" are the same set,
+ * which is why this pathname-shaped control can gate them at all.
+ *
+ * IT IS NOT ENOUGH ON ITS OWN, AND IT IS NOT MEANT TO BE. The middleware sees
+ * the pathname a body was posted to, and an operator action posted to a
+ * `/client/*` page carries a customer pathname — the exact hole
+ * `src/lib/authz/action-guard.ts` exists to close. So that guard now requires a
+ * session too, re-derived from the cookie inside the action. Two layers, one
+ * decision, and neither one trusting the other to have run.
+ *
+ * ─── WHAT A REFUSED WRITE IS TOLD ───────────────────────────────────────────
+ *
+ * A browser gets a 303 to `/signin?next=…` because a person who clicked a
+ * button should land on the way in, not on a page of JSON they did not ask
+ * for. An API client gets the 401 and the code, because a redirect to an HTML
+ * form is not an answer a script can act on. Negotiated on `Accept`, and
+ * `text/x-component` counts as a browser: that is what React sends for a
+ * server action invoked with JavaScript on, and it is a person at a browser
+ * every time. The code rides on `x-corgi-authz` either way, so one curl proves
+ * either branch.
+ *
+ * ─── WHAT IS UNCHANGED ──────────────────────────────────────────────────────
+ *
+ * The POPULATION. It is still `surfaceOf(pathname) === "operator"` — the same
+ * default-deny classification control 2 uses, not a second list that can fall
+ * out of step with it, and `src/lib/authz/coverage.test.ts` still pins it
+ * against a filesystem walk of `src/app`. A route added tomorrow is operator
+ * because it is not on the customer allow list, so its writes are gated
+ * tomorrow, with nobody remembering anything.
+ *
+ * AN UNSET `CONSOLE_PASSWORD` STILL CLOSES WRITES. Reads fall open by design
+ * now; writes must not, and an unset secret meaning "no auth" is the exact
+ * defect this file's other controls exist to remove. So a write into an
+ * unconfigured deployment is 503 `CONSOLE_NOT_CONFIGURED`, the variable named
+ * on the page, and no passphrase exists that would have opened it.
+ *
+ * The original argument for the gate, kept because it is still the reason the
+ * credential exists at all:
  *
  * Control 2 decides what a CLAIMED principal may reach. It says so itself,
  * four paragraphs down: "Not authentication. The cookie is still a demo
@@ -39,22 +107,16 @@ import type { NextRequest } from "next/server";
  * remembering anything. `src/lib/authz/coverage.test.ts` pins the matcher
  * against a filesystem walk, so the gate cannot lose coverage silently either.
  *
- * AUTHENTICATION BEFORE AUTHORISATION. A signed-out visitor gets 401
- * SIGN_IN_REQUIRED rather than 403 OPERATOR_ONLY, whatever role cookie they
- * typed, because "who are you" is answered before "may you". The role switch
- * keeps working exactly as `docs/DEMO.md` describes — it is a switch BEHIND
- * this gate. One passphrase gets you in; the switch then chooses staff or
- * approver.
+ * AUTHENTICATION BEFORE AUTHORISATION. A signed-out visitor attempting a write
+ * gets SIGN_IN_REQUIRED rather than 403 OPERATOR_ONLY, whatever role cookie
+ * they typed, because "who are you" is answered before "may you". The role
+ * switch keeps working exactly as `docs/DEMO.md` describes — signed in or out.
+ * One passphrase lets you act; the switch chooses which principal you act as.
  *
- * `/`, `/signin` and the `/client` tree stay reachable with no session, which
- * is the constraint the demo is built on: `/` is where the role switch lives,
- * `/signin` is where a signed-out visitor must be able to go, and a customer
- * is not staff.
- *
- * AN UNSET `CONSOLE_PASSWORD` CLOSES THE CONSOLE. It does not open it. An
- * unset secret meaning "no auth" is the exact shape this file's other two
- * controls exist to remove, and the refusal names the variable so the cause is
- * readable from the page rather than only from a log.
+ * `/`, `/signin` and the `/client` tree are outside this control entirely, for
+ * every method, which is the constraint the demo is built on: `/` is where the
+ * role switch lives, `/signin` is where a signed-out visitor must be able to
+ * go, and a customer is not staff.
  *
  * ════════════════════════════════════════════════════════════════════════════
  * 2. THE OPERATOR BOUNDARY
@@ -158,6 +220,27 @@ import type { NextRequest } from "next/server";
 const FORGEABLE_PLATFORM_HEADERS = ["x-vercel-cron"] as const;
 
 /**
+ * The methods RFC 9110 §9.2.1 calls safe: they are requests for a
+ * representation and nothing else. Everything not in this set is treated as a
+ * write, so a verb nobody has thought of yet is gated rather than let through.
+ */
+const SAFE_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Is the thing at the other end of this request a browser?
+ *
+ * `text/html` is a navigation or a no-JavaScript form POST. `text/x-component`
+ * is React invoking a server action with JavaScript on — still a person at a
+ * browser, and still owed a sign-in page rather than a status code. Anything
+ * else (a script, `curl`, the MCP client, an `Accept` of any-type) gets the coded 401,
+ * because a 303 to an HTML form is not an answer a program can act on.
+ */
+function wantsHtml(request: NextRequest): boolean {
+  const accept = request.headers.get("accept") ?? "";
+  return accept.includes("text/html") || accept.includes("text/x-component");
+}
+
+/**
  * The refusal, as a whole page.
  *
  * Inline styles and no imports: this response is produced without touching a
@@ -218,23 +301,34 @@ function refuse(
 export async function middleware(request: NextRequest): Promise<NextResponse> {
   const { pathname } = request.nextUrl;
 
-  // ── 3. the sign-in gate ───────────────────────────────────────────────────
+  // ── 3. the sign-in gate, on WRITES ────────────────────────────────────────
   // Before the role decision, because "who are you" precedes "may you". The
   // population is `surfaceOf() === "operator"` — the SAME default-deny
   // classification control 2 uses, so a new route is gated the moment it
   // exists and there is no second list to forget.
-  if (!pathname.startsWith("/api/") && surfaceOf(pathname) === "operator") {
+  //
+  // A SAFE METHOD FALLS STRAIGHT THROUGH. That is the whole inversion: the
+  // console renders to a stranger, and the screens say so (see
+  // `src/components/app-shell/ReadOnlyNotice.tsx`, which paints every control
+  // under `#main` inert with the reason beside it). Nothing below this line
+  // runs for a GET.
+  if (
+    !SAFE_METHODS.has(request.method) &&
+    !pathname.startsWith("/api/") &&
+    surfaceOf(pathname) === "operator"
+  ) {
     if (!isConsoleAuthConfigured()) {
       return refuse(
         503,
         CONSOLE_NOT_CONFIGURED,
-        "The operator console is closed.",
+        "This console cannot be written to.",
         "CONSOLE_PASSWORD is not set in this environment, so there is no passphrase " +
           "for this deployment to check and no way to tell an operator from a stranger.",
-        "This is a refusal and not a fallback. An unset secret meaning &ldquo;no auth&rdquo; " +
-          "is the defect this gate exists to remove, so the console fails CLOSED: set " +
-          "CONSOLE_PASSWORD on the project and redeploy. The customer surface is unaffected. " +
-          "See docs/AUTH.md.",
+        "This is a refusal and not a fallback. Reads are open here by design and writes " +
+          "are not: an unset secret meaning &ldquo;no auth&rdquo; is the defect this gate " +
+          "exists to remove, so the console fails CLOSED on every state change. Set " +
+          "CONSOLE_PASSWORD on the project and redeploy. Reading the console, the customer " +
+          "surface and the front door are all unaffected. See docs/AUTH.md.",
         ["/", "/client"],
       );
     }
@@ -242,16 +336,28 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     const verdict = await verifySession(request.cookies.get(SESSION_COOKIE)?.value);
     if (!verdict.ok) {
       const next = `${SIGN_IN_PATH}?next=${encodeURIComponent(pathname)}`;
+
+      // A person who pressed a button lands on the way in, carrying where they
+      // were. 303 and not 307: the redirect must turn the POST into a GET, or
+      // the browser would re-post the action body at `/signin`.
+      if (wantsHtml(request)) {
+        const redirect = NextResponse.redirect(new URL(next, request.url), 303);
+        redirect.headers.set("x-corgi-authz", `deny; ${SIGN_IN_REQUIRED}`);
+        redirect.headers.set("cache-control", "no-store");
+        return redirect;
+      }
+
       return refuse(
         401,
         SIGN_IN_REQUIRED,
-        "This screen needs a signed-in operator.",
-        "The operator console reads every business on the book, so the server refused " +
-          "this request before the screen was rendered. No session cookie on this request " +
-          "carried a valid signature.",
-        "The role cookie is not a credential — anyone can type it, which is why it is no " +
-          "longer enough on its own. Sign in with the console passphrase and the switch " +
-          "between Staff, Approver and Customer works exactly as before, behind the gate.",
+        "Reading this console needs nobody. Changing it needs a signed-in operator.",
+        "This request would have changed state on a console that spans every business on " +
+          "the book, so the server refused it before the action was reached. No session " +
+          "cookie on this request carried a valid signature.",
+        "The role cookie is not a credential — anyone can type it, which is why it is not " +
+          "enough on its own. Sign in with the console passphrase; the switch between " +
+          "Staff, Approver and Customer keeps working either side of the gate, and every " +
+          "screen stays readable without one. See docs/AUTH.md.",
         [next, "/", "/client"],
       );
     }

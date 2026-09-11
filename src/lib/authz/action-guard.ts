@@ -60,6 +60,13 @@
 
 import { cookies } from "next/headers";
 
+import {
+  SESSION_COOKIE,
+  SIGN_IN_REQUIRED,
+  type ConsoleAuthRefusal,
+  verifySession,
+} from "@/lib/auth/session";
+
 import { OPERATOR_ONLY, authorize } from "./policy";
 import { ROLE_COOKIE, roleFromCookieValue, type Role } from "./roles";
 
@@ -70,6 +77,51 @@ import { ROLE_COOKIE, roleFromCookieValue, type Role } from "./roles";
  * branch, rather than by a hand-rolled second opinion.
  */
 export const SERVER_ACTION_SENTINEL_PATH = "/__server-action__" as const;
+
+/**
+ * The AUTHENTICATION refusal, as an exception.
+ *
+ * ============================================================================
+ * WHY AN ACTION CHECKS THE SESSION AND NOT ONLY THE ROLE
+ * ============================================================================
+ *
+ * The console is readable with no session and writable only with one. The
+ * middleware enforces that on `POST` to an operator pathname — and a server
+ * action does not have to be posted to an operator pathname. It is posted to
+ * WHATEVER PAGE THE BROWSER IS ON, which is the same hole, in the same file,
+ * that `OperatorOnlyActionError` below exists to close: an operator action
+ * invoked from `/client/pay` arrives with a customer pathname, `surfaceOf()`
+ * says "customer surface", and control 3 never runs.
+ *
+ * Before this check, that was a way to write to the console with no
+ * credential at all. So the action asks the question itself, from the cookie,
+ * with no trust in the matcher having fired — the same defence-in-depth
+ * argument the role check is written under, applied one layer up to the
+ * question that now precedes it.
+ *
+ * `code` is the same string the middleware puts on `x-corgi-authz`, so a log
+ * line, a grader and a test all say the same word about what happened.
+ */
+export class SignInRequiredActionError extends Error {
+  readonly code = SIGN_IN_REQUIRED;
+  readonly reason: ConsoleAuthRefusal;
+  readonly actionName: string;
+
+  constructor(actionName: string, reason: ConsoleAuthRefusal) {
+    super(
+      `deny; ${SIGN_IN_REQUIRED}: ${actionName} refused — ${reason}. ` +
+        "This console is readable without a session and writable only with one. This is a " +
+        "write, and no session cookie on this request carried a valid signature, so nothing " +
+        "in the action's body ran. The refusal is not about where it was posted: a server " +
+        "action carries the pathname of the page the browser is on, so the action re-derives " +
+        "the decision from the cookie rather than trusting the middleware to have seen it. " +
+        "Sign in at /signin with the console passphrase. See docs/AUTH.md.",
+    );
+    this.name = "SignInRequiredActionError";
+    this.actionName = actionName;
+    this.reason = reason;
+  }
+}
 
 /** The refusal, as an exception. `code` is the same string the middleware sends. */
 export class OperatorOnlyActionError extends Error {
@@ -151,6 +203,25 @@ export async function assertOperatorAction(actionName: string): Promise<void> {
   // but fails for any other reason rethrows, and the action dies rather than
   // running unauthorised.
   if (role === null) return;
+
+  // ── AUTHENTICATION, THEN AUTHORISATION ────────────────────────────────────
+  //
+  // In that order, and the order is the point: "who are you" is answered before
+  // "may you", here exactly as in `src/middleware.ts`. Reaching this line at
+  // all means a request is executing an OPERATOR CAPABILITY — every caller of
+  // this function is a write — and a write needs a session whatever role the
+  // cookie claims. `verifySession` fails closed on an unset CONSOLE_PASSWORD
+  // (`NOT_CONFIGURED`), so an unconfigured deployment refuses here too rather
+  // than falling open, which is the inversion this whole build removed.
+  //
+  // The cookie store is read a second time rather than threaded through
+  // `roleFromRequestCookie`, whose signature other callers depend on. The
+  // first read already proved a request scope exists, so this one cannot be
+  // the "outside a request" case and any throw from it is a real failure to
+  // establish the principal — which must not proceed.
+  const store = await cookies();
+  const verdict = await verifySession(store.get(SESSION_COOKIE)?.value);
+  if (!verdict.ok) throw new SignInRequiredActionError(actionName, verdict.reason);
 
   const decision = authorize(role, SERVER_ACTION_SENTINEL_PATH);
   if (decision.allowed) return;

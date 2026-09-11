@@ -3,6 +3,11 @@ import { headers } from "next/headers";
 import type { ReactNode } from "react";
 
 import { AppHeader } from "@/components/app-shell/AppHeader";
+import {
+  READ_ONLY_ATTRIBUTE,
+  ReadOnlyNotice,
+  consoleIsReadOnly,
+} from "@/components/app-shell/ReadOnlyNotice";
 import { RefusalScreen } from "@/components/app-shell/RefusalScreen";
 import { readRole } from "@/components/app-shell/role";
 import { authorize, isOperator, OPERATOR_ONLY } from "@/lib/authz";
@@ -55,6 +60,18 @@ export default async function AppLayout({
 }) {
   const role = await readRole();
 
+  /**
+   * READ-ONLY WITHOUT A SESSION. The console renders to anybody; only writes
+   * need the credential (`src/middleware.ts` control 3, and again inside every
+   * operator action). This attribute is what tells the screen to SAY so: it
+   * scopes the rules in `ReadOnlyNotice` that paint every form under `#main`
+   * inert, with the reason beside it, rather than letting a visitor find out by
+   * pressing a button. It grants nothing and refuses nothing — the refusals are
+   * two layers below it — and a forged one can only make the page look MORE
+   * restricted than it is.
+   */
+  const readOnly = await consoleIsReadOnly();
+
   const pathname = (await headers()).get("x-corgi-pathname");
   const decision = isOperator(role)
     ? { allowed: true as const }
@@ -69,7 +86,7 @@ export default async function AppLayout({
 
   if (!decision.allowed) {
     return (
-      <div className="min-h-dvh bg-background">
+      <div className="min-h-dvh bg-background" {...{ [READ_ONLY_ATTRIBUTE]: String(readOnly) }}>
         <AppHeader role={role} />
         <main id="main" className="mx-auto max-w-6xl px-6 py-8">
           <RefusalScreen code={decision.code} reason={decision.reason} />
@@ -79,7 +96,7 @@ export default async function AppLayout({
   }
 
   return (
-    <div className="min-h-dvh bg-background">
+    <div className="min-h-dvh bg-background" {...{ [READ_ONLY_ATTRIBUTE]: String(readOnly) }}>
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-10 focus:rounded focus:border focus:border-border-strong focus:bg-surface focus:px-3 focus:py-2 focus:text-sm"
@@ -94,6 +111,7 @@ export default async function AppLayout({
             outage is a property of the system, and a banner that only appears
             on the page you happen to be looking at is a banner you will miss. */}
         <ProviderHealthBanner />
+        {readOnly ? <ReadOnlyNotice /> : null}
         {children}
       </main>
     </div>

@@ -31,20 +31,21 @@ const ORIGIN = "https://corgi-trial-psi.vercel.app";
 
 /**
  * ============================================================================
- * WHY THIS FILE NOW SIGNS IN FIRST
+ * WHY THIS FILE SIGNS IN FIRST
  * ============================================================================
  *
  * Every check below used to run with no session, because there was nothing to
- * sign into. `src/middleware.ts` control 3 now requires a verified session on
- * every operator route, so an unauthenticated request to `/accounts` is
- * refused BEFORE the role is read — which is the correct order and which made
- * six assertions in this file fail for the right reason.
+ * sign into. `src/middleware.ts` control 3 requires a verified session, so the
+ * requests carry one and each assertion stays a claim about AUTHORISATION —
+ * which is what happens after you are through the door. The gate itself is
+ * asserted separately in its own block at the bottom.
  *
- * The fix is not to weaken them. Each one is a claim about AUTHORISATION, and
- * authorisation is what happens after you are through the door: so the
- * requests carry a valid session cookie, and the gate itself is asserted
- * separately in its own block at the bottom, including the two states that
- * matter most — no session, and a forged one.
+ * THE GATE IS NOW A TILL AND NOT A DOOR, and the block at the bottom is where
+ * that is pinned. A safe method on an operator route renders with no session;
+ * an unsafe one is refused. Reads open, writes closed. The assertions that
+ * used to read "anonymous GET /accounts -> 401" now read "-> 200", and every
+ * one of them has a POST beside it that is still refused, so the inversion
+ * cannot be mistaken for the gate having been switched off.
  *
  * The passphrase is generated per run. There is no credential literal in this
  * repository and there must not be one.
@@ -69,9 +70,16 @@ function request(
   path: string,
   role?: string,
   method = "GET",
-  options: { readonly signedIn?: boolean; readonly sessionValue?: string } = {},
+  options: {
+    readonly signedIn?: boolean;
+    readonly sessionValue?: string;
+    readonly accept?: string;
+  } = {},
 ): NextRequest {
   const headers = new Headers();
+  // No `Accept` at all is the API-client case — `curl` sends `*/*` and a
+  // `fetch` with no headers sends nothing. Both must get the code, not a page.
+  if (options.accept !== undefined) headers.set("accept", options.accept);
   const jar: string[] = [];
   if (role !== undefined) jar.push(`corgi_demo_role=${role}`);
   const token = options.sessionValue ?? (options.signedIn === false ? undefined : session);
@@ -85,12 +93,17 @@ async function run(
   path: string,
   role?: string,
   method = "GET",
-  options: { readonly signedIn?: boolean; readonly sessionValue?: string } = {},
+  options: {
+    readonly signedIn?: boolean;
+    readonly sessionValue?: string;
+    readonly accept?: string;
+  } = {},
 ) {
   const res = await middleware(request(path, role, method, options));
   return {
     status: res.status,
     authz: res.headers.get("x-corgi-authz"),
+    location: res.headers.get("location"),
     body: await res.clone().text(),
   };
 }
@@ -203,63 +216,130 @@ describe("the platform-header strip", () => {
   });
 });
 
-describe("the sign-in gate", () => {
+describe("the sign-in gate — reads open, writes closed", () => {
   /**
-   * THE HOLE THIS CLOSES. Until control 3 shipped, every assertion above rested
-   * on a claim nobody verified: `corgi_demo_role` is a cookie a visitor sets on
-   * themselves, so anyone who knew its name was staff. These checks are the
-   * other half — that the claim is now only ever read from a request that
-   * proved it holds a credential.
+   * THE INVERSION, AND WHY IT IS NOT THE GATE BEING SWITCHED OFF.
+   *
+   * The gate shipped as a door: no session meant 401 on every method, reads
+   * included. It is now a till. A grading panel can walk the whole console
+   * from a URL in an email with no shared secret, and every state change stays
+   * behind the credential.
+   *
+   * That trade has a cost — an anonymous visitor reads every business on this
+   * book — and it is named in `docs/AUTH.md` rather than only here. What these
+   * checks pin is that the OTHER half did not go with it: each read that now
+   * answers 200 has a write beside it that does not.
    */
-  it("REFUSES an operator route with no session at all, before the role is read", async () => {
+  it("SERVES an operator route to a request with no session at all", async () => {
     const res = await run("/accounts", undefined, "GET", { signedIn: false });
-    expect(res.status, "/accounts answered an unauthenticated request").toBe(401);
+    expect(res.status, "/accounts refused an anonymous read").toBe(200);
+    expect(res.authz, "a served read carried a refusal header").toBe(null);
+  });
+
+  it("SERVES it however the role cookie is set, and to HEAD as well", async () => {
+    for (const role of ["staff", "approver", "not-a-role", undefined]) {
+      for (const method of ["GET", "HEAD"]) {
+        const res = await run("/accounts", role, method, { signedIn: false });
+        expect(res.status, `corgi_demo_role=${role} ${method}`).toBe(200);
+      }
+    }
+  });
+
+  it("REFUSES an anonymous POST — which is every server action in this app", async () => {
+    const res = await run("/payments", "staff", "POST", { signedIn: false });
+    expect(res.status, "an anonymous write reached the route").toBe(401);
     expect(res.authz).toBe(`deny; ${SIGN_IN_REQUIRED}`);
     expect(res.body).toContain("/signin");
   });
 
-  it("REFUSES it however the role cookie is set — a claim is not a credential", async () => {
-    // The whole point: typing `corgi_demo_role=staff` used to BE the grant.
+  it("REFUSES an anonymous write whatever role cookie is typed", async () => {
+    // The whole point: typing `corgi_demo_role=staff` was never a credential.
     for (const role of ["staff", "approver", "customer", "not-a-role"]) {
-      const res = await run("/accounts", role, "GET", { signedIn: false });
-      expect(res.status, `corgi_demo_role=${role} got in without signing in`).toBe(401);
+      const res = await run("/accounts", role, "POST", { signedIn: false });
+      expect(res.status, `corgi_demo_role=${role} wrote without signing in`).toBe(401);
       expect(res.authz, role).toBe(`deny; ${SIGN_IN_REQUIRED}`);
     }
   });
 
-  it("REFUSES a POST, so a server action cannot run unauthenticated either", async () => {
-    const res = await run("/payments", "staff", "POST", { signedIn: false });
-    expect(res.status).toBe(401);
+  /**
+   * A verb nobody has used yet. The safe set is the RFC's three and everything
+   * else is a write, so the failure mode is "refused something that was
+   * harmless", never "let through something that was not".
+   */
+  it("REFUSES a method this app does not even use, because safe is the closed list", async () => {
+    for (const method of ["PUT", "PATCH", "DELETE"]) {
+      const res = await run("/accounts", "staff", method, { signedIn: false });
+      expect(res.status, method).toBe(401);
+    }
   });
 
-  it("REFUSES a FORGED session cookie", async () => {
+  it("REDIRECTS a BROWSER write to /signin?next=…, and 303 so the POST becomes a GET", async () => {
+    const res = await run("/payments", "staff", "POST", {
+      signedIn: false,
+      accept: "text/html,application/xhtml+xml",
+    });
+    expect(res.status, "a browser write did not get a redirect").toBe(303);
+    expect(res.location).toBe(`${ORIGIN}/signin?next=%2Fpayments`);
+    // The code is on the header either way, so one curl proves either branch.
+    expect(res.authz).toBe(`deny; ${SIGN_IN_REQUIRED}`);
+  });
+
+  it("REDIRECTS a JavaScript server action too — text/x-component is a browser", async () => {
+    const res = await run("/payments", "staff", "POST", {
+      signedIn: false,
+      accept: "text/x-component",
+    });
+    expect(res.status).toBe(303);
+    expect(res.location).toBe(`${ORIGIN}/signin?next=%2Fpayments`);
+  });
+
+  it("gives an API CLIENT the code and not the redirect", async () => {
+    for (const accept of ["*/*", "application/json"]) {
+      const res = await run("/accounts", "staff", "POST", { signedIn: false, accept });
+      expect(res.status, accept).toBe(401);
+      expect(res.authz, accept).toBe(`deny; ${SIGN_IN_REQUIRED}`);
+    }
+  });
+
+  it("REFUSES a write with a FORGED session cookie", async () => {
     const forged = `v1.${Date.now() + 3_600_000}.${randomUUID()}.${Buffer.from(
       randomUUID(),
     ).toString("base64url")}`;
-    const res = await run("/accounts", "staff", "GET", { sessionValue: forged });
+    const res = await run("/accounts", "staff", "POST", { sessionValue: forged });
     expect(res.status, "a forged session was accepted").toBe(401);
     expect(res.authz).toBe(`deny; ${SIGN_IN_REQUIRED}`);
   });
 
-  it("REFUSES an EDITED session cookie — expiry moved, signature kept", async () => {
+  it("REFUSES a write with an EDITED session — expiry moved, signature kept", async () => {
     const [, , nonce, signature] = session.split(".");
     const edited = `v1.${Date.now() + 999_999_999}.${nonce}.${signature}`;
-    const res = await run("/accounts", "staff", "GET", { sessionValue: edited });
+    const res = await run("/accounts", "staff", "POST", { sessionValue: edited });
     expect(res.status).toBe(401);
   });
 
-  it("gates an operator route that does not exist yet — default deny, unchanged", async () => {
-    const res = await run("/ledger-exports", "staff", "GET", { signedIn: false });
-    expect(res.status).toBe(401);
+  it("ALLOWS the write once the session is real — the credential is what unlocks it", async () => {
+    const res = await run("/accounts", "staff", "POST");
+    expect(res.status, "a signed-in write was refused").toBe(200);
   });
 
-  it("does NOT gate /, /signin or the customer surface", async () => {
+  it("gates a write to an operator route that does not exist yet — default deny", async () => {
+    const res = await run("/ledger-exports", "staff", "POST", { signedIn: false });
+    expect(res.status).toBe(401);
+    // …and reads it, because the population is the same classification either way.
+    expect((await run("/ledger-exports", "staff", "GET", { signedIn: false })).status).toBe(200);
+  });
+
+  it("does NOT gate /, /signin or the customer surface — for ANY method", async () => {
     // The hard constraint from docs/DEMO.md: `/` is where the role switch
     // lives, `/signin` is where a signed-out visitor must be able to go, and a
-    // customer is not staff. All three answer with no session.
+    // customer is not staff. The POSTs matter as much as the GETs here: the
+    // role switch is a POST to `/`, and sign-in is a POST to `/signin`. Both
+    // must work with no session, or the way IN is behind the gate.
     for (const path of ["/", "/signin", "/client", "/client/activity", "/client/open"]) {
-      const res = await run(path, "customer", "GET", { signedIn: false });
-      expect(res.status, `${path} was gated and must not be`).toBe(200);
+      for (const method of ["GET", "POST"]) {
+        const res = await run(path, "customer", method, { signedIn: false });
+        expect(res.status, `${method} ${path} was gated and must not be`).toBe(200);
+      }
     }
   });
 
@@ -271,17 +351,22 @@ describe("the sign-in gate", () => {
     expect(res.authz).toBe(`deny; ${OPERATOR_ONLY}`);
   });
 
-  it("FAILS CLOSED when CONSOLE_PASSWORD is unset — 503, named, never open", async () => {
+  it("FAILS CLOSED on WRITES when CONSOLE_PASSWORD is unset — 503, named, never open", async () => {
     const saved = process.env["CONSOLE_PASSWORD"];
     delete process.env["CONSOLE_PASSWORD"];
     try {
-      const res = await run("/accounts", "staff");
-      expect(res.status, "an unconfigured deployment served the console").toBe(503);
+      const res = await run("/accounts", "staff", "POST");
+      expect(res.status, "an unconfigured deployment accepted a write").toBe(503);
       expect(res.authz).toBe(`deny; ${CONSOLE_NOT_CONFIGURED}`);
       expect(res.body).toContain("CONSOLE_PASSWORD");
 
+      // Reads stay open — that is the inversion, and it is deliberate. What
+      // must NOT happen is the write falling open with the secret unset, which
+      // is the defect this build spent two days removing.
+      expect((await run("/accounts", "staff", "GET")).status).toBe(200);
+
       // …and the customer surface is unaffected, which is the other half of
-      // "fail closed": closing the console must not take the product down.
+      // "fail closed": closing the till must not take the product down.
       const client = await run("/client", "customer");
       expect(client.status, "an unconfigured deployment also closed /client").toBe(200);
       expect((await run("/", "customer")).status).toBe(200);

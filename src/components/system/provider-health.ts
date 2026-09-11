@@ -25,6 +25,8 @@ interface ProviderFreshness {
   readonly deliveryLag?: number | null;
   readonly feedStale?: boolean;
   readonly verdict?: string;
+  /** The endpoint's OWN answer to "does this feed matter". Absent means unsaid. */
+  readonly gatesDeploymentStatus?: boolean;
   readonly status?: string;
 }
 
@@ -133,9 +135,29 @@ export async function readProviderHealth(baseUrl: string): Promise<BannerState> 
     };
   }
 
-  const stale = freshness.filter(isStale).map((p) => ({
-    provider: p.provider,
-    detail: describe(p),
-  }));
+  // STALE IS NOT THE SAME QUESTION AS MATTERS.
+  //
+  // This filter was `isStale` alone, so every quiet feed reached the customer's
+  // page. Measured on production: `/client` carried a red bar reading "Issuing
+  // provider feed is quiet — increase, no delivery for 430 minutes" in ordinary
+  // operation, because Increase is a batch ACH rail that is quiet for hours by
+  // design. Two things were wrong with that at once — Increase is not an
+  // issuing provider, so the headline was false; and the endpoint had ALREADY
+  // decided the feed does not matter, publishing `gatesDeploymentStatus: false`
+  // and keeping `status: "ok"`, which the banner then contradicted on the one
+  // surface a customer looks at.
+  //
+  // The endpoint owns the verdict and this component renders it — that is this
+  // file's stated contract and it was not being honoured. So the population is
+  // now the feeds whose silence the endpoint itself treats as an outage.
+  //
+  // ABSENT MEANS SHOW. A feed that does not publish the field has not said it
+  // is unimportant, and inventing "unimportant" from an absence is the mistake
+  // catalogued at DECISIONS 011 — marking a slot live because a key exists.
+  const gates = (p: ProviderFreshness): boolean => p.gatesDeploymentStatus !== false;
+
+  const stale = freshness
+    .filter((p) => isStale(p) && gates(p))
+    .map((p) => ({ provider: p.provider, detail: describe(p) }));
   return stale.length > 0 ? { kind: "degraded", providers: stale } : { kind: "healthy" };
 }

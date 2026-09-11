@@ -14,6 +14,7 @@ import { ScreenLinks } from "@/components/home/ScreenLinks";
 import { WhatToLookAt } from "@/components/home/WhatToLookAt";
 import { parseConsoleState, type ConsoleState } from "@/components/home/console-state";
 import { RoleSwitcher } from "@/components/app-shell/RoleSwitcher";
+import { SessionBadge } from "@/components/app-shell/SessionBadge";
 import { readRole, type Role } from "@/components/app-shell/role";
 import { rootLogger } from "@/lib/log";
 import { isOperator } from "@/lib/authz/roles";
@@ -114,6 +115,25 @@ export default async function HomePage({
                 switchable without leaving it. A plain form and a server
                 action: no client JavaScript, and it survives a reload. */}
             <RoleSwitcher role={role} />
+            {/*
+              THE WAY IN, ON THE PAGE THE SUBMISSION EMAIL HANDS A STRANGER.
+
+              `/` is the front door and the console is now READ-ONLY without a
+              session: anyone may read every screen, and signing in is what
+              unlocks doing anything. A visitor who can read the whole console
+              and cannot find the sign-in is a visitor who will conclude the
+              writes are broken, so the same badge the console header carries is
+              carried here — "Signed out · Sign in", or the operator's name and
+              a way out once they are in.
+
+              IT IS RENDERED AFTER `RoleSwitcher` AND THAT IS LOAD-BEARING, for
+              the reason written out in `AppHeader.tsx`: `verify-demo.mjs`
+              step 8 performs the no-JavaScript role switch from THIS page by
+              scraping the FIRST `$ACTION_ID_…` out of the markup, and the
+              signed-in branch of this badge is a second <form> (`signOutAction`).
+              Rendered earlier it would silently steal the post.
+            */}
+            <SessionBadge />
             <span className="rounded border border-border-strong px-1.5 py-0.5 text-[11px] text-muted">
               Sandbox
             </span>

@@ -1582,7 +1582,18 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       return;
     }
 
-    const response = await fetch(`${BASE_URL}/accounts`, { cache: "no-store" });
+    // THE CUSTOMER'S PAGE, NOT THE CONSOLE — and that is the brief's own
+    // wording: "turn off your issuing provider's webhooks for five minutes
+    // mid-demo and ASK WHAT THE CUSTOMER SEES." This read `/accounts` until
+    // the operator console went behind a passphrase, at which point it fetched
+    // anonymously and got 401 — the attack failing not because the banner was
+    // missing but because the reader was no longer allowed in.
+    //
+    // `/client` is the better subject anyway. `ProviderHealthBanner` is mounted
+    // in the `(app)` layout, so it renders on both surfaces; asserting it here
+    // proves the thing the brief actually asks about, and needs no credential,
+    // which keeps this attack drivable by anyone holding the URL.
+    const response = await fetch(`${BASE_URL}/client`, { cache: "no-store" });
     expect(response.status).toBe(200);
     const html = await response.text();
 
@@ -1595,9 +1606,25 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     expect(html).not.toMatch(/Provider delivery freshness is not reported yet/);
     expect(html).toMatch(/lithic/);
 
+    // And the banner's own title names lithic, rather than `lithic` merely
+    // occurring somewhere in 470KB of page. The title lists exactly the
+    // providers the endpoint called stale, so this is the banner agreeing that
+    // the induced outage is the thing it is reporting.
+    const bannerTitle = /Issuing provider feed is quiet — ([^<]*)</.exec(html);
+    expect(bannerTitle).not.toBeNull();
+    expect((bannerTitle as RegExpExecArray)[1]).toContain("lithic");
+
     // It RENDERS the endpoint's number rather than computing a second opinion.
-    const minutes = /no delivery for (\d+) minutes?/.exec(html);
-    const seconds = /no delivery for (\d+)s/.exec(html);
+    //
+    // Scoped to `lithic:` rather than taken from the first "no delivery for"
+    // on the page. The banner lists EVERY stale provider, and this deployment
+    // carries a second one: `increase` has a 6h threshold and sits stale at
+    // ~7 hours for ordinary batch reasons. An unscoped match reads whichever
+    // provider the health document happens to order first, and if that is ever
+    // `increase` this assertion compares 25,000s against lithic's 200s and
+    // fails an outage that was reported perfectly correctly.
+    const minutes = /lithic: no delivery for (\d+) minutes?/.exec(html);
+    const seconds = /lithic: no delivery for (\d+)s/.exec(html);
     expect(minutes ?? seconds).not.toBeNull();
     const renderedSeconds =
       minutes !== null ? Number(minutes[1]) * 60 : Number((seconds as RegExpExecArray)[1]);
@@ -1605,9 +1632,9 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // Same source, read a moment apart: allow one minute of drift and no more.
     expect(Math.abs(renderedSeconds - publishedSeconds)).toBeLessThanOrEqual(120);
 
-    // And it does NOT blank the console. Every figure below the banner is a
-    // fold over rows that are already durable, and they stay true while a feed
-    // is silent; hiding them would be the stronger, false claim.
+    // And it does NOT blank the customer's page. Every figure below the banner
+    // is a fold over rows that are already durable, and they stay true while a
+    // feed is silent; hiding them would be the stronger, false claim.
     //
     // Asserted on STRUCTURE, not on copy. This line read
     // `toContain("Deposit accounts")` and failed the whole attack the moment
@@ -1615,14 +1642,40 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // it exists to prove was still perfectly true. A live-fire assertion
     // pinned to a sentence tests the sentence.
     //
-    // `id="balances"` is the panel that renders ledger, holds and available;
-    // the money figures are the point, so the currency marker is checked too.
-    expect(html).toContain('id="balances"');
-    expect(html).toMatch(/\$[0-9][0-9,]*\.[0-9]{2}/);
+    // It then read `id="balances"`, and THAT was wrong here for a different
+    // reason, one worth writing down because it is the reason this attack was
+    // failing: `id="balances"` is the OPERATOR panel, rendered only by
+    // `src/components/accounts/ConsoleView.tsx` on `/accounts`. It has never
+    // existed on `/client`. Moving the fetch to the customer surface — the
+    // right move, the brief asks what the CUSTOMER sees — without moving this
+    // line left the attack asserting the presence of a console the customer
+    // does not have, and so it failed for a reason that had nothing to do with
+    // the banner. The banner was there the whole time.
+    //
+    // The customer's balance panel is `<section aria-labelledby="headline">`
+    // in `src/components/client/BalanceView.tsx`: available and ledger, the
+    // two figures the brief's "users need to see their balance" is about. The
+    // money figures are the point, so they are counted INSIDE that section
+    // rather than anywhere on the page — a currency match loose on 470KB of
+    // HTML would be satisfied by a fixture in some unrelated panel.
+    const bannerAt = html.indexOf('data-provider-status="provider-down"');
+    const panelAt = html.indexOf('aria-labelledby="headline"');
+    expect(panelAt).toBeGreaterThan(-1);
+    // Underneath the banner, not instead of it.
+    expect(panelAt).toBeGreaterThan(bannerAt);
+
+    const panelEnd = html.indexOf("</section>", panelAt);
+    const panel = html.slice(panelAt, panelEnd === -1 ? panelAt + 4_000 : panelEnd);
+    // Tags stripped, because a negative amount renders a nested sr-only
+    // duplicate and the figure would otherwise have to be matched twice.
+    const figures = panel.replace(/<[^>]*>/g, " ").match(/-?\$[0-9][0-9,]*\.[0-9]{2}/g) ?? [];
+    // Two: what you can spend right now, and what is in the account. Not
+    // blanked, not a spinner, not a dash.
+    expect(figures.length).toBeGreaterThanOrEqual(2);
 
     record(
       "evidence",
-      `the deployed console at ${BASE_URL}/accounts renders data-provider-status="provider-down" while lithic is stale: "Issuing provider feed is quiet — lithic", detail "${(minutes ?? seconds)?.[0] ?? ""}" against /api/health's ${publishedSeconds}s, and the deposit-account balances are still rendered underneath rather than blanked.`,
+      `the deployed customer page at ${BASE_URL}/client renders data-provider-status="provider-down" while lithic is stale: "Issuing provider feed is quiet — ${(bannerTitle as RegExpExecArray)[1]}", detail "${(minutes ?? seconds)?.[0] ?? ""}" against /api/health's ${publishedSeconds}s, and the customer's own balance panel underneath it still renders ${figures.length} money figure(s) (${figures.join(", ")}) rather than being blanked. The banner reaches the CUSTOMER, not only the operator console: it is mounted in the (app) layout, /client is inside that layout, and the sign-in gate added over the operator console deliberately leaves the /client tree open (src/middleware.ts), so the person whose money it is sees the outage without a credential.`,
     );
   });
 });

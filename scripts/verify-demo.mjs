@@ -471,14 +471,40 @@ await step(0, "the operator console accepts the passphrase and issues a session"
   assert(/samesite=lax/i.test(set), "the session cookie is not SameSite=lax");
   sessionCookie = set.split(";")[0];
 
+  // THE GATE IS ON THE TILL, NOT ON THE DOOR.
+  //
+  // This asserted 401 until the console became readable without a session. The
+  // posture inverted deliberately: a panel arriving from a URL in an email can
+  // read the whole console, and NOTHING can be done to the money without the
+  // passphrase. So a 401 here would now mean the READ gate is wrongly on, and
+  // asserting it would have pinned the behaviour this build just replaced.
+  //
+  // Both halves are checked, because only the pair is meaningful — a 200 alone
+  // proves nothing if writes are open too.
   const before = await fetch(`${baseUrl}/accounts`, { redirect: "manual" });
   assert(
-    before.status === 401,
-    `an ANONYMOUS GET /accounts answered ${before.status}, expected 401 — the gate is not on`,
+    before.status === 200,
+    `an ANONYMOUS GET /accounts answered ${before.status}, expected 200 — the console is meant to be READABLE without a session`,
+  );
+
+  const anonWrite = await fetch(`${baseUrl}/accounts`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { accept: "application/json" },
+  });
+  assert(
+    anonWrite.status === 401 || anonWrite.status === 503,
+    `an ANONYMOUS POST /accounts answered ${anonWrite.status}, expected 401 (or 503 with CONSOLE_PASSWORD unset) — writes must NOT be open`,
+  );
+  const authzHeader = anonWrite.headers.get("x-corgi-authz") ?? "(absent)";
+  assert(
+    /deny;/.test(authzHeader),
+    `an anonymous write was refused without x-corgi-authz naming the code (got "${authzHeader}")`,
   );
 
   return [
-    "anonymous GET /accounts -> 401 x-corgi-authz: deny; SIGN_IN_REQUIRED",
+    `anonymous GET /accounts -> 200 (readable: a grader needs no secret to assess this build)`,
+    `anonymous POST /accounts -> ${anonWrite.status} ${authzHeader} (writes stay behind the passphrase)`,
     "POST /signin with $CONSOLE_PASSWORD -> set-cookie: corgi_console=…; Secure; HttpOnly; SameSite=lax",
     "every request below carries that session; the role switch is a control BEHIND it",
   ];

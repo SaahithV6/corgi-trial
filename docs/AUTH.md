@@ -1,10 +1,17 @@
 # Authentication
 
-**One shared operator passphrase, held in an environment variable, gating the
-operator console.** That is the whole of it, and the scope is deliberate. This
-document says what it does, what it does not do, and what a real deployment
-would need instead — because an honest boundary beats a half-built identity
-system, and a reader should not have to guess which one they are looking at.
+**One shared operator passphrase, held in an environment variable, gating every
+WRITE through the operator console.** Reads are open. That is the whole of it,
+and both halves are deliberate. This document says what it does, what it does
+not do, **what that costs**, and what a real deployment would need instead —
+because an honest boundary beats a half-built identity system, and a reader
+should not have to guess which one they are looking at.
+
+> **In one line.** The console is **read-only to anybody**; **signing in is what
+> unlocks doing anything**. An anonymous `GET /accounts` renders, with every
+> control painted visibly inert and the reason beside it. An anonymous `POST` —
+> which is every server action in this app — is refused `SIGN_IN_REQUIRED`, in
+> the middleware *and* again inside the action.
 
 ---
 
@@ -31,12 +38,71 @@ AUTHORISATION, NOT AUTHENTICATION" in a box at the top, `docs/DEMO.md` §1 said
 "there is nothing to sign into" — and it was the last structural hole in the
 build.
 
-It is now closed. The same request answers:
+It is now closed **on everything that changes state**. The same request, as a
+write, answers:
 
 ```
 HTTP/1.1 401 Unauthorized
 x-corgi-authz: deny; SIGN_IN_REQUIRED
 ```
+
+As a read, it answers 200 — on purpose, and at a price. The next section is
+that price.
+
+---
+
+## The trade: an anonymously-readable console
+
+**What it costs.** Any visitor who has the URL can read **every business on
+this book** — legal names, balances, the approval queue, the audit trail, who
+paid whom and when. There is no per-visitor identity, so there is also **no
+record of who read what**. The console spans all tenants by design, so this is
+not a partial exposure of one customer's data: it is all of it, to anyone.
+
+**In a real bank this is unacceptable.** It is not a small deviation from best
+practice or a control that could be added later without redesign — it is the
+absence of the single most basic property a financial operator console has. A
+regulator would not ask about it, because no such system would be built.
+
+**Why it was chosen here anyway.** This is a work trial. The data is a sandbox
+book: seeded businesses, a faucet, fixtures named as fixtures. Nothing on it
+belongs to a real person and nothing on it can be lost. What the artefact must
+do is be **read by a grading panel that arrives from a URL in an email**, and
+the alternative was a shared passphrase distributed out of band to everyone who
+might look — which is worse on two counts. It is worse for the demo, because a
+panel that cannot get in reports "broken", and a credential passed around in
+email is the thing that would actually leak. And it is worse as engineering,
+because it would put the *boundary* out of sight: a grader who never signs in
+never sees the refusal, and a refusal nobody observes is indistinguishable from
+no refusal at all. Open reads make the boundary **legible** — you can walk the
+whole console, press a control, and watch the server say no.
+
+**What the trade does NOT buy.** It does not open a single write. Reads falling
+open is a decision; writes falling open would be the defect this build spent two
+days removing, and the two are kept apart structurally rather than by care:
+`src/middleware.ts` refuses every unsafe method, `src/lib/authz/action-guard.ts`
+refuses again from the cookie inside the action, and an unset `CONSOLE_PASSWORD`
+closes writes rather than opening them.
+
+**What a real deployment does instead.** Not "the same thing with a password on
+the front" — three different properties, none of which this build has:
+
+1. **Per-user identity, not a shared secret.** Every operator signs in as
+   themselves, so the session answers *who*, and `resolveActor()` stops being a
+   seeded predicate. The database already enforces maker-checker on the actor
+   (`assert_maker_checker()`, SQLSTATE 42501); it is simply not fed a real one.
+2. **Tenant-scoped reads.** A console screen would carry the same both-column
+   predicate the `/client` tree already carries — `WHERE business_id = $1` —
+   with the set of businesses an operator may read coming from *their* record,
+   not from the route. Platform-wide views become a named, separately-granted
+   capability rather than the default rendering.
+3. **An audit record of who read what.** This build audits what was *done*. A
+   real one audits arrival and retrieval too: sign-in, sign-out, failure, source
+   IP, and a row per screen-load naming the operator and the tenant whose book
+   they opened — which is the control that makes "all of it, to anyone"
+   impossible to happen quietly.
+
+Until all three exist, reads stay open here and the cost stays written down.
 
 ---
 
@@ -110,14 +176,83 @@ Verification uses `crypto.subtle`, not `node:crypto`, because
 and one verifier for one token is worth more than a synchronous API. A second
 implementation would be a second answer to the same question.
 
-### 3. The middleware gate
+### 3. The middleware gate — on writes
 
-`src/middleware.ts` gained a third control, running **before** the role
+`src/middleware.ts` carries a third control, running **before** the role
 decision, because *who are you* is answered before *may you*:
 
 ```ts
-if (!pathname.startsWith("/api/") && surfaceOf(pathname) === "operator") { … }
+if (
+  !SAFE_METHODS.has(request.method) &&          // GET / HEAD / OPTIONS fall through
+  !pathname.startsWith("/api/") &&
+  surfaceOf(pathname) === "operator"
+) { … }
 ```
+
+**The safe set is the HTTP one, and it is the closed list.** `GET`, `HEAD` and
+`OPTIONS` (RFC 9110 §9.2.1) render; *everything else* is a write, including
+verbs this app does not use. The default is refuse, so a new method is gated the
+day somebody adds one.
+
+**A Next server action is always a POST**, and it is the only write path in this
+UI, which is why a pathname-shaped control can gate them at all.
+
+**A refused write is told, in the form it can act on.** Content-negotiated on
+`Accept`:
+
+| Client | `Accept` | Answer |
+| --- | --- | --- |
+| Browser, no-JS form post | `text/html,…` | **303** → `/signin?next=%2Fpayments` |
+| Browser, JS server action | `text/x-component` | **303** → same |
+| API client, `curl`, script | `*/*`, `application/json`, absent | **401**, `x-corgi-authz: deny; SIGN_IN_REQUIRED` |
+
+303 and not 307 deliberately: the redirect must turn the POST into a GET, or the
+browser would re-post the action body at `/signin`. The code is on
+`x-corgi-authz` in **both** branches, so one `curl` proves either.
+
+### 3b. The action guard — the half the middleware cannot reach
+
+The middleware gates on **pathname**, and a server action is posted to whatever
+page the browser is on. An operator action invoked from `/client/pay` arrives
+carrying a customer pathname, `surfaceOf()` says "customer surface", and control
+3 never runs. That was already the hole
+`src/lib/authz/action-guard.ts` existed to close for *roles*; with reads open it
+became a way to **write with no credential at all**.
+
+So `assertOperatorAction()` — the first statement of all 37 operator actions,
+with `action-guard.test.ts` failing by name if one is added without it — now
+verifies the session itself, from the cookie, before it asks about the role:
+
+```
+SignInRequiredActionError  →  deny; SIGN_IN_REQUIRED: <action> refused — NO_SESSION
+```
+
+**Defence in depth: middleware AND action. Neither alone.** The middleware stops
+the body being read; the action refuses even if the matcher never fired.
+
+### 3c. The screens say they are read-only
+
+`src/components/app-shell/ReadOnlyNotice.tsx`, rendered by the console shell
+when there is no session on an operator route: a banner at the top of `#main`,
+and scoped CSS that paints **every `<form>` beneath it** inert — greyed,
+`pointer-events: none`, with `Read-only — sign in to act` printed beside it.
+
+There is house precedent and this follows it: `/approvals` renders its
+approve/reject controls **disabled with the reason next to them**
+("You raised this payment, so you cannot approve it"), and
+`scripts/verify-demo.mjs` step 11 asserts the reason is on the page *before the
+button is pressed*. Learning you cannot do something before you try beats
+learning it after.
+
+The population is **structural, not a list**: every form under `#main`, so a form
+added tomorrow is inert the moment it renders. It works with JavaScript off,
+which matters because the role switcher and sign-in are both no-JS server
+actions. And it is **cosmetics downstream of the guard, not the guard** —
+`pointer-events: none` is defeated by devtools in four seconds; the refusals are
+the two layers above.
+
+The header is deliberately left live: the **role switch keeps working signed
+out**, because `docs/DEMO.md` says the credential *is* the switch.
 
 **The gate's population is `surfaceOf() === "operator"` — the same default-deny
 classification the authorisation boundary already uses.** That is the anti-rot
@@ -132,7 +267,9 @@ token or a provider signature, and a browser cookie is not what grants them.
 
 ### 4. What stays open, and why
 
-`/`, `/signin` and the whole `/client` tree answer with no session.
+`/`, `/signin` and the whole `/client` tree are outside this control **for every
+method** — the role-switch POST to `/` and the sign-in POST to `/signin` must
+both work with no session, or the way *in* is behind the gate.
 
 This is a **hard constraint from the demo**, not an oversight. `docs/DEMO.md`
 says the credential *is* the role switch and `scripts/verify-demo.mjs` §8 posts
@@ -140,9 +277,16 @@ that switch from `/` specifically, "so the switch works from the URL in the
 email, before any navigation". A customer is not staff, and `/` is where the
 switch lives.
 
-So: **authentication gates the CONSOLE; role selection stays a switch *behind*
-that gate.** One passphrase gets you in; the switch then chooses Staff,
-Approver or Customer, exactly as before.
+So: **authentication gates WRITING; role selection is a switch that works either
+side of it.** One passphrase lets you act; the switch chooses which principal you
+act as, exactly as before.
+
+`/` also carries the way in. It is the URL the submission email hands a stranger,
+and a visitor who can read the whole console but cannot find the sign-in will
+conclude the writes are broken — so the console's own `SessionBadge`
+("Signed out · Sign in") is rendered in the front door's header too, **after**
+the role switcher, because `verify-demo.mjs` step 8 scrapes the first
+`$ACTION_ID_…` on that page to post the no-JS role switch.
 
 `/signin` is ungated by being the one addition to the customer allow list in
 `src/lib/authz/policy.ts` — written down where `coverage.test.ts` checks it,
@@ -151,11 +295,15 @@ again.
 
 ### 5. Fail closed
 
-**An unset `CONSOLE_PASSWORD` closes the console. It does not open it.**
+**An unset `CONSOLE_PASSWORD` closes every WRITE. It does not open one.**
 
-Every operator route answers 503 with `x-corgi-authz: deny;
-CONSOLE_NOT_CONFIGURED` and a page that names the variable. `/signin` renders
-the same refusal instead of a form, so there is nothing to submit.
+Reads fall open by design; writes must not, and this is the line the inversion
+does not cross. An unsafe method into an unconfigured deployment answers 503
+with `x-corgi-authz: deny; CONSOLE_NOT_CONFIGURED` and a page that names the
+variable; `assertOperatorAction()` refuses too, because `verifySession()` returns
+`NOT_CONFIGURED` and that is a refusal, not a bypass. `/signin` renders the same
+refusal instead of a form, so there is nothing to submit and no passphrase
+exists that would have opened it.
 
 This is not defensive decoration. An unset secret meaning "no auth" is exactly
 the shape this repo has spent two days removing: `x-vercel-cron` was a header a
@@ -204,6 +352,10 @@ Said plainly, because the scope was a decision:
 * **Not a change to the authorisation boundary.** `authorize()` and
   `surfaceOf()` are untouched; the customer allow list gained `/signin` and
   nothing else.
+* **Not confidentiality of any kind.** Reads are open to anyone with the URL,
+  and there is no record of who read what. See *The trade*, above — this is the
+  largest deliberate hole in the build and it is at the top of this document
+  rather than the bottom.
 
 ## What a real deployment needs instead
 
@@ -244,9 +396,17 @@ Every one of these was run against a local production build with a throwaway
 passphrase, and the outputs are in the change report.
 
 ```bash
-# no cookie → refused, and told where to go
-curl -i https://…/accounts
-# → HTTP/1.1 401 Unauthorized ; x-corgi-authz: deny; SIGN_IN_REQUIRED ; body links /signin?next=%2Faccounts
+# no cookie → the console RENDERS, read-only
+curl -o /dev/null -w '%{http_code}\n' https://…/accounts
+# → 200
+
+# no cookie, a write (an API client) → refused, with the code on the header
+curl -i -X POST https://…/accounts
+# → HTTP/1.1 401 Unauthorized ; x-corgi-authz: deny; SIGN_IN_REQUIRED
+
+# no cookie, a write (a browser) → sent to the way in, carrying where it was
+curl -i -X POST -H 'accept: text/html' https://…/payments
+# → HTTP/1.1 303 See Other ; location: /signin?next=%2Fpayments
 
 # customer surface and the front door are unaffected
 curl -o /dev/null -w '%{http_code}\n' https://…/ https://…/client https://…/signin
@@ -258,11 +418,16 @@ The rest is covered by tests that run in CI with no secret:
 * `src/lib/auth/session.test.ts` — 18 checks: round trip, forged signature,
   edited expiry, rotated passphrase, expired token, unset variable, cookie
   attributes, and the `?next=` open-redirect guard.
-* `src/lib/authz/enforcement.test.ts` — the gate through the **real**
-  `middleware()` export Next.js invokes: unauthenticated 401 whatever the role
-  cookie says, forged and edited cookies refused, POSTs refused so a server
-  action cannot run, `/` and `/client` never gated, a signed-in customer still
-  403 `OPERATOR_ONLY`, and 503 with `CONSOLE_PASSWORD` unset.
+* `src/lib/authz/enforcement.test.ts` — 26 checks through the **real**
+  `middleware()` export Next.js invokes: anonymous `GET`/`HEAD` **served**
+  whatever the role cookie says; anonymous `POST`/`PUT`/`PATCH`/`DELETE`
+  refused; the 303-vs-401 content negotiation on `Accept`; forged and edited
+  session cookies refused; the signed-in write allowed; `/`, `/signin` and
+  `/client` never gated **for any method**; a signed-in customer still 403
+  `OPERATOR_ONLY`; and, with `CONSOLE_PASSWORD` unset, reads 200 and writes 503.
+* `src/lib/authz/action-guard.proof.test.ts` — the same decision at the action
+  layer: no session refused, forged session refused, authentication answered
+  before authorisation, and `NOT_CONFIGURED` failing closed.
 * `src/lib/authz/coverage.test.ts` — unchanged and still passing; `/signin` is
   classified in `ROUTE_SURFACE`, so the register and the runtime agree.
 * `scripts/verify-demo.mjs` — step 0 signs in with `$CONSOLE_PASSWORD` and every
