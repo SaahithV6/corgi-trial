@@ -217,29 +217,48 @@ back-off each time.
 
 ## 3. What is left, and who can close it
 
-Scoreboard against the deployment, `node scripts/compliance.mjs`:
+Scoreboard against the deployment, `node scripts/compliance.mjs`, **re-run
+2026-09-11T09:51Z against commit `544b481`**:
 
 ```
-PASS 28   FAIL 2   WARN 0   UNKNOWN 4   CITED 7   of 41 checks
+PASS 25   FAIL 5   WARN 0   UNKNOWN 4   CITED 7   of 41 checks   22s
 ```
 
-The three items the previous run flagged — the two committed secrets, the float
-in `probe.ts`, and migration 0018's append-only trigger — now pass. **AF2 still
-fails against the deployed URL because the deployment is still running the
-pre-fix code**; against a build with the fix in it, AF2 passes, including its
-delegation to `audit-claims.mjs` (exit 0, "no document contradicts the
-endpoint"). Deploying moves the scoreboard to **PASS 29 · FAIL 1**.
+**It was `PASS 28 · FAIL 2` when this section was written, and it has gone
+backwards by three. Saying which three is the point of re-running it.**
+
+| Check | Why it fails now | Whose fix |
+| --- | --- | --- |
+| **AF3** *"UPDATE or DELETE on money rows"* | it spawns `dbcheck` and asserts exit 0; `dbcheck` is **36 passed, 2 failed** and the two failures are the deliberate standing reds of §5.3 and §5.9. The check is right to report them and they are right to be red. | nobody's — it closes when a verdict exists for 154 unanswered holds and nine fixture rows are cleaned up |
+| **AF2** *"A simulated integration presented as live"* | its three own assertions all pass — 7 slots enumerated, every `live` slot carrying call evidence, the verdict reproducible across three readings — and it fails **only** on its delegation to `audit-claims.mjs`, which exits 1 on **seven false positives**: three different populations of seven ("of 7 legs", "of 7 adapters", and the log quoting the checker's own old bug) matched by a regex that reads any `N of 7`. **No slot on `/api/health` is simulated**, so the automatic fail this check exists to catch is not present. | one line in `scripts/audit-claims.mjs` — require the word `live` beside the number, or scope the rule to lines naming a slot |
+| **AF1** *"Localhost only, or a video in place of a URL"* | the deployed origin is public HTTPS and all 11 console screens answer 200 from it; the check trips on `docs/EVENTS.md:460`, which **lists `localhost` as a blocked SSRF host** in a table of blocked hosts. A string match, not a localhost deployment. | one line — the scanner needs to skip a line that is about refusing localhost |
+| **AF5** *"Secrets committed to the repo" — git history* | unchanged and real: **4 file/shape pairs** alive in history (it was 3). Both credentials are dead, the working tree is clean, and the purge needs a force push nobody has taken. | below |
+| **G1** *stored balance columns* | `interest_posting.basis_balance_cents`, and `dbcheck` disagrees with `compliance.mjs` about it — `dbcheck` re-derives every stored basis from the journal at its watermark and passes it as a named exception. **Two of this repo's own gates disagree and that is not resolved.** | reconcile the two before the debrief |
+
+**Three of those five are guards tripping on something other than the thing they
+guard, and none of the three is softened away here: AF1, AF2 and AF3 all report
+correctly against what they can see.** AF3's red is earned. AF1's and AF2's are
+not, and both fixes are in scripts this workstream may not edit.
 
 ### FAIL — AF5, and it is outside this workstream
 
-`"Secrets committed to the repo." — GIT HISTORY, not just the tip`. Three
-file/shape pairs are alive in history across all refs:
+`"Secrets committed to the repo." — GIT HISTORY, not just the tip`. **Re-run
+2026-09-11T09:51Z: four file/shape pairs across 97 commits on all refs** — it
+was three when this was written, and the set changed rather than merely growing.
+The Plaid-shaped token in `src/lib/rails/plaid/client.test.ts` is gone; two
+`whsec_`-shaped strings in `src/lib/chaos/` are new to the list:
 
 | Where | Shape | Commits |
 | --- | --- | --- |
-| `src/lib/cards/asa.test.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 12 — `f97af3e`, `8443e7b`, `2217231`, `e468356`, `9a76568`, … |
-| `src/lib/rails/plaid/client.test.ts` | `access-(sandbox\|development\|production)-…` | 11 — `e468356`, `d6154f7`, `38d8667`, `2310fd7`, `6038184`, … |
+| `src/lib/cards/asa.test.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 18 — `59010b5`, `544b481`, `87e2966`, `7a0591b`, `2f863c8`, … |
+| `src/lib/chaos/sign.test.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 9 — `59010b5`, `544b481`, `87e2966`, `7a0591b`, `2f863c8`, … |
+| `src/lib/chaos/sign.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 9 — `59010b5`, `544b481`, `87e2966`, `7a0591b`, `2f863c8`, … |
 | `docs/EVALUATION.md` | `access-(sandbox\|development\|production)-…` | 2 — `467f460`, `c551b9f` |
+
+Two things the same run also asserted and that belong beside the red: **no
+current `.env` secret value appears in any commit** (17 values pickaxed with
+`git log -S`), and **no Plaid-shaped access token is readable at the tip**, so
+none could be tested for liveness.
 
 Three things are true and all three matter:
 
@@ -807,6 +826,23 @@ The cheap fix is mechanical — `/api/health` already publishes
 differ. It is not done here because `scripts/audit-claims.mjs` was outside this
 change's remit. Until it is, "the deployed endpoint is the authority" carries an
 unstated second clause: *and nothing checks that the authority is current.*
+
+**Still open, and re-measured 2026-09-11T09:39Z.** `/api/health` reports commit
+`544b481`; `.git/refs/heads/main` is `59010b5`. So the gap this section names is
+live right now, and the checker still cannot see it.
+
+**And it has a second blind spot the same shape, found by running it.** The
+checker exits 1 with **seven contradictions, none of which is one.** Its first
+rule matches any `N of 7` in any document and fires on three unrelated
+populations of seven: coreloop's seven legs (`DECISIONS.md:2846`,
+`docs/CUT-LIST.md:42`), the rail capability matrix's seven adapters
+(`docs/RAILS.md:66–69`), and `docs/CUT-LIST.md:87`, which is the cut list
+**quoting this checker's own earlier bug** — the one recorded as instance 4,
+where it understood only one spelling of `"N of 7"`. The fix then taught it a
+second spelling and did not teach it what the denominator means. Its **second**
+rule, the one that would catch the automatic fail, reports nothing, and
+`/api/health` has no simulated slot for it to catch. `compliance.mjs` AF2
+delegates to it and therefore reads FAIL for a reason that is not AF2 (§3).
 ### 5.8 `v_standing_order_double_fire` has now been watched failing
 
 0012 shipped it joining `payment_instruction` on a **UNIQUE** column and asking
@@ -859,15 +895,14 @@ authorisation's has not is dropped by `ledger_availability()` and kept by
 `v_hold_state`, so the customer's available balance and the hold model disagree
 about the same dollars — `v_balance_definition_drift` 0 → 1.
 
-**One thing this could not close.** `v_hold_expiry_drift` runs from a second
-array in `scripts/dbcheck.mjs`, not from `INVARIANT_VIEWS`, because
+**The one thing this could not close has since been closed by whoever owns that
+directory.** `v_hold_expiry_drift` ran from a second array in
+`scripts/dbcheck.mjs` rather than from `INVARIANT_VIEWS`, because
 `src/lib/chaos/invariants.test.ts` asserts that list equals the chaos
 dashboard's copy in `src/lib/chaos/invariants.ts`, and `src/lib/chaos/**` was
-outside this change's write scope. Appending to the first array without the
-mirroring edit turns `pnpm test` red for someone who cannot fix it. It is
-checked, it counts towards the same tally and `--prove` proves it like every
-other view; what is missing is the chaos dashboard counting it. Four views now
-sit in that position (`v_interchange_*` and this one) and they should be moved
-into `INVARIANT_VIEWS` and mirrored in one commit by whoever owns that
-directory.
+outside this change's write scope — appending to the first array without the
+mirroring edit would have turned `pnpm test` red for someone who could not fix
+it. Four views sat in that position (`v_interchange_*` and this one).
+**Verified 2026-09-11T09:56Z: the second array is gone, and both lists are the
+same 22 views in the same order.**
 

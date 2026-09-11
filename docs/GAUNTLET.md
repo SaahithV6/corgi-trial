@@ -16,7 +16,7 @@ verdict line, in capitals, and the freshness of every figure is stated.
 | **Commit** | `2f863c8f52f16a7c13059f172c31617e45e9c264` (`2f863c8`), read from the deployment itself — `GET /api/health` → `commit.sha`, `source: VERCEL_GIT_COMMIT_SHA` |
 | **Target** | `https://corgi-trial-psi.vercel.app` |
 | **Database** | `corgi_app@ep-curly-tooth-ayhug2be-pooler.c-5.us-east-2.aws.neon.tech/neondb` (live Neon; reads as the application role, which holds no UPDATE or DELETE) |
-| **Health at open / close** | `degraded` at 08:22:30Z, `degraded` at 08:39:19Z — same commit both times, `database.reachable: true`, integrations `live 7 / 7`. The degradation is `webhookProcessing.degradedBy: ["lithic","increase"]`, i.e. dead-lettered deliveries, not a broken rail. §"Why the deployment reads degraded" below. |
+| **Health at open / close** | `degraded` at 08:22:30Z, `degraded` at 08:39:19Z — same commit both times, `database.reachable: true`, integrations `live 7 / 7`. The degradation was `webhookProcessing.degradedBy: ["lithic","increase"]`, i.e. dead-lettered deliveries, not a broken rail. **Re-read 2026-09-11T09:38:36Z on commit `544b481`: `status: "ok"`**, `live 7 / 7`, database 149 ms — the dead-letter backlog no longer degrades the deployment at all (`webhookProcessing.degradedBy: []`). It reads `degraded` again for 180–900 s after any live-fire run, for the Lithic quiet band rather than the backlog. §"Why the deployment read `degraded`" below. |
 | **Ledger size at close** | 3,524 journal entries; `SUM(amount_cents)` over every USD journal line = **0** |
 
 Three runnables were driven end to end inside the window, in this order:
@@ -25,7 +25,7 @@ Three runnables were driven end to end inside the window, in this order:
 | --- | --- | --- | --- |
 | `node scripts/livefire.mjs --base-url https://corgi-trial-psi.vercel.app` | 08:22:48Z | 08:28:51Z (364s) | **PASS 7 · FAIL 0 · SKIP 1** of 8 |
 | `node scripts/coreloop.mjs --base-url https://corgi-trial-psi.vercel.app` | 08:29:16Z | 08:30:30Z (74s) | **PASS 6 · FAIL 1 · SKIP 0** of 7 legs; 101 HTTP calls to the deployed origin, 3 to the Lithic sandbox |
-| `node scripts/dbcheck.mjs` | 08:29:40Z | 08:29:44Z | **35 passed / 1 failed** — the one failure is the documented deliberate one |
+| `node scripts/dbcheck.mjs` | 08:29:40Z | 08:29:44Z | **35 passed / 1 failed** — the one failure is the documented deliberate one. **Re-run 09:40Z: 36 passed / 2 failed**; `v_hold_expiry_drift` joined the gate as a second deliberate red, 9 rows, all released, **zero cents of exposure** |
 
 Direct calls filled the gaps: the deployed public API (`/api/v1`), the deployed
 agent surface (`/api/mcp`), the deployed cron tick (`/api/cron/standing`), the
@@ -196,12 +196,14 @@ Counted at 08:36Z over all 623 authorisations carrying events:
 | declined | — | 55 |
 | **incremental authorisation** | **0** | **0** |
 
-**`incremental_authorization` has never been recorded, by any path, ever.** This
-is the one transition of the seven named in the brief with no demonstration at
-all — see §"Defects found, not fixed", defect 3, which explains why: 18 real
-`AUTHORIZATION_ADVICE` payloads did reach the inbox, and all 18 are parked behind
-a card that is not registered to a customer, so the advice branch has never run
-on live input.
+**`incremental_authorization` had never been recorded, by any path, at the time
+of this pass** — the one transition of the seven named in the brief with no
+demonstration at all, because 18 real `AUTHORIZATION_ADVICE` payloads had
+reached the inbox and all 18 were parked behind a card not registered to a
+customer. **This is CLOSED. Re-measured 2026-09-11T09:53Z: `card_auth_event`
+holds 8 `incremental_authorization` rows and all 18 of those payloads are
+`state = 'done'`.** The ADDENDUM at the end of this section carries the run; the
+table above is left as it was measured at 08:22–08:39Z.
 
 The 76 partial captures, 33 reversals and 82 expiries carry `inbox_id IS NULL` —
 they were written by the hold fuzzer and the integration suites directly against
@@ -284,8 +286,10 @@ none duplicated).
 **Nothing double-counted, and no invariant moved.** Journal entries
 3,531 → 3,577; **trial balance 0** on both sides; Kettle & Crumb's `2100`
 −3,905,603 → −3,839,423 (a **$661.80** net debit of real card spend);
-`v_refused_auth_hold` **149 → 149** — `node scripts/dbcheck.mjs` still reads
-**35 passed, 1 failed**, the same deliberate one. `v_entry_unbalanced`,
+`v_refused_auth_hold` **149 → 149** — `node scripts/dbcheck.mjs` read
+**35 passed, 1 failed** at 08:29:44Z, the same deliberate one. *(Re-run 09:40Z:
+**36 passed, 2 failed**; `v_refused_auth_hold` is 154 as the book keeps running,
+and `v_hold_expiry_drift` is the second deliberate red.)* `v_entry_unbalanced`,
 `v_book_not_zero`, `v_hold_drift`, `v_hold_release_drift`,
 `v_hold_closure_not_terminal`, `v_hold_posting_incomplete`, `v_line_denorm_drift`
 — all 0 rows after.
@@ -512,8 +516,9 @@ processed=0 parked=0."* Never crashed, never double-counted.
 **Park-and-match-later is a real mechanism, not a phrase.** `webhook_inbox`
 carries `state`, `park_attempts`, `parked_on_kind`, `parked_on_ref`,
 `parked_reason`, `next_attempt_at`, `dead_lettered_at`. At 08:39Z there are 52
-parked Lithic rows and 16 parked Increase rows, each naming the referent it is
-waiting for — e.g. `parked_on_kind: card`, `parked_reason: "card
+parked Lithic rows and 16 parked Increase rows *(re-read 09:47Z: **27 Lithic, 119
+Increase** — the Lithic backlog drained and the Increase wire traffic parked)*,
+each naming the referent it is waiting for — e.g. `parked_on_kind: card`, `parked_reason: "card
 8286c472-2d19-4a1b-af0e-5adf0c735ee5 is not registered to a customer"`,
 `next_attempt_at 2026-09-11T09:17:27.379Z`. On the book overall, **128
 authorisations carry `origin = 'clearing_first'`**: the settlement genuinely
@@ -525,7 +530,10 @@ arrived first and was matched afterwards.
 
 **Verdict: HALF PROVEN. The outbound return is real and on the book, but
 HISTORICAL. The inbound recall is NOT DEMONSTRATED — there is no such row on the
-book and no code path that could produce one.**
+book.** *(The second half of that sentence read "and no code path that could
+produce one" and was **retracted by the ADDENDUM at the end of this section**,
+which made the path reachable and then found it wrong. The verdict itself does
+not move: still not demonstrated.)*
 
 This is the item the brief flagged as least certain, and it is.
 
@@ -576,20 +584,27 @@ returned one:
 > customer. Posting it would mean guessing whose money it is."*
 
 The refusal is well-reasoned and I would not want it changed on the quiet. But it
-means the `inbound_ach_return` row in `rail_event_semantics` is **unreachable
-code**: the park happens before the semantics lookup, so nothing can ever consult
-it. Its only exercise anywhere is `src/lib/rails/semantics.test.ts:259`, which
-asserts the table's contents — a row, not a behaviour.
+meant the `inbound_ach_return` row in `rail_event_semantics` was **unreachable
+code**: the park happened before the semantics lookup, so nothing could ever
+consult it, and its only exercise anywhere was
+`src/lib/rails/semantics.test.ts:259`, which asserts the table's contents — a
+row, not a behaviour. **This is superseded by the ADDENDUM at the end of this
+section**: the consumer now reads the inbound object back and asks the table
+*before* it refuses, which made the row reachable — and the moment it was
+reachable it turned out to be wrong. Read the addendum, not this paragraph.
 
-**3. The two real inbound ACH deliveries that did arrive were dropped.** At
-04:14:57Z, Increase delivered `inbound_ach_transfer.created`
-(`sandbox_event_001m27asynxfz81zny26d0e9hz9`) and
+**3. The two real inbound ACH deliveries that did arrive were dropped — and
+have since been recovered.** At 04:14:57Z, Increase delivered
+`inbound_ach_transfer.created` (`sandbox_event_001m27asynxfz81zny26d0e9hz9`) and
 `inbound_ach_transfer.updated` (`sandbox_event_001m27asyqrcaa62g7s9v0x6rzt`) for
-object `sandbox_inbound_ach_transfer_07x75nyvzd1oxihtvuoe`. Both are
+object `sandbox_inbound_ach_transfer_07x75nyvzd1oxihtvuoe`. Both were
 `state = 'dead'`, 10 attempts, dead-lettered at 04:34:15Z, with
 `processing_error = "dead-lettered after 8 failed attempts: no consumer
-registered for provider 'increase'"`. Nothing was posted and nothing was parked
-for a human; they are in the dead-letter pile.
+registered for provider 'increase'"` — nothing posted and nothing parked for a
+human. **Re-read 2026-09-11T09:47Z: both are `state = 'parked'`,
+`processing_error` NULL**, carrying the attribution refusal quoted in the
+addendum below. Nothing was posted then and nothing is posted now; the
+difference is that a human can now see why.
 
 **No simulator route exists either.** `POST /api/sim` on the deployment answers
 **HTTP 404** (measured 08:28:28Z, `{"error":{"code":"NOT_FOUND","message":"no
@@ -716,8 +731,10 @@ same current object back and sees the return.
 
 **The ledger consequence is nothing, and that is the honest answer rather than a
 disappointing one.** No entry was written: `ach:inbound:%` is still 0 keys, the
-trial balance is 0, and `node scripts/dbcheck.mjs` still reads **35 passed,
-1 failed** — the same deliberate `v_refused_auth_hold`, unchanged at 149 rows.
+trial balance is 0, and `node scripts/dbcheck.mjs` read **35 passed,
+1 failed** at the time — the same deliberate `v_refused_auth_hold`, unchanged at
+149 rows. *(Re-run 09:40Z: **36 passed, 2 failed**, `v_refused_auth_hold` 154,
+`v_hold_expiry_drift` 9.)*
 There was no position to correct, because the credit was never bookable.
 
 **What did change is the inbox, and it is the part that matters
@@ -939,11 +956,13 @@ POST https://corgi-trial-psi.vercel.app/api/cron/standing
 
 Two distinct run ids, two ticks, **zero occurrences claimed and zero payments
 raised**, because every mandate due on 2026-09-11 had already been claimed by an
-earlier run. A restart or a retry cannot re-fire what is already claimed. That is
-the property, exercised against the deployment, inside the window.
+earlier run. A restart or a retry cannot re-fire an occurrence that is already
+claimed **under the same key**. That is the property, exercised against the
+deployment, inside the window — and the qualifier is load-bearing; see the
+correction below.
 
 **What makes it structural rather than lucky.** The claim is a unique index, so a
-double fire is not a storable row:
+double fire **under one key** is not a storable row:
 
 ```
 UNIQUE (standing_order_id, scheduled_date)   -- standing_order_occurrence_once
@@ -951,14 +970,32 @@ UNIQUE (idempotency_key)                     -- standing_order_occurrence_key_on
 PRIMARY KEY (occurrence_id)                  -- standing_order_outcome_pkey
 ```
 
-Keys are deterministic — `standing:<mandate uuid>:<YYYY-MM-DD>` — and every
-occurrence carries `claimed_at` and `claimed_by` (both NOT NULL). Twenty-six
-occurrences exist across 2026-09-10 and 2026-09-11, each with exactly one
-outcome: 12 `raised`, 14 `refused`.
+Keys are deterministic — `standing:<mandate uuid>:<YYYY-MM-DD>`, **generated in
+Postgres rather than by application code**, which is the whole argument of
+migration 0012 §2 — and every occurrence carries `claimed_at` and `claimed_by`
+(both NOT NULL). Twenty-six occurrences exist across 2026-09-10 and 2026-09-11,
+each with exactly one outcome: 12 `raised`, 14 `refused`.
 
 **The invariant.** `v_standing_order_double_fire` — **0 rows**, reach **26
-standing-order occurrences**: one occurrence, at most one payment instruction.
-`v_standing_order_unresolved` — **0 rows**. `dbcheck` PASS at 08:29:44Z.
+standing-order occurrences**. `v_standing_order_unresolved` — **0 rows**.
+`dbcheck` PASS at 08:29:44Z.
+
+> **CORRECTION, 2026-09-11T09:55Z — the unique index defends the key, not the
+> keyspace, and the gloss above overstated it.** *"One occurrence, at most one
+> payment instruction"* is not what `UNIQUE (idempotency_key)` proves. An
+> instruction raised for the same mandate and the same date under a **different
+> spelling** of the derived key satisfies every index quoted above and is a
+> second payment. `v_standing_order_double_fire` was itself unable to see that
+> for days — its old body joined `payment_instruction` on that UNIQUE column and
+> asked for `count > 1`, which no state of the database can satisfy — and
+> migration 0023 repointed it at the mandate's keyspace. **It has now been made
+> to fail**: `node scripts/dbcheck.mjs --prove` at 09:41Z plants
+> `standing:6d27bdba-…:2026-09-11` alongside
+> `standing:6d27bdba-…:2026-9-11#retry-after-a-restart`, the view goes 0 → 1
+> naming **both** keys in `instruction_keys`, and it is 0 again after the
+> rollback. So the 0 rows above are now a measurement rather than a tautology,
+> and the reason the count is trustworthy is the proof, not the index.
+> `docs/STANDING-ORDERS.md` §8 carries the full delta.
 
 Scheduling is configured, not aspirational — `vercel.json` registers
 `/api/cron/standing` at `23 5 * * *`, alongside `/api/drain`,
@@ -1193,36 +1230,55 @@ the right at the time) and `v_approved_auth_for_dead_member`.
 Found during the pass. Reported precisely and **left exactly as found**, because
 the finder repairing what it finds is how a defect becomes invisible.
 
-**1. `inbound_ach_return` is unreachable code.** `rail_event_semantics` carries
-the row `ach / increase / inbound_ach_transfer.updated/returned →
-inbound_ach_return`, but `increaseAchConsumer` parks **every**
-`inbound_ach_transfer` delivery on `associatedObjectType` before any category or
-semantics lookup runs. The row can never be consulted. Either the park should
-carry an exception for a returned inbound (the recall of a credit we never posted
-is arguably a no-op worth recording), or the row should be removed so the table
-stops advertising a capability the consumer forecloses. This is the mechanical
-reason item 5 is half an item.
+**1. `inbound_ach_return` was unreachable code — MADE REACHABLE, AND THEN FOUND
+WRONG.** `rail_event_semantics` carries the row `ach / increase /
+inbound_ach_transfer.updated/returned → inbound_ach_return`, and
+`increaseAchConsumer` parked **every** `inbound_ach_transfer` delivery on
+`associatedObjectType` before any category or semantics lookup ran, so the row
+could never be consulted. **The honest repair was taken: it was made reachable
+rather than deleted** (§5 ADDENDUM, 08:53Z–09:17Z) — the consumer reads the
+inbound object back and asks the table before refusing. Doing so exposed a
+defect nothing could previously have exposed, which is the whole argument for
+not deleting an unreachable row on the grounds that nothing runs it. **Item 5 is
+still half an item**, for the reason the addendum measures: one shared FBO
+account number for six businesses means an inbound credit cannot be attributed
+at all.
 
-**2. Two real Increase inbound-ACH deliveries are in the dead-letter pile.**
-`sandbox_event_001m27asynxfz81zny26d0e9hz9` and
+**2. Two real Increase inbound-ACH deliveries were in the dead-letter pile —
+CLOSED.** `sandbox_event_001m27asynxfz81zny26d0e9hz9` and
 `sandbox_event_001m27asyqrcaa62g7s9v0x6rzt`, received 04:14:57Z, 10 attempts,
 dead-lettered 04:34:15Z with *"no consumer registered for provider 'increase'"*.
-The consumer **is** registered now (`POST /api/drain` at 08:32:19Z reports
+The consumer **is** registered (`POST /api/drain` at 08:32:19Z reports
 `consumers: ["lithic-card","increase-ach","increase-wire","stripe-identity",
-"plaid-item"], missingConsumers: []`), so these two are casualties of the window
-before it landed — but a dead letter is never retried, so they will sit there
-forever. Related cosmetic issue: parked Increase rows still carry the **stale**
-`processing_error = "no consumer registered for provider 'increase'"` from those
-early attempts alongside a current, correct and well-argued `parked_reason`. The
-stale field reads as a live wiring failure and is not one. Worth a look before
-anyone demos `/api/health`, which surfaces the dead count.
+"plaid-item"], missingConsumers: []`), and the claim that stood here — *"a dead
+letter is never retried, so they will sit there forever"* — **was wrong**: they
+were redriven.
 
-**3. The incremental-authorisation branch has never run on live input.** Zero
-`incremental_authorization` rows exist in `card_auth_event`, on any path.
+**Measured 2026-09-11T09:47Z against the live database.** Increase holds **124
+`done` and 119 `parked` rows and zero dead**; not one of its 243 rows carries a
+`dead_lettered_at` at all. **No row anywhere in `webhook_inbox` carries the
+string "no consumer registered"**, so the stale `processing_error` field
+described here is gone too. The two named events are `parked` with
+`processing_error` NULL and the attribution refusal in `parked_reason`.
+`/api/health` reads `status: "ok"` in consequence.
+
+**Lithic's 26 dead letters are not closed and are not softened here.** Every one
+is *"parked 12 times waiting for `card:<token>`; referent never arrived"* — an
+authorisation on a card created directly in the sandbox and never registered to
+a customer. **There is still no claim path**: nothing maps an orphan card token
+to a business, so clearing them needs a hand-written `INSERT`.
+
+**3. The incremental-authorisation branch had never run on live input —
+CLOSED.** When this was written, zero `incremental_authorization` rows existed in
+`card_auth_event` on any path. **Measured 2026-09-11T09:53Z: there are 8**, and
+all eighteen of the `AUTHORIZATION_ADVICE` payloads below are now `state =
+'done'` rather than parked. The account of how it stood is kept because the
+mechanism is the point:
+
 Eighteen `webhook_inbox` payloads **do** contain `AUTHORIZATION_ADVICE` — e.g.
 `9b8c6ddb-7d44-49ef-a5d9-c52a69e54ac6` with events
 `[AUTHORIZATION 5000 DECLINED, CLEARING 7340, AUTHORIZATION_ADVICE 9000,
-CLEARING 1660]` — and **all eighteen are parked** with `parked_on_kind: card`,
+CLEARING 1660]` — and **all eighteen were parked** with `parked_on_kind: card`,
 `parked_reason: "card 8286c472-2d19-4a1b-af0e-5adf0c735ee5 is not registered to a
 customer"`, 11 park attempts each. The bodies were synthesised by an integration
 suite against a card token that was never written to `card`. The advice-to-
@@ -1232,21 +1288,43 @@ wrong) is therefore covered only by unit tests, never by the deployed pipeline.
 Registering that card, or re-signing those bodies against a real one, would close
 the last transition in item 2.
 
-## Why the deployment reads `degraded`
+## Why the deployment read `degraded` — and reads `ok` now
 
-Stated so nobody has to guess mid-demo. `/api/health` returns **HTTP 200** with
-`status: "degraded"` throughout the window. It is **not** the rails:
+**Re-read 2026-09-11T09:38:36Z, commit `544b481`: `status: "ok"`.** This section
+is kept because the reason it said `degraded` is the interesting half, and
+because the half that fixed it is not the half anyone would guess.
+
+Stated as it stood: `/api/health` returned **HTTP 200** with
+`status: "degraded"` throughout the window. It was **not** the rails:
 `integrations.live 7 / 7`, `database.reachable true`,
-`webhookHealth.degradedBy: []` (every provider's delivery feed reads `fresh`).
+`webhookHealth.degradedBy: []` (every provider's delivery feed read `fresh`).
 
-It is `webhookProcessing.degradedBy: ["lithic","increase"]` — *arrival is not
+It was `webhookProcessing.degradedBy: ["lithic","increase"]` — *arrival is not
 processing*. Lithic: 33 deliveries accepted and then dead-lettered, the newest at
 **08:25:14.969Z, during this pass**, all with the same reason — *"parked 12 times
 waiting for `card:048c2bd4-…`; referent never arrived"*, i.e. live-fire and
 integration cards that were never registered to a customer. Increase: the 167
 described above.
 
-The endpoint is telling the truth about a real backlog of undeliverable events,
+**What changed, measured 09:47Z–09:59Z:** Increase went **167 → 0** dead — the
+consumer was registered and the backlog redriven, and no `increase` row carries
+a `dead_lettered_at` any more. Lithic went **33 → 26**, and the endpoint now
+reports those 26 as `supersededByConsumption: true`, `degradesDeployment:
+false` — *"history, not a live drop"* — with `clearedBy: "node
+scripts/redrive.mjs --apply"` naming a fix nobody has run. So
+`webhookProcessing.degradedBy` is `[]` and the dead-letter reason for `degraded`
+is gone.
+
+**`degraded` has not gone away, and the reason it appears now is a better one.**
+Read at 09:59:12Z it is `degraded` because `webhookHealth.degradedBy:
+["lithic"]` — 538 s since the last Lithic delivery, inside the documented
+180–900 s `stale` band, *"silent for longer than 180s after recent traffic —
+treated as an outage"*. That is live-fire attack 7's own induced silence, still
+clearing. Past 900 s it returns to `ok` by itself. **And 26 undeliverable card
+authorisations are still sitting there with no claim path**; `status: "ok"` at
+rest should not be read as saying otherwise.
+
+The endpoint was telling the truth about a real backlog of undeliverable events,
 and it escalates rather than whispering — live-fire attack 7 proves that
 escalation is load-bearing, by replaying the outage's own published facts through
 `webhookDeliveryHealth` under both gate settings and showing the alarm **stays
@@ -1264,8 +1342,10 @@ the exact shape of each shortfall:
    daily spend cap is exhausted and every authorisation declines at every amount.
    What was proven instead is the weaker claim, stated as such: a declined
    authorisation places no hold, a backlog delivered twice applies once, and the
-   hold-once invariants hold across 342 live and 356 released holds. Separately,
-   **incremental authorisation has never been demonstrated at all.**
+   hold-once invariants hold across 342 live and 356 released holds. *(Separately,
+   this list said **incremental authorisation has never been demonstrated at
+   all**. That is no longer true: 8 `incremental_authorization` rows at 09:53Z —
+   item 2's ADDENDUM. The spend-cap half of the shortfall stands.)*
 2. **Item 3's approved force post could not be driven** — but the endpoint was
    called for the first time at 08:31:39Z, returned 201, declined for the same
    cap, and the deployed system ingested the refusal correctly with

@@ -9,9 +9,11 @@ Before this was wired the table had 22 seeded rows and zero readers
 `src/lib/rails/semantics.ts`, and **three** consumers that ask it:
 `consumers/lithic-card.ts`, `consumers/increase-wire.ts`, and
 `consumers/increase-ach.ts` — the last of which asks on **both** legs of the
-ACH rail as of 2026-09-11 (§4b). Thirty rows are live: the 22 seeded, plus the
-eight wire rows migration `0025_wires.sql` inserted directly. See §7 for what that
-gap means, and for the one field the live table is currently ahead of the seed on.
+ACH rail as of 2026-09-11 (§4b). **Thirty rows are live and `scripts/seed.mjs`
+now seeds all thirty**: the eight wire rows `0025_wires.sql` inserted directly
+have been mirrored into the seed, and the seed no longer carries a stale copy of
+the row `0039_inbound_recall.sql` corrected. §7 is the record of that gap and of
+how it is now asserted shut.
 
 ---
 
@@ -56,7 +58,7 @@ reconciliation stays clean.** Nothing goes red. There is no alarm for it, and
 there cannot be one — a wrongly-dated entry is a perfectly well-formed entry.
 
 The only defence against that is *review*, and you cannot review a branch buried
-three modules deep inside a webhook handler. So the decision is 22 rows with a
+three modules deep inside a webhook handler. So the decision is 30 rows with a
 `note` on each, and it is reviewed the way any other change is reviewed.
 
 ---
@@ -256,6 +258,15 @@ we already posted has been returned"* — is false here. `canonical_kind` and
 `semantics` were **not** touched: both classifications were right. What was wrong
 was one field name and two sentences of scope.
 
+**Superseded in part, 2026-09-11.** `db/migrations/0042_virtual_account_numbers.sql`
+issues per-customer virtual account numbers and maps `account_number_id` to one
+business, so the withdrawn claim above — that an inbound credit cannot be
+attributed and is never booked — no longer describes the build. Both inbound ACH
+notes in the live table were rewritten by 0042 and say what the consumer does
+now; the seed carries that text verbatim (§7). The measurement that forced the
+`value_date_source` correction is unaffected, because it was about the shape of
+the provider's object and not about what this build does with it.
+
 The wire rail's answer does not transfer, and it is worth knowing why rather than
 assuming it should: `increase-wire.ts` books an inbound credit in exactly one
 case, `wire_transfer.updated/reversed`, where attribution comes from **our own
@@ -298,8 +309,10 @@ source of truth; the database is a deployed copy of it.
 
 6. **Verify against the live database.**
    `set -a; . ./.env; set +a; RUN_DB_TESTS=1 pnpm test src/lib/rails/semantics.test.ts`
-   asserts the deployed table is exactly what the seed file seeds — same keys,
-   same rails, same canonical kinds, same semantics, same value-date sources.
+   asserts the deployed table is exactly what the seed file seeds — same keys in
+   both directions, same rails, same canonical kinds, same semantics, same
+   value-date sources, and the same `note`. A key that is live and not seeded
+   fails naming the key; see §7.
 
 ### Changing an existing row
 
@@ -318,9 +331,10 @@ it mis-dated, and the correction pass is the hard half.
 | `db/migrations/0001_ledger.sql` | the table, `PRIMARY KEY (provider, provider_event_type)` |
 | `db/migrations/0025_wires.sql` | the eight wire rows, inserted directly with their measurements |
 | `db/migrations/0039_inbound_recall.sql` | the inbound ACH recall row corrected, and the inbound credit note's claim withdrawn (§4b) |
-| `scripts/seed.mjs` | `RAIL_EVENT_SEMANTICS` — the 22 rows, source of truth for those 22 |
+| `db/migrations/0042_virtual_account_numbers.sql` | both inbound ACH notes rewritten again, once an inbound credit became attributable |
+| `scripts/seed.mjs` | `RAIL_EVENT_SEMANTICS` — all 30 rows, source of truth for the table |
 | `src/lib/rails/semantics.ts` | the reader. No default, ever |
-| `src/lib/rails/semantics.test.ts` | 22 assertions, one per seeded row, plus the characterisation test |
+| `src/lib/rails/semantics.test.ts` | 30 assertions, one per seeded row, plus the characterisation test and the live comparison (§7) |
 | `src/lib/webhooks/consumers/lithic-card.ts` | the card consumer that asks |
 | `src/lib/webhooks/consumers/increase-wire.ts` | the wire consumer that asks |
 | `src/lib/webhooks/consumers/increase-ach.ts` | the ACH consumer that asks — outbound in §4, inbound in §4b |
@@ -329,34 +343,87 @@ it mis-dated, and the correction pass is the hard half.
 
 ---
 
-## 7. The live table is 30 rows; `scripts/seed.mjs` seeds 22
+## 7. The live table and `scripts/seed.mjs` both hold 30 rows
 
-**State this before anyone re-seeds.** `scripts/seed.mjs` is the source of truth
-for the 22 rows it carries, and it is not the source of truth for the table,
-because two migrations have written rows directly:
+**This section used to be a warning. It is now a record and a rule.**
+
+### What the gap was
+
+`scripts/seed.mjs` carried 22 rows and the deployed table held 30, because
+migrations had written to it directly:
 
 | | rows | what it wrote |
 | --- | --- | --- |
 | `scripts/seed.mjs` | 22 | the card, ACH and USDC rows |
 | `0025_wires.sql` | +8 | the wire rows, with the Fedwire measurements in each note |
 | `0039_inbound_recall.sql` | 0 | **changed** two existing rows: one `value_date_source`, two notes |
+| `0042_virtual_account_numbers.sql` | 0 | **changed** the same two notes again, once an inbound credit became attributable |
 
-`RUN_DB_TESTS=1 pnpm test src/lib/rails/semantics.test.ts` asserts
-`live ↔ seed` and **has been red since 0025**, on the length check
-(`expected live to have a length of 22 but got 30`). It was red before
-0039 and is red after it, for the same reason and by the same eight rows.
-`pnpm test` without credentials is unaffected — the live comparison is gated.
+`RUN_DB_TESTS=1 pnpm test src/lib/rails/semantics.test.ts` had been red since
+0025 on the length check (`expected live to have a length of 22 but got 30`).
 
-**Required follow-up, for whoever owns the seed.** 0039's correction is one
-field, and until it is mirrored a re-seed silently reverts a measured fix,
-because the seed's insert is `ON CONFLICT ... DO UPDATE`. Two one-line changes:
+**The red test was the symptom and not the danger.** The insert in the seed is
 
-1. `scripts/seed.mjs`, `RAIL_EVENT_SEMANTICS`, the
-   `inbound_ach_transfer.updated/returned` row:
-   `valueDateSource: "payload.return.created_at"` →
-   `valueDateSource: "payload.transfer_return.returned_at"`.
-2. `src/lib/rails/semantics.test.ts`, `EXPECTED`, the same row: the same string.
+```sql
+ON CONFLICT (provider, provider_event_type) DO UPDATE
+  SET rail = EXCLUDED.rail, canonical_kind = EXCLUDED.canonical_kind,
+      semantics = EXCLUDED.semantics,
+      value_date_source = EXCLUDED.value_date_source,
+      note = EXCLUDED.note
+```
 
-Both notes should be brought across too; they are long, and they are the review.
-Neither file was in the write set of the change that measured this, which is why
-this section exists instead of the edit.
+so the seed does not merely lag the table, it **overwrites** it. With the seed
+holding `payload.return.created_at`, the next `node scripts/seed.mjs` would have
+put back a path that does not exist on an `inbound_ach_transfer` object.
+`valueDateFromSource()` returns `null` for a path that is absent and the consumer
+parks rather than guessing, so every inbound recall would have parked with no
+value date — a measured fix reverted by a routine command, with nothing red to
+say so. Eight wire rows were exposed the other way round: a database stood up
+from the seed alone came up with no wire classifications at all.
+
+### What is true now
+
+Both hold the same 30 rows, and the three copies are tied together:
+
+| | rows |
+| --- | --- |
+| `scripts/seed.mjs`, `RAIL_EVENT_SEMANTICS` | 30 — the 22 plus the eight wire rows, mirrored verbatim from `0025_wires.sql` |
+| `src/lib/rails/semantics.test.ts`, `EXPECTED` | 30 — one reviewed `it()` per row |
+| the deployed table | 30 |
+
+The inbound recall row reads `payload.transfer_return.returned_at` in all three,
+and both inbound ACH notes are the deployed text — 0039's measurement and 0042's
+rewrite — so a re-seed carries them forward instead of reverting them.
+
+**Verified, not asserted:** `node scripts/seed.mjs` was run against Neon after
+the change and reported `rail_event_semantics  no change  30 already present`,
+and a column-by-column re-read of the table before and after was identical.
+
+### How it stays shut
+
+`src/lib/rails/semantics.test.ts` §7 no longer compares a count. It compares the
+KEY SETS in both directions and then every one of the seven columns, `note`
+included:
+
+* **a key live and not in the seed** fails naming that key, with the sentence
+  that a migration inserted it, the seed will not remove it, but a database
+  stood up from the seed alone comes up without it and every delivery it
+  classifies parks;
+* **a key in the seed and not live** fails with the re-seed command;
+* **any column that differs**, `note` included, fails on that row — because
+  `note = EXCLUDED.note` means a stale note in the seed is a review sentence a
+  re-seed silently reverts, which is the same failure as a stale
+  `value_date_source` with a smaller blast radius.
+
+`pnpm test` without credentials is unaffected: the live half is gated behind
+`RUN_DB_TESTS=1`, and the `seed ↔ EXPECTED` half runs in CI with no database.
+
+### The rule this leaves behind
+
+**A migration may deploy a row. It may not be the only place the row exists.**
+If you write `INSERT INTO rail_event_semantics` in a migration, add the row to
+`RAIL_EVENT_SEMANTICS` in `scripts/seed.mjs` and to `EXPECTED` in
+`src/lib/rails/semantics.test.ts` in the same change — §5 is the checklist — and
+if you CHANGE a deployed row, mirror the new `value_date_source` and the new
+`note` into the seed in that same change. The seed is the source of truth for
+this table; a migration is how a change reaches the deployed copy of it.

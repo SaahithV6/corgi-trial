@@ -57,19 +57,35 @@ and 04:41Z**. Re-run them before the debrief and quote the new run, not this one
 | `curl /api/health` | **7 of 7 live**, database reachable 108 ms, commit `4c682e1` | 04:28:33Z |
 | `POST /api/mcp` `tools/list` | **8 tools** — 7 read, 1 that queues for a human | 04:29:36Z |
 
-### 0.0 RE-RUN — 2026-09-11 between 09:38Z and 10:02Z, against commit `544b481`
+### 0.0 RE-RUN — 2026-09-11 between 09:38Z and 10:05Z
 
 **The table above is left exactly as it was measured at 04:26–04:41Z. This is
 the re-run it asks for**, against the deployed origin and the live Neon
 database. Quote this one, and re-run it again before the room.
 
+**Two caveats on this table before its numbers are quoted, because both bear on
+how much any of them is worth.**
+
+- **The deployment moved underneath the run.** `/api/health` reported commit
+  `544b481` at 09:38:36Z and `2c13805` at 09:59:12Z. Another worker deployed
+  mid-sweep. Everything below was taken against one of those two builds and the
+  row says which where it matters.
+- **`/api/health` read `ok` at 09:38:36Z and `degraded` at 09:59:12Z, and the
+  second reading is not a regression — it is this run's own live fire.** The
+  cause is `webhookHealth.degradedBy: ["lithic"]`: last Lithic delivery 538 s
+  earlier, inside the documented 180–900 s `stale` band, *"silent for longer
+  than 180s after recent traffic — treated as an outage"*. It returns to `ok`
+  on its own past 900 s. **What is no longer degrading it is the thing that used
+  to**: `webhookProcessing.degradedBy` is now `[]`.
+
 | Command | Result | Taken at |
 | --- | --- | --- |
 | `curl /api/health` | `status: "ok"`, **7 of 7 live**, database reachable 149 ms, commit `544b481` | 09:38:36Z |
+| `curl /api/health` *(again, after live fire)* | `status: "degraded"`, **7 of 7 live**, commit `2c13805`; `webhookHealth.degradedBy: ["lithic"]`, `webhookProcessing.degradedBy: []` | 09:59:12Z |
 | `node scripts/dbcheck.mjs` | **36 passed, 2 failed** — both failures deliberate, item 1 below | 09:40Z |
 | `node scripts/dbcheck.mjs --prove` | **22 of 22 invariant views, 24 proofs**, 8 of them needing a trigger disabled on the owner connection; **61 passed, 2 failed** | 09:41Z |
-| `node scripts/livefire.mjs` | **7 PASS / 0 FAIL / 1 SKIP of 8 attacks**, 334 s | 09:43:31 – 09:49:05Z |
-| `node scripts/coreloop.mjs` | **6 PASS / 1 FAIL / 0 SKIP of 7 legs**, 84 s, 104 HTTP calls to the deployed origin + 3 to Lithic, invariants 36/2 | 09:49:20 – 09:50:44Z |
+| `node scripts/livefire.mjs` | **7 PASS · 0 FAIL · 1 SKIP**, across all eight attacks, 334 s | 09:43:31 – 09:49:05Z |
+| `node scripts/coreloop.mjs` | **6 PASS · 1 FAIL · 0 SKIP**, across all seven legs, 84 s, 104 HTTP calls to the deployed origin + 3 to Lithic, invariants 36/2 | 09:49:20 – 09:50:44Z |
 | `node scripts/compliance.mjs` | **25 PASS / 5 FAIL / 0 WARN / 4 UNKNOWN / 7 CITED of 41**, 22 s | 09:51Z |
 | `node scripts/audit-claims.mjs` | **exit 1 — 7 contradictions**, all of them false positives; §0.0b | 09:39Z |
 
@@ -108,12 +124,12 @@ failures the 04:34Z run found being genuinely closed, not re-labelled.
 rule matches `/(\d+)\s+(?:live of|of)\s+(\d+)/` and fires on **any** "N of 7"
 in any document, whatever the seven are:
 
-| Where | What it reads | What it is |
+| Where | What the checker read there | What that seven actually is |
 | --- | --- | --- |
-| `DECISIONS.md:2846` | `PASS 7 FAIL 0 SKIP 0 of 7 legs` | coreloop's **seven legs** |
-| `docs/CUT-LIST.md:42` | `PASS 6 · FAIL 1 · SKIP 0 of 7` | coreloop's seven legs again |
-| `docs/CUT-LIST.md:87` | `understood the spelling "N of 7" only` | the log **quoting the checker's own historical bug** |
-| `docs/RAILS.md:66–69` | `5 of 7`, `4 of 7`, `6 of 7`, `3 of 7` | the rail capability matrix's **seven adapters** |
+| `DECISIONS.md:2846` | a coreloop scoreboard line, as at 05:55Z | coreloop's **seven legs** |
+| `docs/CUT-LIST.md:42` | a coreloop scoreboard line, as at 08:34Z | coreloop's seven legs again |
+| `docs/CUT-LIST.md:87` | the cut list quoting this checker's own historical bug — it said it understood one spelling only | a **quotation**, not a claim |
+| `docs/RAILS.md:66–69` | four capability-matrix cells, each an adapter count, as at that reading | the rail matrix's **seven adapters** |
 
 Three separate populations of seven, none of them integration slots. The
 checker's second rule — the one that would catch an automatic fail — reports
@@ -2224,8 +2240,17 @@ orphan token; the dead letters were retained and **nothing re-drove them**.
 **Increase went to zero dead, and it did not get there by deletion.** No
 `increase` row carries a `dead_lettered_at` at all any more (243 rows, 0
 non-null), and **no row anywhere in the table carries the string "no consumer
-registered"**. The consumer was registered and the backlog redriven;
-`/api/health` reads `status: "ok"` in consequence, not `degraded`.
+registered"**. The consumer was registered and the backlog redriven.
+
+**What that did to `/api/health`, stated precisely rather than as "it reads
+ok".** The dead-letter backlog no longer degrades the deployment at all:
+`webhookProcessing.degradedBy` is `[]`, Increase's `deadLettered.count` is `0`,
+and Lithic's 26 are reported `supersededByConsumption: true`,
+`degradesDeployment: false` — *"history, not a live drop"*, with
+`clearedBy: "node scripts/redrive.mjs --apply"` naming the fix nobody has run.
+So the endpoint reads `ok` at rest. It read `degraded` at 09:59:12Z for a
+different and correct reason: Lithic had been silent 538 s after recent traffic,
+which is inside the 180–900 s `stale` band, because **live fire had just run**.
 
 **Three things here are still real and should read as real.** Lithic's **26 dead
 letters** are unchanged — every one is *"parked 12 times waiting for

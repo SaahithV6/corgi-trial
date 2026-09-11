@@ -276,6 +276,69 @@ export interface IncreaseAchTransfer {
 }
 
 /**
+ * THE INBOUND OBJECT, AND IT IS NOT THE OUTBOUND ONE.
+ *
+ * MEASURED on the sandbox, 2026-09-11, on
+ * `sandbox_inbound_ach_transfer_n8dm6ffh9tijbi27of5b` — a real $2,500.00 credit
+ * created with `POST /simulations/inbound_ach_transfers` and then returned with
+ * `POST /inbound_ach_transfers/{id}/transfer_return`. The difference is exactly
+ * where a value date goes wrong:
+ *
+ *   outbound `ach_transfer`          inbound `inbound_ach_transfer`
+ *   -----------------------------    ------------------------------------
+ *   return.created_at                transfer_return.returned_at
+ *   return.trace_number              trace_number   (on the object itself)
+ *   return.return_reason_code        transfer_return.reason
+ *   settlement.settled_at            settlement.settled_at        (same)
+ *   -                                effective_date, account_number_id
+ *
+ * `account_number_id` is the field that says WHICH OF OUR ACCOUNT NUMBERS the
+ * originator addressed, and — since `db/migrations/0042_virtual_account_numbers.sql`
+ * issued one per business — therefore whose money it is. It was the same single
+ * FBO number for every business before that, which is why every inbound credit
+ * parked. See `./account-numbers.ts`.
+ */
+export interface IncreaseInboundAchTransfer {
+  readonly id: string;
+  /** Integer USD cents, always positive on a credit. */
+  readonly amount: number;
+  readonly account_id?: string | null;
+  readonly account_number_id?: string | null;
+  readonly direction?: string | null;
+  readonly status: string;
+  readonly created_at: string;
+  readonly effective_date?: string | null;
+  readonly trace_number?: string | null;
+  readonly originator_company_name?: string | null;
+  readonly originator_company_entry_description?: string | null;
+  readonly settlement?: { readonly settled_at?: string | null } | null;
+  readonly acceptance?: { readonly accepted_at?: string | null; readonly transaction_id?: string | null } | null;
+  readonly decline?: { readonly reason?: string | null } | null;
+  readonly transfer_return?: {
+    readonly reason?: string | null;
+    readonly returned_at?: string | null;
+    readonly transaction_id?: string | null;
+  } | null;
+}
+
+/**
+ * [DOCS] One virtual account number. Several hang off one `account_id`, and an
+ * inbound payment names the one it was addressed to — which is what makes an
+ * inbound credit attributable at all. See `./account-numbers.ts`.
+ */
+export interface IncreaseAccountNumber {
+  readonly id: string;
+  readonly account_id: string;
+  readonly account_number: string;
+  readonly routing_number: string;
+  readonly name: string;
+  readonly status: string;
+  readonly created_at: string;
+  readonly idempotency_key: string | null;
+  readonly inbound_ach?: { readonly debit_status?: string | null } | null;
+}
+
+/**
  * [DOCS] The webhook body. Note what it does NOT contain: any transfer state.
  * It is a pointer. See `parseEvent`.
  */
@@ -417,6 +480,135 @@ export class IncreaseAchRail implements PaymentRail {
       `/ach_transfers/${encodeURIComponent(transferId)}`,
     );
     return this.mapTransfer(t);
+  }
+
+  /**
+   * `GET /inbound_ach_transfers/{id}` — money somebody sent US.
+   *
+   * Returned raw rather than mapped to a `RailTransfer`. The mapping exists to
+   * normalise OUR instruction's lifecycle (created → submitted → settled →
+   * returned, with the `settlement.settled_at` promotion `mapTransfer`
+   * documents); an arrival has a different lifecycle, a different return shape,
+   * and one field no outbound transfer has — `account_number_id`, which is the
+   * only thing on the message that can say whose money it is. Flattening it
+   * into the outbound shape would throw that field away at the door.
+   *
+   * This is the method `src/lib/webhooks/consumers/increase-ach.ts` used to
+   * open-code as a bare `fetch`, with a comment saying it belonged here. It
+   * does, and the reason is not tidiness: a bare fetch has no error
+   * classification, so a 500 from Increase and a malformed body were
+   * indistinguishable at the call site from "this transfer does not exist".
+   */
+  getInboundTransfer(transferId: string): Promise<IncreaseInboundAchTransfer> {
+    return this.request<IncreaseInboundAchTransfer>(
+      'GET',
+      `/inbound_ach_transfers/${encodeURIComponent(transferId)}`,
+    );
+  }
+
+  // -- account numbers ------------------------------------------------------
+
+  /**
+   * `GET /account_numbers` — every virtual number on the programme.
+   *
+   * The read that measured the gap this rail spent its life inside: on
+   * 2026-09-11 it returned EXACTLY ONE object, `sandbox_account_number_
+   * 96mzhz3n61f5p0jpvytc` (7467448488 / 123308582, name "primary"), on the
+   * programme's own FBO account and shared by all six businesses on the book.
+   * An inbound credit names `account_number_id`, so the field that should
+   * identify the customer identified the programme, and every inbound credit
+   * parked as unattributable — correctly.
+   */
+  async listAccountNumbers(limit = 100): Promise<readonly IncreaseAccountNumber[]> {
+    const page = await this.request<{ data: readonly IncreaseAccountNumber[] }>(
+      'GET',
+      `/account_numbers?limit=${limit}`,
+    );
+    return page.data;
+  }
+
+  /**
+   * `POST /account_numbers` — issue a virtual number for one customer.
+   *
+   * `idempotencyKey` is NOT optional in practice and the reason is measured: a
+   * repeat POST carrying a key that has already been used answers `409
+   * idempotency_key_already_used_error` with `resource_id` naming the number it
+   * already issued — it does not replay the object. That is a stronger
+   * guarantee than a replay (the provider refuses to issue a second number for
+   * one key), and it is why `scripts/provision-account-numbers.mjs` keys on the
+   * business id and recovers by fetching `resource_id`. A key derived from a
+   * clock or a run id would make that recovery unreachable and leave an orphan
+   * account number at the provider after every crash.
+   *
+   * `inbound_ach.debit_status` defaults to `"allowed"` at Increase, which lets
+   * anyone holding the digits PULL money out. This build does not model an
+   * inbound ACH debit — the consumer parks one under `increase_debit_pull` — so
+   * every number it issues blocks them.
+   */
+  createAccountNumber(args: {
+    readonly accountId: string;
+    readonly name: string;
+    readonly idempotencyKey: string;
+    readonly inboundDebitStatus?: 'allowed' | 'blocked';
+  }): Promise<IncreaseAccountNumber> {
+    return this.request<IncreaseAccountNumber>('POST', '/account_numbers', {
+      body: {
+        account_id: args.accountId,
+        name: args.name,
+        inbound_ach: { debit_status: args.inboundDebitStatus ?? 'blocked' },
+      },
+      idempotencyKey: args.idempotencyKey,
+    });
+  }
+
+  // -- inbound simulation ---------------------------------------------------
+  //
+  // These two are the ONLY way to exercise an arrival end to end: nothing this
+  // programme does can make a stranger's bank send it money, and the brief's
+  // item 5 — "an inbound payment is recalled" — cannot be demonstrated without
+  // one. Both are real Increase endpoints against the real sandbox, and both
+  // produce real signature-verified webhook deliveries to the deployed
+  // endpoint; `/simulations/` marks whose side the origination is played from,
+  // not whether the object is real.
+
+  /** `POST /simulations/inbound_ach_transfers` — a stranger pays a customer. */
+  simulateInboundAchTransfer(args: {
+    readonly accountNumberId: string;
+    readonly amountCents: number;
+    readonly companyName?: string;
+    readonly companyEntryDescription?: string;
+  }): Promise<IncreaseInboundAchTransfer> {
+    return this.request<IncreaseInboundAchTransfer>('POST', '/simulations/inbound_ach_transfers', {
+      body: {
+        account_number_id: args.accountNumberId,
+        amount: args.amountCents,
+        ...(args.companyName === undefined ? {} : { company_name: args.companyName }),
+        ...(args.companyEntryDescription === undefined
+          ? {}
+          : { company_entry_description: args.companyEntryDescription }),
+      },
+    });
+  }
+
+  /**
+   * `POST /inbound_ach_transfers/{id}/transfer_return` — send it back.
+   *
+   * A PRODUCTION endpoint, not a simulation: this is the RECEIVING bank (us)
+   * returning a credit it does not want, which is a thing a real programme
+   * really does. MEASURED: the object comes back `status: "returned"` with ONE
+   * new block, `transfer_return {reason, returned_at, transaction_id}`, and no
+   * `return` key anywhere — which is the difference `db/migrations/0039` exists
+   * for.
+   */
+  returnInboundAchTransfer(
+    transferId: string,
+    reason: string,
+  ): Promise<IncreaseInboundAchTransfer> {
+    return this.request<IncreaseInboundAchTransfer>(
+      'POST',
+      `/inbound_ach_transfers/${encodeURIComponent(transferId)}/transfer_return`,
+      { body: { reason } },
+    );
   }
 
   // -- events ---------------------------------------------------------------

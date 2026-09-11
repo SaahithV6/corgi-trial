@@ -149,6 +149,13 @@ export interface HoldOutcome {
    * moves no financial book. See `deriveCardEvents`.
    */
   readonly refusedEvents: readonly string[];
+  /**
+   * How far this payload's reversals ran past its own authorisations, in cents.
+   * Zero for every ordinary transaction. Reporting only — see
+   * `deriveCardEvents().overReversedCents` for why it is a payload-level fact
+   * and not a fold-level invariant.
+   */
+  readonly providerOverReversedCents: bigint;
   /** `H_new − H_cur`. Zero means the memo book already said the right thing. */
   readonly deltaCents: bigint;
   readonly memoEntryId: string | null;
@@ -546,6 +553,22 @@ export async function applyCardTransaction(
 
   const derived = deriveCardEvents(txn);
 
+  // A COMPLETE SNAPSHOT whose reversals exceed its authorisations. Not an
+  // out-of-order artefact — `events[]` carries the whole transaction, so there
+  // is no later delivery that explains it — and therefore a provider fact
+  // worth saying out loud. Nothing branches on it: `H(E)` is already 0 there
+  // by `closed(E)`, and the delta conversion no longer reads the negative base
+  // (migration 0043). See `deriveCardEvents().overReversedCents`.
+  if (derived.overReversedCents > 0n) {
+    rootLogger.warn("holds.provider_over_reversed", {
+      provider,
+      providerAuthId: derived.providerAuthId,
+      overReversedCents: derived.overReversedCents.toString(),
+      events: derived.events.length,
+      inboxId,
+    });
+  }
+
   const classified = await correctionEventIds(derived, conn);
   if (!classified.ok) return { status: "unclassified_step", key: classified.key };
 
@@ -616,6 +639,7 @@ export async function applyCardTransaction(
     state: recorded.state,
     closurePosted: recorded.closurePosted,
     refusedEvents: derived.refused,
+    providerOverReversedCents: derived.overReversedCents,
     deltaCents: recorded.deltaCents,
     memoEntryId: recorded.memoEntryId,
     financialEntryIds: recorded.financialEntryIds,

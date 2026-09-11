@@ -62,7 +62,7 @@
  * and ours disagree, that disagreement is surfaced as a reconciliation signal
  * rather than silently resolved in either direction.
  *
- * ─── Advice ─────────────────────────────────────────────────────────────────
+ * ─── Advice, and the base it is converted against ───────────────────────────
  *
  * An `AUTHORIZATION_ADVICE` OVERRIDES the authorised amount — 1000 → 1500 is
  * `amount: 1500`, not `amount: 500`. Our stored model sums, because
@@ -70,12 +70,65 @@
  * `v_hold_drift` reports. So an advice is converted to the delta that produces
  * its absolute figure, using the events that precede it IN THIS SAME PAYLOAD.
  *
- * That conversion is still a function of the payload alone, not of arrival
- * order, because `events[]` is append-only: an event that precedes the advice
- * can never appear in a later delivery than the advice does, so the running
- * total at the advice is the same in every payload that contains it. The
- * derived delta is therefore stable, and its `providerEventId` is the advice's
- * own Lithic token, so a redelivery deduplicates rather than double-counting.
+ * THE BASE IS CLAMPED AT ZERO, AND THAT IS THE WHOLE OF MIGRATION 0043.
+ * [MEASURED] Lithic transaction `5892c550-b966-4afb-b681-a6456e1cf3c4`,
+ * delivered 2026-09-11T09:02:58Z as one payload of six events:
+ *
+ *     AUTHORIZATION          5000  APPROVED      A =   5000
+ *     CLEARING               7340  APPROVED      C =   7340
+ *     AUTHORIZATION_REVERSAL 7340  APPROVED      A =  -2340
+ *     AUTHORIZATION_REVERSAL 5000  APPROVED      A =  -7340   <- over-reversed
+ *     AUTHORIZATION_ADVICE      0  APPROVED      delta = 0 - (-7340) = +7340
+ *     CLEARING               7340  APPROVED
+ *
+ * The network reversed $123.40 against a $50 authorisation, and the advice that
+ * followed said "the authorised amount is now ZERO". Converted against the
+ * negative running total, that advice of NOTHING became a stored
+ * `incremental_authorization` of **7340** — a $73.40 increment the network
+ * never sent, written into an append-only table. No money moved, because
+ * `closed(E)` already held on `A <= 0` and `H = max(A − C, 0)` clamps twice
+ * over, but the EVENT LOG acquired a fact that did not happen, which is the
+ * sin migration 0028 and DECISIONS 051 are both about.
+ *
+ * An advice overrides an AUTHORISED AMOUNT, and an authorised amount is not a
+ * quantity that can be negative: you cannot have authorised less than nothing.
+ * So the base is `max(A, 0)`. Where `A >= 0` — every advice this book has ever
+ * seen except the one above — nothing changes at all. Where `A < 0` the
+ * over-reversal is KEPT on the books instead of being cancelled out by a
+ * fabricated increment, and the derived delta can only ever be SMALLER than it
+ * was before, so the change can never withhold more of a customer's money.
+ *
+ * ─── Order-freedom: the claim that was true per payload and false across them ─
+ *
+ * This header used to say the conversion was "still a function of the payload
+ * alone, not of arrival order". Per payload that is true and it is worth
+ * keeping: within one `events[]` array the base is fixed, so two processors
+ * handed the same payload derive the same delta.
+ *
+ * ACROSS payloads it is NOT true, and saying so was the more useful half of the
+ * sentence to get right. The stored delta is fixed by the FIRST payload that
+ * carries the advice, because `insertCardEvents()` is
+ * `ON CONFLICT (auth_id, provider_event_id) DO NOTHING`: a later delivery that
+ * derives a different delta under the same Lithic token is silently discarded.
+ * The delta is therefore stable only under a promise Lithic makes and we do not
+ * verify — that `events[]` is append-only, so every snapshot containing the
+ * advice contains exactly the same events before it. Two ways that promise can
+ * fail to hold for US even if it holds for Lithic: our own `created` sort keeps
+ * delivered order for ties, and a redrive or a hand-built payload (livefire,
+ * fixtures) may carry a subset.
+ *
+ * The clamp does not make it true either, and pretending otherwise would be the
+ * same mistake in a new paragraph. What holds after 0043 is narrower and
+ * checkable: the base is non-negative in EVERY payload, so no snapshot can turn
+ * an advice of nothing into an increment of something.
+ *
+ * `v_advice_delta_unsound` (migration 0043) is the invariant. It recovers the
+ * base that was actually used — `absolute_amount − signed_delta`, where the
+ * absolute comes from the payload retained verbatim in `webhook_inbox` and the
+ * signed delta comes from the row we stored — and reports any advice whose base
+ * was negative, OR whose payload can no longer be found to check it against.
+ * Two inputs, neither computed from the other, which is the rule docs/HOLDS.md
+ * §9.8 says a guard has to satisfy to be worth its tick.
  */
 
 import { normalizeTransaction } from "@/lib/rails/lithic/client";
@@ -171,6 +224,26 @@ export interface DerivedCardEvents {
    * downstream has to remember to check it.
    */
   readonly refused: readonly string[];
+  /**
+   * How far the network's own reversals ran PAST its own authorisations in
+   * this payload, in cents. Zero for every ordinary transaction.
+   *
+   * This is the honest, loud form of "A(E) went negative", and the reason it
+   * lives here rather than in `model.ts` is that only here can it be said
+   * without being wrong. `A(E) < 0` is a perfectly legitimate state of the
+   * FOLD: a reversal that arrives before its authorisation puts `A` below zero
+   * and the next delivery puts it back, and that is the out-of-order case the
+   * brief tells you to survive rather than a defect to alarm on. `holdState()`
+   * therefore asserts nothing about the sign, and `model.ts` says why.
+   *
+   * A Lithic PAYLOAD is different: `events[]` carries the whole transaction, so
+   * a snapshot whose reversals exceed its authorisations is not an artefact of
+   * arrival order — there is no later delivery that explains it. That is a
+   * surprising provider fact, this build's posture is that a surprising
+   * provider fact should be VISIBLE, and `applyCardTransaction()` logs it.
+   * Nothing branches on it and no money depends on it.
+   */
+  readonly overReversedCents: bigint;
   /** What the first event we can see says about how this auth began. */
   readonly origin: AuthOrigin;
   /** `txn.created` in book time. The authorisation's own value date. */
@@ -426,9 +499,21 @@ export function deriveCardEvents(txn: Transaction): DerivedCardEvents {
       lithicEvent.type === "AUTHORIZATION_ADVICE" ||
       lithicEvent.type === "CREDIT_AUTHORIZATION_ADVICE"
     ) {
-      // Absolute → delta. See the module header for why this is still a pure
-      // function of the payload and therefore still order-free.
-      const delta = amountCents - runningAuthorised;
+      // Absolute → delta, against a base that CANNOT BE NEGATIVE.
+      //
+      // `runningAuthorised` is the sum of what the network has said so far in
+      // this payload and it is allowed to go below zero — a Lithic transaction
+      // really has over-reversed, measured, and that fact is kept rather than
+      // flattened (see the header and `overReversedCents`). But an advice
+      // overrides an AUTHORISED AMOUNT, and there is no such thing as having
+      // authorised less than nothing, so the figure this delta is measured from
+      // is the authorised position clamped at zero.
+      //
+      // Without the clamp, an advice of 0 against a base of -7340 became an
+      // `incremental_authorization` of 7340 — a fact the network never sent.
+      // With it, that advice produces `delta = 0` and no row at all.
+      const base = runningAuthorised > 0n ? runningAuthorised : 0n;
+      const delta = amountCents - base;
       if (delta === 0n) continue;
       push(
         {
@@ -467,6 +552,10 @@ export function deriveCardEvents(txn: Transaction): DerivedCardEvents {
     stepTypes,
     results,
     refused,
+    // The final running total, not the deepest excursion: a payload that dips
+    // below zero and is brought back by a later authorisation in the SAME
+    // snapshot has not over-reversed, it has been read halfway through.
+    overReversedCents: runningAuthorised < 0n ? -runningAuthorised : 0n,
     // An identity with no usable events yet is still an identity; calling its
     // origin 'clearing_first' would be a guess, and 'authorization' would be a
     // lie, so an empty payload inherits the neutral case.

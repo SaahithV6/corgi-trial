@@ -138,7 +138,63 @@ export interface AuthorizationClock {
 }
 
 export interface HoldState {
-  /** A(E). MAY BE NEGATIVE — a reversal can arrive before its authorisation. */
+  /**
+   * A(E). MAY BE NEGATIVE — a reversal can arrive before its authorisation.
+   *
+   * ─── WHY IT IS NOT FLOORED, decided in migration 0043 ──────────────────────
+   *
+   * It went to **−7340** on Lithic transaction
+   * `5892c550-b966-4afb-b681-a6456e1cf3c4`: two `AUTHORIZATION_REVERSAL`s, 7340
+   * and 5000, against one `AUTHORIZATION` of 5000. Three answers were on the
+   * table and only one of them survives contact with the arithmetic.
+   *
+   * **Flooring `A` in the fold is a provable NO-OP for `H`, so it buys nothing
+   * and costs the evidence.** If `A < 0` then `A <= 0`, so `closed(E)` is
+   * already TRUE and `H` is already 0 — by the CLOSURE arm, not by the clamp.
+   * Replace `A` with `max(A, 0)` and it is still `<= 0`, still closed, still
+   * `H = 0`. Not one customer-visible number moves. What does move is
+   * `v_card_auth_state.auth_net_cents`, which would stop being able to say that
+   * the network over-reversed. This build's posture is that a surprising
+   * provider fact is made visible, not absorbed, and flooring absorbs it in
+   * exchange for nothing.
+   *
+   * It also would not have fixed the reported harm. The damage on that
+   * transaction was done by the absolute→delta conversion in
+   * `lithic-events.ts`, which reads a RUNNING total inside one payload; an
+   * end-of-fold floor never touches that number. A fix that leaves the bug
+   * standing is not the fix.
+   *
+   * **Rejecting the second reversal at ingest** refuses a fact the network
+   * sent, which this build does nowhere else, and it cannot be done without
+   * putting cross-event judgement in the front door — each reversal is
+   * well-formed on its own; only their SUM over-reverses. Decision 050 is the
+   * standing lesson about deciding things at the front door: the verdict was
+   * discarded there and $4,451.00 was withheld that nobody had authorised.
+   *
+   * **So `A` stays unfloored — but `A >= 0` is NOT an invariant, and asserting
+   * it would be a guard that fires on correct behaviour.** A lone
+   * `authorization_reversal` is `A < 0` and it is exactly the shape the brief
+   * names: "the settlement webhook can arrive before the auth it belongs to."
+   * The fuzzer measures this rather than arguing it — **1,614 of 7,220
+   * generated sets (22.4%) reach `A < 0`, 812 of them after a real
+   * authorisation, and ZERO of them are open or holding a cent.** An invariant
+   * that went red on 22% of legitimate event sets would be worse than no
+   * invariant.
+   *
+   * What IS asserted, in `fuzz.test.ts`:
+   *
+   *     A(E) < 0  =>  closed(E)  AND  H(E) = 0
+   *
+   * — so the `max(·, 0)` clamp is the SECOND line there and not the only one,
+   * which is the opposite of how it looked from the incident.
+   *
+   * And the loud part, where it can be said without being wrong: a single
+   * Lithic PAYLOAD carries the whole `events[]` array, so a snapshot whose
+   * reversals exceed its authorisations cannot be explained by arrival order.
+   * `deriveCardEvents().overReversedCents` reports it, `applyCardTransaction()`
+   * logs it, and `dbcheck`'s GUARD REACH counts the authorisations standing at
+   * `A < 0` on every run.
+   */
   readonly authorisedCents: bigint;
   /** C(E). May exceed A(E): fuel pumps and tips over-capture routinely. */
   readonly capturedCents: bigint;

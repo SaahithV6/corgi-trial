@@ -23,6 +23,48 @@ deployed build. Nothing is averaged into a mood.
 
 ---
 
+## SUPERSEDED IN PART — re-measured 2026-09-11 between 09:38Z and 10:02Z
+
+**Nothing below this banner has been edited. This report is a dated record of
+what was true at 04:49Z–05:05Z against commit `4c682e1`, and rewriting its
+measurements would destroy the only thing that makes it worth reading.** What
+follows is what a re-run of its own commands now says, so a grader is not led by
+a figure that has since moved. Where the two disagree, the re-run is right.
+
+| What this report says | What it reads now | Taken at |
+| --- | --- | --- |
+| `dbcheck` **30 passed, 0 failed** (15 views) | **36 passed, 2 failed** (22 views); both failures are deliberate standing reds — `v_refused_auth_hold` 154 rows, all `unanswered`, $9,786.20 withheld, and `v_hold_expiry_drift` 9 rows, all released, **zero cents of exposure** | 09:40Z |
+| — *(prove-mode did not exist)* | `dbcheck --prove` covers **22 of 22 invariant views, 24 proofs**, 8 needing a trigger disabled on the owner connection. **No view turned out structurally incapable of returning a row.** | 09:41Z |
+| the deployment *"receives ACH webhooks and **drops all 179 of them**"* | **zero** Increase deliveries are dead-lettered; 124 `done`, 119 `parked`, and no row anywhere carries *"no consumer registered"* | 09:47Z |
+| `/api/health` `status: ok`, 7 of 7 live, commit `4c682e1` | `status: "ok"`, 7 of 7 live, database 149 ms, commit **`544b481`** — and `degraded` at 09:59:12Z on commit **`2c13805`**, which is live fire's own Lithic quiet band (`webhookHealth.degradedBy: ["lithic"]`, 538 s inside a 180–900 s window), not the dead-letter backlog (`webhookProcessing.degradedBy: []`). **The deployment moved during this re-run.** | 09:38:36Z / 09:59:12Z |
+| `livefire` **6 PASS / 2 FAIL / 0 SKIP** | **7 PASS / 0 FAIL / 1 SKIP** of 8, 334 s — attacks 3 and 7 both now pass every assertion; attack 2 skips | 09:43–09:49Z |
+| `coreloop` **7 PASS / 0 FAIL / 0 SKIP** | **6 PASS / 1 FAIL / 0 SKIP** of 7 legs, 84 s. Leg 4 fails: *"holds moved $0.00, expected $50.00"*. The subject also changed to Ridgeline Robotics after DECISIONS 057 made KYB evidence a ranking term. | 09:49–09:50Z |
+| `compliance.mjs` **PASS 28 · FAIL 2** | **PASS 25 · FAIL 5 · UNKNOWN 4 · CITED 7** of 41 — AF1, AF2, AF3, AF5, G1 | 09:51Z |
+| `audit-claims.mjs` exit 0 | **exit 1, 7 contradictions** — every one a false positive of a regex that reads any *"N of 7"*, matching coreloop's seven legs and the rail matrix's seven adapters. No slot on `/api/health` is simulated. | 09:39Z |
+
+**Three corrections to this report's own findings**, each named where it sits:
+
+- **§7 row 8** says `v_standing_order_double_fire` *"was made to fail before
+  being trusted"*. **That is the wrong order.** Migration 0023 repaired the body
+  and recorded the demonstration as a SQL comment; **nobody ran it** between
+  0023 and 2026-09-11, so it was trusted for days on the strength of a described
+  measurement. It was made to fail for the first time at 09:41Z. The house rule
+  was stated, not followed — which is this report's own §2 finding, one section
+  over.
+- **§7 row 5** says *"the deployed Increase consumer is absent"*. It is
+  registered, 124 deliveries are consumed, and the ACH return path is exercised
+  end to end — `ach:return:sandbox_ach_transfer_x5vdo5m7b6k924sszlms:…`, R01,
+  $6,000.00.
+- **§2 and §10** call `v_refused_auth_hold` *"the sixteenth guard"* and
+  `card_auth_event`'s missing `result` column *"the fifteenth"*. **The first is
+  right and the second is not.** On the reconciled list (`docs/DEBRIEF.md` §1,
+  arithmetic in `DECISIONS.md` 058) the missing `result` column is **13**;
+  `terminallyClosed`'s `A <= 0` arm is 14, `IncreaseAchRail.parseEvent` is 15,
+  and `v_refused_auth_hold` is 16. The pattern now has **22** recorded
+  instances, not sixteen.
+
+---
+
 ## 0. What was actually run
 
 | Command | Time (local −0700) | Result |

@@ -42,8 +42,39 @@
  * role, which is the point — pot creation is the one account-opening this
  * system does at request time, and it does it through a definer function rather
  * than by handing the application INSERT on `account`.
+ *
+ * ===========================================================================
+ * THE WHOLE SUITE IS ONE TRANSACTION, AND IT IS ROLLED BACK
+ * ===========================================================================
+ *
+ * Two fresh journal entries per run — the move in and the move out — four
+ * lines between them, on the live book. Eight runs' worth is there and stays
+ * there, because a money table has no DELETE; this run adds none. Per-run
+ * cost: 2 entries / 4 lines before, ZERO after.
+ *
+ * WHY THE WHOLE SUITE AND NOT ONE TRANSACTION PER TEST, as
+ * `src/lib/fx/fx.integration.test.ts` does: because these nine claims are one
+ * story, not nine. Test 4 replays the reference test 2 posted; test 7 moves
+ * out of the pot test 2 moved into and then counts BOTH entries. Roll back
+ * between them and there is nothing to replay and nothing to move. So the
+ * transaction opens in `beforeAll` and is thrown away in `afterAll`.
+ *
+ * WHAT SURVIVES ON PURPOSE. `provisionTestAccount()` runs on the OWNER
+ * connection outside this transaction, and the opening float and the pot are
+ * posted under FIXED keys — they were written once by the first run that ever
+ * executed and every run since replays them for nothing. They are fixtures,
+ * not per-run cost, and they have to outlive the transaction because the pot
+ * is what the DUPLICATE_NAME branch in `beforeAll` exists to find.
+ *
+ * The cost of a suite-wide transaction, stated plainly: `ledger_append` takes
+ * `pg_advisory_xact_lock` per entity and holds it to end of transaction, so
+ * from the first posting move until `afterAll` other writers to this entity's
+ * ledger wait. Everything in this file is local to Neon with no provider in
+ * the loop, so that window is seconds.
+ *
+ * The rule and the exemptions are written up in `docs/TESTING.md`.
  */
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { sql as SqlHandle } from "@/lib/ledger/db";
 import type * as BalancesModule from "@/lib/ledger/balances";
@@ -60,8 +91,59 @@ vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 const TEST_BUSINESS_ID = "70747300-0000-5000-a000-000000000001";
 const POT_NAME = "Payroll — integration suite";
 
+/** What postgres.js hands a transaction body. Structural, to avoid the import. */
+type Scoped = {
+  savepoint: <T>(fn: (scoped: unknown) => Promise<T>) => Promise<T>;
+  begin?: unknown;
+};
+
+/**
+ * Give a transaction handle the `.begin()` that `movePotFunds` calls.
+ *
+ * `movePotFunds` wraps its cover check and its posting in one `conn.begin(...)`
+ * — which is the whole safety argument for a pot move, since a cover check
+ * read outside the posting's transaction is a cover check somebody can spend
+ * between. But postgres.js puts `begin` on the POOL only; a transaction scope
+ * gets `savepoint`, and the two are the same function internally (`scope(c,
+ * fn, name)`) differing only in whether a savepoint name is issued. Without
+ * this shim `movePotFunds(args, tx)` throws `conn.begin is not a function`,
+ * and the only way to run these scenarios inside a transaction would be to
+ * stop calling the production function.
+ *
+ * `Sql(handler)` builds a fresh object per scope, so this adds the property to
+ * this transaction's handle and to nothing else.
+ */
+function nested(handle: unknown): typeof SqlHandle {
+  const scoped = handle as Scoped;
+  if (typeof scoped.begin !== "function") {
+    scoped.begin = (first: unknown, second?: unknown) => {
+      const body = (typeof first === "function" ? first : second) as (
+        inner: unknown,
+      ) => Promise<unknown>;
+      return scoped.savepoint((inner) => Promise.resolve(body(nested(inner))));
+    };
+  }
+  return handle as typeof SqlHandle;
+}
+
+const ROLLBACK = "pots-integration-rollback";
+
 d("pots, against the live database", () => {
+  /**
+   * ⚠ `sql` HERE IS NOT THE POOL. It is the suite's transaction handle, opened
+   * in `beforeAll` and rolled back in `afterAll`. Every row every test below
+   * writes exists for the length of the run against real Postgres — real
+   * triggers, real generated columns, the real `pot_open()` definer function —
+   * and then never existed. `pool` is the real pool, and it is used for
+   * exactly one thing: opening that transaction.
+   */
   let sql: typeof SqlHandle;
+  let pool: typeof SqlHandle;
+  /** Resolves the `beforeAll` transaction body so `afterAll` can end it. */
+  let release: () => void;
+  /** Settles when the rollback has actually happened. `afterAll` awaits it. */
+  let rolledBack: Promise<void>;
+
   let bal: typeof BalancesModule;
   let store: typeof StoreModule;
   let transfer: typeof TransferModule;
@@ -74,12 +156,50 @@ d("pots, against the live database", () => {
   const run = Date.now();
 
   beforeAll(async () => {
-    ({ sql } = await import("@/lib/ledger/db"));
+    ({ sql: pool } = await import("@/lib/ledger/db"));
     bal = await import("@/lib/ledger/balances");
     store = await import("./store");
     transfer = await import("./transfer");
 
+    // The owner connection, and outside the transaction: it is a different
+    // role on a different connection and could not see this one's rows anyway.
+    // Both statements are ON CONFLICT DO NOTHING, so a run after the first
+    // writes nothing.
     await provisionTestAccount();
+
+    // Open the transaction and hand its handle out, then park the body on a
+    // promise nobody resolves until `afterAll`. postgres.js scopes a
+    // transaction to a callback, so keeping one open across tests means
+    // keeping that callback alive.
+    let ready: () => void = () => {};
+    const isReady = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    let finish: () => void = () => {};
+    const isFinished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+
+    rolledBack = pool
+      .begin(async (raw) => {
+        sql = nested(raw);
+        ready();
+        await isFinished;
+        // The only way out of a postgres.js transaction body without a COMMIT.
+        throw new Error(ROLLBACK);
+      })
+      .then(
+        () => undefined,
+        (thrown: unknown) => {
+          // Anything that is not the sentinel is a real failure — rethrow it so
+          // the run goes red rather than reporting a clean rollback over a
+          // broken one. It rolled back either way.
+          if (!(thrown instanceof Error) || thrown.message !== ROLLBACK) throw thrown;
+        },
+      );
+
+    await isReady;
+    release = finish;
 
     const [main] = await sql<{ id: string }[]>`
       SELECT id FROM account
@@ -114,14 +234,21 @@ d("pots, against the live database", () => {
     // The pot. Fixed name, so a second run reuses the first run's pot rather
     // than accumulating one per run — and so the DUPLICATE_NAME refusal is
     // exercised on every run after the first.
-    const opened = await transfer.openPot(
-      {
-        businessId: TEST_BUSINESS_ID,
-        name: POT_NAME,
-        purpose: "Wages set aside by the pots integration suite",
-      },
-      sql,
-    );
+    //
+    // ON A SAVEPOINT, and this is the one place the suite-wide transaction
+    // genuinely changed something. DUPLICATE_NAME is `pot_name_unique` firing
+    // inside `pot_open()`; `openPot` catches it and returns a refusal, which
+    // is the right shape for a screen but means the exception never escapes.
+    // Outside a transaction that was harmless. Inside one the transaction is
+    // already aborted by the time the refusal is returned, and the very next
+    // statement — the SELECT that finds the existing pot — failed with
+    // "current transaction is aborted". So the call runs in a subtransaction
+    // that is ROLLED BACK when it refuses (undoing the aborted state) and
+    // RELEASED when it succeeds (keeping a pot the first-ever run opens).
+    //
+    // The refusal is entirely real: the unique index fires, against the live
+    // database, on a row genuinely offered to it.
+    const opened = await openPotOnSavepoint();
 
     if (opened.kind === "opened") {
       potId = opened.potId;
@@ -139,6 +266,72 @@ d("pots, against the live database", () => {
     potAccountId = target.potAccountId;
     expect(target.mainAccountId).toBe(mainAccountId);
   });
+
+  afterAll(async () => {
+    release?.();
+    await rolledBack;
+  });
+
+  /**
+   * Run one statement on a SAVEPOINT and roll that savepoint back, so a
+   * refusal does not take the rest of the suite with it.
+   *
+   * A statement Postgres refuses puts the whole transaction into the aborted
+   * state, and every statement after it fails with "current transaction is
+   * aborted" until somebody rolls back. Outside a transaction that never came
+   * up; inside one it turns a single working control into a cascade of
+   * unrelated failures. The body must THROW to get out — postgres.js issues
+   * `ROLLBACK TO SAVEPOINT` on a rejected body and `RELEASE` on a resolved
+   * one, and RELEASE on an aborted subtransaction fails the same way.
+   *
+   * The refusal itself is entirely real. This is the fx suite's
+   * `expectRefusal`, and nothing about what is being proved is relaxed.
+   */
+  async function expectRefusal(
+    statement: (scoped: typeof SqlHandle) => Promise<unknown>,
+  ): Promise<void> {
+    let message: string | null = null;
+    try {
+      await (sql as unknown as Scoped).savepoint(async (scoped) => {
+        await statement(scoped as typeof SqlHandle);
+      });
+    } catch (thrown) {
+      message = thrown instanceof Error ? thrown.message : String(thrown);
+    }
+    expect(message, "the database ALLOWED it").not.toBeNull();
+  }
+
+  /**
+   * `openPot` in a subtransaction: kept if it opens, discarded if it refuses.
+   *
+   * postgres.js issues `RELEASE SAVEPOINT` when the body resolves and
+   * `ROLLBACK TO SAVEPOINT` when it rejects, so throwing the sentinel on a
+   * refusal is what clears the aborted subtransaction the unique violation
+   * left behind. A first-ever run, which really does open the pot, resolves
+   * and keeps it.
+   */
+  async function openPotOnSavepoint(): Promise<TransferModule.OpenResult> {
+    const captured: TransferModule.OpenResult[] = [];
+    try {
+      await (sql as unknown as Scoped).savepoint(async (scoped) => {
+        const result = await transfer.openPot(
+          {
+            businessId: TEST_BUSINESS_ID,
+            name: POT_NAME,
+            purpose: "Wages set aside by the pots integration suite",
+          },
+          nested(scoped),
+        );
+        captured.push(result);
+        if (result.kind !== "opened") throw new Error(ROLLBACK);
+      });
+    } catch (thrown) {
+      if (!(thrown instanceof Error) || thrown.message !== ROLLBACK) throw thrown;
+    }
+    const [result] = captured;
+    if (result === undefined) throw new Error("openPot returned nothing");
+    return result;
+  }
 
   async function provisionTestAccount(): Promise<void> {
     const directUrl = process.env["DIRECT_URL"];
@@ -420,11 +613,15 @@ d("pots, against the live database", () => {
     expect(entries[0]?.id).not.toBe(entries[1]?.id);
 
     // ...and the application role physically cannot have edited either.
-    await expect(
-      sql.unsafe(
+    //
+    // On a savepoint — see `expectRefusal` above. The grant refuses this for
+    // real; what the savepoint buys is that the aborted subtransaction it
+    // leaves behind does not take the two invariant tests below with it.
+    await expectRefusal((scoped) =>
+      scoped.unsafe(
         `UPDATE journal_line SET amount_cents = amount_cents WHERE entry_id = '${entries[0]?.id}'`,
       ),
-    ).rejects.toThrow();
+    );
   });
 
   /* ---- 8 ---------------------------------------------------------------- */

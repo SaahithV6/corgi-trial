@@ -128,6 +128,7 @@ function nested(handle: unknown): Db.Sql {
 }
 
 const ROLLBACK = 'wire-outbound-integration-rollback';
+const SAVEPOINT_ROLLBACK = 'wire-outbound-savepoint-rollback';
 
 suite('an outbound wire, through requestPayment()', () => {
   let requestPayment: typeof Approvals.requestPayment;
@@ -203,6 +204,44 @@ suite('an outbound wire, through requestPayment()', () => {
     release?.();
     await rolledBack;
   });
+
+  /**
+   * Run one call on a SAVEPOINT and then roll that savepoint back, keeping its
+   * return value.
+   *
+   * This exists for exactly one call site and the reason is worth the fifteen
+   * lines. `approvePayment()` makes its INSERT directly on the connection it is
+   * handed and converts a refusal into `{ ok: false }` — which is the right
+   * shape for a console but means the exception never escapes. Outside a
+   * transaction that is harmless. INSIDE one it is not: the trigger's error has
+   * already put the transaction into the aborted state, and Postgres will
+   * refuse every statement after it with "current transaction is aborted"
+   * until somebody rolls back. Two tests would then fail for a reason that has
+   * nothing to do with wires.
+   *
+   * A savepoint gives the refusal somewhere to land. The body must THROW to get
+   * out — postgres.js issues `ROLLBACK TO SAVEPOINT` on a rejected body and
+   * `RELEASE` on a resolved one, and RELEASE on an aborted subtransaction fails
+   * exactly the same way — so the sentinel is thrown after the value is
+   * captured.
+   *
+   * The refusal itself is entirely real: the trigger fires, against the live
+   * database, on a row that genuinely was inserted first. Nothing is relaxed.
+   */
+  async function onSavepoint<T>(body: (scoped: Db.Sql) => Promise<T>): Promise<T> {
+    const captured: T[] = [];
+    try {
+      await (tx as unknown as Scoped).savepoint(async (raw) => {
+        captured.push(await body(nested(raw)));
+        throw new Error(SAVEPOINT_ROLLBACK);
+      });
+    } catch (thrown) {
+      if (!(thrown instanceof Error) || thrown.message !== SAVEPOINT_ROLLBACK) throw thrown;
+    }
+    const [value] = captured;
+    if (captured.length === 0) throw new Error('the savepoint body returned nothing');
+    return value as T;
+  }
 
   const destination = {
     type: 'wire' as const,
@@ -307,9 +346,14 @@ suite('an outbound wire, through requestPayment()', () => {
 
   it('refuses the initiator approving her own wire — at the DATABASE', async () => {
     const found = await instruction(tx, `itest:${run}`);
-    const decision = await approvePayment(
-      { instructionId: found.id, actorId: PRIYA, contentHash: found.contentHash },
-      tx,
+    // On a savepoint — see `onSavepoint` above. The trigger fires for real;
+    // what the savepoint buys is that the aborted subtransaction it leaves
+    // behind does not take the next two tests with it.
+    const decision = await onSavepoint((scoped) =>
+      approvePayment(
+        { instructionId: found.id, actorId: PRIYA, contentHash: found.contentHash },
+        scoped,
+      ),
     );
     expect(decision.ok).toBe(false);
   }, 30_000);

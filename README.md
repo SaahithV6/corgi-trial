@@ -40,7 +40,20 @@ is provider-driven it calls the sandbox for real and then waits for the webhook.
 **A leg that cannot be driven through the deployed surface skips and names what
 is missing.**
 
-Last run, 2026-09-11T04:03Z, against production:
+**Current reading, 2026-09-11T09:49:20Z → 09:50:44Z, against production:
+`PASS 6 · FAIL 1 · SKIP 0` across all seven legs, 84 s, invariants 36/2, on
+Ridgeline Robotics, Inc.** Leg 4 fails — *"holds moved $0.00, expected
+$50.00"* — because the Lithic sandbox account's daily spend cap is exhausted and
+every authorisation declines at every amount; a declined authorisation correctly
+places no hold, so the leg reports that it could not be proven rather than
+passing on a weaker claim. **The subject also changed from Kettle & Crumb to
+Ridgeline Robotics**, because DECISIONS 057 found the run was ranking businesses
+by `localeCompare` after reading KYB evidence and never using it — see below.
+Run the command and read the current scoreboard there.
+
+The capture below is the **04:03Z run**, kept because it is the shape of the
+output and because the leg-by-leg narrative refers to it. It is a record, not
+the current state:
 
 ```
   THE BUSINESS — every figure below belongs to this one entity
@@ -66,13 +79,12 @@ Last run, 2026-09-11T04:03Z, against production:
 
 Seven legs, seven passes, no fails and no skips, in 85 seconds.
 
-**The business it ran on is deliberately not the demo favourite.** Every
-screenshot in this repo is of Ridgeline Robotics, and Ridgeline is the one
-business the seed script ever opened accounts for, so a core loop driven through
-Ridgeline would prove the loop works on the one entity that was arranged in
-advance. This run picks **Kettle & Crumb Bakery LLC**, which held **zero
-accounts, zero journal lines and zero payments** until a KYB approval opened its
-chart of accounts at request time — the thing migration `0021_open_accounts.sql`
+**How the run picks its business, and the mistake that changed it.** The 04:03Z
+run above picked **Kettle & Crumb Bakery LLC** on the argument that it was
+deliberately not the demo favourite: every screenshot in this repo is of
+Ridgeline Robotics, Ridgeline is the one business the seed script ever opened
+accounts for, and Kettle & Crumb held **zero accounts, zero journal lines and
+zero payments** until a KYB approval opened its chart of accounts at request time — the thing migration `0021_open_accounts.sql`
 exists to make true, because the brief's loop opens with *"open an account behind
 a real KYB check"* and until that migration the check was real and the opening
 was a seeding act. The run prints the gate's answer for every business on the
@@ -706,11 +718,22 @@ model has been widened by accident.
 | `node scripts/verify-demo.mjs` | every claim in `docs/DEMO.md` is still true of the deployed system | network |
 | `node scripts/seed.mjs` | demo data from zero, idempotently | `DIRECT_URL` |
 
-### `pnpm db:check` — 25 checks: attempt the forbidden, then assert the invariants
+### `pnpm db:check` — 38 checks: attempt the forbidden, then assert the invariants
 
 Connects as `corgi_app` — not the owner, because privileges never bind a table
 owner — and tries `UPDATE`, `DELETE` and `TRUNCATE` on the money tables. A
-success here is a failure. Run against production, 2026-09-11T04:02Z:
+success here is a failure.
+
+**Current reading, 2026-09-11T09:40Z: `36 passed, 2 failed`** over **22
+invariant views**. Both failures are deliberate and neither is softened — they
+are set out under *Honest current state* below. `node scripts/dbcheck.mjs
+--prove` additionally makes **every one of those 22 views fail on purpose**, in
+a rolled-back transaction: 24 proofs, 8 of them needing a trigger disabled on
+the owner connection, coverage computed from the same array the gate walks.
+
+The capture below is an **older run, kept because it is the output a reader
+wants to see the shape of** — production, 2026-09-11T04:02Z, when the gate held
+11 invariant views rather than 22:
 
 ```
 LEDGER INVARIANTS — attempting the forbidden, expecting refusal
@@ -983,48 +1006,139 @@ and why it posts no money.
 
 ## Honest current state
 
-Everything in this section was measured against production between 03:35 and
-04:05 on 2026-09-11, by running the command rather than by remembering what it
-last said. Where a number here disagrees with what those commands print today,
-they are right.
+**Re-measured against production between 09:38Z and 10:05Z on 2026-09-11**, by
+running each command rather than by remembering what it last said. Where a
+number here disagrees with what those commands print today, they are right.
+Every figure that moved since the previous reading is shown with the old one
+beside it, because a figure that quietly improves is as hard to trust as one
+that quietly rots.
 
-**Core loop: PASS 7, FAIL 0, SKIP 0 across all seven legs, invariants 25/25**,
-in 85 s, on Kettle & Crumb Bakery LLC — a business that held zero accounts until
-KYB approval opened them. Output at the top of this file, narrative in
-[`docs/CORE-LOOP.md`](./docs/CORE-LOOP.md).
+> **The deployed origin moved during this reading.** `/api/health` reported
+> commit `544b481` at 09:38:36Z and `2c13805` at 09:59:12Z.
 
-**`pnpm db:check`: 25 passed, 0 failed.** Output above. Three of the checks are
-new today and two of those were empty for the wrong reason before they were
-fixed — see the section above, and treat that as the more useful sentence than
-the number.
+**Core loop: PASS 6, FAIL 1, SKIP 0 across all seven legs, invariants 36/2**, in
+84 s, on **Ridgeline Robotics, Inc.** *(was: 7/0/0 on Kettle & Crumb Bakery
+LLC.)* Two things changed and both are worth saying out loud:
 
-**`/api/health`: 7 live of 7**, both must-be-live slots among them.
+- **Leg 4 now fails** — *"holds moved $0.00, expected $50.00"*. The Lithic
+  sandbox account's daily spend cap is exhausted, so every authorisation
+  declines at every amount, and a declined authorisation correctly places no
+  hold. The leg is honest about not being provable rather than passing on a
+  weaker claim.
+- **The subject changed**, because DECISIONS 057 found the run was picking its
+  business by `localeCompare` after reading KYB evidence and never using it —
+  which had chosen a business approved by the *simulator* to demonstrate leg 1's
+  *"real KYB check"*. Evidence tier is now a ranking term ahead of the alphabet,
+  and Ridgeline's director leg is live on Stripe Identity.
+
+Narrative in [`docs/CORE-LOOP.md`](./docs/CORE-LOOP.md).
+
+**`pnpm db:check`: 36 passed, 2 failed** over 22 invariant views *(was: 25
+passed, 0 failed over 11)*. **Both failures are deliberate standing reds, both
+would go green with one `WHERE` clause, and both `WHERE` clauses would be
+shaped like the failure they hide:**
+
+- **`v_refused_auth_hold` — 154 rows**, 130 holds, **$9,786.20 withheld**, every
+  one `verdict = 'unanswered'`: an authorisation is holding a customer's money
+  and no verdict from the network was ever recorded for it. These are pre-0026
+  fixture events whose payloads were not retained, so the verdict cannot be
+  recovered and **will not be invented**. Migration 0032 declined to exclude
+  them: *"the exclusion would be safe, and would still be an exclusion shaped
+  like the failure."*
+- **`v_hold_expiry_drift` — 9 rows**, all released, **zero cents of exposure**.
+  A card hold's expiry is stored twice — `hold.expires_at`, which
+  `ledger_availability()` reads, and `card_authorization.expires_at`, which
+  `v_card_auth_hold` reads. Nine fixtures bypassed `ensureAuthorization()` and
+  took two separate `now()` readings 135–158 ms apart. No money is at risk; what
+  is at risk is that for the width of that gap two bodies would answer *"has
+  this hold expired?"* differently and nothing would say so.
+
+**`compliance.mjs` AF3 spawns `dbcheck` and asserts exit 0, so AF3 reports these
+as a violation, correctly, and will until they are genuinely closed.**
+
+**`node scripts/dbcheck.mjs --prove`: 22 of 22 invariant views, 24 proofs**, 8
+of them needing a trigger disabled on the owner connection because `corgi_app`
+cannot disable one at all — which is layer 1 holding, not a limitation being
+routed around. **No view turned out to be structurally incapable of returning a
+row.** The sharpest result is `v_member_approval_without_right`, which needs
+**two** triggers switched off — `payment_instruction_event_maker_checker` and
+`payment_instruction_event_team` — and that is the finding rather than the
+workaround: 0001's maker-checker and 0033's team check **compose rather than
+overlap**, so the state that view reports is unreachable through the product.
+
+**`/api/health`: 7 live of 7**, both must-be-live slots among them. Top-level
+`status` reads **`ok` at rest** and **`degraded` for 180–900 s after a live-fire
+run** — the Lithic feed's `stale` band, *"silent for longer than 180s after
+recent traffic — treated as an outage"*. Measured `ok` at 09:38:36Z and
+`degraded` at 09:59:12Z, ten minutes after live fire. The dead-letter backlog no
+longer degrades it at all (`webhookProcessing.degradedBy: []`).
 
 **`tools/list` on the deployed MCP endpoint: 8 tools**, seven read and one
 write.
 
 **All fourteen screens answered 200 in all five states**, with five distinct
-renders each.
+renders each *(measured 04:05Z; not re-driven in this reading)*.
 
-**`node scripts/compliance.mjs`: PASS 28, FAIL 2, UNKNOWN 4, CITED 7, of 41
-checks**, in 25 s. CITED is not a pass and UNKNOWN is not a pass. The four
-UNKNOWNs are honest ones — whether the author can explain a line under
-questioning is not mechanisable and the tool refuses to fake a check for it; and
-the GitHub invitations, the video link and the evidence-pack sharing are account
-state outside this repo. **The two FAILs are below and both are real.**
+**`node scripts/compliance.mjs`: PASS 25, FAIL 5, UNKNOWN 4, CITED 7, of 41
+checks**, in 22 s *(was: PASS 28, FAIL 2)*. CITED is not a pass and UNKNOWN is
+not a pass. The four UNKNOWNs are honest ones — whether the author can explain a
+line under questioning is not mechanisable and the tool refuses to fake a check
+for it; and the GitHub invitations, the video link and the evidence-pack sharing
+are account state outside this repo. **The five FAILs are below and three of
+them are guards tripping on something other than what they guard.**
 
-**Live fire: PASS 5, FAIL 2, SKIP 1 of 8 attacks**, 314 s. The previous reading
-of this file was 7 PASS / 0 FAIL / 1 SKIP, and moving it down rather than leaving
-the old number there is the entire point of `scripts/audit-claims.mjs` existing.
+**Live fire: PASS 7, FAIL 0, SKIP 1 of 8 attacks**, 334 s *(was: 5 PASS / 2 FAIL
+/ 1 SKIP)*. Attacks 3 and 7 both now pass every assertion. **A skip is still not
+a pass**, and this run's skip is worse than the last one's, for a reason given
+below.
 
-### The two compliance failures
+### The five compliance failures
 
 **AF5 — "Secrets committed to the repo", read against git history rather than
-the tip.** Two dead sandbox credentials are alive in history. Both were rotated
-or had already expired before the working tree was scrubbed (DECISIONS 023). The
+the tip.** **Four file/shape pairs** are alive in history across 97 commits
+*(was three; the Plaid-shaped token left the list and two `whsec_`-shaped
+strings in `src/lib/chaos/` joined it)*. The credentials were rotated or had
+already expired before the working tree was scrubbed (DECISIONS 023). The
 purge needs a `filter-branch` and a force push, which is destructive and
 irreversible and has not been taken. The check is right to fail; the working tree
-is clean and the credentials are dead.
+is clean and the credentials are dead. The same run also asserts that **no
+current `.env` secret value appears in any commit** (17 values pickaxed with
+`git log -S`).
+
+**AF3 — "UPDATE or DELETE on money rows."** It spawns `dbcheck` and asserts exit
+0. `dbcheck` is 36/2 and both failures are the deliberate reds above, so this is
+red for a reason that is written down and not repaired away. Its own direct
+assertion passes: **no `UPDATE`/`DELETE`/`TRUNCATE` against any of the 35 money
+tables in 835 code files**, with 15 occurrences that are statements written to be
+refused, counted as proof rather than breach.
+
+**AF2 — "A simulated integration presented as live."** Its three own assertions
+all pass: seven slots enumerated with per-slot evidence, every slot reading
+`live` carrying an HTTP status or an on-chain fact rather than a present key,
+and the verdict reproducible across three readings seconds apart. It fails
+**only** on its delegation to `scripts/audit-claims.mjs`, which exits 1 with
+seven findings — and **not one of them is a simulated slot presented as live.**
+That checker matches any *"N of 7"* in any document and fires on three unrelated
+populations of seven: coreloop's seven legs, the rail capability matrix's seven
+adapters, and one line of the cut list **quoting the checker's own earlier bug**.
+`/api/health` has no simulated slot for its second rule to catch. This is the
+document auditor's blind spot recurring: it was taught a second *spelling* of the
+claim and never taught what the denominator means. The fix is one line in that
+script — require the word `live` beside the number, or scope the rule to lines
+naming a slot.
+
+**AF1 — "Localhost only, or a video in place of a URL."** The deployed origin is
+public HTTPS and all 11 console screens answer 200 from it. The check trips on
+one line of `docs/EVENTS.md` that **lists `localhost` among the blocked SSRF
+hosts**. A string match on a line about refusing localhost, not a localhost
+deployment.
+
+**G1 — a stored balance column, and two of this repo's own gates disagree about
+it.** `compliance.mjs` fails on `interest_posting.basis_balance_cents`;
+`dbcheck` passes it as one of three named exceptions and **re-derives every
+stored basis from the journal at its recorded watermark, row by row**. `dbcheck`
+does the harder check. **The disagreement is not resolved**, and it should be
+before anyone has to explain it in a room.
 
 **NN9 — "Money is never a float".** Three lines of
 `src/components/disputes/DisputeForms.tsx` — 164, 182 and 453 — divide cents by
@@ -1036,9 +1150,26 @@ so nothing in the ledger is wrong. **It is still a false claim in this
 README's own terms until it is fixed**, which is why it is here and not in a
 footnote. The fix is `formatCents()` and it is minutes.
 
-### The live-fire skip, and the two live-fire failures
+### The live-fire skip, and the two live-fire failures that have since closed
 
-**The skip is attack 2, and it is a bookkeeping row rather than a money error.**
+**Re-run 2026-09-11T09:43:31Z → 09:49:05Z: PASS 7 · FAIL 0 · SKIP 1, 334 s.**
+Attacks 3 and 7 both now pass every assertion — 3/3 each. The two failures
+described below are genuinely closed rather than re-labelled, and **the accounts
+of them are kept**, because what each one turned out to be is the useful part
+and because this README quoted "7 PASS / 0 FAIL" for hours while it was 5/2/1.
+
+**The skip is still attack 2, and this run's version of it is worse than the
+one described below.** It reported *"1 passed, 2 skipped — the attack is NOT
+proven · waiting on: (no reason recorded — investigate)"*. A skip that cannot
+name what it is waiting on is a worse artefact than one that can, and it is
+reported here as such rather than rounded to "still skipping". The underlying
+cause is unchanged and is measured elsewhere: **the Lithic sandbox account's
+daily spend cap is exhausted**, so every authorisation declines at every amount
+and the $50-auth/$73.40-capture sequence cannot be driven at all — which is also
+why coreloop leg 4 fails.
+
+**What the skip meant when the cap was not in the way, and it is a bookkeeping
+row rather than a money error.**
 On the $50.00 authorisation cleared at $73.40 the hold *is* released: the memo
 entries are the opening delta and its exact negation and nothing else, the ledger
 posts exactly 7340 in exactly one financial entry, the hold withholds nothing
@@ -1058,8 +1189,8 @@ reporting drift is indistinguishable from a ledger that has actually drifted. Th
 full reasoning is DECISIONS 024; the fix is one migration moving both sides
 together, and it is item 1 on the cut list's week two.
 
-**Attack 3 fails on one of three assertions, and the failing one is not the
-attack's claim.** *"the correction grew a line on the day we learned: expected 9
+**Attack 3 *used to fail* on one of three assertions, and the failing one was
+not the attack's claim. It passes 3/3 as at 09:49Z; this is the account of it.** *"the correction grew a line on the day we learned: expected 9
 to be +0"* — reproduced exactly, twice, forty minutes apart, both times at 9, so
 it is systematic and not a race. The claim the attack exists to prove is that a
 correction posts at the **original** value date and does **not** also post at its
@@ -1075,8 +1206,10 @@ to the correction's own entries; that is a test change, it is deliberately not
 made here, and [`docs/CUT-LIST.md`](./docs/CUT-LIST.md) §3.7 carries the query
 that shows the nine rows.
 
-**Attack 7 fails on its position-freeze cross-check, and passes the two
-assertions the attack is named for.** The outage is visible and it escalates:
+**Attack 7 *used to fail* on its position-freeze cross-check while passing the
+two assertions the attack is named for. It passes 3/3 as at 09:49Z; this is the
+account of it, and the guard defect it exposed is real whether or not the run is
+green.** The outage is visible and it escalates:
 `/api/health` moved lithic to `stale` at 183 s inside its own 180–900 s band,
 with `degradesDeployment=true`, `degradedBy=["lithic"]`, top-level
 `status: "degraded"` and `database.reachable: true` — so "degraded" names the
@@ -1137,25 +1270,40 @@ edit, and a checker adjusted until it agrees is not a check.
 
 ### Known gaps, in one place
 
-- **Three stale memo holds.** Three card holds carry a `hold_closure` row the
-  event fold disagrees with — residue of a clearing-before-authorisation bug the
-  code no longer has, on rows that are append-only and cannot be deleted. $60.00
-  on the memo book is withheld from nothing. It is **not** caught by
-  `v_hold_drift`, which is `WHERE NOT is_released AND memo <> target` and so
-  excludes a spuriously-closed hold by construction. That property is worse than
-  the sixty dollars. [`docs/CUT-LIST.md`](./docs/CUT-LIST.md) §2.2.
-- **Thirty-five parked webhook deliveries**, measured 2026-09-11T04:05Z. Card
-  authorisations on Lithic cards created directly in the sandbox and never
-  registered to a customer here. The consumer will not guess whose money to move,
-  so it parks with the card token in the reason. They are verified, durable, and
-  post the moment a card is claimed — but there is still no *claim* path, so
-  today the only way to clear them is to insert a `card` row by hand, and the
-  count grows every time live fire runs.
-- **Twenty-eight dead-lettered deliveries**, across all five providers, from
-  earlier consumer iterations. They are retained rather than deleted, which is
-  the append-only inbox behaving correctly; nothing re-drives them. Two of them
-  are real Increase deliveries whose signatures verified and for which no
-  consumer is registered.
+- **Stale memo holds — now counted rather than estimated.** A card hold can
+  carry a `hold_closure` row the event fold disagrees with, on rows that are
+  append-only and cannot be deleted. This bullet used to say *"three holds,
+  $60.00"*; migration 0040 added `v_hold_closure_census`, which measures it, and
+  at 2026-09-11T09:52Z it reports **56 closures of that shape — $2,683.00**: 52
+  written by `repair` (0026 and 0032 closing holds the fold calls open **on
+  purpose**, because the fold's input had lost the network's refusal) and 4 by
+  `test_harness` ($132.00). **The shape is still outside `v_hold_drift`**, which
+  is `WHERE NOT is_released AND memo <> target` and so excludes a
+  spuriously-closed hold by construction, and that property is worse than any of
+  the dollar figures. [`docs/CUT-LIST.md`](./docs/CUT-LIST.md) §2.2.
+- **146 parked webhook deliveries**, measured 2026-09-11T09:47Z *(was 35 at
+  04:05Z)*: **27 Lithic and 119 Increase**. The Lithic rows are card
+  authorisations on cards created directly in the sandbox and never registered
+  to a customer here — the consumer will not guess whose money to move, so it
+  parks with the card token in the reason. The Increase rows are wire
+  deliveries and one $10,000.00 inbound ACH credit parked *on purpose*: the
+  object names the programme's single shared FBO account number, so the field
+  that should say whose money it is names the programme. They are verified,
+  durable, and post the moment the referent is claimed — but there is still no
+  *claim* path for an orphan card token, so the only way to clear those is to
+  insert a `card` row by hand, and the count grows every time live fire runs.
+- **26 dead-lettered deliveries, all of them Lithic**, measured 09:47Z *(was 28
+  across all providers)*. Every one is *"parked 12 times waiting for
+  `card:<token>`; referent never arrived"*. They are retained rather than
+  deleted, which is the append-only inbox behaving correctly.
+  `/api/health` reports them `supersededByConsumption: true`,
+  `degradesDeployment: false` — *"history, not a live drop"* — and names the fix
+  nobody has run: `clearedBy: "node scripts/redrive.mjs --apply"`.
+- **Increase's dead letters are now zero** *(they were 167, all reading "no
+  consumer registered for provider 'increase'")*. The consumer is registered and
+  the backlog was redriven: 124 `done`, 119 `parked`, **0 dead**, and not one of
+  the 243 rows carries a `dead_lettered_at` at all. **No row anywhere in
+  `webhook_inbox` still carries that string.**
 - **Persona is not signed up**, so the non-happy-path director-KYC states are
   not third-party. See above.
 - **The cron runs daily, not hourly.** Vercel Hobby caps cron at once per day,
@@ -1166,9 +1314,16 @@ edit, and a checker adjusted until it agrees is not a check.
 - **Three lines of the disputes UI divide money by 100.** See NN9 above. Display
   only, nothing computed from it, and still a contradiction of this README until
   it calls `formatCents()`.
-- **The Increase adapter's four money operations have never run.** Its probe is
-  measured and its `originate`, `observe`, `settle` and `reverse` are `~` on the
-  capability matrix. One earned cell does not promote its neighbours.
+- **The Increase adapter's four money operations have now run, and R02–R29 have
+  not.** All five cells — `originate`, `observe`, `settle`, `reverse`, `probe` —
+  read `proof: 'measured'`, earned on
+  `sandbox_ach_transfer_x5vdo5m7b6k924sszlms`, **$6,000.00**, carrying an
+  `Idempotency-Key` only this repo's `createAchTransfer` sends. *(The evidence
+  string this bullet used to rest on described a **different** transfer —
+  `…s2iljuavdzp2p68rh7v7`, key null — which is exactly the evidence that it did
+  not come from here.)* **The gap moved one level down and is not closed: R01
+  `insufficient_fund` is measured end to end; R02–R29 are table-driven and
+  unexercised.** One earned return code does not promote its neighbours.
 - **No off-ramp partner on the cross-border payout.** The USDC leg confirms on
   Base Sepolia; nobody hands the beneficiary pesos, so every delivery amount is a
   commitment and the screen says so. Nothing is hedged, and the Send button runs

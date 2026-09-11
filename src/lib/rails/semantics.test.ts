@@ -10,7 +10,7 @@
  * test passes with twenty-one right rows and one wrong one, which is exactly
  * the failure being defended against.
  *
- * ─── Where the 22 expectations come from ────────────────────────────────────
+ * ─── Where the 30 expectations come from ────────────────────────────────────
  *
  * `EXPECTED` below is the REVIEWED answer, written out by hand, each with the
  * reason it is that way. It is then tied to the other two copies of the same
@@ -21,7 +21,30 @@
  *                        new row without adding a test here fails this suite —
  *                        in CI, with no database.
  *   live  <-> seed       behind RUN_DB_TESTS=1, against Neon: the deployed
- *                        table must equal the file that seeds it.
+ *                        table must equal the file that seeds it, on all seven
+ *                        columns, note included.
+ *   live  <-> EXPECTED   behind the same flag: the deployed rows tied to the
+ *                        review directly, and not only through the seed.
+ *
+ * ─── Why the live half was red, and what the red was hiding ─────────────────
+ *
+ * From `0025_wires.sql` until 2026-09-11 this suite reported
+ * `expected live to have a length of 22 but got 30`. The eight wire rows had
+ * been inserted by a migration and never added to the seed, and a length is
+ * the least useful way to say that: it reads as a stale test rather than as
+ * what it was. The table's insert in `scripts/seed.mjs` is
+ * `ON CONFLICT DO UPDATE`, so the seed is not merely behind the table, it
+ * OVERWRITES it — `0039_inbound_recall.sql` had corrected the inbound recall
+ * row to `payload.transfer_return.returned_at` after measuring the Increase
+ * sandbox, the seed still said `payload.return.created_at`, and the next
+ * `node scripts/seed.mjs` would have put the wrong string back. That is the
+ * danger; the red test was only the symptom.
+ *
+ * So the eight wire rows are reviewed here, they are carried by the seed, and
+ * the live comparison now names the rows that differ IN BOTH DIRECTIONS rather
+ * than counting them: a migration that adds a row the seed does not know about
+ * fails with that row's key and a sentence saying the seed will not deploy it,
+ * and a seed row that is not deployed fails with the re-seed command.
  *
  * Run the live half with:
  *
@@ -249,7 +272,7 @@ const EXPECTED: readonly Expected[] = [
     canonicalKind: "inbound_ach_credit",
     semantics: "new_event",
     valueDateSource: "payload.effective_date",
-    why: "someone is sending money to the programme's FBO number, effective on the date the originator chose; nothing posts, because nothing here can say whose money it is",
+    why: "someone is sending money to a virtual account number on the FBO account, effective on the date the originator chose; since 0042 that number names one business, so it books and its hold binds for two banking days",
   },
   {
     rail: "ach",
@@ -267,7 +290,7 @@ const EXPECTED: readonly Expected[] = [
     // returns null for a path that is not there and the consumer parks, so the
     // old string could never have dated a recall even once the branch existed.
     valueDateSource: "payload.transfer_return.returned_at",
-    why: "an inbound credit has been recalled — its own date again, read from the INBOUND object's transfer_return.returned_at, not the outbound return.created_at it was copied from",
+    why: "an inbound credit has been recalled — its own date again, read from the INBOUND object's transfer_return.returned_at, not the outbound return.created_at it was copied from; since 0042 it books the reversal and closes the arrival's hold",
   },
 
   // ---- Increase (wire) ----------------------------------------------------

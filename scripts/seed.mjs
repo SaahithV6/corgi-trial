@@ -490,10 +490,19 @@ const RAIL_EVENT_SEMANTICS = [
   // `db/migrations/0039_inbound_recall.sql` corrected the recall row's
   // value_date_source from the OUTBOUND `return.created_at` shape to the
   // inbound object's own `transfer_return.returned_at`, measured on the
-  // Increase sandbox, and withdrew the posting claim in both notes. Those are
-  // the rows below, verbatim: the seed is the source of truth for this table,
-  // and an `ON CONFLICT DO UPDATE` seed that still carried the old string
-  // would revert a measured fix the next time anybody ran it.
+  // Increase sandbox. `0042_virtual_account_numbers.sql` then rewrote both
+  // notes again, once an inbound credit could be attributed to a business and
+  // therefore booked.
+  //
+  // BOTH ARE MIRRORED HERE VERBATIM FROM THE DEPLOYED TABLE, and the mirroring
+  // is the point rather than a tidy-up: this insert is
+  // `ON CONFLICT DO UPDATE ... SET value_date_source = EXCLUDED.value_date_source,
+  // note = EXCLUDED.note`, so any field the seed holds stale is a field the
+  // next `node scripts/seed.mjs` silently reverts. A seed still carrying
+  // `payload.return.created_at` would have put back a path that does not exist
+  // on an `inbound_ach_transfer`, and every recall would have parked with no
+  // value date. `src/lib/rails/semantics.test.ts` §7 asserts all seven columns
+  // against the live table so the next drift is reported rather than shipped.
   {
     rail: "ach",
     provider: "increase",
@@ -501,7 +510,7 @@ const RAIL_EVENT_SEMANTICS = [
     canonicalKind: "inbound_ach_credit",
     semantics: "new_event",
     valueDateSource: "payload.effective_date",
-    note: "Someone is sending money to the programme's FBO account number, effective on the date the originator chose -- a NEW EVENT at payload.effective_date, which is right and is why this column is unchanged. WHAT THIS BUILD DOES WITH IT IS NOTHING, and the earlier note overstated it: there is no debit of 1130, no credit of a 2100 leaf and no 9200 hold, because there is nobody to credit. MEASURED 2026-09-11: GET /account_numbers returns exactly one account_number (sandbox_account_number_96mzhz3n61f5p0jpvytc), on the programme's own FBO account, shared by all six businesses on this book; no account_number -> business mapping exists in this schema and no path issues per-customer numbers. So the object's account_number_id identifies the programme, not a customer, and posting would mean guessing whose money it is. The delivery PARKS on inbound_ach_account_mapping -- bounded, then a dead letter in front of a human -- and an operator either attributes it by hand or returns it to the originator. This note describes the build that exists; when per-customer account numbers are issued, the posting rule in the first sentence of the old note is the right one to write.",
+    note: "Someone is sending money to a virtual account number on the programme's FBO account, effective on the date the originator chose -- a NEW EVENT at payload.effective_date. Since db/migrations/0042_virtual_account_numbers.sql the receiver is knowable: the object names account_number_id, virtual_account_number maps that id to exactly one business, and the consumer books DR 1110 (the cash is at the sponsor bank the moment Increase accepts it) / CR that business's 2100 leaf, then opens an uncleared_credit hold under the ach/new funds-availability policy -- two banking days -- so the LEDGER balance moves and the AVAILABLE balance does not. That is the ACH half of the availability contrast: an inbound wire is final on receipt and its hold is born released, an inbound ACH can still be pulled back by the originator and its hold binds. A credit naming a number with NO row in virtual_account_number still PARKS, unchanged and deliberate: the refusal is the point, and an attribution path with a default account would destroy it.",
   },
   {
     rail: "ach",
@@ -510,7 +519,7 @@ const RAIL_EVENT_SEMANTICS = [
     canonicalKind: "inbound_ach_return",
     semantics: "new_event",
     valueDateSource: "payload.transfer_return.returned_at",
-    note: "THE RECALL OF AN INBOUND CREDIT, and on this build its ledger consequence is nothing. MEASURED 2026-09-11 on sandbox_inbound_ach_transfer_n8dm6ffh9tijbi27of5b: returning an inbound ACH adds ONE block, transfer_return {reason, returned_at, transaction_id}, and the object carries no `return` key at all -- the outbound ach_transfer shape (return.created_at) does not apply here, and this row shipped naming it because nothing could reach the row to find out. Still a NEW EVENT at its own date: the credit really did arrive on the effective date and really did go back on the returned_at date, so a recall never rewrites the arrival day. What it does NOT do here is reverse a posting, because this build issues no virtual account numbers, cannot attribute an inbound credit to a customer, and therefore never booked one -- there is no entry to reverse and no 9200 hold to close. The consumer records the recall, reports the value date from this field, and RESOLVES the parked arrival delivery, because the money has gone back and there is no longer anything for an operator to attribute.",
+    note: "THE RECALL OF AN INBOUND CREDIT. MEASURED 2026-09-11 on sandbox_inbound_ach_transfer_n8dm6ffh9tijbi27of5b: returning an inbound ACH adds ONE block, transfer_return {reason, returned_at, transaction_id}, and the object carries no `return` key at all -- the outbound ach_transfer shape (return.created_at) does not apply here, which is why this row's value_date_source names transfer_return.returned_at. A NEW EVENT at its own date, never a correction: the credit really did arrive on the effective date and really did go back on the returned_at date, so a recall never rewrites the arrival day and the arrival day's statement still shows the money that was there. Since 0042 the consumer books it: DR the business's 2100 leaf / CR 1110 at the recall's own value date, and it CLOSES the uncleared_credit hold the arrival opened in the same transaction -- a hold left standing against a credit that has gone back would withhold the money twice. A recall of a credit this book never attributed still books nothing, because there is nothing to correct, and it resolves the parked arrival delivery instead of leaving an operator pointed at money that has already left.",
   },
 
   // ---- Increase (wire) ----------------------------------------------------
