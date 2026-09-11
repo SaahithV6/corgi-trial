@@ -255,12 +255,15 @@ the live book — a customer who pays the same supplier the same amount on the s
 day of the month by hand is not a double fire, and a guard that says they are is
 one operators learn to ignore.
 
-**This is the second guard in this build found to be empty for the wrong
-reason**, after `v_hold_drift`, whose `WHERE NOT is_released AND memo <> target`
-excludes a spuriously-closed hold *by construction* and therefore cannot see the
-exact failure it exists to catch (`CUT-LIST.md` §3.2). The pattern is the honest
-through-line: **a zero-row invariant proves nothing until somebody has watched it
-return a row.**
+**This is instance 8 of a pattern this build has now recorded twenty-two
+times**, and it was the second *view* found to be empty for the wrong reason,
+after `v_hold_drift` — whose `WHERE NOT is_released AND memo <> target` excludes
+a spuriously-closed hold *by construction* and therefore cannot see the exact
+failure it exists to catch (`CUT-LIST.md` §3.2). The full list, with the
+exclusion clause in each, is `docs/DEBRIEF.md` §1; the arithmetic that
+reconciled three disagreeing counts into one is `DECISIONS.md` 058. The pattern
+is the honest through-line: **a zero-row invariant proves nothing until somebody
+has watched it return a row.**
 
 That sentence is now executable rather than aspirational. `pnpm db:check` runs
 the invariant views on every pass; `node scripts/dbcheck.mjs --prove` makes

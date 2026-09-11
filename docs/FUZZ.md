@@ -28,9 +28,11 @@ than asserted.
 | **Orderings evaluated** | 98,611 per `pnpm test`; **6,257,911** on the deep run |
 | **Prefix/invariant evaluations** | 55,036 per `pnpm test`; **2,763,725** on the deep run |
 | **Runtime** | **0.6 s** default, **7.6 s** deep (`FUZZ_EXHAUSTIVE=1`) |
+| **Lithic payloads generated** | 4,000 per `pnpm test`; **200,000** on the deep run |
+| **Advice conversions checked** | 2,828 per `pnpm test`; **138,960** on the deep run |
 | **Live-book orderings** | 18, across 6 sets, ~50 webhook deliveries (`RUN_DB_TESTS=1`) |
 | **Counterexamples to permutation invariance** | **ZERO.** |
-| **Counterexamples found elsewhere** | **ONE** — FINDING 1, **fixed in migration 0028**. |
+| **Counterexamples found elsewhere** | **TWO** — FINDING 1, fixed in 0028; FINDING 2, fixed in 0043. |
 
 **The set-function claim survives.** Across 6.25 million orderings, `holdState()`
 returned a byte-identical `HoldState` every time — not just `holdCents`, every
@@ -42,6 +44,17 @@ append-only `hold_closure` row that `apply.ts` wrote *on the way* was not,
 because it was decided on a PREFIX and then made permanent. That is FINDING 1,
 and migration 0028 fixed it by making the predicate that licenses the row out of
 monotone arms only. The row is now as order-free as the number.
+
+**And what did not survive next was a gap this document had already named.** The
+section at the bottom of this file called *"What this does not cover"* listed
+**the Lithic adapter's advice conversion** as a deliberate exclusion, with a
+good reason and a bad consolation: *"`AUTHORIZATION_ADVICE` is still fuzzed in
+the pure suite, as `incremental_authorization` / `authorization_reversal`, which
+is what it becomes."* Fuzzing what an advice BECOMES is not fuzzing the step
+that decides what it becomes, and on 2026-09-11 that step turned an advice of
+**$0.00** into a stored increment of **$73.40** on a real Lithic transaction.
+That is FINDING 2. The exclusion was written down, which is worth something; it
+was also load-bearing, which nobody noticed until the defect arrived through it.
 
 ---
 
@@ -230,6 +243,135 @@ disagree with it. See migration 0028 §2.
 
 ---
 
+## FINDING 2 — an advice of nothing became an increment of $73.40 — **FIXED, migration 0043**
+
+Not found by the fuzzer. Found on the live book, in a layer the fuzzer had been
+told to stay out of, and the fuzzer's job here was to answer three questions
+afterwards: *could our corpus have found it, can it now, and is the fix real.*
+
+### What happened
+
+Lithic transaction `5892c550-b966-4afb-b681-a6456e1cf3c4`, one payload, six
+events, `webhook_inbox 3520124c-2d1a-4c28-be52-432590c6f519`:
+
+```
+AUTHORIZATION          5000  APPROVED     A =  5000
+CLEARING               7340  APPROVED     C =  7340
+AUTHORIZATION_REVERSAL 7340  APPROVED     A = -2340
+AUTHORIZATION_REVERSAL 5000  APPROVED     A = -7340   <- the network over-reversed
+AUTHORIZATION_ADVICE      0  APPROVED     delta = 0 - (-7340) = +7340
+CLEARING               7340  APPROVED
+```
+
+An `AUTHORIZATION_ADVICE` carries the **absolute** authorised amount; the
+adapter stores the delta that produces it. Measured against a running total that
+had gone below zero, an advice saying *"the authorised amount is now nothing"*
+was stored as `card_auth_event a299ea01-…`, kind `incremental_authorization`,
+amount **7340** — an increment the network never sent, in an append-only table.
+
+No money moved. `closed(E)` already held on `A ≤ 0`, so `H` was 0 by the closure
+arm before the `max(A − C, 0)` clamp was ever consulted.
+
+### The fix, in one line
+
+```diff
+- const delta = amountCents - runningAuthorised;
++ const base  = runningAuthorised > 0n ? runningAuthorised : 0n;
++ const delta = amountCents - base;
+```
+
+An advice overrides an **authorised amount**, and an authorised amount cannot be
+negative: you cannot have authorised less than nothing. Where `A ≥ 0` — every
+advice this book has ever seen except the one above — nothing changes.
+
+### `A(E)` was NOT floored, and the corpus is why
+
+The obvious companion fix is to floor `A` in the fold. It was rejected, and the
+fuzzer supplies both halves of the argument.
+
+**Flooring is a no-op.** `A < 0 ⇒ A ≤ 0 ⇒ closed(E) ⇒ H = 0`. Substituting
+`max(A, 0)` leaves every one of those steps true. This is not reasoning any
+more: section 10 of the suite runs the reference implementation twice on every
+set where `A < 0`, once with `A` and once with `max(A, 0)`, and asserts `H` is
+identical. It buys no correctness and costs the only evidence that the provider
+over-reversed.
+
+**`A ≥ 0` is not an invariant.** A reversal delivered before the authorisation
+it belongs to — the brief's own out-of-order case — puts `A` below zero
+legitimately. Measured across every corpus in the file at default scale:
+
+| | |
+| --- | --- |
+| Sets reaching `A(E) < 0` | **1,614 of 7,220 — 22.4%** |
+| ...after a real authorisation, i.e. a genuine over-reversal | **812** |
+| ...that are OPEN | **0** |
+| ...that are holding a cent | **0** |
+
+A view asserting `A ≥ 0` would be red on a fifth of correct behaviour. So the
+property asserted instead is `A(E) < 0 ⇒ closed(E) ∧ H(E) = 0`, and it is
+asserted **twice, independently**: once through the closure arm and once through
+`A − C < 0`. The incident report said *"the clamp is the only thing standing
+between that and a wrong hold"*. It is not, and that is the correction that
+matters, because the whole case for leaving `A` unfloored rests on it.
+
+### Section 11: the corpus that did not exist
+
+`generateLithicPayload()` produces whole `card_transaction.updated` bodies —
+advices included, reversals weighted heavily enough to drive the running total
+below zero. Four properties, on `deriveCardEvents()` rather than on
+`holdState()`:
+
+| Property | Result |
+| --- | --- |
+| the base an advice is measured from is never negative | clean since 0043 |
+| the delta is exactly `absolute − max(A_before, 0)` | clean |
+| a refused step feeds no term — dropping it changes neither `A` nor `C` | clean |
+| every derived event is a non-negative magnitude, and duplicate tokens land once | clean |
+
+And the coverage claims, which are what stop the four rows above from being a
+green tick over an empty search. At default scale, over 4,000 payloads:
+
+| | |
+| --- | --- |
+| Derived canonical events | 14,446 |
+| Advices converted (network APPROVED) | 2,828 |
+| Advices refused, stored as `declined` and converted at all | 354 / **0** |
+| Payloads whose reversals outran their own authorisations | **1,358 (34%)** |
+| **Advices standing on a negative base — the live defect's shape** | **624** |
+| Cents the PRE-0043 rule would have fabricated on them | **$61,277.06** |
+
+On the deep run (`FUZZ_EXHAUSTIVE=1`, 200,000 payloads): 726,383 derived events,
+138,960 advices, 67,795 over-reversed payloads, **30,705** advices on a negative
+base, **$3,072,996.89** of fabricated increment avoided.
+
+Those last two rows are the point. A corpus that never reaches an advice
+standing on a negative running total cannot fail the property it exists for, and
+would have passed cleanly on the day the bug shipped. So the suite recomputes
+the **pre-0043** rule beside the current one and asserts it is still caught —
+the same shape as FINDING 1's localisation test, and for the same reason: it
+stops the fixed property going green because the corpus went quiet.
+
+Every one of those 624 differences is an over-statement. The old rule could only
+ever derive a **larger** delta than the new one, which is why the fix can never
+withhold more of a customer's money than the bug did.
+
+### The database half
+
+`v_advice_delta_unsound` (migration 0043) asks the same question of history that
+section 11 asks of the corpus, and it asks it with **two independent inputs**:
+the base is recovered as `payload absolute − stored signed delta`, where the
+absolute comes from the body retained verbatim in `webhook_inbox` and the signed
+delta comes from the row we wrote. Neither is computed from the other. It is
+**red on arrival with exactly one row, $73.40** — the event above, which is not
+repaired, because the only compensation available is a second event the network
+never sent.
+
+It also reports `finding = 'no_retained_payload'` rather than silently dropping
+an advice whose payload is gone. An advice we cannot check is not a pass; 0026
+shipped the opposite of that rule and hid its own bug behind it.
+
+---
+
 ## Everything else: clean
 
 | Property | Result |
@@ -249,6 +391,14 @@ disagree with it. See migration 0028 §2.
 | `sawFinal` / `sawClose` / `expired` are monotone | clean |
 | A negative magnitude is refused wherever in the order it sits | clean |
 | Cents past 2⁵³ survive | clean — and the same figures collide as `number`, which is asserted |
+| `A(E) < 0` is REACHED by the corpus — 22.4% of sets, 812 after a real auth | asserted as a floor, so a weakened generator goes red |
+| `A(E) < 0 ⇒ closed(E)` | clean |
+| `A(E) < 0 ⇒ A − C < 0`, so `H = 0` without the closure arm too | clean — the clamp is the second line, not the only one |
+| Flooring `A` changes `H` on no set in the corpus | clean — this is migration 0043's argument, executed |
+| An advice is never converted against a negative base | **was FINDING 2** — clean since migration 0043 |
+| ...and the PRE-0043 rule still fabricates a delta on 624 of them | asserted, so the row above cannot go green by the corpus going quiet |
+| The advice delta is exactly `absolute − max(A_before, 0)` | clean |
+| A refused step feeds no term of the fold, at the payload layer too | clean |
 
 ### The one precondition, written down
 
@@ -315,6 +465,24 @@ PROPERTY VIOLATED: terminallyClosed is monotone under adding events to E
   trillion cents are all fair game, because the model claims to be total over the
   set and a generator that only produces sensible histories only tests the
   sensible half.
+- **`generateLithicPayload(seed, options)`** — section 7, added by migration
+  0043. One whole `card_transaction.updated` body: a weighted draw over
+  `AUTHORIZATION`, `AUTHORIZATION_REVERSAL`, `AUTHORIZATION_ADVICE`, `CLEARING`,
+  `FINANCIAL_AUTHORIZATION`, `AUTHORIZATION_EXPIRY`, `RETURN` and
+  `BALANCE_INQUIRY` (which the adapter must recognise and DROP, so it sits in
+  the corpus between steps that must not be dropped). `created` increases by one
+  second per step, so the adapter's `created` sort is a fixed order rather than
+  a tie-break nobody can reproduce.
+
+  The reversals are weighted heavily **on purpose**, because the defect only
+  appears once the running authorised total inside one payload has gone below
+  zero. The weights are a search strategy, not an assertion — which is why the
+  suite counts how often the corpus reaches that state and asserts the count,
+  rather than trusting the weights.
+
+  The two trap fields (`txn.status`, `txn.amounts.hold.amount`) are populated
+  with nonsense, because nothing in `deriveCardEvents()` may read either and
+  this corpus would notice if that changed.
 - **`orderings(items, rng, budget)`** — every ordering when `n!` is affordable, a
   seeded sample when it is not. The sample always includes the identity and the
   exact reverse, because those are the two a human would have written and the one
@@ -335,10 +503,14 @@ The properties, plus:
   sum, `some`, one `max`. It is not a better implementation and is not used for
   anything. It exists so the fuzzer has something to disagree *with*: the day the
   fold and the documentation part company, 3,000 sets per run notice.
-- **A census.** `CENSUS` is accumulated by the properties themselves and pinned
-  by the last test in the file. "I ran six million orderings" is only a real
-  result if the number is real, and a future edit that quietly shrinks a corpus
-  turns that test red instead of turning the fuzzer into a formality.
+- **A census — now three of them.** `CENSUS` is accumulated by the properties
+  themselves and pinned by the last test in the file. "I ran six million
+  orderings" is only a real result if the number is real, and a future edit that
+  quietly shrinks a corpus turns that test red instead of turning the fuzzer
+  into a formality. `NEGATIVE_A` and `PAYLOADS` do the same job for FINDING 2's
+  two sections, and their pins are the ones that matter most: a corpus that
+  stops reaching an over-reversal, or stops standing an advice on one, would
+  make section 11's properties unfalsifiable without making them red.
 - **A budget.** 0.6 s at the default scale, because this runs on every
   `pnpm test` and a fuzzer nobody keeps is worth nothing. The deep run is behind
   `FUZZ_EXHAUSTIVE=1`.
@@ -407,14 +579,19 @@ Two notes on how it is set up, both deliberate:
 
 Named so the gaps are chosen rather than implied:
 
-- **The Lithic adapter's advice conversion.** `AUTHORIZATION_ADVICE` carries an
-  absolute amount that `deriveCardEvents()` turns into a delta using the events
-  preceding it *in the same payload*. The live-book generator therefore excludes
-  it: splitting a payload one-event-per-delivery changes what an advice means,
-  and that is a property of the adapter rather than of the hold model. Conflating
-  the two would make the test unable to say which layer broke. `AUTHORIZATION_ADVICE`
+- ~~**The Lithic adapter's advice conversion.**~~ **NO LONGER TRUE, and it is
+  the most useful entry in this section.** This bullet used to end *"`AUTHORIZATION_ADVICE`
   is still fuzzed in the pure suite, as `incremental_authorization` /
-  `authorization_reversal`, which is what it becomes.
+  `authorization_reversal`, which is what it becomes"* — and fuzzing what an
+  advice BECOMES is not fuzzing the step that decides what it becomes. FINDING 2
+  came through exactly this gap. Section 7 of `fuzz-generators.ts` and section 11
+  of `fuzz.test.ts` now generate whole Lithic payloads and attack
+  `deriveCardEvents()` directly. **What remains excluded is only the LIVE-BOOK
+  property**, and that exclusion is still right for the original reason:
+  splitting a payload one-event-per-delivery changes what an advice means, so
+  `DB_STEPS` leaves it out and the suite can still say which layer broke.
+  A named gap is better than an unnamed one; it is not a substitute for closing
+  it.
 - **Corrections.** `RETURN_REVERSAL` and `CORRECTION_*` are classified
   `correction` in `rail_event_semantics` and take the reverse-and-rebook path at
   the *original* value date. Different property, own suite

@@ -262,6 +262,27 @@ and read this section rather than the glyphs.** A table that claims less than
 was proven is a bug; a table that claims more is a failed submission, and the
 two are not the same size.
 
+**And the Increase ACH row now observes money coming IN, which for most of this
+build it could not.** `observe` is one glyph and it covered one direction: an
+outbound `ach_transfer` of ours, matched to a `payment_instruction` by an
+idempotency key only `createAchTransfer` could have written. An
+`inbound_ach_transfer` names an `account_number_id` and nothing else that could
+identify a receiver, and `GET /account_numbers` returned exactly ONE object — the
+programme's own FBO number, shared by every business — so every inbound credit
+parked as unattributable, correctly, for the life of the build.
+
+`POST /account_numbers` issues one per customer (measured: 7 issued 2026-09-11,
+`sandbox_account_number_bh5spt0xmebnj6xq6t3l` and six siblings), and
+`db/migrations/0042_virtual_account_numbers.sql` records whose each one is. A
+credit addressed to a mapped number posts DR `1110` / CR that business's `2100`
+with an `uncleared_credit` hold; a credit addressed to an unmapped one still
+parks, which is why 29 historical deliveries redriven through the new consumer
+all stayed parked. **None of this moved a cell in §3**, and that is the right
+outcome to state explicitly: the five operations are properties of the ADAPTER,
+the inbound path runs through the consumer, and `INCREASE_SUPPORT` declares
+nothing about attribution. The evidence strings were not touched because nothing
+they claim changed.
+
 **Lithic cannot originate.** A card rail never originates a payment — the
 merchant's acquirer does, the network routes, and Lithic tells us afterwards,
 twice and for different amounts. `POST /v1/simulate/authorize` exists and is
@@ -448,6 +469,17 @@ never received it.
   adapter's reading of the live bytes matches the entries the consumer booked.
   Collapsing the consumer onto `observe()` is a consumer change and is owned
   elsewhere.
+- **`increase-wire.ts` still refuses inbound wires with a sentence that is no
+  longer true.** Its park reads *"this build issues no virtual account
+  numbers"*, and since `db/migrations/0042_virtual_account_numbers.sql` it
+  issues one per business. 27 deliveries over 13 inbound wires carry that
+  wording, and every one of them was genuinely addressed to the programme's
+  shared FBO number, so the REFUSAL is still right and only the reason is
+  stale. The lookup the wire path needs is the same one the ACH path uses —
+  `findVirtualAccountNumber()`, keyed on provider rather than on rail — and
+  `creditInboundWire()` already takes the `businessId` it would produce. One
+  call and a reason string; `src/lib/webhooks/consumers/increase-wire.ts` is
+  owned elsewhere.
 - **`park()` in `src/lib/webhooks/inbox.ts` writes `parked_reason` and leaves
   `processing_error` untouched.** So a delivery that failed once and later
   parked carries two fields disagreeing about itself: a correct, current parked

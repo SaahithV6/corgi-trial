@@ -59,7 +59,9 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
   // asserted equal by this module's own test. That parity is the point: a
   // chaos dashboard checking fifteen invariants while CI checks sixteen is a
   // screen quietly claiming more coverage than it has, which is the failure
-  // this build has now catalogued eighteen times.
+  // this build has now catalogued twenty-three times — the count is
+  // reconciled in DECISIONS 058, because four documents were running four
+  // different tallies, which is itself the pattern.
   [
     'v_wire_availability_drift',
     'a wire credit withholds nothing, because a wire cannot be returned',
@@ -99,5 +101,21 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
   [
     'v_hold_expiry_drift',
     'one card hold, one expiry instant — the two readers agree',
+  ],
+  // 0043's two. Both are RED ON ARRIVAL and that is deliberate: they make a
+  // measured finding visible rather than absorbing it. Neither is exposure.
+  //
+  // The advice one exists because deriveCardEvents() had never been fuzzed —
+  // docs/FUZZ.md had NAMED that gap and excused it with "it's still fuzzed as
+  // what it becomes", which is not the same as fuzzing the step that decides
+  // it. 4,000 generated payloads found 624 advices converted against a
+  // negative base, $61,277.06 the old rule would have fabricated.
+  [
+    'v_advice_delta_unsound',
+    'an advice is never converted against a base an authorised amount cannot take',
+  ],
+  [
+    'v_hold_closure_unexplained',
+    'no unreversed closure stands over an open authorisation the provider does not explain',
   ],
 ] as const;

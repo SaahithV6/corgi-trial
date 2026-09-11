@@ -273,6 +273,122 @@ describe("deriveCardEvents — advice is absolute, and becomes a delta", () => {
   });
 });
 
+describe("deriveCardEvents — transaction 5892c550: the advice converted against a negative base", () => {
+  /**
+   * The live payload, verbatim, from `webhook_inbox
+   * 3520124c-2d1a-4c28-be52-432590c6f519` — Lithic transaction
+   * `5892c550-b966-4afb-b681-a6456e1cf3c4`, delivered as ONE body of six
+   * events at 2026-09-11T09:02:58Z. Signature verified, `state = 'done'`.
+   *
+   * The network reversed $123.40 against a $50.00 authorisation, then sent an
+   * advice saying THE AUTHORISED AMOUNT IS NOW ZERO. Before migration 0043 the
+   * conversion measured that advice against a running total of -7340 and stored
+   * `incremental_authorization 7340` — an increment the network never sent, in
+   * an append-only table. That row is still on the live book and
+   * `v_advice_delta_unsound` reports it; this is the pin that stops the code
+   * producing another one.
+   *
+   * Lithic's own reversal amounts are NEGATIVE in the payload. `eventMagnitude`
+   * takes the absolute value, because direction lives in the canonical kind —
+   * so the signs below are the ones Lithic actually sent, not tidied.
+   */
+  const LIVE = [
+    lithicEvent("AUTHORIZATION", 5000, {
+      token: "2c652ccd-cd4e-4d56-8783-7da7ac378272",
+      created: "2026-09-10T22:35:26Z",
+      result: "APPROVED",
+    }),
+    lithicEvent("CLEARING", 7340, {
+      token: "45701807-d8c8-44d5-a1a7-b2e1171a10f1",
+      created: "2026-09-10T22:35:27Z",
+      settlement: 7340,
+      result: "APPROVED",
+    }),
+    lithicEvent("AUTHORIZATION_REVERSAL", -7340, {
+      token: "0503a161-bc33-4c9c-b4d5-6a1215447eb4",
+      created: "2026-09-10T22:35:31Z",
+      result: "APPROVED",
+    }),
+    lithicEvent("AUTHORIZATION_REVERSAL", -5000, {
+      token: "ee76e133-5528-41ab-b9fd-fc8f3afb5d01",
+      created: "2026-09-10T22:35:32Z",
+      result: "APPROVED",
+    }),
+    lithicEvent("AUTHORIZATION_ADVICE", 0, {
+      token: "535f87ec-7e6a-4599-8b8f-db3c8e0c5957",
+      created: "2026-09-10T22:35:35Z",
+      result: "APPROVED",
+    }),
+    lithicEvent("CLEARING", 7340, {
+      token: "60e8438f-8ab2-4aa5-bbea-b6c193dfe0ba",
+      created: "2026-09-10T22:35:37Z",
+      settlement: 7340,
+      result: "APPROVED",
+    }),
+  ];
+
+  it("an advice of NOTHING produces no event, instead of an increment of 7340", () => {
+    const derived = deriveCardEvents(txn(LIVE));
+    const advice = derived.events.find(
+      (e) => e.providerEventId === "535f87ec-7e6a-4599-8b8f-db3c8e0c5957",
+    );
+    expect(advice).toBeUndefined();
+    // Five facts, not six: the advice asserted nothing had changed from an
+    // authorised position that was already at or below nothing.
+    expect(derived.events).toHaveLength(5);
+    expect(derived.events.map((e) => e.kind)).toEqual([
+      "authorization",
+      "clearing",
+      "authorization_reversal",
+      "authorization_reversal",
+      "clearing",
+    ]);
+  });
+
+  it("keeps the over-reversal on the books rather than cancelling it out", () => {
+    const derived = deriveCardEvents(txn(LIVE));
+    const state = holdState(derived.events, FAR);
+
+    // A is the honest sum of what the network said: 5000 authorised, 12340
+    // reversed. NOT floored — see model.ts and migration 0043.
+    expect(state.authorisedCents).toBe(-7340n);
+    expect(state.capturedCents).toBe(14680n);
+
+    // And the over-reversal is reported as a payload-level fact, because a
+    // complete snapshot cannot be explained by arrival order.
+    expect(derived.overReversedCents).toBe(7340n);
+  });
+
+  it("holds nothing, by BOTH defences, and never did", () => {
+    const state = holdState(deriveCardEvents(txn(LIVE)).events, FAR);
+    // Defence one: `A <= 0` closes the authorisation, so H is 0 before the
+    // clamp is consulted.
+    expect(state.closed).toBe(true);
+    // Defence two: A - C is strictly negative, so `max(A - C, 0)` is 0 even
+    // with the closure arm deleted. The incident report said the clamp was the
+    // only thing standing between this and a wrong hold. It is not.
+    expect(state.authorisedCents - state.capturedCents).toBeLessThan(0n);
+    expect(state.holdCents).toBe(0n);
+    // Reversible: `A <= 0` is not a terminal condition, so no permanent
+    // closure row is licensed here either (migration 0028).
+    expect(state.terminallyClosed).toBe(false);
+  });
+
+  it("an advice of a REAL figure still lands on that figure when the base is sound", () => {
+    // The clamp must not change the ordinary case. Same payload minus the two
+    // reversals: the advice of 0 now stands on a base of 5000 and correctly
+    // becomes a reversal of 5000.
+    const derived = deriveCardEvents(
+      txn(LIVE.filter((e) => e.type !== "AUTHORIZATION_REVERSAL")),
+    );
+    expect(
+      derived.events.find((e) => e.providerEventId === "535f87ec-7e6a-4599-8b8f-db3c8e0c5957"),
+    ).toMatchObject({ kind: "authorization_reversal", amountCents: 5000n });
+    expect(holdState(derived.events, FAR).authorisedCents).toBe(0n);
+    expect(derived.overReversedCents).toBe(0n);
+  });
+});
+
 describe("deriveCardEvents — origin, which nothing branches on", () => {
   it("a clearing with no authorisation in the payload is clearing_first", () => {
     const derived = deriveCardEvents(

@@ -33,7 +33,7 @@ a figure that has since moved. Where the two disagree, the re-run is right.
 
 | What this report says | What it reads now | Taken at |
 | --- | --- | --- |
-| `dbcheck` **30 passed, 0 failed** (15 views) | **36 passed, 2 failed** (22 views); both failures are deliberate standing reds — `v_refused_auth_hold` 154 rows, all `unanswered`, $9,786.20 withheld, and `v_hold_expiry_drift` 9 rows, all released, **zero cents of exposure** | 09:40Z |
+| `dbcheck` **30 passed, 0 failed** (15 views) | **36 passed, 2 failed** (22 views); both failures are deliberate standing reds — `v_refused_auth_hold` 154 rows, all `unanswered`, $9,786.20 withheld, and `v_hold_expiry_drift` 9 rows, all released, **zero cents of exposure**. **36 passed, 4 failed at 10:07Z**: `v_advice_delta_unsound` (1 row) and `v_hold_closure_unexplained` (4 rows) arrived red from migrations 0042/0043 while this sweep ran; not diagnosed here. | 09:40Z / 10:07Z |
 | — *(prove-mode did not exist)* | `dbcheck --prove` covers **22 of 22 invariant views, 24 proofs**, 8 needing a trigger disabled on the owner connection. **No view turned out structurally incapable of returning a row.** | 09:41Z |
 | the deployment *"receives ACH webhooks and **drops all 179 of them**"* | **zero** Increase deliveries are dead-lettered; 124 `done`, 119 `parked`, and no row anywhere carries *"no consumer registered"* | 09:47Z |
 | `/api/health` `status: ok`, 7 of 7 live, commit `4c682e1` | `status: "ok"`, 7 of 7 live, database 149 ms, commit **`544b481`** — and `degraded` at 09:59:12Z on commit **`2c13805`**, which is live fire's own Lithic quiet band (`webhookHealth.degradedBy: ["lithic"]`, 538 s inside a 180–900 s window), not the dead-letter backlog (`webhookProcessing.degradedBy: []`). **The deployment moved during this re-run.** | 09:38:36Z / 09:59:12Z |
@@ -113,6 +113,11 @@ in §7.
 ---
 
 ## 2. THE SIXTEENTH GUARD
+
+> *Numbering note, 2026-09-11T09:58Z: **sixteen is right** on the reconciled list
+> (`docs/DEBRIEF.md` §1, arithmetic in `DECISIONS.md` 058). The *"fifteenth
+> guard"* this section cites below is **13** there, not 15. And the pattern now
+> has **22** recorded instances, not sixteen.*
 
 > `v_refused_auth_hold` — added tonight in migration `0026_auth_result.sql` (21:30) and
 > wired into `pnpm db:check` at 21:52 — **reported zero rows at the exact moment two holds
@@ -270,6 +275,17 @@ it is the distinction being drawn properly, and it is the right call.
 ---
 
 ## 3. The ACH rail: received, verified, and dropped — while health calls it fresh
+
+> **CLOSED 2026-09-11T09:47Z, and the guard finding in this section is not.** The
+> drop is gone: Increase has **124 `done`, 119 `parked`, 0 dead**, not one of its
+> 243 rows carries a `dead_lettered_at`, and no row anywhere in `webhook_inbox`
+> carries *"no consumer registered"*. The guard defect this section identifies —
+> `webhookHealth` computed from `MAX(received_at)`, so a rail that receives
+> everything and processes nothing reads as maximally fresh — **was real and was
+> repaired**: `/api/health` now publishes a separate `webhookProcessing` block
+> keyed on `processed_at` and disposition. It is instance **17** on the
+> reconciled list.
+
 
 `/api/health` at 05:04:11.989Z:
 
@@ -463,13 +479,13 @@ broader than what any check covers. The brief asks for **three** screens in five
 | # | Item | Verdict |
 | --- | --- | --- |
 | 1 | Ledger vs available, derived not stored | **PASS.** `v_available_balance`, `v_ledger_balance`, `v_trial_balance` are views. `v_balance_definition_drift` holds `v_hold_state`'s release predicate equal to `ledger_availability()`'s — two independent bodies — and is empty. **One caveat:** `compliance.mjs` G1 **FAILs** on `interest_posting.basis_balance_cents` as a stored balance column, while `dbcheck` passes it as one of "3 named exceptions, each proven reproducible" and re-derives every stored basis from the journal at its watermark. The two tools disagree; `dbcheck` does the harder check and I side with it. **Reconcile them before the debrief — you do not want to be explaining a disagreement between your own two gates.** |
-| 2 | The authorisation lifecycle; hold releases exactly once | **FAIL on the deployed build.** A declined authorisation places a hold (§2). `v_hold_drift`, `v_hold_release_drift`, `v_hold_closure_not_terminal` all empty; auth/incremental/partial/multiple/over-capture/expiry/reversal are all modelled as events. The lifecycle model is right; the decline path is not deployed. |
+| 2 | The authorisation lifecycle; hold releases exactly once | **FAIL on the deployed build** at 05:05Z: a declined authorisation placed a hold (§2). **CORRECTION, 09:40Z: the decline path is deployed.** `card_auth_event` holds 74 `declined` rows, and `v_refused_auth_hold` returns **zero rows with `verdict = 'refused'`** — no hold withholds money against an authorisation the network is recorded as having refused. Its 154 rows are all `verdict = 'unanswered'`: pre-0026 fixture events whose payloads were never retained, so the verdict cannot be recovered and is not being invented. **Also closed:** `incremental_authorization` had never been recorded by any path and now has 8 rows. **Still short:** the $50-auth/$73.40-capture sequence cannot be driven at all, because the Lithic sandbox spend cap is exhausted — live-fire attack 2 SKIPs and coreloop leg 4 FAILs on it. |
 | 3 | Settlement is not authorisation | **PASS** — `coreloop` leg 4: $50 auth, $73.40 capture, hold releases exactly once, ledger posts settled. Force-post modelled (81 `force_post` events on file). |
 | 4 | Out-of-order delivery | **PASS** — `livefire` attack 4 ends exactly where in-order ends. 55 parked Lithic events show the parking machinery is live. |
-| 5 | Returns and recalls | **PARTIAL.** Modelled and tested in-repo; but the deployed Increase consumer is absent (§3), so the ACH return path is not exercisable on the URL right now. **Returns are where the brief says the design shows.** |
+| 5 | Returns and recalls | **PARTIAL** at 05:05Z: modelled and tested in-repo, but the deployed Increase consumer was absent (§3), so the ACH return path was not exercisable on the URL. **CORRECTION, 09:47Z: the consumer is registered and 124 Increase deliveries are consumed, 0 dead.** The outbound ACH return is exercised end to end — `ach:return:sandbox_ach_transfer_x5vdo5m7b6k924sszlms:644288470109390`, R01 `insufficient_fund`, $6,000.00, posted at `return.created_at` with the settlement left standing. **Still partial, for a different reason:** the *inbound* recall cannot be attributed at all, because the programme has one shared FBO account number across six businesses (`docs/GAUNTLET.md` §5 addendum), and R02–R29 remain table-driven and unexercised. |
 | 6 | Bitemporality — the correction test | **PASS, and it is the best work in the build.** §6 item 5. |
 | 7 | Statements reproducible forever | **PASS** — `v_statement_version` (52 rows); statement screen renders both readings and the watermark. |
-| 8 | Standing orders fire once and only once | **PASS, and honestly repaired.** `v_standing_order_double_fire` was for days a view joining a UNIQUE column asking `count > 1` — unsatisfiable — and quoted as proof in a test, a document and `compliance.mjs`. 0023 repointed it at the derived-key question the unique index does not answer, and it was **made to fail before being trusted**. This is the house rule working. |
+| 8 | Standing orders fire once and only once | **PASS, and honestly repaired.** `v_standing_order_double_fire` was for days a view joining a UNIQUE column asking `count > 1` — unsatisfiable — and quoted as proof in a test, a document and `compliance.mjs`. 0023 repointed it at the derived-key question the unique index does not answer. **CORRECTION, 09:58Z: this row said it was "made to fail before being trusted", and that is the wrong order.** 0023 recorded the demonstration as a SQL comment and *nobody ran it* between then and 2026-09-11; it was trusted for days on a described measurement. It was made to fail for the first time at 09:41Z, by `dbcheck --prove` planting a second instruction on one occurrence under a different spelling of the derived key: 0 → 1, both keys named in `instruction_keys`, 0 again after rollback. The house rule was stated, not followed — which is this report's own §2 finding. |
 | 9 | Scheme reconciliation with aging | **PASS with the negative-aging defect** (§6 item 7). |
 | 10 | Maker-checker, agent included | **PASS** — enforced by database trigger, and the MCP write tool lands in the same queue. |
 
@@ -535,6 +551,19 @@ and not 5.
 ---
 
 ## 10. The single most likely reason this submission would lose
+
+> **SUPERSEDED 2026-09-11T10:05Z, and this section is the most important one in
+> the report to not quote stale.** Its premise — *"the deployed URL is behind
+> the repo on two money-path defects"* — was right at 05:05Z and its three
+> named green signals have all moved: `dbcheck` reads **36 passed, 2 failed**
+> (not 30/0), Increase drops **nothing** (not all 179 — 124 consumed, 0
+> dead-lettered), and `/api/health` still reads 7 of 7 live. **The argument in
+> the last three paragraphs is untouched by that and is the part worth
+> keeping.** The deployment is still not the tree: `/api/health` reported
+> `544b481` at 09:38Z and `2c13805` at 09:59Z; `.git/refs/heads/main` is
+> `59010b5`. And `scripts/audit-claims.mjs` — the tool whose job is to catch
+> exactly this — still cannot see it, which is instance 21.
+
 
 **The deployed URL is behind the repo on two money-path defects, and every green dashboard
 is measuring the repo instead of the deployment.**

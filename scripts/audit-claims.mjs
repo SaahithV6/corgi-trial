@@ -75,6 +75,12 @@ for (const f of files) {
     dated[i] = underDatedHeading;
   });
 
+  // The words that make an "N of 7" a claim about INTEGRATIONS rather than
+  // about legs, adapters, attacks or screens. Derived from the slot names the
+  // endpoint itself publishes, so it cannot drift from them.
+  const SLOT_WORDS =
+    /integration|slot|card_issuing|card_webhooks|director_kyc|business_registry|open_banking|ach_rail|stablecoin/i;
+
   // 1. A stated count that disagrees with the endpoint.
   lines.forEach((line, i) => {
     // "4 of 7", "4 live of 7", and "4/7 live". The last one was missed
@@ -84,7 +90,45 @@ for (const f of files) {
     const m =
       line.match(/(\d+)\s+(?:live of|of)\s+(\d+)\s*(live)?/i) ??
       line.match(/(\d+)\s*\/\s*(\d+)\s+live/i);
-    if (m && Number(m[2]) === total && Number(m[1]) !== liveCount) {
+
+    // THE NUMBER SEVEN IS NOT THE CLAIM. The word `live` beside it is.
+    //
+    // This matched any "N of 7" anywhere, and there are three unrelated
+    // sevens in this repo: coreloop's seven LEGS, the rail matrix's seven
+    // ADAPTERS, and the cut list quoting this checker's own original bug. So
+    // it reported seven contradictions against an endpoint none of them
+    // mentions — and `compliance.mjs` AF2 delegates here, which meant an
+    // AUTOMATIC FAIL rule read FAIL on a book that contradicts nothing.
+    //
+    // That is worse than a nuisance and it is this codebase's own pattern
+    // wearing the opposite coat: the twenty-three guards catalogued tonight
+    // were blind to what they watched, and this one was blind to what it was
+    // watching FOR — it could not tell the population apart, so it could not
+    // be right except by luck. A guard that cries wolf on an automatic fail
+    // teaches a reader to scroll past the one time it is real.
+    //
+    // The fix is to require the claim to be ABOUT liveness: either the word
+    // `live` is in the match, or the line names an integration slot. A line
+    // saying "7 of 7 legs" now says nothing to this rule, which is correct,
+    // because it is not a statement about integrations at all.
+    const saysLive =
+      m !== null && (m[3] !== undefined || /\blive\b/i.test(line) || SLOT_WORDS.test(line));
+
+    // ...and it must be counting SLOTS. "0 of 7 rows", "7 of 7 legs" and
+    // "5 of 7 adapters" are all statements about something else that happen to
+    // sit near the word `live`, which is how the widened match still found
+    // three false positives in a document ABOUT this checker.
+    const countsSomethingElse =
+      m !== null &&
+      new RegExp(`${m[1]}\\s*(?:live\\s+)?(?:of|/)\\s*${m[2]}\\s+(rows?|legs?|adapters?|attacks?|screens?|checks?|tests?|assertions?|disjuncts?)`, "i").test(line);
+
+    // A number inside backticks is being QUOTED, not asserted. The same
+    // reasoning as the history exemption below: a document that cannot repeat
+    // a past claim without failing the check written because of it is a
+    // document that cannot explain its own corrections.
+    const isQuoted = m !== null && new RegExp("`[^`]*" + m[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[^`]*`").test(line);
+
+    if (m && saysLive && !countsSomethingElse && !isQuoted && Number(m[2]) === total && Number(m[1]) !== liveCount) {
       // Allow a line that is explicitly narrating history.
       // A line that dates itself is a record, not a claim. EVALUATION.md is a
       // log of what was true at each iteration and must be allowed to say so.

@@ -71,6 +71,42 @@
  * $140.00 of a customer's money for a $90.00 fuel stop, and every invariant in
  * the book would stay green while it happened. So the conversion is asserted
  * here against the provider's own bytes, per event, not against a fixture.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS FILE COMMITS, AND MUST
+ * ---------------------------------------------------------------------------
+ *
+ * Every other integration suite in this repo now runs its scenarios inside a
+ * transaction that is rolled back — see `docs/TESTING.md`, and
+ * `src/lib/fx/fx.integration.test.ts` for the pattern. THIS ONE IS EXEMPT, on
+ * both of the grounds that document names, and neither is about convenience:
+ *
+ * 1. ITS ACTION IS REMEDIATION, NOT A SCENARIO. The wake registers six cards
+ *    that six real deliveries are parked on, requeues the dead letters and
+ *    unparks them. Roll that back and eighteen signature-verified provider
+ *    events stay stuck for ever and every assertion below becomes false. A
+ *    repair that is discarded has repaired nothing — the same reason
+ *    `settleAnythingLeftOpen()` in `disputes.integration.test.ts` commits.
+ *
+ * 2. THE CLAIMS ARE ABOUT DURABILITY ACROSS TRANSACTIONS, WHICH IS NOT A
+ *    PROPERTY ONE TRANSACTION CAN HAVE. "The advice branch HAS run on live
+ *    input", "no advice payload is left parked", "the hold released exactly
+ *    once" are statements about the committed book, made by nine tests that
+ *    write nothing at all. And `drain()` is the PRODUCTION CONSUMER: it takes
+ *    no connection, it claims rows under a lease with `FOR UPDATE SKIP
+ *    LOCKED`, and it commits each delivery separately BECAUSE that is the
+ *    idempotency contract under test. Forcing it into one outer transaction
+ *    would not be testing the drain; it would be testing something else with
+ *    the same name.
+ *
+ * WHAT DID CHANGE. The drain used to run up to eight times unconditionally,
+ * which meant a suite whose own work was long finished still acted as a
+ * production worker over whatever the deployed system happened to have in its
+ * inbox at that second — including `releaseAvailableCredits()`, a real sweep
+ * over real holds. It now runs only when this run actually woke something,
+ * which is the only state a drain is needed in. In steady state — the state
+ * this file has been in since the first run that executed it — the wake is a
+ * no-op and the per-run cost is ZERO by construction rather than by luck.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -201,7 +237,10 @@ d("the incremental authorisation, woken from the inbox", () => {
 
     const store = createPostgresInboxStore(sqlExecutorFromPostgresJs(sql));
 
-    for (const token of waiting.map((r) => r.parked_on_ref)) {
+    /** The cards this run actually has to wake. EMPTY on every run after the first. */
+    const woken = waiting.map((r) => r.parked_on_ref);
+
+    for (const token of woken) {
       if ((await resolveCard(PROVIDER, token, sql)) === null) {
         await registerCard(
           {
@@ -231,11 +270,29 @@ d("the incremental authorisation, woken from the inbox", () => {
       await store.unparkWaitingFor([{ kind: "card", ref: token }], new Date());
     }
 
-    // Drain to idle. Each delivery is a snapshot of the whole transaction, so
-    // the later ones subsume the earlier ones and order does not matter.
-    for (let i = 0; i < 8; i += 1) {
-      const summary = await drain({ maxBatches: 20 });
-      if (summary.claimed === 0) break;
+    // Drain to idle — BUT ONLY IF THIS RUN WOKE SOMETHING. Each delivery is a
+    // snapshot of the whole transaction, so the later ones subsume the earlier
+    // ones and order does not matter.
+    //
+    // The guard is the one behaviour change in this file, and it is the point
+    // of the exemption above rather than an exception to it. `drain()` is the
+    // real consumer over the real inbox: it posts journal entries for whatever
+    // is pending and it runs `releaseAvailableCredits()` over real holds. Once
+    // the wake is done there is nothing here for it to do, and running it
+    // anyway made this suite a production worker executing on somebody else's
+    // rows — the deployed system's, arriving between one run and the next —
+    // eight times per invocation. Now it runs exactly when it has work: when
+    // this run unparked deliveries that need dispatching.
+    //
+    // Nothing is skipped that this file is responsible for. `woken` is empty
+    // only when `waiting` was empty, and `waiting` is every advice delivery
+    // still parked or dead — so an empty `woken` IS the assertion two tests
+    // below make independently.
+    if (woken.length > 0) {
+      for (let i = 0; i < 8; i += 1) {
+        const summary = await drain({ maxBatches: 20 });
+        if (summary.claimed === 0) break;
+      }
     }
   }, 300_000);
 

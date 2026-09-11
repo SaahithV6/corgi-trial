@@ -25,7 +25,7 @@ Three runnables were driven end to end inside the window, in this order:
 | --- | --- | --- | --- |
 | `node scripts/livefire.mjs --base-url https://corgi-trial-psi.vercel.app` | 08:22:48Z | 08:28:51Z (364s) | **PASS 7 · FAIL 0 · SKIP 1** of 8 |
 | `node scripts/coreloop.mjs --base-url https://corgi-trial-psi.vercel.app` | 08:29:16Z | 08:30:30Z (74s) | **PASS 6 · FAIL 1 · SKIP 0** of 7 legs; 101 HTTP calls to the deployed origin, 3 to the Lithic sandbox |
-| `node scripts/dbcheck.mjs` | 08:29:40Z | 08:29:44Z | **35 passed / 1 failed** — the one failure is the documented deliberate one. **Re-run 09:40Z: 36 passed / 2 failed**; `v_hold_expiry_drift` joined the gate as a second deliberate red, 9 rows, all released, **zero cents of exposure** |
+| `node scripts/dbcheck.mjs` | 08:29:40Z | 08:29:44Z | **35 passed / 1 failed** — the one failure is the documented deliberate one. **Re-run 09:40Z: 36 passed / 2 failed**; `v_hold_expiry_drift` joined the gate as a second deliberate red, 9 rows, all released, **zero cents of exposure**. **Re-run 10:07Z: 36 passed / 4 failed** — `v_advice_delta_unsound` (1 row) and `v_hold_closure_unexplained` (4 rows) arrived red from migrations 0042/0043, landed by another worker and not diagnosed in this pass |
 
 Direct calls filled the gaps: the deployed public API (`/api/v1`), the deployed
 agent surface (`/api/mcp`), the deployed cron tick (`/api/cron/standing`), the
@@ -76,7 +76,12 @@ claim is never dressed up as the published one.
 > its own freshness caveat. Item 2's incremental authorisation moves to
 > **PROVEN**; item 5's inbound leg moves from *"no reachable code path"* to
 > **reachable, classified and exercised — and booking nothing, for a reason that
-> is now measured.** Nothing above was edited to say so.
+> is now measured.** Nothing above was edited to say so. Item 5 then carries a
+> **second** addendum, measured later still (09:47Z–10:12Z), which moves its
+> inbound leg to **PROVEN**: per-business virtual account numbers were issued, a
+> real inbound ACH credit was attributed and held unavailable, and a real recall
+> booked the corrected position. The scoreboard row still reads HALF PROVEN
+> because that is what the pass measured.
 
 ---
 
@@ -793,6 +798,191 @@ account numbers will need on day one. Making it reachable was the cheaper answer
 and the more honest one: the table now says what happens, and what happens is
 what the consumer does.
 
+### ADDENDUM 2 — 2026-09-11T09:47Z → 10:12Z. The gap was the schema, and it is closed
+
+**The inbound leg is now PROVEN, on real Increase objects, end to end: a credit
+arrives at a business's own account number, is attributed, is held under the ACH
+availability policy, and is recalled — and the recall books a correcting position
+at the day the provider says it happened.** One thing this sandbox cannot produce
+is named at the bottom rather than staged around.
+
+**Freshness and honesty caveat, unchanged from ADDENDUM 1.** The provider calls,
+the webhook deliveries and the database are live and fresh. The webhooks were
+received and signature-verified by the **deployed** endpoint. The consumer change
+and `db/migrations/0042_virtual_account_numbers.sql` are applied to the live Neon
+database, but the deployed origin is still older than this code, so the drain
+that booked these entries ran **locally** against the live database.
+
+#### 1. What ADDENDUM 1 measured is what got fixed
+
+ADDENDUM 1's answer was *"no, and it is measured"*: `GET /account_numbers`
+returned exactly one object, the programme's own `primary` number, shared by
+every business. So the field that should identify the customer identified the
+programme.
+
+`POST /account_numbers` issues more of them. MEASURED, 2026-09-11T09:47Z:
+
+```
+POST /account_numbers
+     {account_id: sandbox_account_zkfx1wcn4brwoaiyksj6,
+      name: "Ridgeline Robotics, Inc.", inbound_ach: {debit_status: "blocked"}}
+  -> 200  sandbox_account_number_bh5spt0xmebnj6xq6t3l
+          account_number 3164662367  routing_number 123308582  status "active"
+```
+
+`scripts/provision-account-numbers.mjs` issued one per business with a `2100`
+deposit leaf — seven — and recorded whose each is in `virtual_account_number`:
+
+| business | routing / account | `account_number_id` |
+| --- | --- | --- |
+| Ridgeline Robotics, Inc. | 123308582 / 3164662367 | `sandbox_account_number_bh5spt0xmebnj6xq6t3l` |
+| Kettle & Crumb Bakery LLC | 123308582 / 4629029952 | `sandbox_account_number_zpftz6nlr9yc0b47x4tk` |
+| Holds Integration Fixture Co. | 123308582 / 1974459830 | `sandbox_account_number_49ummbukvor7j75lxisw` |
+| Pots Integration Fixture Co. | 123308582 / 3538495975 | `sandbox_account_number_93axp4osgowil557ps55` |
+| Hold Fuzzer Fixture Co. | 123308582 / 2169552990 | `sandbox_account_number_quey4w91fia43l18yys3` |
+| Live Fire — attack 7 | 123308582 / 8900127506 | `sandbox_account_number_lb1cizms7t2nqui3g7tc` |
+| Live Fire — attack 3 | 123308582 / 7345287035 | `sandbox_account_number_ttzizcgbmj8zra4fd8od` |
+
+Silverline Freight Co. got none and the reason is on the report row: it has no
+`2100` leaf, so there is nowhere for money addressed to it to land. The
+programme's own `primary` number is deliberately mapped to **nobody**.
+
+Two measurements came out of running it, neither of them guessed:
+
+- **A repeat `POST` with a used `Idempotency-Key` answers `409
+  idempotency_key_already_used_error` and names the object it already issued in
+  `resource_id` — it does not replay it.** The script's recovery is to fetch that
+  id, which is why a crash between the provider call and the table insert costs
+  nothing. Found by running the script twice.
+- **`company_name` longer than 16 bytes is rejected** (`Your request contains
+  invalid parameters`) — the NACHA Company Name field, enforced rather than
+  truncated.
+
+#### 2. The credit, on a real inbound ACH to a business's own number
+
+`sandbox_inbound_ach_transfer_osq6n9a04iypwl40byz1`, **$1,874.25**, addressed to
+Kettle & Crumb's own number `4629029952`, `effective_date 2026-09-11`,
+`status accepted`, trace `940308578992411`, originator `ITEM FIVE SUPPLY`. The deliveries reached the deployed
+endpoint and were drained through the consumer:
+
+| Entry | Key | Value date | Booked | Lines |
+| --- | --- | --- | --- | --- |
+| `a0f7e533-8858-494b-b67b-0fed8ca37319` | `ach:inbound:sandbox_inbound_ach_transfer_osq6n9a04iypwl40byz1` | 2026-09-11 | 10:08:06.364Z | 1110 +187425 / 2100 Kettle −187425 |
+| memo | `hold:0f736c97-…:after:increase.ach:inbound:…osq6n9a04iypwl40byz1` | 2026-09-11 | 10:08:06.364Z | 9200 Kettle −187425 / 9900 +187425 |
+
+**The ledger moved and available did not.** Hold `0f736c97-2a4c-4072-8fd9-e182c35e2d47`,
+kind `uncleared_credit`, policy `3bae7e8b` (`ach`/`new`, 2 banking days, 09:00
+ET), `available_at 2026-09-15T13:00:00Z`. That is the ACH half of the
+availability contrast, and it is the same code the wire rail runs — the only
+difference is the policy row, which says zero days for a wire and two for a
+stranger's ACH. `v_wire_availability_drift` is still **0 rows**.
+
+#### 3. The recall, on the real return endpoint, at the day it happened
+
+```
+POST /inbound_ach_transfers/sandbox_inbound_ach_transfer_osq6n9a04iypwl40byz1/transfer_return
+     {reason: "credit_entry_refused_by_receiver"}
+  -> status "returned", transfer_return {
+       reason: "credit_entry_refused_by_receiver",
+       returned_at: "2026-09-11T10:08:11Z",
+       transaction_id: "sandbox_transaction_rkx1o76pz439jbr7crkg"}
+```
+
+| Entry | Key | Value date | Booked | Lines |
+| --- | --- | --- | --- | --- |
+| `86a8aa94-5e3a-4c08-bffd-dfe94291d24f` | `ach:inbound:recall:…osq6n9a04iypwl40byz1:sandbox_transaction_rkx1o76pz439jbr7crkg` | 2026-09-11 | 10:08:13.265Z | 2100 Kettle +187425 / 1110 −187425 |
+| memo | `hold:0f736c97-…:after:recall:…osq6n9a04iypwl40byz1` | 2026-09-11 | 10:08:13.265Z | 9200 Kettle +187425 / 9900 −187425 |
+
+Both `entry_type = 'original'`: a recall is a **new event**, never a reversal of
+the arrival, so the arrival stands on the arrival's day — entry
+`a0f7e533-…` is untouched and still dated 2026-09-11, which the test re-reads
+after the recall rather than assuming.
+
+**The hold is closed in the same transaction, and that is the part that is easy
+to get wrong.** Available = ledger − holds. A recall that debited the customer
+and left the arrival's hold standing would withhold the same money twice —
+available would fall by $3,748.50 for a customer who never had $1,874.25.
+`hold_closure` on `0f736c97` = 1 row, memo balance back to zero,
+`v_hold_release_drift` still **0 rows**.
+
+#### 4. And it attributes, rather than merely posting
+
+A build that credited "the only business on the book" would satisfy everything
+above. So the same run sent **$943.18** to Ridgeline's own number
+(`sandbox_inbound_ach_transfer_jhn7tpytnmta0umg0oke`) and asserted that
+Ridgeline's ledger moved by exactly that and **Kettle's did not move at all**.
+Entry `9ed8e2ec-a847-44ea-910b-5bd9d19b44e7`, value date 2026-09-11, hold
+`e7be0a75-…` still **open** until 2026-09-15T13:00Z — nobody recalled that one,
+so it is money a customer has and cannot yet spend.
+
+Re-runnable, and it is the artifact rather than this table:
+
+```
+set -a; . ./.env; set +a; RUN_INBOUND_RECALL=1 pnpm vitest run \
+  src/lib/rails/increase/inbound-recall.integration.test.ts
+```
+
+#### 5. The redrive: 29 rows, 29 still parked, nothing forced
+
+Every delivery parked for want of a mapping was made due and driven through the
+current consumer at 10:11Z:
+
+| parked on | deliveries | after the redrive |
+| --- | --- | --- |
+| `inbound_ach_account_mapping` | 2 (`sandbox_inbound_ach_transfer_07x75nyvzd1oxihtvuoe`, $10,000.00 from CORGI TREASURY) | **still parked** |
+| `inbound_wire_account_mapping` | 27 (13 inbound wires) | **still parked** |
+
+**Not one of them posted, and that is the correct result.** Every one names
+`sandbox_account_number_96mzhz3n61f5p0jpvytc` — the programme's shared FBO
+number — which is mapped to nobody on purpose. Attributing them would mean
+picking a business for money that was addressed to the programme, which is the
+exact failure this whole change exists to make unnecessary. What did change is
+the reason, which now names the number and says why it cannot be mapped instead
+of claiming this build issues none:
+
+> *"…names account_number_id `sandbox_account_number_96mzhz3n61f5p0jpvytc`, and
+> NOTHING ON THIS BOOK SAYS WHOSE THAT NUMBER IS — there is no
+> `virtual_account_number` row for it… It is most likely the programme's own FBO
+> number, which is shared and is deliberately mapped to nobody."*
+
+The 27 inbound wire deliveries keep the older wording, because
+`src/lib/webhooks/consumers/increase-wire.ts` still says *"this build issues no
+virtual account numbers"* and that sentence is now false. The wire consumer was
+outside this change's write set; the lookup it needs is the same one
+(`virtual_account_number` is keyed on provider, not on rail) and is one call.
+**Reported, not fixed.**
+
+#### 6. The one thing this sandbox cannot show
+
+`POST /simulations/inbound_ach_transfers` **rejects `effective_date`** —
+`{"field":"effective_date","message":"Unexpected parameter."}`, measured — so an
+inbound arrival is always dated today, and a recall of it on the same day lands
+on the same value date. The two dates are read from two different provider fields
+and the test asserts each against the field it came from
+(`payload.effective_date`, `payload.transfer_return.returned_at`), but the
+**visible** day separation the brief pictures — Tuesday's credit, Thursday's
+recall — cannot be produced for an inbound ACH on this sandbox. Item 6 proves
+that separation on the value-date axis with real backdated corrections; this item
+proves the two events are dated from the provider's own fields and that the
+earlier one is never rewritten by the later one.
+
+#### Revised verdict for item 5
+
+**Outbound: PROVEN, historical** — the real $6,000.00 R01, unchanged.
+
+**Inbound: PROVEN, fresh.** A real inbound ACH credit attributed to the business
+whose virtual account number it named, booked at the provider's effective date,
+held unavailable by the funds-availability policy, recalled on the real return
+endpoint, and booked back at the recall's own value date with the arrival still
+standing and the hold closed exactly once. The refusal that was the item's honest
+answer before is intact and was re-measured: 29 deliveries addressed to the
+shared number were redriven and all 29 stayed parked.
+
+**What is still not demonstrated, and is not claimed:** an inbound recall
+separated from its credit by a calendar day, because this sandbox will not date
+an arrival in the past; and inbound WIRE attribution, because the wire consumer
+was not in this change's write set.
+
 ---
 
 ## 6. Bitemporality — the correction test
@@ -995,7 +1185,7 @@ standing-order occurrences**. `v_standing_order_unresolved` — **0 rows**.
 > naming **both** keys in `instruction_keys`, and it is 0 again after the
 > rollback. So the 0 rows above are now a measurement rather than a tautology,
 > and the reason the count is trustworthy is the proof, not the index.
-> `docs/STANDING-ORDERS.md` §8 carries the full delta.
+> `docs/STANDING-ORDERS.md` §2 carries the full delta.
 
 Scheduling is configured, not aspirational — `vercel.json` registers
 `/api/cron/standing` at `23 5 * * *`, alongside `/api/drain`,

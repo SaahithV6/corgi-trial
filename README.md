@@ -115,8 +115,17 @@ commit.
 `scripts/audit-claims.mjs` reads that endpoint and fails if any document in the
 repo contradicts it. It is run before every commit.
 
-Read at 2026-09-11T03:44:31Z, commit `4c682e1`. `integrations.live` **7** of
-`integrations.total` **7**.
+> **And it is currently red for a reason that is not this table.** At
+> 2026-09-11T09:39Z it exits 1 with seven findings, **none of which is a
+> simulated slot presented as live** — there is no simulated slot. Its first
+> rule matches any *"N of 7"* in any document and is firing on coreloop's seven
+> legs, the rail capability matrix's seven adapters, and one line of the cut
+> list quoting the checker's own earlier bug. The fix is one line in that
+> script. See *The five compliance failures* below.
+
+Read at 2026-09-11T09:38:36Z, commit `544b481` — re-read at 09:59:12Z on commit
+`2c13805`, unchanged. `integrations.live` **7** of `integrations.total` **7**.
+Every evidence string below was returned by that reading.
 
 | Slot | Provider | Verdict | Evidence returned by the probe |
 | --- | --- | --- | --- |
@@ -290,11 +299,11 @@ state*.
 
 ---
 
-## Fourteen screens, five states each
+## Every screen, five states each — the fourteen that matter, described
 
 The trial scores *"the three screens that matter show default, loading, empty,
-error and one edge state"*. **All fourteen do**, and every state is a URL you can
-paste, bookmark or hand to someone:
+error and one edge state"*. **Every screen does**, and every state is a URL you
+can paste, bookmark or hand to someone:
 
 ```
 ?state=loading    ?state=empty    ?state=error    ?state=edge    (bare = default)
@@ -330,12 +339,20 @@ available balance below it, which is a transient fact about somebody else's card
 holds. The same shape exists in the live history as a genuinely refused row; the
 fixture is what can be shown to order.
 
-Measured at 2026-09-11T03:41Z against the deployed URL: **all fourteen screens
-answered 200 in all five states, and for every screen the five renders were five
-distinct documents** — a screen that ignored the parameter and served its default
-five times would be caught by that, and a screen that answered 200 with an empty
-body would be caught by it too. The nav carries thirteen of them; `/` is the
-console behind the wordmark.
+**Re-measured 2026-09-11T10:04Z against the deployed URL by
+`node scripts/verify-demo.mjs`: the console now serves 21 screens, and
+all 21 answered 200 in all five states — 105 renders, every one 200, and for
+every screen the five renders were five distinct documents.** A screen that
+ignored the parameter and served its default five times would be caught by that,
+and a screen that answered 200 with an empty body would be caught by it too. The
+nav carries 20 of them; `/` is the console behind the wordmark.
+
+**The table above describes fourteen, not twenty-one, and that is a gap in this
+README rather than in the build.** `/transactions`, `/economics`, `/team`,
+`/audit`, `/events`, `/chaos` and `/breaks` are served, navigable and pass the
+same five-state check; they have no row here saying what their edge state is.
+*(The earlier figure in this section was "all fourteen screens", measured
+03:41Z, when fourteen is what the console served.)*
 
 ---
 
@@ -1056,6 +1073,21 @@ shaped like the failure they hide:**
 **`compliance.mjs` AF3 spawns `dbcheck` and asserts exit 0, so AF3 reports these
 as a violation, correctly, and will until they are genuinely closed.**
 
+> **LATER READING, 2026-09-11T10:07Z — and it moved again while this sweep was
+> being written.** `node scripts/dbcheck.mjs` now reports **36 passed, 4
+> failed**. `scripts/dbcheck.mjs` was rewritten at 10:06Z and migrations `0042`
+> and `0043` landed, both by other workers, and **two new invariant views
+> arrived already red**: `v_advice_delta_unsound` (**1 row** — *"an advice is
+> never converted against a base an authorised amount cannot take"*) and
+> `v_hold_closure_unexplained` (**4 rows** — *"no unreversed closure stands over
+> an open authorisation the provider's verdicts do not explain"*). The two
+> deliberate reds described here are unchanged at 154 and 9 rows. **Neither new
+> failure has been diagnosed by this worker and neither is claimed to be
+> deliberate** — they are reported because the number is 4 and saying 2 would be
+> the exact habit this sweep exists to break. Run the command; do not quote
+> either figure without doing so.
+
+
 **`node scripts/dbcheck.mjs --prove`: 22 of 22 invariant views, 24 proofs**, 8
 of them needing a trigger disabled on the owner connection because `corgi_app`
 cannot disable one at all — which is layer 1 holding, not a limitation being
@@ -1076,8 +1108,9 @@ longer degrades it at all (`webhookProcessing.degradedBy: []`).
 **`tools/list` on the deployed MCP endpoint: 8 tools**, seven read and one
 write.
 
-**All fourteen screens answered 200 in all five states**, with five distinct
-renders each *(measured 04:05Z; not re-driven in this reading)*.
+**All 21 screens answered 200 in all five states** — 105 renders, every one
+200, five distinct documents per screen, measured 10:04Z *(was: fourteen
+screens, 04:05Z)*. The nav serves 20 routes and `/` links to all of them.
 
 **`node scripts/compliance.mjs`: PASS 25, FAIL 5, UNKNOWN 4, CITED 7, of 41
 checks**, in 22 s *(was: PASS 28, FAIL 2)*. CITED is not a pass and UNKNOWN is
@@ -1254,19 +1287,35 @@ traffic expected is Tuesday* — and it means `scripts/verify-demo.mjs` will
 legitimately report one FAIL on check 1 for about a quarter of an hour after a
 live-fire run.
 
-### `node scripts/verify-demo.mjs`: 11 PASS, 2 FAIL, 1 SKIP of 14, exit 1
+### `node scripts/verify-demo.mjs`: 17 PASS, 1 FAIL, 1 SKIP of 19, exit 1
 
-Run at 2026-09-11T04:02:56Z. `docs/DEMO.md` §5 carries the full output and the
-reasoning; in short, **both failures are this script and neither is a screen.**
-Two of its fourteen checks parse the account screen's availability table by
+**Re-run 2026-09-11, finished 10:04:31Z** *(was 11 PASS / 2 FAIL / 1 SKIP of 14
+at 04:02:56Z)*. The script grew from 14 checks to 19 and the two parser failures
+described below are gone.
+
+**The one FAIL is check 1 — `/api/health` `status` is `"degraded"`, expected
+`"ok"` — and it is this README's own documented behaviour rather than a
+defect.** Live fire had run 15 minutes earlier, Lithic had been silent 538 s,
+and the 180–900 s band treats silence after recent traffic as an outage. Past
+900 s the endpoint returns to `ok` on its own. **A check that goes red for a
+correct reason is still red**, and the honest reading is that `verify-demo` and
+the health band disagree about whether a just-attacked system should be called
+healthy — not that either is wrong.
+
+**The one SKIP is check 12**, which says so plainly: *"the database-level refusal
+is not asserted by THIS script"*. Live-fire attack 5 and coreloop leg 5 both
+assert it against SQLSTATE 42501 from `assert_maker_checker()`. A skip is not a
+pass, and this one names the command that does prove it.
+
+**What the two old FAILs were, kept because the reasoning is the useful part.**
+Two of the fourteen checks parsed the account screen's availability table by
 taking the **first four** money figures out of it, and that table gained a fifth
 row — **Committed outflows** — when the four disagreeing definitions of available
-balance were reduced to one. So the parser reads the committed-outflows figure as
-the available balance and reports a mismatch against a screen whose arithmetic is
-exact: `$145,294.77 − $2,989.00 − $1,250.00 − $0.00 = $141,055.77`, which is what
-the screen prints and what the parser never reaches. The fix is to read the last
-figure rather than the fourth; it is one line, the script is not this worker's to
-edit, and a checker adjusted until it agrees is not a check.
+balance were reduced to one. So the parser read the committed-outflows figure as
+the available balance and reported a mismatch against a screen whose arithmetic
+was exact. The fix was to read the last figure rather than the fourth. It was
+never *"adjust the checker until it agrees"*: the screen was right throughout and
+the parser was reading the wrong row.
 
 ### Known gaps, in one place
 

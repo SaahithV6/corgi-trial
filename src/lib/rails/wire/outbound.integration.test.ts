@@ -60,6 +60,39 @@
  * before this change, and it is exactly why the ledger entry authorising it
  * has to be real at the moment it is sent — which, inside the transaction, it
  * is.
+ *
+ * ===========================================================================
+ * ⚠ THIS SUITE IS CURRENTLY RED, AND NOT BECAUSE OF THE ROLLBACK
+ * ===========================================================================
+ *
+ * Four of the six tests fail today, and the rollback is not what makes them
+ * fail. The two that do not touch `requestPayment()` pass; the other four fail
+ * because `requestPayment()` now refuses THIS FILE'S `destination` on the
+ * POOL as well, for two reasons that arrived under it:
+ *
+ *   1. PAYEE_WIRE_ROUTING_NUMBER_MISSING. `gatePaymentOnPayee()` reads
+ *      `destination.wireRoutingNumber` and refuses a wire without one. This
+ *      file deliberately sends a BIC-only destination — see the comment on
+ *      `destination` — because the wire ABA is supposed to be resolved from
+ *      the confirmed payee book rather than carried on the instruction, which
+ *      is the argument the last test spells out at length. The gate and that
+ *      argument now disagree, and that is a design question for whoever
+ *      introduced `wireRoutingNumber`, not something a test should paper over.
+ *
+ *   2. PAYEE_WARNING_UNACKNOWLEDGED. Supplying the ABA to get past (1) reaches
+ *      a second refusal: the payee this file confirms one test earlier carries
+ *      a standing warning nobody has signed for, so the gate stops the
+ *      payment. The suite has no acknowledgement step.
+ *
+ * MEASURED, not inferred: `requestPayment()` was called on the POOL, outside
+ * any transaction, with this exact destination, and returned refusal (1)
+ * verbatim.
+ *
+ * The rollback machinery below is correct and costs nothing — the per-run
+ * figures above were verified at ZERO on this red run, because a refused
+ * instruction writes nothing either way. It is left in place so that fixing
+ * the gate brings the suite back GREEN and FREE rather than green and
+ * expensive. Do not "fix" this by relaxing an assertion.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

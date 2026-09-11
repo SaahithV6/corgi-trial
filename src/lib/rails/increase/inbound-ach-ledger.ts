@@ -557,14 +557,24 @@ export async function recallInboundAch(args: {
     // `v_hold_state` reads released off this row, so a process that died in
     // between would leave the customer's available balance already correct.
     //
-    // No `source` argument, matching the two sibling uncleared-credit closers
-    // (`rails/plaid/adapter.ts`, `rails/wire/ledger.ts`): `ClosureSource` lives
-    // in `src/lib/holds/store.ts`, which is outside this change's write scope,
-    // and `v_hold_closure_not_terminal` cannot see an `uncleared_credit` hold at
-    // all — it INNER JOINs `card_authorization` — so the omission hides nothing
-    // from a guard. `dbcheck`'s GUARD REACH census prints it under
-    // `(undeclared)` beside the other two, which is where an operator would
-    // look for it.
+    // NO `source` ARGUMENT, and the reason is a scope fact rather than a
+    // preference. `ClosureSource` (src/lib/holds/store.ts) is a closed union of
+    // eight writers and `hold_closure_source_known` (migration 0040) is the
+    // matching CHECK; neither has a value for "the credit was recalled", and
+    // both live outside this change's write set. Passing `wire_availability` or
+    // `availability_sweep` would be a false statement about who closed this
+    // hold, which is precisely what 0040 exists to stop — it replaced a guard
+    // that discriminated on PROSE with one that discriminates on a value.
+    //
+    // The two sibling uncleared-credit closers pass none either
+    // (`rails/plaid/adapter.ts`, `rails/wire/ledger.ts`); their historical rows
+    // carry a source only because 0040 backfilled it from their reason strings.
+    // So this closure reads `(undeclared)` in `dbcheck`'s GUARD REACH census,
+    // alongside theirs, and hides nothing from a guard:
+    // `v_hold_closure_not_terminal` cannot see an `uncleared_credit` hold at all
+    // — it INNER JOINs `card_authorization` — and `dbcheck`'s source assertion
+    // is drawn from the card-auth population only. The follow-up is one union
+    // member, one CHECK arm and this argument.
     const holdClosedHere = await closeHold(
       holdRow.id,
       `inbound ACH ${recall.transferId} was recalled on ${recall.valueDate} (${recall.reason}); the credit this hold withheld has gone back to the originator, so there is nothing left to withhold`,

@@ -2860,3 +2860,164 @@ was false: **a coordinator restating a number is not a measurement of it.** The
 difference here is that the claim turned out to be true — which is luck, not
 method, and would have been indistinguishable from the alternative right up to
 the moment somebody ran it.
+
+## 058 — 2026-09-11T10:10Z — Three counts of the same pattern, reconciled to one, with the arithmetic shown
+
+This log has been tracking one failure shape since 033 — **a guard reported
+healthy because what it excluded was shaped exactly like the failure it existed
+to catch.** Four documents were counting it, and all four disagreed:
+
+| Document | What it said |
+|---|---|
+| `docs/DEBRIEF.md` §1 | *fourteen*, in a numbered table, with `card_auth_event`'s missing `result` column at **13** |
+| `docs/COMPLIANCE.md` §5 | headed *"sixteen, seventeen and eighteen"*, for the three it added |
+| `DECISIONS.md` 056 | *"Three more guards, bringing the count to nineteen"* |
+| `docs/EVALUATION.md` §2, §10 | *"THE SIXTEENTH GUARD"* for `v_refused_auth_hold`, and *"the fifteenth guard"* for the same missing `result` column DEBRIEF numbers 13 |
+
+**A number four documents disagree about is not a finding, it is a mood.** So it
+is reconciled here rather than asserted anywhere, and the arithmetic is below so
+a reader can get a different answer on purpose instead of by accident.
+
+### The inclusion rule, fixed first
+
+A row counts when **a check, view, probe, gate or test reported healthy because
+the defect was outside its population by construction** — the `WHERE`, the
+`every`, the `else`, the missing column, the fixture that pinned the field under
+test, the population that was empty.
+
+Two adjacent things are deliberately **excluded**, and naming them is the only
+thing that makes the number mean anything:
+
+- **A guard that is correct but that nothing runs.** `v_wire_availability_drift`
+  and `v_hold_release_drift` both sat in that state; `docs/COMPLIANCE.md` §5.6
+  counts five invariants in this build that have. A view nobody queries is a
+  comment, not a blind guard.
+- **A defect that a new guard found.** `v_hold_expiry_drift`'s two clocks (0040)
+  is a real defect and is not a guard with a blind spot.
+
+Counting those would make the number 27 and the number would mean less.
+
+### The canonical list
+
+**`docs/DEBRIEF.md` §1's numbering is adopted as canonical**, for one reason
+that is not aesthetic: rows 1–14 are unchanged by this reconciliation, so the
+two dozen `instance N` back-references already written through that document
+keep resolving. Eight instances are appended, ordered by the timestamp of the
+entry that first recorded each.
+
+| # | Guard | Recorded in | At |
+|---:|---|---|---|
+| 1 | `v_hold_drift` — `WHERE NOT is_released` | 033 | — |
+| 2 | secret scanner v1 — plain `grep`, binary skip | 033 | — |
+| 3 | health escalation gate — `slots.every(live)` | 033 | — |
+| 4 | `audit-claims.mjs` — understood `"N of 7"` only | 033 | — |
+| 5 | secret scanner v2 — `0x` + 64-hex *shape* | 033 | — |
+| 6 | `v_deposit_control_drift` — flat `code = '2100'` | 041, 045 | — |
+| 7 | `reconcile-usdc.mjs` — one wallet address from the env | 044, 045 | — |
+| 8 | `v_standing_order_double_fire` — join on a UNIQUE column | 045 | — |
+| 9 | probe `fromStatus()` — any non-auth 4xx ⇒ `live` | 045 | — |
+| 10 | Stripe Connect probe — an `else` meaning success | 034 | — |
+| 11 | `probeIntegrations()` fallback — no probe inherits the env verdict | 026 | — |
+| 12 | `compliance.mjs` AF6 stamp check — only the immediately preceding entry | 047 | — |
+| 13 | `card_auth_event` — **the column itself**; there is no `result` | 050 | 04:20Z |
+| 14 | `terminallyClosed`'s `A <= 0` arm — a predicate on a total that can go back up | 051 | 04:38Z |
+| 15 | `IncreaseAchRail.parseEvent`'s `startsWith('ach_transfer_')`, and the test fixture that hardcoded the field under test | 052 | 04:58Z |
+| 16 | `v_refused_auth_hold` — `INNER JOIN` + `r.result IS NOT NULL`, the two spellings of *no verdict* | COMPLIANCE §5.1 | 05:40Z |
+| 17 | `/api/health` webhook freshness — `MAX(received_at)`, arrival rather than disposition | COMPLIANCE §5.4 | 05:40Z |
+| 18 | `coreloop.mjs` subject ranking — read `kyb_evidence` and never used it | COMPLIANCE §5.5, 057 | 05:40Z |
+| 19 | `v_hold_closure_not_terminal` — population matched as English against a free-text column | 056 | 05:50Z |
+| 20 | `v_accrual_month_drift` — vacuous; `WHERE month_complete` over zero complete months | 056 | 05:50Z |
+| 21 | `audit-claims.mjs` v3 — checks documents against the endpoint, never the endpoint against the tree | 056, COMPLIANCE §5.7 | 05:50Z |
+| 22 | `v_balance_definition_drift` — compares only the definitions it was told about; the agent surface kept a fifth | 054 | 06:05Z |
+
+**The count is 22.**
+
+### Where each old number went wrong, precisely
+
+- **DEBRIEF's fourteen was right when written and then stopped being re-run.**
+  051 was the fourteenth; 052 self-numbered as the fifteenth an hour later and
+  DEBRIEF never picked it up. Nothing was wrong with the arithmetic, only with
+  the assumption that a total stays true.
+- **COMPLIANCE §5's sixteen/seventeen/eighteen is correct and stays.** At 05:40Z
+  the count through 052 was 15, so its three are 16, 17, 18.
+- **056's "bringing the count to nineteen" had the right three and the wrong
+  total.** It counted 16 before them. COMPLIANCE §5 had already taken 16, 17 and
+  18 — written at 05:40Z, ten minutes before 056 — so its three are **19, 20 and
+  21**, not 17, 18 and 19. Worth noting that 056's own timestamp runs backwards
+  against 055 (06:30Z), which 047 already records as a property of this log
+  rather than a defect in it; the out-of-order writing is how the collision
+  happened.
+- **054's instance was described and never numbered.** It is 22, and it is last
+  by its own timestamp.
+- **EVALUATION's "sixteenth" is right; its "fifteenth" is not.** It called
+  `v_refused_auth_hold` the sixteenth, which the canonical list agrees with —
+  and it got there by calling the missing `result` column the fifteenth, which
+  is 13. Two errors of +2 and −0 that happened to land on the same answer. That
+  is the least trustworthy way to be right and it is flagged in the file.
+
+### What was changed, and what was not
+
+**No past entry in this log has been edited.** 056's nineteen and 054's silence
+stand exactly as written; this entry is the correction, which is the only way a
+decision log is worth anything. `docs/DEBRIEF.md` §1 now carries the 22-row
+table and the inclusion rule; `docs/COMPLIANCE.md` §5 and `docs/EVALUATION.md`
+carry dated notes pointing here.
+
+### The thing that is uncomfortable and should be said
+
+**Instance 4 and instance 21 are the same tool, twice.** `audit-claims.mjs` was
+counted in 033 for understanding one spelling of `"N of 7"`, fixed by teaching
+it a second spelling, and counted again in 056 for never checking that the
+endpoint it treats as authoritative is the build the repository is on. **And it
+is failing right now for a third variant of the first defect**: at
+2026-09-11T09:39Z it exits 1 with seven findings, none of which is a simulated
+slot presented as live. Its rule matches any `"N of 7"` and is firing on
+coreloop's seven legs, the rail capability matrix's seven adapters, and one line
+of `docs/CUT-LIST.md` quoting the tool's own original bug. It was taught a
+second *spelling* and never taught what the denominator *means*.
+
+`scripts/compliance.mjs` AF2 delegates to it, so **AF2 reads FAIL for a reason
+that is not AF2**, on a scoreboard where AF2 is an automatic fail. The fix is
+one line — require the word `live` beside the number, or scope the rule to lines
+that name a slot — and it is in a script this worker was not permitted to edit.
+Whoever owns it should take it before submission.
+
+### The figures this entry was written alongside
+
+Measured 2026-09-11 between 09:38Z and 10:07Z, against the live Neon database
+and the deployed origin. The deployment moved during the sweep: `/api/health`
+reported commit `544b481` at 09:38:36Z and `2c13805` at 09:59:12Z.
+
+```
+dbcheck                36 passed, 2 failed      (22 invariant views)
+dbcheck --prove        22 of 22 views, 24 proofs, 8 needing a trigger disabled
+v_refused_auth_hold    154 rows, all unanswered, 130 holds, $9,786.20 withheld
+v_hold_expiry_drift    9 rows, all released, 0 cents of exposure
+livefire               PASS 7 · FAIL 0 · SKIP 1, across all eight attacks, 334s
+coreloop               PASS 6 · FAIL 1 · SKIP 0, across all seven legs, 84s
+compliance.mjs         PASS 25 · FAIL 5 · UNKNOWN 4 · CITED 7, of 41 checks
+audit-claims.mjs       exit 1, 7 findings, every one a false positive
+webhook_inbox          increase 124 done / 119 parked / 0 dead
+                       lithic   905 done /  27 parked / 26 dead
+/api/health            ok at 09:38:36Z; degraded at 09:59:12Z on the Lithic
+                       180-900s quiet band, ten minutes after live fire
+```
+
+**Two of those are worse than the last reading and are not softened anywhere.**
+`coreloop` leg 4 fails because the Lithic sandbox spend cap is exhausted and
+every authorisation declines, and `compliance.mjs` went from 2 FAIL to 5.
+
+### 058 addendum — 2026-09-11T10:08Z — the figure moved while the entry was being written
+
+`scripts/dbcheck.mjs` was rewritten at 10:06Z and migrations `0042` and `0043`
+landed, all by other workers, between this entry's 09:40Z reading and its being
+saved. **`dbcheck` now reports 36 passed, 4 failed.** Two new invariant views
+arrived red: `v_advice_delta_unsound` (1 row) and `v_hold_closure_unexplained`
+(4 rows). The two deliberate reds are unchanged at 154 and 9 rows.
+
+**Neither new failure was diagnosed by this worker and neither is claimed to be
+deliberate.** It is recorded here rather than folded into the block above,
+because a reconciliation entry that quietly restates its own headline number is
+the failure it was written about. The `36 passed, 2 failed` in that block is a
+true reading of 09:40Z and false of 10:07Z, and both sentences are now on the
+record.

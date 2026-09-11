@@ -81,11 +81,14 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { deriveCardEvents } from "./lithic-events";
 import {
   counterexample,
   describeEvents,
+  describePayload,
   factorial,
   generateEventSet,
+  generateLithicPayload,
   makeRng,
   orderings,
   permutations,
@@ -194,6 +197,30 @@ function fail(message: string): never {
 }
 
 /**
+ * The SIGNED delta this derived event carries if — and only if — it is the
+ * conversion of an `AUTHORIZATION_ADVICE` the network agreed to. `null`
+ * otherwise.
+ *
+ * Two things have to line up, and the second is the one the first draft of
+ * section 11 got wrong. The STEP has to be an advice, and the derived KIND has
+ * to be one of the two the conversion can produce. A REFUSED advice is not
+ * converted at all: `deriveCardEvents()`'s refusal branch comes first, so it is
+ * stored under `declined`, at its own magnitude, feeding no term of `H(E)`.
+ * Reading that magnitude as though it were a delta reports a base for a
+ * conversion that never happened.
+ */
+function adviceDelta(
+  derived: ReturnType<typeof deriveCardEvents>,
+  event: CardEvent,
+): bigint | null {
+  const step = derived.stepTypes.get(event.providerEventId);
+  if (step !== "AUTHORIZATION_ADVICE" && step !== "CREDIT_AUTHORIZATION_ADVICE") return null;
+  if (event.kind === "incremental_authorization") return event.amountCents;
+  if (event.kind === "authorization_reversal") return -event.amountCents;
+  return null;
+}
+
+/**
  * How much work this file actually does, counted rather than claimed.
  *
  * "I ran fifty thousand orderings" is only a real result if the number is real,
@@ -202,6 +229,30 @@ function fail(message: string): never {
  * instead of silently turning the fuzzer into a formality.
  */
 const CENSUS = { sets: 0, orderings: 0, prefixes: 0 };
+
+/**
+ * How far into `A(E) < 0` the corpus actually gets. Section 10.
+ *
+ * Accumulated by the properties and asserted by them, because the whole
+ * argument for leaving `A` unfloored (migration 0043) is that this state is
+ * COMMON and HARMLESS, and "common" is a number or it is a hope.
+ */
+const NEGATIVE_A = { sets: 0, afterAuthorisation: 0, open: 0, holding: 0 };
+
+/** Section 11's census: the payload layer, which had no corpus until 0043. */
+const PAYLOADS = {
+  generated: 0,
+  derivedEvents: 0,
+  advices: 0,
+  /** Advices standing on a negative running total — the live defect's shape. */
+  advicesOnNegativeBase: 0,
+  /** Payloads whose own reversals outran their own authorisations. */
+  overReversed: 0,
+};
+
+/** Seeds and size for the Lithic-payload corpus. Its own range, like the rest. */
+const PAYLOAD_SEED_BASE = 7_000_000;
+const PAYLOAD_CORPUS = 4_000 * SCALE;
 
 /** One ordering, evaluated and counted. */
 function fingerprintOf(events: readonly CardEvent[], clock: AuthorizationClock): string {
@@ -1056,6 +1107,320 @@ describe("refusals are order-free too", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 10. A(E) < 0 — FINDING 2, and the premise it corrects
+// ---------------------------------------------------------------------------
+//
+// On 2026-09-11 `A(E)` went to -7340 on a real Lithic transaction and the
+// report of it said: "no money moved, because `H = max(A − C, 0)` clamps. The
+// clamp is the only thing standing between that and a wrong hold."
+//
+// THE CLAMP IS NOT THE ONLY THING, and the arithmetic says so before any corpus
+// does. `closed(E)` carries `(count > 0 ∧ A ≤ 0)`, so `A < 0` implies CLOSED,
+// and `H` is 0 on the closure arm before the `max` is ever consulted. The two
+// defences are independent and both hold. That is worth asserting rather than
+// believing, because the whole argument for leaving `A` unfloored (model.ts,
+// migration 0043) rests on it: if the clamp really were the only line, flooring
+// `A` would stop being cosmetic.
+//
+// AND `A >= 0` IS NOT AN INVARIANT. This is the other half, and the corpus is
+// the evidence. A reversal delivered before the authorisation it belongs to —
+// the brief's own out-of-order case — puts `A` below zero legitimately, and the
+// next delivery puts it back. A view or an assertion demanding `A >= 0` would
+// fire on that. The counts below are printed as a coverage claim and asserted
+// as a floor, so nobody can weaken the generator and leave this green.
+describe(`A(E) < 0 — ${CORPUS.invariants} sets`, () => {
+  it("is REACHED by the corpus, often, and after a real authorisation too", () => {
+    for (let i = 0; i < CORPUS.invariants; i++) {
+      const seed = SEED_BASE.invariants + i;
+      const { events, clock } = gen(seed, { minSize: 1, maxSize: 6 });
+      const state = evaluate(events, clock);
+      if (state.authorisedCents >= 0n) continue;
+      NEGATIVE_A.sets += 1;
+      // The shape that is NOT explicable as "the authorisation has not arrived
+      // yet": the network authorised something and then reversed more than it.
+      if (state.sawAuthorisation) NEGATIVE_A.afterAuthorisation += 1;
+      if (!state.closed) NEGATIVE_A.open += 1;
+      if (state.holdCents !== 0n) NEGATIVE_A.holding += 1;
+    }
+
+    // Reachability is the claim; these are floors, not measurements. Measured
+    // at the default scale on 2026-09-11: 1,614 of 7,220 sets across every
+    // corpus in this file (22.4%), 812 of them after a real authorisation.
+    expect(NEGATIVE_A.sets).toBeGreaterThan(CORPUS.invariants / 10);
+    expect(NEGATIVE_A.afterAuthorisation).toBeGreaterThan(CORPUS.invariants / 20);
+  });
+
+  it("always implies closed(E) AND H = 0 — by BOTH defences, independently", () => {
+    for (let i = 0; i < CORPUS.invariants; i++) {
+      const seed = SEED_BASE.invariants + i;
+      const { events, clock } = gen(seed, { minSize: 1, maxSize: 6 });
+      const state = evaluate(events, clock);
+      if (state.authorisedCents >= 0n) continue;
+
+      // Defence one: the closure arm. `count > 0 ∧ A ≤ 0` is satisfied, so H
+      // is 0 without the `max` being consulted at all.
+      if (!state.closed) {
+        fail(
+          counterexample({
+            property: "A(E) < 0 implies closed(E)",
+            seed,
+            clock,
+            original: events,
+            shrunk: shrink(events, (c) => {
+              const s = holdState(c, clock);
+              return s.authorisedCents < 0n && !s.closed;
+            }),
+            detail: `A = ${state.authorisedCents}, closed = false`,
+          }),
+        );
+      }
+
+      // Defence two: the clamp, on its own. `A < 0` and `C >= 0` make
+      // `A − C` strictly negative, so `max(A − C, 0)` is 0 even if the closure
+      // arm were deleted tomorrow. Two independent reasons for the same zero.
+      if (state.authorisedCents - state.capturedCents >= 0n) {
+        fail(
+          `A(E) < 0 should make A − C strictly negative, but seed ${seed} gives ` +
+            `A = ${state.authorisedCents}, C = ${state.capturedCents}`,
+        );
+      }
+
+      if (state.holdCents !== 0n) {
+        fail(
+          counterexample({
+            property: "A(E) < 0 implies H(E) = 0",
+            seed,
+            clock,
+            original: events,
+            shrunk: shrink(events, (c) => {
+              const s = holdState(c, clock);
+              return s.authorisedCents < 0n && s.holdCents !== 0n;
+            }),
+            detail: `A = ${state.authorisedCents}, H = ${state.holdCents}`,
+          }),
+        );
+      }
+    }
+
+    // Not one set in the corpus is open or holding a cent at A < 0. This is
+    // the number migration 0043 quotes when it declines to floor `A`.
+    expect({ open: NEGATIVE_A.open, holding: NEGATIVE_A.holding }).toEqual({
+      open: 0,
+      holding: 0,
+    });
+  });
+
+  it("flooring A would change nothing at all — the no-op, demonstrated", () => {
+    // The argument in `model.ts` for leaving `A` unfloored is that the floor is
+    // arithmetically a no-op for `H`, so it buys no correctness and costs the
+    // evidence that the provider over-reversed. That is an argument about the
+    // formula, so it is checked against the formula: run the reference
+    // implementation twice, once with `A` and once with `max(A, 0)` substituted
+    // into both places the formula uses it, and compare `H`.
+    let floored = 0;
+    for (let i = 0; i < CORPUS.invariants; i++) {
+      const seed = SEED_BASE.invariants + i;
+      const { events, clock } = gen(seed, { minSize: 1, maxSize: 6 });
+      const ref = referenceHold(events, clock);
+      if (ref.a >= 0n) continue;
+      floored += 1;
+
+      const a = ref.a > 0n ? ref.a : 0n;
+      const closedIfFloored =
+        events.some((x) => x.isFinal) ||
+        events.some((x) => x.kind === "close" || x.kind === "expiry") ||
+        (ref.count > 0 && a <= 0n) ||
+        clock.now.getTime() >= clock.expiresAt.getTime();
+      const remainder = a - ref.c;
+      const hIfFloored = closedIfFloored ? 0n : remainder > 0n ? remainder : 0n;
+
+      if (hIfFloored !== ref.h) {
+        fail(
+          `flooring A changed H on seed ${seed}: ${ref.h} -> ${hIfFloored}. ` +
+            `If this ever fails, migration 0043's argument for leaving A unfloored ` +
+            `is wrong and the decision has to be retaken.`,
+        );
+      }
+    }
+    expect(floored).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. The Lithic payload — the layer the advice bug actually lived in
+// ---------------------------------------------------------------------------
+//
+// Sections 1–10 attack `holdState()`. The defect of 2026-09-11 was not in
+// `holdState()` and could not have been found by any of them: an
+// `AUTHORIZATION_ADVICE` carries the ABSOLUTE authorised amount, the adapter
+// converts it to the delta that produces that absolute, and `CardEventKind` has
+// no member for an advice — so no set this fuzzer generated could contain one.
+// `deriveCardEvents()` had never been fuzzed at all.
+//
+// The corpus in `generateLithicPayload()` closes that. The properties here are
+// about the CONVERSION, not about the hold:
+//
+//   A.  the base an advice is measured from is never negative
+//   B.  the delta is exactly `absolute − max(A_before, 0)`, so an advice still
+//       moves `A` to its absolute figure whenever the base is non-negative,
+//       which is every advice this book has ever seen but one
+//   C.  the corpus REACHES the defect's shape — an advice standing on a
+//       negative running total — because a property nobody's input can violate
+//       is a property nobody has tested
+//   D.  a refused step contributes nothing, at the payload layer too
+describe(`the advice conversion — ${PAYLOAD_CORPUS} generated Lithic payloads`, () => {
+  it("never measures an advice against a negative base, and lands on the absolute when it can", () => {
+    for (let i = 0; i < PAYLOAD_CORPUS; i++) {
+      const seed = PAYLOAD_SEED_BASE + i;
+      const { txn, magnitudes } = generateLithicPayload(seed);
+      PAYLOADS.generated += 1;
+
+      const derived = deriveCardEvents(txn);
+      PAYLOADS.derivedEvents += derived.events.length;
+
+      // Re-fold `A` in derivation order, one event at a time, so the base at
+      // each advice is the number the adapter actually used.
+      let base = 0n;
+      for (const event of derived.events) {
+        // A REFUSED advice is not converted at all — it is stored under
+        // `declined`, at its own magnitude, and feeds no term. So the events
+        // this property is about are the advices the network AGREED to, which
+        // are exactly the ones that came out as a delta. Getting this wrong is
+        // what the first run of this test did: it read a CARD_PAUSED advice's
+        // magnitude as though it were a delta and reported a base of 0 for a
+        // conversion that never happened.
+        const isAdvice = adviceDelta(derived, event) !== null;
+
+        if (isAdvice) {
+          PAYLOADS.advices += 1;
+          const absolute = magnitudes.get(event.providerEventId);
+          if (absolute === undefined) fail(`seed ${seed}: advice ${event.providerEventId} has no generated magnitude`);
+          const signed = adviceDelta(derived, event) as bigint;
+          const usedBase = absolute - signed;
+
+          // A. This is the invariant `v_advice_delta_unsound` checks on the
+          //    database, checked here on the pure function that produces it.
+          if (usedBase < 0n) {
+            fail(
+              `PROPERTY VIOLATED: an advice was converted against a NEGATIVE base\n` +
+                `  seed: ${seed}  (generateLithicPayload(${seed}))\n` +
+                `  payload: ${describePayload(txn)}\n` +
+                `  advice ${event.providerEventId}: absolute ${absolute}, stored ${event.kind} ` +
+                `${event.amountCents}, implied base ${usedBase}`,
+            );
+          }
+
+          // B. And the base is exactly the clamped running total.
+          const expectedBase = base > 0n ? base : 0n;
+          if (usedBase !== expectedBase) {
+            fail(
+              `seed ${seed}: advice ${event.providerEventId} used base ${usedBase}, ` +
+                `expected max(A_before, 0) = ${expectedBase} (A_before = ${base})\n` +
+                `  payload: ${describePayload(txn)}`,
+            );
+          }
+
+          // C. Did this payload reach the live defect's shape?
+          if (base < 0n) PAYLOADS.advicesOnNegativeBase += 1;
+        }
+
+        if (event.kind === "authorization" || event.kind === "incremental_authorization") {
+          base += event.amountCents;
+        } else if (event.kind === "authorization_reversal") {
+          base -= event.amountCents;
+        }
+      }
+
+      if (derived.overReversedCents > 0n) PAYLOADS.overReversed += 1;
+
+      // D. A refused step feeds no term of the model. The kind it is stored
+      //    under is `declined`, which is in none of the four contributing sets,
+      //    so this is structural — but structural claims are exactly the ones
+      //    worth checking against a corpus.
+      for (const token of derived.refused) {
+        const event = derived.events.find((e) => e.providerEventId === token);
+        if (event === undefined) fail(`seed ${seed}: refused token ${token} is not in the derived set`);
+        if (event.isFinal) fail(`seed ${seed}: a refusal must not carry isFinal`);
+        const withoutIt = derived.events.filter((e) => e.providerEventId !== token);
+        const clock: AuthorizationClock = {
+          expiresAt: new Date("2099-01-01T00:00:00Z"),
+          now: new Date("2026-09-11T00:00:00Z"),
+        };
+        const a = holdState(derived.events, clock);
+        const b = holdState(withoutIt, clock);
+        if (a.authorisedCents !== b.authorisedCents || a.capturedCents !== b.capturedCents) {
+          fail(
+            `seed ${seed}: dropping refused step ${token} changed the fold — ` +
+              `A ${a.authorisedCents} vs ${b.authorisedCents}, C ${a.capturedCents} vs ${b.capturedCents}`,
+          );
+        }
+      }
+
+      // Every derived event is a magnitude, whatever the payload's signs were.
+      for (const event of derived.events) {
+        if (event.amountCents < 0n) fail(`seed ${seed}: derived a negative magnitude for ${event.providerEventId}`);
+      }
+
+      // Dedupe: a token listed twice in one array lands once.
+      const tokens = new Set(derived.events.map((e) => e.providerEventId));
+      expect(tokens.size).toBe(derived.events.length);
+    }
+
+    // THE COVERAGE CLAIM, asserted rather than hoped for. A corpus that never
+    // reaches an advice standing on a negative running total cannot fail
+    // property A, and would have passed on the day the bug shipped.
+    expect(PAYLOADS.advices).toBeGreaterThan(0);
+    expect(PAYLOADS.overReversed).toBeGreaterThan(0);
+    expect(PAYLOADS.advicesOnNegativeBase).toBeGreaterThan(0);
+  });
+
+  it("is the property the OLD conversion fails — the fix is not vacuous", () => {
+    // The mirror of `terminallyClosed`'s localisation test in section 8: the
+    // pre-0043 rule is recomputed here from the same payloads, and it must
+    // still be caught. If the corpus ever stops separating the two, this test
+    // goes red and says so, instead of property A quietly going green because
+    // nothing reaches the shape any more.
+    let oldRuleWouldHaveFabricated = 0;
+    let fabricatedCents = 0n;
+
+    for (let i = 0; i < PAYLOAD_CORPUS; i++) {
+      const seed = PAYLOAD_SEED_BASE + i;
+      const { txn, magnitudes } = generateLithicPayload(seed);
+      const derived = deriveCardEvents(txn);
+
+      let base = 0n;
+      for (const event of derived.events) {
+        if (adviceDelta(derived, event) !== null) {
+          if (base < 0n) {
+            const absolute = magnitudes.get(event.providerEventId) ?? 0n;
+            // What the pre-0043 line computed: `amount − runningAuthorised`,
+            // with no clamp. On the live transaction that turned an advice of
+            // 0 against a base of -7340 into an increment of 7340.
+            const oldDelta = absolute - base;
+            const newDelta = absolute - 0n;
+            if (oldDelta !== newDelta) {
+              oldRuleWouldHaveFabricated += 1;
+              fabricatedCents += oldDelta - newDelta;
+            }
+          }
+        }
+        if (event.kind === "authorization" || event.kind === "incremental_authorization") {
+          base += event.amountCents;
+        } else if (event.kind === "authorization_reversal") {
+          base -= event.amountCents;
+        }
+      }
+    }
+
+    expect(oldRuleWouldHaveFabricated).toBeGreaterThan(0);
+    // And every cent of the difference is an over-statement: the old rule could
+    // only ever derive a LARGER delta, never a smaller one, which is why the
+    // fix can never withhold more of a customer's money than the bug did.
+    expect(fabricatedCents).toBeGreaterThan(0n);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The fuzzer's own machinery
 // ---------------------------------------------------------------------------
 
@@ -1138,6 +1503,20 @@ describe("the census", () => {
     expect(CENSUS.sets).toBeGreaterThanOrEqual(25_720 * SCALE);
     expect(CENSUS.orderings).toBeGreaterThanOrEqual(98_611 * SCALE);
     expect(CENSUS.prefixes).toBeGreaterThanOrEqual(55_036 * SCALE);
+  });
+
+  it("pins the PAYLOAD corpus too — the layer that had none until 0043", () => {
+    // `deriveCardEvents()` was unfuzzed, which is why an advice of 0 reached
+    // production as an increment of 7340. These are the numbers docs/FUZZ.md
+    // quotes for section 11, and they are floors: shrink the corpus and this
+    // goes red rather than the coverage quietly evaporating.
+    expect(PAYLOADS.generated).toBeGreaterThanOrEqual(PAYLOAD_CORPUS);
+    expect(PAYLOADS.derivedEvents).toBeGreaterThanOrEqual(4_000 * SCALE);
+    expect(PAYLOADS.advices).toBeGreaterThanOrEqual(1_000 * SCALE);
+    // The two that matter. A corpus that never reaches an over-reversal, or
+    // never stands an advice on one, cannot fail the property it exists for.
+    expect(PAYLOADS.overReversed).toBeGreaterThanOrEqual(500 * SCALE);
+    expect(PAYLOADS.advicesOnNegativeBase).toBeGreaterThanOrEqual(100 * SCALE);
   });
 });
 

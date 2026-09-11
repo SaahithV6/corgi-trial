@@ -39,8 +39,39 @@
  * ---------------------------------------------------------------------------
  *
  * Money tables are append-only, so there is no teardown and none is wanted.
- * Each run picks its own synthetic business date and its own account, and
- * every assertion is about that day's own rows.
+ * What there IS now is a transaction that is rolled back, which is a different
+ * thing: the rows never exist to need deleting.
+ *
+ * Measured, before: +2 `book_day` closes, +2 `statement` publications and +4
+ * journal entries per run — and a closed day and a published statement are
+ * both PERMANENT, so every run was adding two facts to the book that could
+ * never be taken back. 101 book days and 60 statements are on the live
+ * database and stay there. This run adds none of either. Per-run cost: 2 book
+ * days / 2 statements / 4 entries before, ZERO after.
+ *
+ * WHICH TESTS ARE WRAPPED, and why the others are not:
+ *
+ *   ▸ "reproduces a closed day's statement" — WRAPPED. It closes a synthetic
+ *     day and publishes v1 and v2 against it.
+ *   ▸ "refuses to issue a corrected version before anything has been
+ *     published" — WRAPPED. The refusal is the point, but the `closeDay()`
+ *     that sets it up is a real permanent close.
+ *   ▸ "the database refuses to edit a published statement or a closed day" —
+ *     not wrapped. The grant refuses all three statements, so there is nothing
+ *     to roll back, and running them on the pool keeps it honest: a rollback
+ *     could otherwise be mistaken for the reason nothing changed.
+ *   ▸ "refuses to publish a statement for a day that has not been closed" —
+ *     not wrapped. `publishStatement` raises before it writes anything.
+ *   ▸ "generates the same statement PDF twice" — not wrapped. It renders; it
+ *     writes nothing, and it goes through `statementPdfAction`, the screen's
+ *     own entry point, which takes no connection and must not be given one.
+ *   ▸ "seeds the demo the /statements screen reads" — **DELIBERATELY NOT
+ *     WRAPPED, and it must stay that way.** See the note on that test.
+ *
+ * Each run still picks its own synthetic business date and its own account, so
+ * the two suites that share this database cannot collide even while the rows
+ * are alive. That was never redundant with the rollback: it is what keeps a
+ * concurrent worker from reading them mid-run.
  *
  * Three isolation decisions, and all three were forced by a real failure
  * rather than chosen up front. The live database is SHARED — with the other
@@ -118,6 +149,44 @@ function dayFromEpoch(offset: number): string {
   return at.toISOString().slice(0, 10);
 }
 
+/** What postgres.js hands a transaction body. Structural, to avoid the import. */
+type Scoped = {
+  savepoint: <T>(fn: (scoped: unknown) => Promise<T>) => Promise<T>;
+  begin?: unknown;
+};
+
+/**
+ * Give a transaction handle the `.begin()` that the statements code calls.
+ *
+ * `closeDay`, `publishStatement` and `reissueStatement` each wrap their writes
+ * in `conn.begin(...)`, which is right — a close and the watermark it freezes,
+ * a statement and the document it hashes, must land together or not at all.
+ * But postgres.js puts `begin` on the POOL only; a transaction scope gets
+ * `savepoint`, and the two are the same function internally (`scope(c, fn,
+ * name)`) differing only in whether a savepoint name is issued. Without this
+ * shim `closeDay(args, tx)` throws `conn.begin is not a function`, and the
+ * only way to run the reproducibility proof inside a transaction would be to
+ * stop calling the production functions — which would mean this file no longer
+ * proves anything about the code that publishes statements.
+ *
+ * `Sql(handler)` builds a fresh object per scope, so this adds the property to
+ * this transaction's handle and to nothing else.
+ */
+function nested(handle: unknown): Sql {
+  const scoped = handle as Scoped;
+  if (typeof scoped.begin !== "function") {
+    scoped.begin = (first: unknown, second?: unknown) => {
+      const body = (typeof first === "function" ? first : second) as (
+        inner: unknown,
+      ) => Promise<unknown>;
+      return scoped.savepoint((inner) => Promise.resolve(body(nested(inner))));
+    };
+  }
+  return handle as Sql;
+}
+
+const ROLLBACK = "statements-integration-rollback";
+
 d("statements, against the live database", () => {
   let sql: Sql;
   let postEntry: typeof PostEntry;
@@ -185,259 +254,288 @@ d("statements, against the live database", () => {
     cardPayableId = card;
   });
 
+  /**
+   * Run a scenario against the live database and then throw it away.
+   *
+   * The close really happens, the watermark is really frozen, the statement is
+   * really hashed by the same code the screen calls, and the append-only
+   * triggers really fire — and then the transaction is rolled back and neither
+   * the closed day nor the published document was ever a fact. A closed day is
+   * permanent; the only way to test closing one without accumulating them is
+   * not to keep the transaction.
+   *
+   * Anything that is not the sentinel is a real failure — a broken assertion
+   * or a statement Postgres refused — and is rethrown so the run goes red. It
+   * rolled back either way.
+   */
+  async function rolledBack(body: (tx: Sql) => Promise<void>): Promise<void> {
+    let failure: unknown = null;
+    try {
+      await sql.begin(async (raw) => {
+        await body(nested(raw));
+        throw new Error(ROLLBACK);
+      });
+    } catch (thrown) {
+      if (!(thrown instanceof Error) || thrown.message !== ROLLBACK) failure = thrown;
+    }
+    if (failure !== null) throw failure;
+  }
+
   it("reproduces a closed day's statement byte-for-byte, across a backdated correction", async () => {
-    /* ---- Settlement day ------------------------------------------------- */
+    await rolledBack(async (tx) => {
+      /* ---- Settlement day ------------------------------------------------- */
 
-    await postEntry(
-      {
-        entityId,
-        valueDate: settlementDay,
-        book: "financial",
-        description: `Inbound ACH credit ${tag}`,
-        idempotencyKey: `stmt:${tag}:credit`,
-        actorId,
-        rail: "ach",
-        externalRef: `STMT-${tag}-ACH`,
-        lines: [
-          { accountId: achReceivableId, amountCents: CREDIT_CENTS },
-          { accountId, amountCents: -CREDIT_CENTS },
-        ],
-      },
-      sql,
-    );
-
-    const clearingEntryId = await postEntry(
-      {
-        entityId,
-        valueDate: settlementDay,
-        book: "financial",
-        description: `Card clearing ${tag}`,
-        idempotencyKey: `stmt:${tag}:clearing`,
-        actorId,
-        rail: "card",
-        externalRef: `STMT-${tag}-CARD`,
-        lines: [
-          { accountId, amountCents: CLEARING_CENTS },
-          { accountId: cardPayableId, amountCents: -CLEARING_CENTS },
-        ],
-      },
-      sql,
-    );
-
-    /* ---- Close: the watermark is frozen --------------------------------- */
-
-    const close = await publish.closeDay(
-      { entityId, businessDate: settlementDay, actorId },
-      sql,
-    );
-    expect(close.created).toBe(true);
-    const W1 = close.bookDay.bookingWatermark;
-    expect(W1).toBeGreaterThan(0n);
-
-    // Closing a closed day writes nothing and reports the ORIGINAL watermark.
-    // A day is closed once; `book_day`'s primary key is the guarantee and this
-    // is the application not fighting it.
-    const reclose = await publish.closeDay(
-      { entityId, businessDate: settlementDay, actorId },
-      sql,
-    );
-    expect(reclose.created).toBe(false);
-    expect(reclose.bookDay.bookingWatermark).toBe(W1);
-    expect(reclose.bookDay.closedAt).toBe(close.bookDay.closedAt);
-
-    /* ---- GENERATION 1 ---------------------------------------------------- */
-
-    const g1 = await publish.publishStatement(
-      { accountId, businessDate: settlementDay, actorId },
-      sql,
-    );
-    expect(g1.created).toBe(true);
-    expect(g1.statement.version).toBe(1);
-    expect(g1.statement.bookingWatermark).toBe(W1);
-    expect(g1.statement.format).toBe(render.STATEMENT_FORMAT);
-    expect(g1.statement.generatedBy).toBe(actorId);
-
-    const H1 = g1.statement.contentHash;
-    const T1 = render.canonicalStatement(g1.document);
-    expect(H1).toHaveLength(64);
-    expect(render.statementHash(g1.document)).toBe(H1);
-
-    // The published figures are the fold over the day, not a guess.
-    expect(g1.statement.lineCount).toBe(2);
-    expect(g1.statement.closingBalanceCents).toBe(
-      g1.statement.openingBalanceCents + CREDIT_CENTS - CLEARING_CENTS,
-    );
-
-    /* ---- GENERATION 2: nothing has changed ------------------------------- */
-
-    const g2 = await publish.verifyStatement(g1.statement.statementId, sql);
-    expect(g2).not.toBeNull();
-    const H2 = g2!.recomputedHash;
-    const T2 = g2!.canonical;
-    expect(g2!.reproduced).toBe(true);
-    expect(g2!.formatChanged).toBe(false);
-    expect(H2).toBe(H1);
-    expect(T2).toBe(T1);
-
-    // And publishing again is a no-op that returns the SAME row, not a v2.
-    const republish = await publish.publishStatement(
-      { accountId, businessDate: settlementDay, actorId },
-      sql,
-    );
-    expect(republish.created).toBe(false);
-    expect(republish.statement.statementId).toBe(g1.statement.statementId);
-    expect(republish.statement.version).toBe(1);
-
-    /* ---- A NEW backdated correction lands into the closed day ------------ */
-
-    const correction = await reverseAndRebook(
-      {
-        originalEntryId: clearingEntryId,
-        reason: `statement proof ${tag}: merchant reversed and re-presented`,
-        actorId,
-        rebook: {
-          // SETTLEMENT DAY's value date, today's booking position. If this
-          // carried today's value date instead, settlement day would stay
-          // wrong forever and today would show a phantom credit.
+      await postEntry(
+        {
+          entityId,
           valueDate: settlementDay,
           book: "financial",
-          description: `Card clearing re-presented ${tag}`,
-          idempotencyKey: `stmt:${tag}:rebook`,
+          description: `Inbound ACH credit ${tag}`,
+          idempotencyKey: `stmt:${tag}:credit`,
+          actorId,
+          rail: "ach",
+          externalRef: `STMT-${tag}-ACH`,
+          lines: [
+            { accountId: achReceivableId, amountCents: CREDIT_CENTS },
+            { accountId, amountCents: -CREDIT_CENTS },
+          ],
+        },
+        tx,
+      );
+
+      const clearingEntryId = await postEntry(
+        {
+          entityId,
+          valueDate: settlementDay,
+          book: "financial",
+          description: `Card clearing ${tag}`,
+          idempotencyKey: `stmt:${tag}:clearing`,
+          actorId,
           rail: "card",
           externalRef: `STMT-${tag}-CARD`,
           lines: [
-            { accountId, amountCents: REBOOK_CENTS },
-            { accountId: cardPayableId, amountCents: -REBOOK_CENTS },
+            { accountId, amountCents: CLEARING_CENTS },
+            { accountId: cardPayableId, amountCents: -CLEARING_CENTS },
           ],
         },
-      },
-      sql,
-    );
-    expect(correction.rebookEntryId).not.toBeNull();
+        tx,
+      );
 
-    // The correction really is inside the closed period and above the
-    // watermark — which is what makes generation 3 a test rather than a
-    // tautology.
-    const [late] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM journal_entry
-       WHERE value_date = ${settlementDay}::date AND booking_seq > ${W1}`;
-    expect(late?.n).toBe(2);
+      /* ---- Close: the watermark is frozen --------------------------------- */
 
-    /* ---- GENERATION 3: the book has changed, the document has not -------- */
+      const close = await publish.closeDay(
+        { entityId, businessDate: settlementDay, actorId },
+        tx,
+      );
+      expect(close.created).toBe(true);
+      const W1 = close.bookDay.bookingWatermark;
+      expect(W1).toBeGreaterThan(0n);
 
-    const g3 = await publish.verifyStatement(g1.statement.statementId, sql);
-    expect(g3).not.toBeNull();
-    const H3 = g3!.recomputedHash;
-    const T3 = g3!.canonical;
-    expect(g3!.reproduced).toBe(true);
-    expect(H3).toBe(H1);
-    // Byte-identical, asserted about the bytes and not only about the digest.
-    expect(T3).toBe(T1);
-    expect(T3.length).toBe(T1.length);
-    expect(g3!.document.lineCount).toBe(2);
-    expect(g3!.document.closingBalanceCents).toBe(g1.statement.closingBalanceCents);
+      // Closing a closed day writes nothing and reports the ORIGINAL watermark.
+      // A day is closed once; `book_day`'s primary key is the guarantee and this
+      // is the application not fighting it.
+      const reclose = await publish.closeDay(
+        { entityId, businessDate: settlementDay, actorId },
+        tx,
+      );
+      expect(reclose.created).toBe(false);
+      expect(reclose.bookDay.bookingWatermark).toBe(W1);
+      expect(reclose.bookDay.closedAt).toBe(close.bookDay.closedAt);
 
-    /* ---- Both readings, at once ----------------------------------------- */
+      /* ---- GENERATION 1 ---------------------------------------------------- */
 
-    const comparison = await compare.compareStatement(
-      { accountId, businessDate: settlementDay },
-      sql,
-    );
-    expect(comparison).not.toBeNull();
-    const c = comparison!;
+      const g1 = await publish.publishStatement(
+        { accountId, businessDate: settlementDay, actorId },
+        tx,
+      );
+      expect(g1.created).toBe(true);
+      expect(g1.statement.version).toBe(1);
+      expect(g1.statement.bookingWatermark).toBe(W1);
+      expect(g1.statement.format).toBe(render.STATEMENT_FORMAT);
+      expect(g1.statement.generatedBy).toBe(actorId);
 
-    // As published: unchanged, and still hashing to what it hashed to.
-    expect(c.published.statementId).toBe(g1.statement.statementId);
-    expect(c.published.contentHash).toBe(H1);
-    expect(c.reproduced).toBe(true);
-    expect(c.publishedDocument.closingBalanceCents).toBe(g1.statement.closingBalanceCents);
+      const H1 = g1.statement.contentHash;
+      const T1 = render.canonicalStatement(g1.document);
+      expect(H1).toHaveLength(64);
+      expect(render.statementHash(g1.document)).toBe(H1);
 
-    // As corrected: the day is now worth CLEARING - REBOOK more, because the
-    // merchant took less than it first presented.
-    expect(c.correctedDocument.closingBalanceCents).toBe(
-      g1.statement.closingBalanceCents + CLEARING_CENTS - REBOOK_CENTS,
-    );
-    expect(c.deltaCents).toBe(CLEARING_CENTS - REBOOK_CENTS);
-    expect(c.correctedDocument.lineCount).toBe(4);
+      // The published figures are the fold over the day, not a guess.
+      expect(g1.statement.lineCount).toBe(2);
+      expect(g1.statement.closingBalanceCents).toBe(
+        g1.statement.openingBalanceCents + CREDIT_CENTS - CLEARING_CENTS,
+      );
 
-    // And the difference is itemised, not asserted. `explainsDelta` is the
-    // assertion that matters: the listed entries must sum to the whole gap.
-    // It failed the first time this ran, because the list was scoped to
-    // entries INSIDE the period and a closing balance also moves when
-    // something backdated before the period is booked late. See
-    // `listLatePostings`.
-    expect(c.latePostings.map((p) => p.entryType)).toEqual(["reversal", "rebook"]);
-    expect(c.latePostings.every((p) => !p.affectsOpening)).toBe(true);
-    expect(compare.explainsDelta(c.deltaCents, c.latePostings)).toBe(true);
-    const groups = compare.groupLatePostings(c.latePostings);
-    expect(groups).toHaveLength(1);
-    expect(groups[0]?.isCorrection).toBe(true);
-    expect(groups[0]?.netCents).toBe(c.deltaCents);
-    expect(groups[0]?.correctionGroupId).toBe(correction.correctionGroupId);
+      /* ---- GENERATION 2: nothing has changed ------------------------------- */
 
-    /* ---- v2: a NEW document, never an edit ------------------------------ */
+      const g2 = await publish.verifyStatement(g1.statement.statementId, tx);
+      expect(g2).not.toBeNull();
+      const H2 = g2!.recomputedHash;
+      const T2 = g2!.canonical;
+      expect(g2!.reproduced).toBe(true);
+      expect(g2!.formatChanged).toBe(false);
+      expect(H2).toBe(H1);
+      expect(T2).toBe(T1);
 
-    const v2 = await publish.reissueStatement(
-      { accountId, businessDate: settlementDay, actorId },
-      sql,
-    );
-    expect(v2.created).toBe(true);
-    expect(v2.statement.version).toBe(2);
-    expect(v2.statement.bookingWatermark).toBeGreaterThan(W1);
-    expect(v2.statement.contentHash).not.toBe(H1);
-    expect(v2.statement.lineCount).toBe(4);
-    expect(v2.statement.closingBalanceCents).toBe(c.correctedDocument.closingBalanceCents);
+      // And publishing again is a no-op that returns the SAME row, not a v2.
+      const republish = await publish.publishStatement(
+        { accountId, businessDate: settlementDay, actorId },
+        tx,
+      );
+      expect(republish.created).toBe(false);
+      expect(republish.statement.statementId).toBe(g1.statement.statementId);
+      expect(republish.statement.version).toBe(1);
 
-    // Reissuing again writes nothing: a version whose only difference from its
-    // predecessor is `generated_at` is noise in an audit trail.
-    const reissueAgain = await publish.reissueStatement(
-      { accountId, businessDate: settlementDay, actorId },
-      sql,
-    );
-    expect(reissueAgain.created).toBe(false);
-    expect(reissueAgain.statement.statementId).toBe(v2.statement.statementId);
+      /* ---- A NEW backdated correction lands into the closed day ------------ */
 
-    /* ---- v1 is untouched, in the row and in the rendering --------------- */
+      const correction = await reverseAndRebook(
+        {
+          originalEntryId: clearingEntryId,
+          reason: `statement proof ${tag}: merchant reversed and re-presented`,
+          actorId,
+          rebook: {
+            // SETTLEMENT DAY's value date, today's booking position. If this
+            // carried today's value date instead, settlement day would stay
+            // wrong forever and today would show a phantom credit.
+            valueDate: settlementDay,
+            book: "financial",
+            description: `Card clearing re-presented ${tag}`,
+            idempotencyKey: `stmt:${tag}:rebook`,
+            rail: "card",
+            externalRef: `STMT-${tag}-CARD`,
+            lines: [
+              { accountId, amountCents: REBOOK_CENTS },
+              { accountId: cardPayableId, amountCents: -REBOOK_CENTS },
+            ],
+          },
+        },
+        tx,
+      );
+      expect(correction.rebookEntryId).not.toBeNull();
 
-    const v1Now = await read.readStatementById(g1.statement.statementId, sql);
-    expect(v1Now).toEqual(g1.statement);
+      // The correction really is inside the closed period and above the
+      // watermark — which is what makes generation 3 a test rather than a
+      // tautology.
+      const [late] = await tx<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM journal_entry
+         WHERE value_date = ${settlementDay}::date AND booking_seq > ${W1}`;
+      expect(late?.n).toBe(2);
 
-    const versions = await read.listStatementVersions(
-      { accountId, periodStart: settlementDay, periodEnd: settlementDay },
-      sql,
-    );
-    expect(versions.map((v) => v.version)).toEqual([1, 2]);
-    expect(versions[0]?.contentHash).toBe(H1);
+      /* ---- GENERATION 3: the book has changed, the document has not -------- */
 
-    // GENERATION 4, unasked for and free: after v2 exists, v1 still renders
-    // identically. The versions are independent documents, not a chain where
-    // the newest overwrites the reading of the oldest.
-    const g4 = await publish.verifyStatement(g1.statement.statementId, sql);
-    expect(g4!.recomputedHash).toBe(H1);
-    expect(g4!.canonical).toBe(T1);
+      const g3 = await publish.verifyStatement(g1.statement.statementId, tx);
+      expect(g3).not.toBeNull();
+      const H3 = g3!.recomputedHash;
+      const T3 = g3!.canonical;
+      expect(g3!.reproduced).toBe(true);
+      expect(H3).toBe(H1);
+      // Byte-identical, asserted about the bytes and not only about the digest.
+      expect(T3).toBe(T1);
+      expect(T3.length).toBe(T1.length);
+      expect(g3!.document.lineCount).toBe(2);
+      expect(g3!.document.closingBalanceCents).toBe(g1.statement.closingBalanceCents);
 
-    // The evidence, printed so it can be pasted rather than paraphrased.
-    // eslint-disable-next-line no-console
-    console.log(
-      [
-        "",
-        "  REPRODUCIBILITY PROOF — live Neon, three generations",
-        `  business date      ${settlementDay}   account ${accountId}`,
-        `  close watermark    seq ${W1}   (book_day.booking_watermark, frozen)`,
-        `  preimage length    ${T1.length} bytes, ${g1.document.lineCount} lines`,
-        `  G1 publish v1      ${H1}`,
-        `  G2 re-render       ${H2}   ${H2 === H1 ? "IDENTICAL" : "DIFFERENT"}`,
-        `     backdated correction: reversal ${correction.reversalEntryId} + rebook ${String(correction.rebookEntryId)}`,
-        `     both at value date ${settlementDay}, booked above seq ${W1}`,
-        `  G3 re-render       ${H3}   ${H3 === H1 ? "IDENTICAL" : "DIFFERENT"}`,
-        `  canonical bytes    T1 === T2 === T3: ${String(T1 === T2 && T2 === T3)}`,
-        `  as published       closing ${g1.statement.closingBalanceCents} cents (v1, seq ${W1})`,
-        `  as corrected       closing ${c.correctedDocument.closingBalanceCents} cents (now)`,
-        `  delta              ${c.deltaCents} cents, itemised by ${c.latePostings.length} entries, explained: ${String(compare.explainsDelta(c.deltaCents, c.latePostings))}`,
-        `  v2 issued          ${v2.statement.contentHash} at seq ${v2.statement.bookingWatermark}`,
-        "",
-      ].join("\n"),
-    );
+      /* ---- Both readings, at once ----------------------------------------- */
+
+      const comparison = await compare.compareStatement(
+        { accountId, businessDate: settlementDay },
+        tx,
+      );
+      expect(comparison).not.toBeNull();
+      const c = comparison!;
+
+      // As published: unchanged, and still hashing to what it hashed to.
+      expect(c.published.statementId).toBe(g1.statement.statementId);
+      expect(c.published.contentHash).toBe(H1);
+      expect(c.reproduced).toBe(true);
+      expect(c.publishedDocument.closingBalanceCents).toBe(g1.statement.closingBalanceCents);
+
+      // As corrected: the day is now worth CLEARING - REBOOK more, because the
+      // merchant took less than it first presented.
+      expect(c.correctedDocument.closingBalanceCents).toBe(
+        g1.statement.closingBalanceCents + CLEARING_CENTS - REBOOK_CENTS,
+      );
+      expect(c.deltaCents).toBe(CLEARING_CENTS - REBOOK_CENTS);
+      expect(c.correctedDocument.lineCount).toBe(4);
+
+      // And the difference is itemised, not asserted. `explainsDelta` is the
+      // assertion that matters: the listed entries must sum to the whole gap.
+      // It failed the first time this ran, because the list was scoped to
+      // entries INSIDE the period and a closing balance also moves when
+      // something backdated before the period is booked late. See
+      // `listLatePostings`.
+      expect(c.latePostings.map((p) => p.entryType)).toEqual(["reversal", "rebook"]);
+      expect(c.latePostings.every((p) => !p.affectsOpening)).toBe(true);
+      expect(compare.explainsDelta(c.deltaCents, c.latePostings)).toBe(true);
+      const groups = compare.groupLatePostings(c.latePostings);
+      expect(groups).toHaveLength(1);
+      expect(groups[0]?.isCorrection).toBe(true);
+      expect(groups[0]?.netCents).toBe(c.deltaCents);
+      expect(groups[0]?.correctionGroupId).toBe(correction.correctionGroupId);
+
+      /* ---- v2: a NEW document, never an edit ------------------------------ */
+
+      const v2 = await publish.reissueStatement(
+        { accountId, businessDate: settlementDay, actorId },
+        tx,
+      );
+      expect(v2.created).toBe(true);
+      expect(v2.statement.version).toBe(2);
+      expect(v2.statement.bookingWatermark).toBeGreaterThan(W1);
+      expect(v2.statement.contentHash).not.toBe(H1);
+      expect(v2.statement.lineCount).toBe(4);
+      expect(v2.statement.closingBalanceCents).toBe(c.correctedDocument.closingBalanceCents);
+
+      // Reissuing again writes nothing: a version whose only difference from its
+      // predecessor is `generated_at` is noise in an audit trail.
+      const reissueAgain = await publish.reissueStatement(
+        { accountId, businessDate: settlementDay, actorId },
+        tx,
+      );
+      expect(reissueAgain.created).toBe(false);
+      expect(reissueAgain.statement.statementId).toBe(v2.statement.statementId);
+
+      /* ---- v1 is untouched, in the row and in the rendering --------------- */
+
+      const v1Now = await read.readStatementById(g1.statement.statementId, tx);
+      expect(v1Now).toEqual(g1.statement);
+
+      const versions = await read.listStatementVersions(
+        { accountId, periodStart: settlementDay, periodEnd: settlementDay },
+        tx,
+      );
+      expect(versions.map((v) => v.version)).toEqual([1, 2]);
+      expect(versions[0]?.contentHash).toBe(H1);
+
+      // GENERATION 4, unasked for and free: after v2 exists, v1 still renders
+      // identically. The versions are independent documents, not a chain where
+      // the newest overwrites the reading of the oldest.
+      const g4 = await publish.verifyStatement(g1.statement.statementId, tx);
+      expect(g4!.recomputedHash).toBe(H1);
+      expect(g4!.canonical).toBe(T1);
+
+      // The evidence, printed so it can be pasted rather than paraphrased.
+      // eslint-disable-next-line no-console
+      console.log(
+        [
+          "",
+          "  REPRODUCIBILITY PROOF — live Neon, three generations",
+          `  business date      ${settlementDay}   account ${accountId}`,
+          `  close watermark    seq ${W1}   (book_day.booking_watermark, frozen)`,
+          `  preimage length    ${T1.length} bytes, ${g1.document.lineCount} lines`,
+          `  G1 publish v1      ${H1}`,
+          `  G2 re-render       ${H2}   ${H2 === H1 ? "IDENTICAL" : "DIFFERENT"}`,
+          `     backdated correction: reversal ${correction.reversalEntryId} + rebook ${String(correction.rebookEntryId)}`,
+          `     both at value date ${settlementDay}, booked above seq ${W1}`,
+          `  G3 re-render       ${H3}   ${H3 === H1 ? "IDENTICAL" : "DIFFERENT"}`,
+          `  canonical bytes    T1 === T2 === T3: ${String(T1 === T2 && T2 === T3)}`,
+          `  as published       closing ${g1.statement.closingBalanceCents} cents (v1, seq ${W1})`,
+          `  as corrected       closing ${c.correctedDocument.closingBalanceCents} cents (now)`,
+          `  delta              ${c.deltaCents} cents, itemised by ${c.latePostings.length} entries, explained: ${String(compare.explainsDelta(c.deltaCents, c.latePostings))}`,
+          `  v2 issued          ${v2.statement.contentHash} at seq ${v2.statement.bookingWatermark}`,
+          "",
+        ].join("\n"),
+      );
+    });
   });
 
   it("the database refuses to edit a published statement or a closed day", async () => {
@@ -472,23 +570,49 @@ d("statements, against the live database", () => {
   });
 
   it("refuses to issue a corrected version before anything has been published", async () => {
-    const closedButUnpublished = dayFromEpoch((stamp % 5000) + 2);
-    await publish.closeDay(
-      { entityId, businessDate: closedButUnpublished, actorId },
-      sql,
-    );
-    await expect(
-      publish.reissueStatement(
-        { accountId, businessDate: closedButUnpublished, actorId },
-        sql,
-      ),
-    ).rejects.toThrow(publish.NotYetPublishedError);
+    await rolledBack(async (tx) => {
+      const closedButUnpublished = dayFromEpoch((stamp % 5000) + 2);
+      await publish.closeDay(
+        { entityId, businessDate: closedButUnpublished, actorId },
+        tx,
+      );
+      await expect(
+        publish.reissueStatement(
+          { accountId, businessDate: closedButUnpublished, actorId },
+          tx,
+        ),
+      ).rejects.toThrow(publish.NotYetPublishedError);
+    });
   });
 
   it("seeds the demo the /statements screen reads, and is a no-op the second time", async () => {
-    // This is also the seeder. The screen's default state reads the live
-    // database, so it having something to show is a consequence of this
-    // running rather than of a fixture claiming so.
+    // ┌────────────────────────────────────────────────────────────────────┐
+    // │ THIS TEST COMMITS, DELIBERATELY. DO NOT WRAP IT IN A ROLLBACK.     │
+    // └────────────────────────────────────────────────────────────────────┘
+    //
+    // Every other writing test in this file runs inside a transaction that is
+    // thrown away. This one cannot, for two reasons, and both are about what
+    // it IS rather than about what it costs:
+    //
+    // 1. IT IS THE SEEDER. The sentence below is the whole point — the screen's
+    //    default state reads the live database, so `/statements` having
+    //    something to show is a consequence of this running. Roll it back and
+    //    the deployed demo is reading rows that no longer exist. A seeder whose
+    //    output is discarded has not seeded anything.
+    //
+    // 2. THE CLAIM IS ABOUT DURABILITY ACROSS TRANSACTIONS. `again.closedNow`,
+    //    `again.v1.statementId === first.v1.statementId` and
+    //    `again.current.version === first.current.version` are assertions that
+    //    the SECOND call found what the FIRST call committed and declined to
+    //    write a second version. That is idempotency across time, which is the
+    //    only reason this test exists, and it is not a property a single
+    //    transaction can exhibit.
+    //
+    // Its per-run cost in steady state is already zero, and it is zero by its
+    // own design rather than by a rollback: `seedStatementDemo` is idempotent
+    // and writes a new version only when the book genuinely moved under the
+    // demo day. This run's other tests no longer move it, so they no longer
+    // manufacture work for it either. See `docs/TESTING.md`.
     const first = await demo.seedStatementDemo({}, sql);
     expect(first.v1.version).toBe(1);
     // NOT `toBe(2)`. The demo day accumulates a genuine new version whenever

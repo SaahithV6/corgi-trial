@@ -447,7 +447,9 @@ $600.00 back, of which **$300.00 was Kettle & Crumb Bakery's** money.
 > **Re-measured 2026-09-11T09:40Z it reads 36 passed, 2 failed**, and
 > `v_refused_auth_hold` is **154 rows / 130 holds / $9,786.20**, all
 > `unanswered` — the population grows because the book keeps running, and the
-> exclusion is still refused. §5.9 carries the second red.
+> exclusion is still refused. §5.9 carries the second red. **At 10:07Z it reads
+> 36 passed, 4 failed**: two further views arrived red from migrations `0042`
+> and `0043`, landed by another worker and not diagnosed here.
 
 `pnpm db:check` was **30 passed, 1 failed** at 05:40Z, and the failure was
 `v_refused_auth_hold`:

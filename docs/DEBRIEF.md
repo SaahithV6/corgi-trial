@@ -83,6 +83,7 @@ how much any of them is worth.**
 | `curl /api/health` | `status: "ok"`, **7 of 7 live**, database reachable 149 ms, commit `544b481` | 09:38:36Z |
 | `curl /api/health` *(again, after live fire)* | `status: "degraded"`, **7 of 7 live**, commit `2c13805`; `webhookHealth.degradedBy: ["lithic"]`, `webhookProcessing.degradedBy: []` | 09:59:12Z |
 | `node scripts/dbcheck.mjs` | **36 passed, 2 failed** — both failures deliberate, item 1 below | 09:40Z |
+| `node scripts/dbcheck.mjs` *(again, 27 min later)* | **36 passed, 4 failed** — two new views arrived red from another worker's migrations; see the note under item 1 | 10:07Z |
 | `node scripts/dbcheck.mjs --prove` | **22 of 22 invariant views, 24 proofs**, 8 of them needing a trigger disabled on the owner connection; **61 passed, 2 failed** | 09:41Z |
 | `node scripts/livefire.mjs` | **7 PASS · 0 FAIL · 1 SKIP**, across all eight attacks, 334 s | 09:43:31 – 09:49:05Z |
 | `node scripts/coreloop.mjs` | **6 PASS · 1 FAIL · 0 SKIP**, across all seven legs, 84 s, 104 HTTP calls to the deployed origin + 3 to Lithic, invariants 36/2 | 09:49:20 – 09:50:44Z |
@@ -2163,7 +2164,7 @@ one, written by the firing routine) alongside
 (an unpadded, `DateStyle`-dependent key from a retry). The row names **both**
 keys in `instruction_keys`, and it is 0 again after the rollback. **The UNIQUE
 index is perfectly satisfied by that pair**, which is precisely why the old body
-could not see it. Full narrative: `docs/STANDING-ORDERS.md` §8.
+could not see it. Full narrative: `docs/STANDING-ORDERS.md` §2, *"It has now been watched failing, and the delta is quoted"*.
 
 ### 5.5 `v_hold_release_drift` is correct and was queried by nothing
 

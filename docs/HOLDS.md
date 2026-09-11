@@ -1452,6 +1452,16 @@ books are at zero, turning a silent inconsistency into $132.00 of
 are already correct. What was missing was anybody being able to *see* them, and
 that is now fixed on every run.
 
+> **SUPERSEDED IN PART BY §11.5–11.6.** The refusal to repair still stands, and
+> §11.5 prices the closure-reversal repair properly rather than dismissing it —
+> including the measurement this section did not take, that these four memo
+> books **opened and then released**, so a completion sweep would be
+> re-withholding money the book has already given back. What does not stand is
+> the last sentence above. "Printed on every run" is a *report*; reports are
+> read by whoever is already looking. `v_hold_closure_unexplained` (migration
+> 0043) is the **guard**, it ranges over all 197 card-auth closures rather than
+> 129, and it is red with these four and their $132.00 on every CI run.
+
 ### 10.5 `v_hold_expiry_drift` — two views disagree about one clock
 
 Found by a from-scratch rebuild of the book, and added in the same migration
@@ -1498,3 +1508,299 @@ is the sentence 0032 wrote about `v_refused_auth_hold`, the other deliberate red
 on this list. The nine are not repaired either: repairing them means rewriting
 `expires_at` on rows in two append-only tables, which is the one thing this
 system does not do. Recording the reasoning is the repair.
+
+## 11. `A(E)` is not floored, and four closures get a guard — migration 0043
+
+Two defects were measured on 2026-09-11 and both were deliberately left
+standing. This is the second look at each, and in both cases the *decision* was
+right and its *consequence* was not.
+
+### 11.1 `A(E)` went to −7340, and an advice of nothing became $73.40
+
+Lithic transaction `5892c550-b966-4afb-b681-a6456e1cf3c4`, delivered as **one
+payload of six events** at 09:02:58Z (`webhook_inbox
+3520124c-2d1a-4c28-be52-432590c6f519`, signature verified, `state='done'`):
+
+```
+AUTHORIZATION          5000  APPROVED     A =  5000
+CLEARING               7340  APPROVED     C =  7340
+AUTHORIZATION_REVERSAL 7340  APPROVED     A = -2340
+AUTHORIZATION_REVERSAL 5000  APPROVED     A = -7340   <- the network over-reversed
+AUTHORIZATION_ADVICE      0  APPROVED     delta = 0 - (-7340) = +7340
+CLEARING               7340  APPROVED
+```
+
+The network reversed **$123.40** against a **$50.00** authorisation, and the
+advice that followed said *the authorised amount is now zero*. Converted against
+the negative running total, that advice of nothing was stored as
+`card_auth_event a299ea01-f4c2-44a7-b042-13093b979329`, kind
+`incremental_authorization`, amount **7340** — an increment the network never
+sent, in an append-only table. That is the sin §8 and DECISIONS 051 are both
+about, in a field neither of them was looking at.
+
+### 11.2 The decision on `A(E)`, and why the obvious answer is the wrong one
+
+**Flooring `A` in the fold. REJECTED — the arithmetic does the rejecting.**
+
+`A < 0` implies `A ≤ 0`, so `v_card_auth_hold.is_closed` is *already* TRUE on the
+fourth disjunct and `target_hold_cents` is *already* zero — **by the closure, not
+by the `GREATEST(A − C, 0)`**. Substitute `GREATEST(A, 0)` and it is still `≤ 0`,
+still closed, still zero. Not one customer-visible number moves. This is not an
+argument, it is executed: `fuzz.test.ts` §10 runs the reference implementation
+twice on every set where `A < 0`, once with `A` and once with `max(A, 0)`, and
+asserts `H` is identical.
+
+So the floor buys nothing and costs the only evidence that the provider
+over-reversed — in a build whose whole posture is that a surprising provider fact
+should be *visible*. It also would not have fixed the harm: the damage was done
+by a **running** total inside one payload, and a floor applied at the end of the
+fold never touches it. A fix that leaves the bug standing is not the fix.
+
+**Rejecting the second reversal at ingest. REJECTED.** It refuses a fact the
+network sent, which this build does nowhere else, and it cannot be expressed
+without cross-event judgement in the front door: each reversal is well formed on
+its own, only their **sum** over-reverses. Decision 050 is the standing lesson
+about deciding things at the front door — the verdict was discarded there and
+$4,451.00 was withheld that nobody had authorised.
+
+**Asserting `A ≥ 0` as an invariant. REJECTED, and this is the finding.**
+
+`A < 0` is a **legitimate** state of the fold. A reversal that arrives before the
+authorisation it belongs to — item 4 of the brief's own gauntlet — puts `A` below
+zero, and the next delivery puts it back. `model.ts` has said so in a comment
+since the file was written: *"MAY BE NEGATIVE — a reversal can arrive before its
+authorisation."*
+
+Measured rather than argued. Across every corpus in `fuzz.test.ts` at default
+scale:
+
+| | |
+| --- | --- |
+| Sets reaching `A(E) < 0` | **1,614 of 7,220 — 22.4%** |
+| ...after a real authorisation, i.e. a genuine over-reversal | **812** |
+| ...that are OPEN | **0** |
+| ...that are holding a cent | **0** |
+
+A guard asserting `A ≥ 0` would be red on a fifth of correct behaviour. What is
+asserted instead — twice, independently — is
+
+```
+A(E) < 0  =>  closed(E)  AND  A − C < 0
+```
+
+so `H = 0` holds through the closure arm **and** through the clamp, with either
+one deleted. The incident report said *"the clamp is the only thing standing
+between that and a wrong hold."* It is not, and that correction is load-bearing:
+if the clamp really were the only line, flooring `A` would stop being cosmetic.
+
+### 11.3 What actually changed, and the comment that was half true
+
+```diff
+- const delta = amountCents - runningAuthorised;
++ const base  = runningAuthorised > 0n ? runningAuthorised : 0n;
++ const delta = amountCents - base;
+```
+
+An advice overrides an **authorised amount**, and an authorised amount cannot be
+negative: you cannot have authorised less than nothing. Where `A ≥ 0` — every
+advice on this book except the one above — nothing changes at all. Where `A < 0`
+the over-reversal is **kept** instead of being cancelled out by a fabricated
+increment, and the derived delta can only ever be **smaller** than it was, so the
+change can never withhold more of a customer's money. On the live payload the
+advice now produces `delta = 0` and no row at all.
+
+`lithic-events.ts` claimed the conversion was *"still a function of the payload
+alone, not of arrival order."* **Per payload that is true. Across payloads it is
+false, and the comment has been corrected rather than deleted**, because the
+false half is the more useful one to have written down. The stored delta is fixed
+by the FIRST payload that carries the advice: `insertCardEvents()` is
+`ON CONFLICT (auth_id, provider_event_id) DO NOTHING`, so a later delivery
+deriving a different delta under the same token is silently discarded. The delta
+is stable only under a promise Lithic makes and we do not verify — that
+`events[]` is append-only, so every snapshot containing the advice contains
+exactly the same events before it. Our own `created` sort keeps delivered order
+for ties, and a redrive or a hand-built payload may carry a subset. **The clamp
+does not make it true either**, and saying it did would be the same mistake in a
+new paragraph. What holds after 0043 is narrower and checkable: the base is
+non-negative in every payload.
+
+And the loud part, where it can be said without being wrong: a Lithic **payload**
+carries the whole transaction, so a snapshot whose reversals exceed its
+authorisations cannot be explained by arrival order. `deriveCardEvents()` now
+returns `overReversedCents`, `applyCardTransaction()` logs
+`holds.provider_over_reversed`, and `dbcheck`'s GUARD REACH prints
+`v_auth_over_reversed` — **9 authorisations standing at `A < 0`, $862.08
+over-reversed, 0 of them open and 0 of them withholding** — with the guard that
+owns the money question named beside it (`v_hold_release_drift`).
+
+### 11.4 `v_advice_delta_unsound` — RED with one row, and not repaired
+
+The guard recovers the base that was actually used:
+
+```
+base = payload absolute − stored signed delta
+```
+
+The absolute comes from the body retained verbatim in `webhook_inbox`; the signed
+delta comes from the row we wrote. **Neither is computed from the other**, which
+is §9.8's rule, and it is the reason this view can see something the fold cannot.
+It reports `finding = 'negative_base'`, and also `'no_retained_payload'` — an
+advice we cannot check is reported rather than excluded, because 0026 shipped the
+opposite of that rule (`AND r.result IS NOT NULL` over an INNER JOIN) and hid its
+own bug behind it.
+
+Eight advices exist on this book. Seven were converted against a base of 0 or
+6000. One was converted against −7340. **The view is red with that one row,
+$73.40, and it is not repaired.** There is no `card_auth_event_reversal`, and the
+only compensation available — appending an `authorization_reversal 7340` — would
+be a **second** fact the network never sent, which is the sin being corrected.
+`H` is 0 either way, the hold is closed and released, the exposure is zero cents.
+Recording the reasoning is the repair, exactly as §10.5's nine rows were handled.
+
+### 11.5 The four closures, re-examined — and the repair that was priced
+
+§10.4 left four `test_harness` closures standing over $33.00 authorisations the
+fold calls open, on the argument that both repairs are worse. **The argument
+survives. Its conclusion did not.**
+
+The synthetic-expiry repair is unchanged: their clocks run to 2026-09-17 and have
+not run out, so appending an `expiry` event is a false statement in an
+append-only table.
+
+The closure-reversal repair was refused on the grounds that it *"would turn zero
+exposure into $132.00 of `v_hold_drift`"* — and that is only true of a repair
+that reverses the closure and stops. 0011 built `hold_closure_reversal` for
+exactly this shape, and §9.6 paired a repair with `settleHoldPosting()` to bring
+the memo book to `H(E)`. So the **complete** version was priced, on the live
+book, rather than dismissed:
+
+1. **It withholds $132.00 of two real businesses' available balance**
+   (`a0c41a37-2be1-5c30-bfe9-03455f048fac` ×3, `66fdc0f8-9fc9-4119-88aa-895e0dc90f00`)
+   against authorisations that exist at no provider. Nothing will ever capture
+   them.
+2. **The memo book for these four is not missing — it opened AND released.**
+   This is the measurement §10.4 did not take. Each hold carries two memo
+   entries: `Card hold opened/increased …-e1` (+3300) and `Card hold
+   reduced/released …-sweep` (−3300), the second written by
+   `expiry.expireOne()` under the test's forged clock. So the "completion" sweep
+   would be **re-withholding money this book has already, deliberately, given
+   back**. It is not an incomplete posting at all; §9's diagnosis does not apply.
+3. **It is not even stable.** On 2026-09-17 the real clock reaches `expires_at`,
+   `is_closed` flips, `is_released` flips, and four holds carrying $132.00 land
+   on `v_hold_release_drift` until somebody runs a sweep that nothing schedules
+   (decision 046).
+
+So they are **not repaired**, and the three ids and the reasoning stand. What
+does not stand is *"no guard can see them"*. A `defect_shape` column printed
+under GUARD REACH is a **report**. Reports are read by whoever is already
+looking; guards are read by CI.
+
+### 11.6 `v_hold_closure_unexplained` — the guard, widened rather than narrowed
+
+```
+a standing, unreversed hold_closure on a card_auth hold, over an authorisation
+the fold still calls OPEN, where the network is NOT on record as having refused
+any step of that authorisation
+```
+
+**No source filter at all.** It ranges over all **197** card-auth closures —
+the 129 `v_hold_closure_not_terminal` admits plus the 52 `repair` and 16
+`test_harness` it does not. The two overlap on purpose: a `posting_path` closure
+of this shape reports in both, and two guards agreeing is the only way to notice
+when one of them stops ranging over something.
+
+The one subtraction is **demonstrated per row, not declared per source**, and
+that distinction is itself a finding. §10.3 justified excluding the 52 `repair`
+closures like this:
+
+> The guard that owns that population is `v_refused_auth_hold`, which reads the
+> provider's verdict rather than the fold, and which is red on exactly that
+> evidence.
+
+**Measured on 2026-09-11: 0 of those 52 holds are in `v_refused_auth_hold`.**
+0032's own repair reversed their memo entries, so they stopped withholding money
+and left that view the moment they were fixed. *Ownership by membership was stale
+the day it was written.* Ownership by **evidence** is not:
+
+| source | defect shape | carries a non-APPROVED verdict on record |
+| --- | --- | --- |
+| `repair` | 52 | **52** |
+| `test_harness` | 4 | **0** |
+
+All 52 repairs carry a `card_auth_event_result` whose `result` is not
+`APPROVED` — the verdict the fold deliberately does not read, which is *why* the
+fold calls them open. That is 0026's and 0032's whole finding, expressed as a
+predicate. The four `test_harness` rows carry none. Nothing refused them; a test
+fabricated them.
+
+**The view is RED on arrival with those four rows and $132.00.** That is the
+disposition, not a failure of the migration: it is the same one
+`v_refused_auth_hold` (unanswered) and `v_hold_expiry_drift` (nine fixture rows)
+already have — a standing, named, counted red that tells the truth, rather than a
+green tick over a population chosen to produce one.
+
+### 11.7 Where `dbcheck` stands, and what `--prove` now does
+
+```
+36 passed, 4 failed          (was 36 passed, 2 failed)
+--prove covered 24 of 24 invariant views (28 proofs)     (was 22 of 22, 24 proofs)
+```
+
+Four deliberate reds, each with its money printed beside it:
+
+| view | rows | what it is |
+| --- | --- | --- |
+| `v_refused_auth_hold` | 154 | unanswered verdicts, $9,786.20 — 0032, not repairable by inventing one |
+| `v_hold_expiry_drift` | 9 | two clocks, 135–158 ms apart, zero exposure — 0040 §10.5 |
+| `v_advice_delta_unsound` | 1 | the advice above, $73.40, zero exposure — §11.4 |
+| `v_hold_closure_unexplained` | 4 | the fixture's closures, $132.00, zero exposure — §11.6 |
+
+Four proofs were added, and in both pairs the **second** is the one worth
+reading. A guard that fires on the defect is half a claim; a guard that stays
+quiet on the legitimate case that looks identical is the other half, and this
+build has shipped three guards that had only the first half (0012, 0026, 0028).
+
+```
+v_advice_delta_unsound                       1 -> 2   an advice of 0 stored as +1
+v_advice_delta_unsound(a sound advice is OUT) 1 -> 1  the same advice, absolute 1, delta +1
+v_hold_closure_unexplained                   4 -> 5   a test_harness closure, no refusal on record
+v_hold_closure_unexplained(a refused auth is OUT) 4 -> 4  the same closure, over a REFUSED auth
+```
+
+The fourth builds its refusal through the front door — a `declined` event and its
+verdict, which is what ingest writes — with 0026's
+`card_auth_event_result_agrees_with_kind` trigger left armed. It is the only
+proof in the file that manufactures the *exempting* evidence rather than the
+violating state.
+
+### 11.8 And the fuzzer was attacking the wrong function
+
+`docs/FUZZ.md` named **the Lithic adapter's advice conversion** in its *"What
+this does not cover"* section, with a good reason and a bad consolation:
+
+> `AUTHORIZATION_ADVICE` is still fuzzed in the pure suite, as
+> `incremental_authorization` / `authorization_reversal`, which is what it
+> becomes.
+
+Fuzzing what an advice *becomes* is not fuzzing the step that decides what it
+becomes. Six and a quarter million orderings of `holdState()` could never have
+found this, because `CardEventKind` has no member for an advice and so no set the
+generator produced could contain one. **`deriveCardEvents()` had never been
+fuzzed at all.**
+
+`fuzz-generators.ts` §7 now generates whole `card_transaction.updated` bodies and
+`fuzz.test.ts` §11 attacks the conversion. Default scale, 4,000 payloads: 14,446
+derived events, 2,828 advices converted, **1,358 payloads (34%) whose reversals
+outran their own authorisations**, and **624 advices standing on a negative
+base** — every one of which the pre-0043 rule would have fabricated a larger
+delta for, **$61,277.06** in total. The deep run is 200,000 payloads, 30,705 such
+advices, $3,072,996.89.
+
+Those last figures are the point, and the suite asserts them as floors: a corpus
+that never reaches an advice standing on a negative running total cannot fail the
+property it exists for, and would have passed cleanly on the day the bug shipped.
+The pre-0043 rule is recomputed beside the current one and asserted to still be
+caught — the same device FINDING 1 uses, for the same reason.
+
+**A named gap is better than an unnamed one. It is not a substitute for closing
+it.**

@@ -158,21 +158,31 @@ class AchRailAdapter implements ObservingRail, OriginatingRail<AchInstruction> {
  * can re-run) and from the deployed system on every `/api/health` request. So
  * `probe` is `measured` and the matrix cell is `+`.
  *
- * NOTHING ELSE MOVES, and resisting that is the point. A read of `/accounts`
- * proves the credential authenticates and the host answers. It does not prove
- * that `POST /ach_transfers` maps a `TransferRequest` correctly, that the
- * `submitted + settlement.settled_at -> settled` promotion fires, or that an
- * R01 arrives shaped the way `research/ach/NOTES.md` guessed — not one line of
- * which is marked `[MEASURED]`. Letting one earned cell promote its neighbours
- * is liveness by presence wearing a round trip as a disguise.
+ * ALL FIVE HAVE NOW BEEN RUN, and the argument this paragraph used to make is
+ * still correct — it simply no longer applies here. A read of `/accounts`
+ * proves the credential authenticates and the host answers, and nothing more;
+ * letting one earned cell promote its neighbours would be liveness by presence
+ * wearing a round trip as a disguise. That is why these four were never
+ * promoted by the probe. Each was measured separately:
  *
- * The sandbox account does hold one returned ACH transfer, and it was NOT made
- * by this adapter: its `idempotency_key` is null, and `initiateCredit` always
- * sends `Idempotency-Key: <clientReferenceId>` (../increase/client.ts). Two
- * real Increase deliveries have also reached the deployed webhook endpoint and
- * had their signatures verified — and both were dead-lettered, "no consumer
- * registered for provider 'increase'", so `parseEvent` has still never seen a
- * real delivery. `observe` stays `~`.
+ *   originate  sandbox_ach_transfer_x5vdo5m7b6k924sszlms, $6,000.00, carrying
+ *              `Idempotency-Key: test:approvals:…` — and `initiateCredit` is
+ *              the only code here that sends one to /ach_transfers.
+ *   settle     ach:settled:…x5vdo5m7b6k924sszlms, DR 2300 / CR 1110.
+ *   reverse    ach:return:…:644288470109390, R01 insufficient_fund, posted at
+ *              return.created_at with the settlement left standing. R02-R29
+ *              remain table-driven and unexercised, and the `reverse` evidence
+ *              string says so rather than letting one R-code cover twenty-eight.
+ *   observe    the last to be earned: `parseEvent` run against the RAW SIGNED
+ *              BYTES of five real deliveries out of `webhook_inbox.raw_body`,
+ *              agreeing with what the consumer independently booked.
+ *
+ * This paragraph previously described a DIFFERENT transfer — the one whose
+ * `idempotency_key` is null, `sandbox_ach_transfer_s2iljuavdzp2p68rh7v7`,
+ * $742.19. There are two now, and the distinction is the whole proof. It also
+ * said two deliveries were dead-lettered with "no consumer registered for
+ * provider 'increase'": a consumer is registered, those 167 dead letters were
+ * redriven to zero, and `park()` no longer leaves that stale error behind.
  */
 const INCREASE_SUPPORT: RailSupport = {
   originate: {

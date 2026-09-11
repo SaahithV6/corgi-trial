@@ -80,6 +80,33 @@ vi.mock("./store", () => ({
   loadQuoteByRef: (ref: string) => loadQuoteByRef(ref),
 }));
 
+/**
+ * THE HANDLE, TOO — and this one is not optional.
+ *
+ * `gate.ts` imports `sql` from `@/lib/ledger/db` for its `conn: Sql = sql`
+ * default. That module calls `postgres(env.APP_DATABASE_URL, …)` at import
+ * time, and `env` THROWS when the variable is absent. CI
+ * (`.github/workflows/ci.yml`) runs a bare `pnpm test` with no secrets on
+ * purpose, so importing the gate without this stub fails the whole file at
+ * module load — not one red assertion, a red suite, in the one environment
+ * that has no way to fix it.
+ *
+ * The stub is never called. Every case below omits `conn`, so the default is
+ * handed straight to `loadQuoteByRef`, which is the mock above and ignores it.
+ */
+vi.mock("@/lib/ledger/db", () => ({
+  sql: new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(
+          "this test must not reach the database; every case stubs loadQuoteByRef",
+        );
+      },
+    },
+  ),
+}));
+
 const { requireAcceptedQuote } = await import("./gate");
 
 /** The off-ramp wallet the commitment names. Mixed case on purpose. */

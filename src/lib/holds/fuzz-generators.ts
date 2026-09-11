@@ -14,12 +14,40 @@
  * the set and is printed in every failure message, so any counterexample this
  * finds can be reproduced by anyone with the number.
  *
- * Nothing in this file imports the database, a clock, or anything from outside
- * `./model`. It is input, not opinion: it does not know what the right answer is
- * and has no way to express one. `fuzz.test.ts` owns the properties.
+ * Nothing in this file imports the database, a clock, or any RUNTIME value from
+ * outside `./model`. It is input, not opinion: it does not know what the right
+ * answer is and has no way to express one. `fuzz.test.ts` owns the properties.
+ * (Section 7 takes a TYPE-ONLY import of Lithic's payload shapes, which is
+ * erased at compile time and adds no runtime dependency on the rail adapter.)
+ *
+ * ─── Section 7 exists because the fuzzer was attacking the wrong function ────
+ *
+ * Everything above section 7 generates CANONICAL event sets and hands them to
+ * `holdState()`. That is the function the model's argument is about, and 6.25M
+ * orderings say the argument holds.
+ *
+ * It is not the function the bug was in. On 2026-09-11 an `AUTHORIZATION_ADVICE`
+ * of **0** was stored as an `incremental_authorization` of **7340**, because
+ * `deriveCardEvents()` converts an advice's ABSOLUTE amount into a delta against
+ * a running total that had gone to -7340 — and `deriveCardEvents()` had never
+ * been fuzzed at all. It could not have been, from here: an advice is a Lithic
+ * PAYLOAD concept and `CardEventKind` has no member for it, so no set this file
+ * generated could ever contain one. The live-book property in `fuzz.test.ts`
+ * makes the same exclusion explicitly, in `DB_STEPS`, with a comment saying why.
+ *
+ * **That gap is the finding, and section 7 closes it.** `generateLithicPayload()`
+ * produces whole `card_transaction.updated` bodies — advices included, reversals
+ * weighted heavily enough to drive the running total below zero — so the
+ * absolute→delta conversion has a corpus to be attacked on.
  *
  * Money is `bigint` cents throughout, like everywhere else.
  */
+
+import type {
+  Transaction,
+  TransactionEvent,
+  TransactionEventType,
+} from "@/lib/rails/lithic/types";
 
 import type { AuthorizationClock, CardEvent, CardEventKind } from "./model";
 
@@ -409,4 +437,203 @@ export function counterexample(args: {
   ];
   if (args.detail !== undefined) lines.push(`  detail: ${args.detail}`);
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// 7. Lithic payloads — the layer the advice bug actually lived in
+// ---------------------------------------------------------------------------
+
+/**
+ * The step types this generator draws from.
+ *
+ * `AUTHORIZATION_ADVICE` is the whole reason the section exists, and the
+ * reversals are weighted heavily on purpose: the defect only appears once the
+ * running authorised total inside ONE payload has gone below zero, which needs
+ * reversals that outrun their authorisations. A uniform draw reaches that state
+ * rarely enough to make the corpus a formality, so the weights are a search
+ * strategy — `assertReachedOverReversal` in `fuzz.test.ts` is what turns the
+ * strategy into a measured claim rather than a hope.
+ */
+const WEIGHTED_STEPS: readonly (readonly [TransactionEventType, number])[] = [
+  ["AUTHORIZATION", 20],
+  ["AUTHORIZATION_REVERSAL", 26],
+  ["AUTHORIZATION_ADVICE", 22],
+  ["CLEARING", 16],
+  ["FINANCIAL_AUTHORIZATION", 6],
+  ["AUTHORIZATION_EXPIRY", 4],
+  ["RETURN", 3],
+  // Recognised and deliberately dropped by `canonicalKind`. In the corpus so
+  // that a payload the adapter must IGNORE sits between ones it must not.
+  ["BALANCE_INQUIRY", 3],
+];
+
+const STEP_WEIGHT_TOTAL = WEIGHTED_STEPS.reduce((sum, [, w]) => sum + w, 0);
+
+function weightedStep(rng: Rng): TransactionEventType {
+  let roll = rng.int(STEP_WEIGHT_TOTAL);
+  for (const [step, weight] of WEIGHTED_STEPS) {
+    roll -= weight;
+    if (roll < 0) return step;
+  }
+  return "AUTHORIZATION";
+}
+
+/**
+ * Amounts as Lithic sends them: `number`, not `bigint`.
+ *
+ * Capped well inside the safe-integer range on purpose — `eventMagnitude()`
+ * THROWS on an unsafe integer, and a generator that tripped that would be
+ * testing the guard rather than the conversion. `0` is in the list because an
+ * advice of zero is exactly the live defect, and the fuel-pump pair (5000,
+ * 7340) is here for the same reason it is in `INTERESTING_CENTS`.
+ */
+const INTERESTING_LITHIC_AMOUNTS: readonly number[] = [
+  0, 1, 100, 1_000, 2_340, 5_000, 6_000, 7_340, 9_000, 12_340,
+];
+
+function lithicAmount(rng: Rng): number {
+  if (rng.bool(0.6)) return rng.pick(INTERESTING_LITHIC_AMOUNTS);
+  return rng.between(0, 25_000);
+}
+
+export interface GeneratedPayload {
+  /** Reproduce this exact payload with `generateLithicPayload(seed)`. */
+  readonly seed: number;
+  readonly txn: Transaction;
+  /** `token` → the step type it was generated as. For the properties. */
+  readonly steps: ReadonlyMap<string, TransactionEventType>;
+  /** `token` → the magnitude the payload carries, as a bigint. */
+  readonly magnitudes: ReadonlyMap<string, bigint>;
+  /** Tokens the payload marks as REFUSED by the network. */
+  readonly refused: readonly string[];
+}
+
+export interface GeneratePayloadOptions {
+  readonly minEvents?: number;
+  readonly maxEvents?: number;
+  /** Probability that any one step carries a non-APPROVED `result`. */
+  readonly refusalProbability?: number;
+  /** Probability that a step is an exact re-listing of an earlier token. */
+  readonly duplicateProbability?: number;
+}
+
+const REFUSALS: readonly string[] = [
+  "DECLINED",
+  "ACCOUNT_DAILY_SPEND_LIMIT_EXCEEDED",
+  "INSUFFICIENT_FUNDS",
+  "CARD_PAUSED",
+];
+
+/**
+ * One `card_transaction.updated` body, deterministically, from a seed.
+ *
+ * "Valid" here means what it means in section 3: shaped the way Lithic shapes
+ * it, NOT narratively sensible. A reversal with no authorisation in front of
+ * it, three advices in a row, an expiry followed by a clearing — all fair game,
+ * because `deriveCardEvents()` claims to be total over a payload and a
+ * generator that only produces well-behaved transactions only tests the
+ * well-behaved half. That is how the advice-of-zero shape got to production:
+ * nobody had written it down, so nobody had tried it.
+ *
+ * `created` strictly increases across the array, one second apart, so the
+ * adapter's `created` sort is a fixed order rather than a tie-break nobody can
+ * reproduce. Lithic delivers chronologically; this matches it.
+ */
+export function generateLithicPayload(
+  seed: number,
+  options: GeneratePayloadOptions = {},
+): GeneratedPayload {
+  const rng = makeRng(seed);
+  const minEvents = options.minEvents ?? 1;
+  const maxEvents = options.maxEvents ?? 7;
+  const refusalProbability = options.refusalProbability ?? 0.12;
+  const duplicateProbability = options.duplicateProbability ?? 0.08;
+
+  const size = rng.between(minEvents, maxEvents);
+  const events: TransactionEvent[] = [];
+  const steps = new Map<string, TransactionEventType>();
+  const magnitudes = new Map<string, bigint>();
+  const refused: string[] = [];
+  const base = Date.parse("2026-09-10T22:35:00Z");
+
+  for (let i = 0; i < size; i++) {
+    // The redelivery Lithic can actually produce: the same token listed twice
+    // in one array. `deriveCardEvents()` drops the second on its own `seen`
+    // set, before the database's UNIQUE index ever sees it.
+    if (events.length > 0 && rng.bool(duplicateProbability)) {
+      const repeat = rng.pick(events);
+      events.push({ ...repeat });
+      continue;
+    }
+
+    const type = weightedStep(rng);
+    const amount = lithicAmount(rng);
+    const token = `p${seed}-e${i}`;
+    const isRefused = rng.bool(refusalProbability);
+
+    const event: TransactionEvent = {
+      token,
+      type,
+      created: new Date(base + i * 1_000).toISOString(),
+      amount,
+      amounts: {
+        cardholder: { amount, conversion_rate: "1.000000", currency: "USD" },
+        merchant: { amount, currency: "USD" },
+        // Only a clearing carries a settlement figure, which is the precedence
+        // `eventMagnitude()` reads. Everything else falls back to `amount`.
+        settlement: type === "CLEARING" ? { amount, currency: "USD" } : null,
+      },
+      effective_polarity: type === "RETURN" ? "CREDIT" : "DEBIT",
+      // `exactOptionalPropertyTypes` is on, so the refusal string is narrowed
+      // here rather than allowed to widen to `| undefined`. Every generated
+      // step carries a verdict; `isRefused(result)` in `lithic-events.ts` is
+      // what decides whether it counts as one.
+      result: (isRefused ? rng.pick(REFUSALS) : "APPROVED") as NonNullable<
+        TransactionEvent["result"]
+      >,
+    };
+
+    events.push(event);
+    steps.set(token, type);
+    magnitudes.set(token, BigInt(Math.abs(amount)));
+    if (isRefused) refused.push(token);
+  }
+
+  return {
+    seed,
+    steps,
+    magnitudes,
+    refused,
+    txn: {
+      token: `fuzz-txn-${seed}`,
+      account_token: "2742964f-478f-47ef-a4e9-852dc50d9c44",
+      card_token: `fuzz-card-${seed}`,
+      created: new Date(base).toISOString(),
+      updated: new Date(base + size * 1_000).toISOString(),
+      // The two trap fields, populated with nonsense on purpose: nothing in
+      // `deriveCardEvents()` may read either, and this corpus would notice.
+      status: "SETTLED",
+      result: "APPROVED",
+      amounts: {
+        cardholder: { amount: 0, conversion_rate: "1.000000", currency: "USD" },
+        hold: { amount: -1, currency: "USD" },
+        merchant: { amount: 0, currency: "USD" },
+        settlement: { amount: 0, currency: "USD" },
+      },
+      events,
+    },
+  };
+}
+
+/** One Lithic step, on one line, for a failure message. */
+export function describeStep(event: TransactionEvent): string {
+  const verdict = event.result === undefined || event.result === "APPROVED" ? "" : ` ${event.result}`;
+  return `${event.type} ${event.amount}${verdict} (${event.token})`;
+}
+
+/** A whole payload, for an assertion message. */
+export function describePayload(txn: Transaction): string {
+  const events = txn.events ?? [];
+  if (events.length === 0) return "{}";
+  return `{\n    ${events.map(describeStep).join(",\n    ")}\n  }`;
 }

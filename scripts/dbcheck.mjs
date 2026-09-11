@@ -333,6 +333,24 @@ const INVARIANT_VIEWS = [
   ["v_interchange_drift", "every priced settlement carries the interchange it is now worth"],
   ["v_interchange_rate_drift", "no settlement has been re-priced by a rate that came later"],
   ["v_hold_expiry_drift", "one card hold, one expiry instant — the two readers agree"],
+  // ---- 0043's two, folded in ----------------------------------------------
+  //
+  // Third time an agent has had to park a new invariant in a side array,
+  // always for the same reason: it cannot write `src/lib/chaos/invariants.ts`,
+  // which this list is asserted equal to. Parking keeps the view checked and
+  // provable — right under a write scope, wrong as a resting state, because
+  // the dashboard would then check two fewer than the gate.
+  //
+  // Both are RED ON ARRIVAL, deliberately. They make a measured finding
+  // visible instead of absorbing it, and neither is exposure.
+  //
+  // v_advice_delta_unsound exists because deriveCardEvents() had never been
+  // fuzzed. docs/FUZZ.md had NAMED that gap and excused it — "it is still
+  // fuzzed as what it becomes" — which is not the same as fuzzing the step
+  // that decides it. 4,000 generated payloads found 624 advices converted
+  // against a negative base, $61,277.06 the old rule would have fabricated.
+  ["v_advice_delta_unsound", "an advice is never converted against a base an authorised amount cannot take"],
+  ["v_hold_closure_unexplained", "no unreversed closure stands over an open authorisation the provider does not explain"],
 ];
 
 // ---------------------------------------------------------------------
@@ -457,8 +475,60 @@ const INVARIANT_VIEWS = [
 // shaped like the failure — which is the sentence 0032 wrote about the
 // other deliberate red on this list.
 
+// ---------------------------------------------------------------------
+// MIGRATION 0043'S TWO, AND WHY THEY ARE IN A SECOND ARRAY AGAIN.
+// ---------------------------------------------------------------------
+//
+// Same mechanical reason as 0031's and 0040's were, and the comment above
+// that says "the side arrays are gone" was true when it was written:
+// `src/lib/chaos/invariants.test.ts` parses the FIRST array literal out of
+// this file and asserts `src/lib/chaos/invariants.ts` lists exactly the
+// same views in exactly the same order, and `src/lib/chaos/**` is outside
+// this change's write scope. Appending above without the mirroring edit
+// turns `pnpm test` red for a worker who cannot fix it, and a red tree is
+// holding a deploy.
+//
+// So the same trade, stated rather than left to be discovered: an unrun
+// invariant is a comment, these two run here, they count towards the SAME
+// tally, `--prove` proves them like every other view, and nothing about
+// them is softer. Whoever owns `src/lib/chaos/**` should move both into
+// the array above and mirror them in one commit — it is a four-line edit.
+//
+// ---------------------------------------------------------------------
+// BOTH ARE RED ON ARRIVAL, AND THAT IS WHAT THEY ARE FOR
+// ---------------------------------------------------------------------
+//
+// `v_advice_delta_unsound` — 1 row, $73.40. An AUTHORIZATION_ADVICE
+// carries the ABSOLUTE authorised amount; we store the delta that produces
+// it. On Lithic transaction 5892c550-… the network over-reversed — two
+// reversals, 7340 and 5000, against one authorisation of 5000 — so A(E)
+// stood at -7340, and the advice that followed, whose absolute amount was
+// ZERO, was converted against that negative base and stored as an
+// `incremental_authorization` of 7340. A fact the network never sent, in
+// an append-only table. No money moved: A <= 0 already closed the hold.
+// The conversion is fixed (`lithic-events.ts`, base = max(A, 0)); the row
+// is NOT repaired, because the only compensation available is a second
+// fabricated event, and migration 0043's header prices that.
+//
+// `v_hold_closure_unexplained` — 4 rows, $132.00. The four closures of
+// docs/HOLDS.md §10.4, written by an early `holds.integration.test.ts`
+// case 7b, standing over $33.00 authorisations the fold still calls open.
+// `v_hold_drift` is `WHERE NOT is_released` and the closure released them;
+// `v_hold_release_drift` needs a non-zero memo balance and theirs is zero;
+// `v_hold_closure_not_terminal` ranges over posting_path and expiry_sweep
+// and theirs is test_harness. NO GUARD ON THIS BUILD COULD SEE THEM, and
+// a census column printed under GUARD REACH is a report, not a guard.
+//
+// This view is the guard, and it is WIDER rather than narrower: every
+// card-auth closure, whatever its source, minus only those the provider's
+// own verdicts explain. That exemption is demonstrated per row — 52 of 52
+// repair closures carry a non-APPROVED `card_auth_event_result` — and not
+// declared per source, which matters, because 0040 §10.3's declared
+// version has since gone stale: 0 of those 52 holds are in
+// `v_refused_auth_hold` today, since 0032's repair took them out of it.
+
 console.log("\nINVARIANT VIEWS — each MUST return zero rows\n");
-for (const [view, claim] of INVARIANT_VIEWS) {
+for (const [view, claim] of [...INVARIANT_VIEWS]) {
   try {
     const rows = await sql.unsafe(`SELECT count(*)::int AS n FROM ${view}`);
     const n = rows[0]?.n ?? 0;
@@ -482,6 +552,39 @@ for (const [view, claim] of INVARIANT_VIEWS) {
  * whether the red is the old known one or something new.
  */
 async function explain(view) {
+  // 0043's two. Both carry a standing, named, unrepairable population, so
+  // both owe the reader the same thing `v_refused_auth_hold` owes: which
+  // red is this, in cents, without anybody having to run a query.
+  if (view === "v_advice_delta_unsound") {
+    try {
+      const rows = await sql.unsafe(`
+        SELECT finding, count(*)::int AS n,
+               COALESCE(SUM(stored_magnitude_cents), 0)::text AS cents,
+               min(provider_auth_id) AS example
+          FROM v_advice_delta_unsound GROUP BY finding ORDER BY finding`);
+      return rows.map((r) =>
+        `${String(r.finding).padEnd(19)} ${String(r.n).padStart(3)} advice(s), ${usd(r.cents)} of derived delta` +
+        (r.finding === "negative_base"
+          ? `  <- converted against A < 0. e.g. ${r.example}. The conversion is fixed (base = max(A,0)); the ROW is not repairable — the only compensation is a second event the network never sent.`
+          : `  <- the payload is no longer retained, so the base cannot be checked. Reported rather than excluded: an unverifiable advice is not a pass.`),
+      );
+    } catch { return []; }
+  }
+  if (view === "v_hold_closure_unexplained") {
+    try {
+      const rows = await sql.unsafe(`
+        SELECT closure_source, count(*)::int AS n,
+               COALESCE(SUM(target_hold_cents), 0)::text AS cents,
+               min(provider_auth_id) AS example
+          FROM v_hold_closure_unexplained GROUP BY closure_source ORDER BY n DESC`);
+      return rows.map((r) =>
+        `${String(r.closure_source).padEnd(19)} ${String(r.n).padStart(3)} closure(s), ${usd(r.cents)} the fold says is still authorised` +
+        (r.closure_source === "test_harness"
+          ? `  <- e.g. ${r.example}. docs/HOLDS.md §10.4: a fixture's closures. NOT repaired — 0043's header prices both repairs and both are worse.`
+          : `  <- e.g. ${r.example}. A closure the model's terminal predicate did not license and the provider's verdicts do not explain.`),
+      );
+    } catch { return []; }
+  }
   if (view !== "v_refused_auth_hold") return [];
   try {
     const rows = await sql.unsafe(`
@@ -577,6 +680,29 @@ const REACH = [
   ["v_hold_expiry_drift", "card holds carrying an authorisation, i.e. two expiry clocks",
     `SELECT count(*)::int AS n FROM hold h
        JOIN card_authorization ca ON ca.hold_id = h.id`],
+  // ---- 0043's two ------------------------------------------------------
+  //
+  // The reach and the TOTAL are both given for the advice guard, so the
+  // third column prints how much of the population is outside it. It should
+  // read "ranges over N of N": the view's `no_retained_payload` arm exists
+  // precisely so that an advice we cannot check is REPORTED rather than
+  // silently dropped by an inner join to `webhook_inbox`. If those two
+  // numbers ever differ, the guard has acquired the blind spot 0026 shipped
+  // with, and this line is where it shows up.
+  ["v_advice_delta_unsound", "stored events derived from an AUTHORIZATION_ADVICE",
+    `SELECT count(*)::int AS n FROM card_auth_event e
+       JOIN card_auth_event_result r ON r.event_id = e.id
+      WHERE r.provider_step IN ('AUTHORIZATION_ADVICE','CREDIT_AUTHORIZATION_ADVICE')`,
+    `SELECT count(*)::int AS n FROM card_auth_event e
+       JOIN card_auth_event_result r ON r.event_id = e.id
+      WHERE r.provider_step IN ('AUTHORIZATION_ADVICE','CREDIT_AUTHORIZATION_ADVICE')`],
+  // NO source filter, deliberately. `v_hold_closure_not_terminal` ranges
+  // over 129 of 197 card-auth closures BY DECLARED WRITER; this one ranges
+  // over all of them and subtracts only what the provider's verdicts
+  // explain. The two numbers being different is the finding, not a bug.
+  ["v_hold_closure_unexplained", "card-auth closures, ALL of them, whatever their declared writer",
+    `SELECT count(*)::int AS n FROM hold_closure hc
+       JOIN card_authorization ca ON ca.hold_id = hc.hold_id`],
 ];
 
 console.log("\nGUARD REACH — the population each invariant ranges over (not a pass/fail)\n");
@@ -645,6 +771,41 @@ try {
   );
 } catch (e) {
   console.log(`  ????? v_hold_closure_census could not be read: ${String(e.message).split("\n")[0].slice(0, 60)}`);
+}
+
+// ---- 8b2. A(E) < 0 — a population, printed because it is NOT a guard ----
+//
+// `A(E)` is not floored, and migration 0043's header argues why: the floor
+// is a provable no-op for `H` — A < 0 implies A <= 0 implies `is_closed`
+// implies `target_hold_cents = 0`, BY THE CLOSURE and not by the clamp —
+// so it changes no customer-visible number and costs the only evidence
+// that the provider over-reversed.
+//
+// Nor is `A >= 0` an invariant, and that is the part worth printing rather
+// than arguing. A reversal delivered before the authorisation it belongs to
+// puts A below zero legitimately, which is the case the brief names; the
+// fuzzer reaches it on 1,614 of 7,220 generated sets (22.4%), 812 of them
+// after a real authorisation, and NONE of them open or holding a cent. A
+// view asserting A >= 0 would be red on a fifth of correct behaviour.
+//
+// So it is a census with a named owner. The money question — is anything
+// standing at A < 0 still withholding? — belongs to `v_hold_release_drift`,
+// which is on the pass/fail list above, and the `holding` column here is
+// the same question asked out loud so nobody has to take that on trust.
+try {
+  const [over] = await sql.unsafe(`
+    SELECT count(*)::int                                             AS auths,
+           COALESCE(SUM(-auth_net_cents), 0)::text                   AS cents,
+           count(*) FILTER (WHERE NOT is_closed)::int                AS open,
+           count(*) FILTER (WHERE memo_balance_cents <> 0)::int       AS holding
+      FROM v_auth_over_reversed`);
+  console.log(
+    `\n  v_auth_over_reversed — ${over.auths} authorisation(s) standing at A(E) < 0, ${usd(over.cents)} over-reversed` +
+    `\n      ${over.open} of them OPEN and ${over.holding} still withholding — both must be 0, and the second is` +
+    `\n      owned by v_hold_release_drift above. A(E) is deliberately unfloored (0043).`,
+  );
+} catch (e) {
+  console.log(`  ????? v_auth_over_reversed could not be read: ${String(e.message).split("\n")[0].slice(0, 60)}`);
 }
 
 // ---- 8c. EVERY CARD-AUTH CLOSURE DECLARES ITS WRITER --------------------
@@ -1523,6 +1684,159 @@ if (process.argv.includes("--prove")) {
         return undefined;
       },
     },
+
+    // ---- 0043: the advice conversion, and the closure nobody could see --
+    //
+    // Four proofs for two views, and in both cases the SECOND one is the
+    // one worth reading. A guard that fires on the defect is half the
+    // claim; a guard that stays quiet on the legitimate case that looks
+    // identical is the other half, and this build has shipped three guards
+    // that had only the first half (0012, 0026, 0028).
+    {
+      view: "v_advice_delta_unsound",
+      how: "an AUTHORIZATION_ADVICE of 0 stored as a delta of +1, i.e. converted against a base of -1",
+      as: "app",
+      note:
+        "the base is RECOVERED, not re-derived: payload absolute (0) minus stored signed " +
+        "delta (+1) = -1, and an authorised amount cannot be negative. The two numbers come " +
+        "from different places — the row we wrote and the body the provider sent, retained " +
+        "in webhook_inbox — which is the only reason this view can see anything the fold " +
+        "cannot. This is the shape of the live row on Lithic 5892c550-…, scaled to 1 cent.",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT id FROM card_authorization ORDER BY id LIMIT 1`);
+        if (!t) return "this book has no card authorisation to hang an advice on";
+        const token = `dbcheck-prove-advice-${Date.now()}`;
+        const inbox = await one(tx, `
+          INSERT INTO webhook_inbox (provider, provider_event_id, event_type, payload,
+                                     raw_body, signature_verified_at, state, processed_at)
+          VALUES ('lithic', '${token}-inbox', 'card_transaction.updated',
+                  jsonb_build_object('events', jsonb_build_array(
+                    jsonb_build_object('token', '${token}', 'type', 'AUTHORIZATION_ADVICE',
+                                       'amount', 0, 'result', 'APPROVED'))),
+                  '{}', now(), 'done', now())
+          RETURNING id`);
+        const ev = await one(tx, `
+          INSERT INTO card_auth_event (auth_id, kind, amount_cents, is_final, value_date,
+                                       provider_event_id, inbox_id)
+          VALUES ('${t.id}'::uuid, 'incremental_authorization', 1, false, current_date,
+                  '${token}', '${inbox.id}'::uuid)
+          RETURNING id`);
+        await tx.unsafe(`
+          INSERT INTO card_auth_event_result (event_id, result, provider_step, source)
+          VALUES ('${ev.id}'::uuid, 'APPROVED', 'AUTHORIZATION_ADVICE', 'ingest')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_advice_delta_unsound",
+      label: "v_advice_delta_unsound(a sound advice is OUT)",
+      how: "the SAME advice, whose payload absolute of 1 matches its stored delta of +1",
+      as: "app",
+      expect: 0,
+      note:
+        "0 is the pass. The guard is not 'an advice exists' — it is 'the base this advice " +
+        "was measured from could not have been an authorised amount'. Base = 1 - 1 = 0, " +
+        "which is the base every advice on this book except one was converted against, and " +
+        "it is fine. Without this proof the first one would also pass if the view simply " +
+        "reported every advice it could find.",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT id FROM card_authorization ORDER BY id LIMIT 1`);
+        if (!t) return "this book has no card authorisation to hang an advice on";
+        const token = `dbcheck-prove-advice-ok-${Date.now()}`;
+        const inbox = await one(tx, `
+          INSERT INTO webhook_inbox (provider, provider_event_id, event_type, payload,
+                                     raw_body, signature_verified_at, state, processed_at)
+          VALUES ('lithic', '${token}-inbox', 'card_transaction.updated',
+                  jsonb_build_object('events', jsonb_build_array(
+                    jsonb_build_object('token', '${token}', 'type', 'AUTHORIZATION_ADVICE',
+                                       'amount', 1, 'result', 'APPROVED'))),
+                  '{}', now(), 'done', now())
+          RETURNING id`);
+        const ev = await one(tx, `
+          INSERT INTO card_auth_event (auth_id, kind, amount_cents, is_final, value_date,
+                                       provider_event_id, inbox_id)
+          VALUES ('${t.id}'::uuid, 'incremental_authorization', 1, false, current_date,
+                  '${token}', '${inbox.id}'::uuid)
+          RETURNING id`);
+        await tx.unsafe(`
+          INSERT INTO card_auth_event_result (event_id, result, provider_step, source)
+          VALUES ('${ev.id}'::uuid, 'APPROVED', 'AUTHORIZATION_ADVICE', 'ingest')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_hold_closure_unexplained",
+      how: "a test_harness closure over an open authorisation the network never refused",
+      as: "app",
+      note:
+        "THIS IS THE ROW `v_hold_closure_not_terminal` CANNOT SEE. Declared " +
+        "source='test_harness', so that guard's `source IN ('posting_path','expiry_sweep')` " +
+        "excludes it; the memo book is at zero, so v_hold_release_drift excludes it; the " +
+        "closure makes is_released true, so v_hold_drift excludes it. Four rows of exactly " +
+        "this shape ($132.00) have stood on this book since 2026-09-10 — docs/HOLDS.md §10.4",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ch.hold_id, ch.auth_id FROM v_card_auth_hold ch
+           WHERE NOT ch.is_closed
+             AND NOT EXISTS (SELECT 1 FROM hold_closure hc WHERE hc.hold_id = ch.hold_id)
+             AND NOT EXISTS (SELECT 1 FROM card_auth_event e
+                               JOIN card_auth_event_result r ON r.event_id = e.id
+                              WHERE e.auth_id = ch.auth_id
+                                AND r.result IS NOT NULL AND r.result <> 'APPROVED')
+           ORDER BY ch.hold_id LIMIT 1`);
+        if (!t) return "every open card authorisation on this book already has a closure row or a refusal on record";
+        await tx.unsafe(`
+          INSERT INTO hold_closure (hold_id, reason, actor_id, source)
+          VALUES ('${t.hold_id}'::uuid,
+                  'dbcheck --prove: a fixture closing a hold the model never terminated',
+                  ${ACTOR}, 'test_harness')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_hold_closure_unexplained",
+      label: "v_hold_closure_unexplained(a refused auth is OUT)",
+      how: "the SAME closure, over an authorisation the network is on record as having REFUSED",
+      as: "app",
+      expect: 0,
+      note:
+        "0 is the pass, and this is the clause that lets 0026's and 0032's 52 repair " +
+        "closures out — by EVIDENCE, per row, not by their declared source. The fold calls " +
+        "those authorisations open because its INPUT lost the refusal; the refusal is in " +
+        "card_auth_event_result, which the fold does not read. 0040 §10.3 claimed they were " +
+        "owned by v_refused_auth_hold instead: measured today, 0 of the 52 are in it, " +
+        "because 0032's own repair took them out of it. Ownership by membership was stale " +
+        "the day it was written; ownership by evidence is not.",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ch.hold_id, ch.auth_id FROM v_card_auth_hold ch
+           WHERE NOT ch.is_closed
+             AND NOT EXISTS (SELECT 1 FROM hold_closure hc WHERE hc.hold_id = ch.hold_id)
+           ORDER BY ch.hold_id LIMIT 1`);
+        if (!t) return "every open card authorisation on this book already has a closure row";
+        // The refusal is manufactured the only way the schema allows: a
+        // `declined` event and its verdict, which is what ingest writes
+        // (0026). `card_auth_event_result_agrees_with_kind` refuses a
+        // DECLINED filed under `authorization`, and that trigger is NOT
+        // disabled here — the proof goes through the front door.
+        const ev = await one(tx, `
+          INSERT INTO card_auth_event (auth_id, kind, amount_cents, is_final, value_date, provider_event_id)
+          VALUES ('${t.auth_id}'::uuid, 'declined', 1, false, current_date,
+                  'dbcheck-prove-refusal-' || gen_random_uuid()::text)
+          RETURNING id`);
+        await tx.unsafe(`
+          INSERT INTO card_auth_event_result (event_id, result, provider_step, source)
+          VALUES ('${ev.id}'::uuid, 'DECLINED', 'AUTHORIZATION', 'ingest')`);
+        await tx.unsafe(`
+          INSERT INTO hold_closure (hold_id, reason, actor_id, source)
+          VALUES ('${t.hold_id}'::uuid,
+                  'dbcheck --prove: a closure over an authorisation the network refused',
+                  ${ACTOR}, 'test_harness')`);
+        return undefined;
+      },
+    },
   ];
 
   // ---- the driver -----------------------------------------------------
@@ -1531,7 +1845,7 @@ if (process.argv.includes("--prove")) {
   // script already checks, so a view added above without a proof here is a
   // named FAILURE on the next run rather than a quiet gap. That is the same
   // mistake this whole section exists to stop being possible.
-  const ALL_VIEWS = INVARIANT_VIEWS;
+  const ALL_VIEWS = [...INVARIANT_VIEWS];
   const proven = new Set();
 
   for (const [view] of ALL_VIEWS) {

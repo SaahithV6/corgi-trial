@@ -33,6 +33,33 @@
  *
  * BALANCES ARE READ AS DELTAS. The ledger is append-only; a test asserting an
  * absolute figure passes once and then asserts the order the suite ran in.
+ *
+ * ===========================================================================
+ * THE ONE TEST THAT BOOKS MONEY RUNS INSIDE A TRANSACTION THAT IS ROLLED BACK
+ * ===========================================================================
+ *
+ * Question 5 credits a real inbound wire into the SEEDED DEMO BUSINESS: three
+ * journal entries — financial, memo hold, memo release — plus a `hold` and its
+ * `hold_closure`, every run, on the book the console screens read. Per-run
+ * cost: 3 entries / 1 hold / 1 closure before, ZERO after.
+ *
+ * The rows exist while every assertion is made — the hold really opens, the
+ * zero-day policy really releases it on arrival, `v_hold_release_drift` is
+ * really consulted, the replay is really decided by `hold_ref UNIQUE` — and
+ * then the transaction is thrown away. The rule and the exemptions are written
+ * up in `docs/TESTING.md`; the pattern is the one proved in
+ * `src/lib/fx/fx.integration.test.ts`.
+ *
+ * The other four questions are NOT wrapped and cost nothing: 1, 2 and 3 talk
+ * only to Increase, 4 reads a delivery out of `webhook_inbox`, and 6 reads an
+ * invariant view.
+ *
+ * WHAT IS NOT ROLLED BACK, AND CANNOT BE: the Increase sandbox. The wire that
+ * was originated, submitted, settled and reversed is on their system and stays
+ * there, and so is the inbound one. That is what a live integration means and
+ * it was already true — the point of this file is that those calls really
+ * happen. What changed is only that OUR book no longer keeps a copy of the
+ * bookkeeping.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -62,6 +89,43 @@ const INCREASE_ACCOUNT_NUMBER_ID = 'sandbox_account_number_96mzhz3n61f5p0jpvytc'
  */
 const WIRE_ROUTING = '021000021';
 
+/** What postgres.js hands a transaction body. Structural, to avoid the import. */
+type Scoped = {
+  savepoint: <T>(fn: (scoped: unknown) => Promise<T>) => Promise<T>;
+  begin?: unknown;
+};
+
+/**
+ * Give a transaction handle the `.begin()` that `creditInboundWire` calls.
+ *
+ * The booking wraps the financial entry, the memo hold and the memo release in
+ * one `conn.begin(...)`, which is right: a credit whose hold did not open, or
+ * a hold that opened and never released, is exactly the drift
+ * `v_hold_release_drift` exists to catch. But postgres.js puts `begin` on the
+ * POOL only; a transaction scope gets `savepoint`, and the two are the same
+ * function internally (`scope(c, fn, name)`) differing only in whether a
+ * savepoint name is issued. Without this shim `creditInboundWire({ conn: tx })`
+ * throws `conn.begin is not a function`, and the only way to run question 5
+ * inside a transaction would be to stop calling the rail's own booking code.
+ *
+ * `Sql(handler)` builds a fresh object per scope, so this adds the property to
+ * this transaction's handle and to nothing else.
+ */
+function nested(handle: unknown): Db.Sql {
+  const scoped = handle as Scoped;
+  if (typeof scoped.begin !== 'function') {
+    scoped.begin = (first: unknown, second?: unknown) => {
+      const body = (typeof first === 'function' ? first : second) as (
+        inner: unknown,
+      ) => Promise<unknown>;
+      return scoped.savepoint((inner) => Promise.resolve(body(nested(inner))));
+    };
+  }
+  return handle as Db.Sql;
+}
+
+const ROLLBACK = 'wire-integration-rollback';
+
 suite('the wire rail, against Increase', () => {
   let increaseWireAdapter: typeof AdapterModule.increaseWireAdapter;
   let creditInboundWire: typeof LedgerModule.creditInboundWire;
@@ -78,6 +142,26 @@ suite('the wire rail, against Increase', () => {
     ({ availableBalance } = await import('@/lib/ledger/balances'));
     ({ sql } = await import('@/lib/ledger/db'));
   });
+
+  /**
+   * Run a scenario against the live database and then throw it away.
+   *
+   * Anything that is not the sentinel is a real failure — a broken assertion
+   * or a statement Postgres refused — and is rethrown so the run goes red. It
+   * rolled back either way.
+   */
+  async function rolledBack(body: (tx: Db.Sql) => Promise<void>): Promise<void> {
+    let failure: unknown = null;
+    try {
+      await sql.begin(async (raw) => {
+        await body(nested(raw));
+        throw new Error(ROLLBACK);
+      });
+    } catch (thrown) {
+      if (!(thrown instanceof Error) || thrown.message !== ROLLBACK) failure = thrown;
+    }
+    if (failure !== null) throw failure;
+  }
 
   /* ---- 1. the probe ---------------------------------------------------- */
 
@@ -216,90 +300,105 @@ suite('the wire rail, against Increase', () => {
     expect(credit).not.toBeNull();
     if (credit === null) return;
 
-    const before = await availableBalance(RIDGELINE_BUSINESS, sql);
-    const receipt = await creditInboundWire({ businessId: RIDGELINE_BUSINESS, credit });
-    const after = await availableBalance(RIDGELINE_BUSINESS, sql);
+    // The Increase calls above are OUTSIDE the transaction, deliberately: a
+    // transaction that posts takes `pg_advisory_xact_lock` per entity until it
+    // ends, and holding that across a round trip to Increase would make every
+    // other writer on this book wait on somebody else's network. Everything
+    // from here down is this arrival's own bookkeeping.
+    await rolledBack(async (tx) => {
+      const before = await availableBalance(RIDGELINE_BUSINESS, tx);
+      const receipt = await creditInboundWire({
+        businessId: RIDGELINE_BUSINESS,
+        credit,
+        conn: tx,
+      });
+      const after = await availableBalance(RIDGELINE_BUSINESS, tx);
 
-    // THE CLAIM, AS TWO DELTAS. The ACH funding leg moves the first and not
-    // the second; a wire moves both, TOGETHER, because
-    // `funds_availability_policy` says 0 banking days from midnight ET and
-    // `ledger_availability`'s own release predicate does the rest.
-    //
-    // The claim is the EQUALITY of the two deltas, not their absolute value,
-    // and that is not a hedge — it is what makes the assertion survive
-    // `outbound.integration.test.ts` releasing a wire out of the same account
-    // while this file runs. A concurrent entry moves both terms, so it cannot
-    // make a broken rail look correct: only a hold that actually withheld
-    // something can separate them. The exact +$750.00 is asserted below, off
-    // this wire's own rows, where no other test can reach.
-    expect(after.ledgerCents - before.ledgerCents).toBe(
-      after.availableCents - before.availableCents,
-    );
-    // And the uncleared-credit term — the difference between them — did not
-    // move at all, which is the same statement said the other way round.
-    expect(after.unclearedCents - before.unclearedCents).toBe(0n);
-    expect(after.holdsCents - before.holdsCents).toBe(0n);
+      // THE CLAIM, AS TWO DELTAS. The ACH funding leg moves the first and not
+      // the second; a wire moves both, TOGETHER, because
+      // `funds_availability_policy` says 0 banking days from midnight ET and
+      // `ledger_availability`'s own release predicate does the rest.
+      //
+      // The claim is the EQUALITY of the two deltas, not their absolute value,
+      // and that is not a hedge — it is what makes the assertion survive
+      // `outbound.integration.test.ts` releasing a wire out of the same account
+      // while this file runs. A concurrent entry moves both terms, so it cannot
+      // make a broken rail look correct: only a hold that actually withheld
+      // something can separate them. The exact +$750.00 is asserted below, off
+      // this wire's own rows, where no other test can reach.
+      expect(after.ledgerCents - before.ledgerCents).toBe(
+        after.availableCents - before.availableCents,
+      );
+      // And the uncleared-credit term — the difference between them — did not
+      // move at all, which is the same statement said the other way round.
+      expect(after.unclearedCents - before.unclearedCents).toBe(0n);
+      expect(after.holdsCents - before.holdsCents).toBe(0n);
 
-    // The hold WAS written. That is what makes this a proof rather than a
-    // choice: something was there for the model to release.
-    expect(receipt.created).toBe(true);
-    expect(receipt.availableImmediately).toBe(true);
-    expect(receipt.schedule.bankingDaysHold).toBe(0);
-    expect(receipt.schedule.releaseLocalTime).toBe('00:00:00');
+      // The hold WAS written. That is what makes this a proof rather than a
+      // choice: something was there for the model to release.
+      expect(receipt.created).toBe(true);
+      expect(receipt.availableImmediately).toBe(true);
+      expect(receipt.schedule.bankingDaysHold).toBe(0);
+      expect(receipt.schedule.releaseLocalTime).toBe('00:00:00');
 
-    // THREE ENTRIES, the same three an ACH credit gets — financial, memo
-    // hold, memo release — with the one-to-two banking days taken out. The
-    // release is the part that did NOT fall out of the model: a hold released
-    // on arrival has no later sweep to square its memo book, and
-    // `v_hold_release_drift` requires a released hold to be flat.
-    expect(receipt.releaseEntryId).not.toBeNull();
-    const [closure] = await sql<{ reason: string }[]>`
-      SELECT reason FROM hold_closure WHERE hold_id = ${receipt.holdId}::uuid`;
-    expect(closure?.reason).toMatch(/zero-day policy releases on arrival/);
+      // THREE ENTRIES, the same three an ACH credit gets — financial, memo
+      // hold, memo release — with the one-to-two banking days taken out. The
+      // release is the part that did NOT fall out of the model: a hold released
+      // on arrival has no later sweep to square its memo book, and
+      // `v_hold_release_drift` requires a released hold to be flat.
+      expect(receipt.releaseEntryId).not.toBeNull();
+      const [closure] = await tx<{ reason: string }[]>`
+        SELECT reason FROM hold_closure WHERE hold_id = ${receipt.holdId}::uuid`;
+      expect(closure?.reason).toMatch(/zero-day policy releases on arrival/);
 
-    const [drift] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM v_hold_release_drift WHERE hold_id = ${receipt.holdId}::uuid`;
-    expect(drift?.n, 'a released wire hold must withhold nothing').toBe(0);
+      const [drift] = await tx<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM v_hold_release_drift WHERE hold_id = ${receipt.holdId}::uuid`;
+      expect(drift?.n, 'a released wire hold must withhold nothing').toBe(0);
 
-    // And the receipt a demo reads, with the sign the customer's statement
-    // uses: $750.00 credited, $0.00 held.
-    const credits = await readWireCredits(
-      (await sql<{ account_id: string }[]>`
-        SELECT account_id FROM hold WHERE id = ${receipt.holdId}::uuid`)[0]?.account_id ?? '',
-      sql,
-    );
-    const mine = credits.find((c) => c.externalRef === receipt.externalRef);
-    expect(mine?.creditedCents).toBe(amountCents);
-    expect(mine?.heldCents).toBe(0n);
+      // And the receipt a demo reads, with the sign the customer's statement
+      // uses: $750.00 credited, $0.00 held.
+      const credits = await readWireCredits(
+        (await tx<{ account_id: string }[]>`
+          SELECT account_id FROM hold WHERE id = ${receipt.holdId}::uuid`)[0]?.account_id ?? '',
+        tx,
+      );
+      const mine = credits.find((c) => c.externalRef === receipt.externalRef);
+      expect(mine?.creditedCents).toBe(amountCents);
+      expect(mine?.heldCents).toBe(0n);
 
-    const [hold] = await sql<{ available_at: Date; policy_id: string | null }[]>`
-      SELECT available_at, policy_id FROM hold WHERE id = ${receipt.holdId}::uuid`;
-    expect(hold?.policy_id).not.toBeNull();
-    // Already in the past at the instant it was written. Born released.
-    expect(hold?.available_at.getTime()).toBeLessThanOrEqual(Date.parse(credit.acceptedAt));
+      const [hold] = await tx<{ available_at: Date; policy_id: string | null }[]>`
+        SELECT available_at, policy_id FROM hold WHERE id = ${receipt.holdId}::uuid`;
+      expect(hold?.policy_id).not.toBeNull();
+      // Already in the past at the instant it was written. Born released.
+      expect(hold?.available_at.getTime()).toBeLessThanOrEqual(Date.parse(credit.acceptedAt));
 
-    // Replay: the same arrival books nothing twice. Decided by
-    // `hold_ref UNIQUE (kind, external_ref)` and the entry idempotency key,
-    // not by an `if`.
-    const replay = await creditInboundWire({ businessId: RIDGELINE_BUSINESS, credit });
-    expect(replay.created).toBe(false);
-    expect(replay.entryId).toBe(receipt.entryId);
-    expect(replay.memoEntryId).toBe(receipt.memoEntryId);
+      // Replay: the same arrival books nothing twice. Decided by
+      // `hold_ref UNIQUE (kind, external_ref)` and the entry idempotency key,
+      // not by an `if`.
+      const replay = await creditInboundWire({
+        businessId: RIDGELINE_BUSINESS,
+        credit,
+        conn: tx,
+      });
+      expect(replay.created).toBe(false);
+      expect(replay.entryId).toBe(receipt.entryId);
+      expect(replay.memoEntryId).toBe(receipt.memoEntryId);
 
-    // Counted on THIS wire's own rows rather than on the account's balance,
-    // for the same reason the deltas above are an equality: another suite may
-    // be booking against this business at the same moment, and "the balance
-    // did not change" would be asserting that nothing else in the system is
-    // running. Three entries for this arrival — financial, memo hold, memo
-    // release — and no more, however many times it is delivered.
-    const { listLedgerLines } = await import('@/lib/ledger/queries');
-    const lines = await listLedgerLines({ rail: 'wire', limit: 500 }, sql);
-    const entries = new Set(
-      lines.filter((l) => l.externalRef === receipt.externalRef).map((l) => l.entryId),
-    );
-    expect(entries.size).toBe(3);
-    expect(entries).toContain(receipt.entryId);
-    expect(entries).toContain(receipt.memoEntryId);
+      // Counted on THIS wire's own rows rather than on the account's balance,
+      // for the same reason the deltas above are an equality: another suite may
+      // be booking against this business at the same moment, and "the balance
+      // did not change" would be asserting that nothing else in the system is
+      // running. Three entries for this arrival — financial, memo hold, memo
+      // release — and no more, however many times it is delivered.
+      const { listLedgerLines } = await import('@/lib/ledger/queries');
+      const lines = await listLedgerLines({ rail: 'wire', limit: 500 }, tx);
+      const entries = new Set(
+        lines.filter((l) => l.externalRef === receipt.externalRef).map((l) => l.entryId),
+      );
+      expect(entries.size).toBe(3);
+      expect(entries).toContain(receipt.entryId);
+      expect(entries).toContain(receipt.memoEntryId);
+    });
   }, 60_000);
 
   /* ---- 6. the invariant ------------------------------------------------ */

@@ -278,6 +278,99 @@ arrives as a `return` block on the same `ach_transfer`, which `applyStep`'s
 
 ---
 
+## 4c. The inbound ACH rows, made true: a virtual account number per business
+
+**2026-09-11, after §4b.** §4b ends by withdrawing a claim: an inbound credit
+could not be attributed, so it was never booked, so a recall had nothing to
+correct. That was a fact about the **schema**, not about the rail, and it is the
+one this section removes.
+
+### The fact that was missing, and why it could only be a fact
+
+`POST /account_numbers` issues a second, third, Nth account number on the same
+Increase account. Each has its own digits and its own id, and an inbound payment
+addressed to one arrives naming **that** id in `account_number_id`. MEASURED:
+
+```
+POST /account_numbers
+     {account_id: sandbox_account_zkfx1wcn4brwoaiyksj6,
+      name: "Ridgeline Robotics, Inc.",
+      inbound_ach: {debit_status: "blocked"}}
+  -> 200  sandbox_account_number_bh5spt0xmebnj6xq6t3l
+          account_number 3164662367  routing_number 123308582  status "active"
+```
+
+So the provider will say **which** number was addressed. It will never say
+**whose** it is. Nothing derives a business from an account number — no prefix,
+no checksum, no issue order — so this is a fact somebody records, not a rule
+somebody applies, and `virtual_account_number`
+(`db/migrations/0042_virtual_account_numbers.sql`) is where it lives. The table
+is append-only with a trigger that says why in the exception message: an UPDATE
+of `business_id` would silently re-point every future credit addressed to that
+number at a different customer, and there is no correcting journal entry for a
+lie told by a lookup. `corgi_app` holds `SELECT` on it and nothing else, so the
+consumer that reads the mapping cannot write it.
+
+### What the two rows now decide
+
+| key | value date from | what the consumer does |
+| --- | --- | --- |
+| `inbound_ach_transfer.created` | `payload.effective_date` | DR `1110` / CR the business's `2100`, plus an `uncleared_credit` hold under `ach`/`new` — two banking days |
+| `inbound_ach_transfer.updated/returned` | `payload.transfer_return.returned_at` | DR the business's `2100` / CR `1110` at the recall's own day, **and close the hold** |
+
+Both are still `new_event`, and both `canonical_kind`s are unchanged. **0042
+touched the two `note` columns and nothing else** — the classification was right
+when it was unreachable, right when it was measured, and right now. What changed
+underneath it is the schema the notes describe.
+
+The recall closing the hold is the half worth stating here rather than only in
+code. Available = ledger − holds. A recall that debited the customer and left
+the arrival's hold standing would withhold the same money twice: the ledger falls
+by the credit AND the hold goes on withholding it, so available falls by twice
+the amount for a customer who never had it. `recallInboundAch()` closes it in the
+same transaction and posts the reversing memo entry at the recall's value date.
+
+### The refusal is unchanged, and that is the point
+
+A credit naming a number with **no row** in `virtual_account_number` still parks
+on `inbound_ach_account_mapping`, with nothing posted. There is no default
+account, no "the only business on the book", no "whoever this originator paid
+last time". The programme's own `primary` number
+(`sandbox_account_number_96mzhz3n61f5p0jpvytc`) is deliberately mapped to
+**nobody**: every historical inbound payment on this book was addressed to it,
+and mapping it would attribute all of them by decree.
+
+Measured after the change, on the live book: **29 deliveries parked for want of a
+mapping were redriven through the current consumer and 29 stayed parked** — two
+inbound ACH deliveries for `sandbox_inbound_ach_transfer_07x75nyvzd1oxihtvuoe`
+($10,000.00 from CORGI TREASURY) and 27 inbound wire deliveries. Every one of
+them names the shared FBO number. **A row that posts nothing is a result.**
+
+### Proven, not argued
+
+`src/lib/rails/increase/inbound-recall.integration.test.ts` drives the whole
+sentence against the real sandbox — a credit to one business's own number, the
+real webhook deliveries, the credit booked at `effective_date` with available
+unmoved, the real recall, the recall booked at `transfer_return.returned_at`, the
+hold closed, and the arrival still standing on the arrival's day. It also asserts
+the half a refusal can never prove: that the money lands on the business whose
+number was addressed and **not** on the one whose was not.
+
+```
+set -a; . ./.env; set +a; RUN_INBOUND_RECALL=1 pnpm vitest run \
+  src/lib/rails/increase/inbound-recall.integration.test.ts
+```
+
+**One thing this sandbox cannot show.** `POST /simulations/inbound_ach_transfers`
+rejects `effective_date` (`Unexpected parameter`, measured), so an arrival is
+always dated today and a recall of it lands on the same day. The two dates are
+read from two different provider fields and the test asserts each against the
+field it came from, but the **visible** day separation the brief pictures —
+Tuesday's credit, Thursday's recall — cannot be produced on this rail here. Said
+rather than staged.
+
+---
+
 ## 5. How to add a row safely
 
 Rows live in `RAIL_EVENT_SEMANTICS` in `scripts/seed.mjs`. That array is the
@@ -331,13 +424,16 @@ it mis-dated, and the correction pass is the hard half.
 | `db/migrations/0001_ledger.sql` | the table, `PRIMARY KEY (provider, provider_event_type)` |
 | `db/migrations/0025_wires.sql` | the eight wire rows, inserted directly with their measurements |
 | `db/migrations/0039_inbound_recall.sql` | the inbound ACH recall row corrected, and the inbound credit note's claim withdrawn (§4b) |
-| `db/migrations/0042_virtual_account_numbers.sql` | both inbound ACH notes rewritten again, once an inbound credit became attributable |
+| `db/migrations/0042_virtual_account_numbers.sql` | the `account_number -> business` table, and both inbound notes rewritten again (§4c) |
 | `scripts/seed.mjs` | `RAIL_EVENT_SEMANTICS` — all 30 rows, source of truth for the table |
 | `src/lib/rails/semantics.ts` | the reader. No default, ever |
 | `src/lib/rails/semantics.test.ts` | 30 assertions, one per seeded row, plus the characterisation test and the live comparison (§7) |
 | `src/lib/webhooks/consumers/lithic-card.ts` | the card consumer that asks |
 | `src/lib/webhooks/consumers/increase-wire.ts` | the wire consumer that asks |
-| `src/lib/webhooks/consumers/increase-ach.ts` | the ACH consumer that asks — outbound in §4, inbound in §4b |
+| `src/lib/rails/increase/account-numbers.ts` | the lookup that turns `account_number_id` into a business — never a derivation |
+| `src/lib/rails/increase/inbound-ach-ledger.ts` | what an attributed inbound credit and its recall post, and the availability hold between them |
+| `scripts/provision-account-numbers.mjs` | issues one number per business at the provider, then records whose it is |
+| `src/lib/webhooks/consumers/increase-ach.ts` | the ACH consumer that asks — outbound in §4, inbound in §4b and §4c |
 | `research/ledger/DESIGN.md` §6.1, §14 | the design |
 | `DECISIONS.md` 019, 027 | the measurement, and the over-claim it corrects |
 
