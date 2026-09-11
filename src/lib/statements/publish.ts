@@ -1,24 +1,3 @@
-import type { Sql } from "@/lib/ledger/queries";
-
-import {
-  UnknownAccountError,
-  contentWatermark,
-  listStatementVersions,
-  readBookDay,
-  readStatementAccount,
-  readStatementById,
-  renderStatement,
-  toPublishedStatement,
-} from "./read";
-import { STATEMENT_FORMAT, canonicalStatement, statementHash } from "./render";
-import type {
-  BookDay,
-  BusinessDate,
-  PublishResult,
-  PublishedStatement,
-  StatementDocument,
-} from "./types";
-
 /**
  * Closing a day, and issuing the documents pinned to it.
  *
@@ -66,6 +45,27 @@ import type {
  * period_end, version)` constraint is still the guarantee; the lock only makes
  * the common case not fail.
  */
+
+import type { Sql } from "@/lib/ledger/queries";
+
+import {
+  UnknownAccountError,
+  contentWatermark,
+  listStatementVersions,
+  readBookDay,
+  readStatementAccount,
+  readStatementById,
+  renderStatement,
+  toPublishedStatement,
+} from "./read";
+import { STATEMENT_FORMAT, canonicalStatement, statementHash } from "./render";
+import type {
+  BookDay,
+  BusinessDate,
+  PublishResult,
+  PublishedStatement,
+  StatementDocument,
+} from "./types";
 
 export class DayNotClosedError extends Error {
   override readonly name = "DayNotClosedError";

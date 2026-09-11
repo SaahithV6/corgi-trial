@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The card correction path: the one place a provider event stops being a new
  * line on today's statement and becomes a repair of an old one.
@@ -74,6 +72,8 @@ import "server-only";
  * `v_hold_release_drift` stay at zero across a correction — the TypeScript
  * model and the SQL view are held equal by invariant and neither moved.
  */
+
+import "server-only";
 
 import { reverseAndRebook } from "@/lib/ledger/post";
 import { sql, type Sql } from "@/lib/ledger/db";

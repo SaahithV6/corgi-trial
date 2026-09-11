@@ -1,34 +1,3 @@
-import "server-only";
-
-import type {
-  AccountOption,
-  CorrectionGroupView,
-  DayOption,
-  DocumentView,
-  LatePostingView,
-  PublishedStatementView,
-  StatementDetailView,
-  StatementLineView,
-  StatementsQuery,
-  StatementsView,
-} from "@/components/statements/data-contract";
-import type { Sql } from "@/lib/ledger/queries";
-import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
-
-import { compareStatement, explainsDelta, groupLatePostings } from "./compare";
-import {
-  listStatementDays,
-  readStatementAccount,
-  statementConnection,
-  type StatementDay,
-} from "./read";
-import type {
-  LatePosting,
-  PublishedStatement,
-  StatementComparison,
-  StatementDocument,
-} from "./types";
-
 /**
  * The live implementation of the statements screen's data contract.
  *
@@ -61,6 +30,37 @@ import type {
  * rather than silently rounds: a balance past 2^53 is a bug worth crashing on,
  * not a number to approximate on a customer's statement.
  */
+
+import "server-only";
+
+import type {
+  AccountOption,
+  CorrectionGroupView,
+  DayOption,
+  DocumentView,
+  LatePostingView,
+  PublishedStatementView,
+  StatementDetailView,
+  StatementLineView,
+  StatementsQuery,
+  StatementsView,
+} from "@/components/statements/data-contract";
+import type { Sql } from "@/lib/ledger/queries";
+import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
+
+import { compareStatement, explainsDelta, groupLatePostings } from "./compare";
+import {
+  listStatementDays,
+  readStatementAccount,
+  statementConnection,
+  type StatementDay,
+} from "./read";
+import type {
+  LatePosting,
+  PublishedStatement,
+  StatementComparison,
+  StatementDocument,
+} from "./types";
 
 /** The one bigint -> number narrowing in the read path. Refuses, never rounds. */
 function toCents(value: bigint): number {

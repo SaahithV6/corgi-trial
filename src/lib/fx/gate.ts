@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The predicate the payout path calls. One function, one question:
  *
@@ -74,6 +72,8 @@ import "server-only";
  * which is an outage somebody notices and fixes; failing open produces a
  * commitment nobody made, which nobody notices until the customer does.
  */
+
+import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { USDC_UNITS_PER_CENT } from "@/lib/rails/stablecoin/types";

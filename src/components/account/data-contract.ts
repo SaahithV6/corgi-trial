@@ -61,8 +61,8 @@ export type ValueDate = string;
  * The two balances, and the decomposition of the gap between them.
  *
  * `availableCents` must equal
- * `ledgerCents - activeHoldsCents - unclearedCreditsCents`, exactly, in
- * integers. The screen asserts this and shows a reconciliation warning if it
+ * `ledgerCents - activeHoldsCents - unclearedCreditsCents - pendingOutboundCents`,
+ * exactly, in integers. The screen asserts this and shows a reconciliation warning if it
  * fails, because a gap that does not decompose is a ledger bug that an
  * operator needs to see rather than a rounding curiosity to hide.
  *
@@ -91,9 +91,9 @@ export type AccountSummary = {
   readonly ledgerCents: Cents;
 
   /**
-   * Spendable position: `ledger − Σ active holds`. May be negative after an
-   * over-capture; §10 is explicit that it is not clamped, because clamping
-   * loses money.
+   * Spendable position: `ledger − Σ active holds − Σ committed outflows`. May
+   * be negative after an over-capture; §10 is explicit that it is not clamped,
+   * because clamping loses money.
    */
   readonly availableCents: Cents;
 
@@ -102,6 +102,19 @@ export type AccountSummary = {
 
   /** Σ of `remainingCents` over uncleared-credit holds. Non-negative. */
   readonly unclearedCreditsCents: Cents;
+
+  /**
+   * Debits already booked for a FUTURE value date. Non-negative; committed out.
+   *
+   * The fourth term, and the one with no row in the holds table: an outbound
+   * ACH originated today for tomorrow's settlement is a journal entry, not a
+   * hold. It has not moved `ledgerCents` — `value_date <= today` excluded it —
+   * and it must still come off `available`, because money booked to leave has
+   * been committed and a customer who can spend it again before it settles has
+   * been overdrawn on their own behalf. See `ledger_availability()`,
+   * migration 0022.
+   */
+  readonly pendingOutboundCents: Cents;
 
   /** The instant this fold was taken. All ages are measured against it. */
   readonly asOf: Instant;

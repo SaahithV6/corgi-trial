@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The Lithic consumer: the thing `dispatch.ts` hands a card event to.
  *
@@ -51,6 +49,8 @@ import "server-only";
  * See docs/CARD-CORRECTIONS.md, which also records what Lithic's sandbox can
  * and cannot originate, measured.
  */
+
+import "server-only";
 
 import { applyCardTransaction, LITHIC_PROVIDER } from "@/lib/holds";
 import type { Transaction } from "@/lib/rails/lithic/types";

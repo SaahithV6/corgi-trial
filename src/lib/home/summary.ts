@@ -1,9 +1,3 @@
-import "server-only";
-
-import { fail, ok } from "@/lib/result";
-import type { ErrorShape, Result } from "@/lib/result";
-import { ledgerConnection, type Sql } from "@/lib/ledger/queries";
-
 /**
  * The two reads the landing page makes, and nothing else.
  *
@@ -39,6 +33,12 @@ import { ledgerConnection, type Sql } from "@/lib/ledger/queries";
  * landing page that ran its own probes would be a third. It reads the
  * endpoint, so it cannot disagree with the endpoint.
  */
+
+import "server-only";
+
+import { fail, ok } from "@/lib/result";
+import type { ErrorShape, Result } from "@/lib/result";
+import { ledgerConnection, type Sql } from "@/lib/ledger/queries";
 
 /* -------------------------------------------------------------------------- */
 /* 1. Live system state                                                       */

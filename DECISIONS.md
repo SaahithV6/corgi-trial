@@ -2164,3 +2164,175 @@ clock-versus-closure disagreement is an alarm rather than a view. **Then** give
 `availableBalance()` the snapshot predicate and let the funding screen delete its
 local copy. Not the other order: unifying the readers while the sweep is unwired
 would make both screens agree on a number that is wrong in the same direction.
+
+---
+
+## 047 — 2026-09-11T02:02Z — Three timestamps in this file go backwards, and I am not restamping them
+
+**What the checker says.** `node scripts/compliance.mjs --only AF6` reports
+three entry timestamps that decrease against the entry above them:
+
+    011  02:05Z  after  010  03:20Z
+    024  17:45Z  after  023  19:40Z
+    027  18:45Z  after  026  19:20Z
+
+**They are not being restamped.** A monotonic sequence would take five minutes
+to manufacture and would be a lie about when the work happened — in a file
+whose own preamble says *nothing here is edited after the fact*, and in a trial
+whose brief says *"we will read the git history"*. A log that quietly agrees
+with itself is worth less than one that says where it disagrees with itself.
+
+**What the content shows, without needing the history.** Four of this file's 46
+stamps are byte-identical to an earlier entry's stamp, and in every case it is
+the later-numbered entry that is the duplicate:
+
+    006 / 011   2026-09-10T02:05Z
+    019 / 024   2026-09-10T17:45Z
+    022 / 028   2026-09-10T19:10Z
+    023 / 029   2026-09-10T19:40Z
+
+Two of those four (011 and 024) are two of the three regressions. That is the
+fingerprint of a heading line copied from a nearby entry and then edited for
+number and title with the timestamp left behind — a clerical defect, not a
+backdated claim about when a decision was taken. 028 and 029 carry exactly the
+same defect and are invisible to the checker only because the entries on either
+side of them happen to be later.
+
+**027 is a different case.** Its 18:45Z duplicates nothing. It sits between 026
+(19:20Z) and 028 (19:10Z), so it is earlier than both of its neighbours rather
+than a copy of either. Its subject — being asked whether the T+24h checkpoint
+was really ready, and finding four things asserted without checking — is the
+kind of entry started while other work is in flight and filed once the checking
+is done.
+
+**What I did not do, and why.** Recovering each entry's true wall-clock time
+means reading when it landed, and that is a git question. This pass ran under an
+explicit instruction not to invoke git, so I have no measurement of the real
+times and have therefore invented none. The three headings stand exactly as
+written. The numbers are recoverable by anyone who wants them —
+
+    git log --follow --format='%cI %s' -- DECISIONS.md
+
+— and the correction that follows from them belongs in a superseding entry.
+Editing 011, 024 and 027 in place does not, which is why this entry exists
+instead of three footnotes.
+
+**Why it is soft, and stays soft.** The brief asks for *"timestamped entries in
+the repo ... written as you go"* and nowhere for a monotonic sequence. The
+checker agrees — it records these as `~` rather than a failure, and notes that
+parallel workers writing up concurrent work land out of order. Its proxy 4, 32
+commits touching this file across 24.9 hours, is the check that actually answers
+the question the brief asked.
+
+### Postscript to 047 — the measurement, now taken
+
+047 was written without git, because the worker was told not to run it, and it
+correctly **invented no numbers** rather than filling the gap with plausible
+ones. Here is what the log itself shows, which needed no git at all:
+
+    006 / 011   both 02:05Z
+    019 / 024   both 17:45Z
+    022 / 028   both 19:10Z     <- the checker cannot see this one
+    023 / 029   both 19:40Z     <- nor this one
+
+Four duplicated stamps, and in every case the **later-numbered** entry carries
+the **earlier** entry's time. That is the signature of a heading line copied
+from a neighbour and edited for number and title with the stamp left behind.
+Clerical, not a backdated claim — and worth saying plainly, because "three
+timestamps go backwards" invites the reading that someone tried to make work
+look earlier than it was.
+
+The checker only sees two of the four, because 028 and 029 happen to sit next
+to entries later than themselves. A guard that catches half a defect and
+reports a count is more dangerous than one that catches none, because the count
+reads as complete.
+
+**The stamps are left as they are.** This log's own preamble says nothing here
+is edited after the fact, and a timestamp corrected quietly is exactly the kind
+of small tidy that makes a reader wonder what else was tidied. The record is
+that four were copied; that record is now on the record.
+
+
+---
+
+## 048 — 2026-09-11T02:55Z — One definition of available, and the future-dated question answered both ways on purpose
+
+**Decision.** 046 said "name this rather than unify it tonight" and gave an
+order: wire the sweep first, then unify. The sweep is wired — `drain.ts:156`
+calls `releaseAvailableCredits()` now — so the precondition 046 set is met and
+the unification is done.
+
+**What it actually was.** Four definitions, not three, and the fourth is the
+one that mattered: the screens' hold folds. Measured against the live database
+at 02:31Z, with `dbcheck` green:
+
+| account | accounts console | funding screen | apart by |
+| --- | --- | --- | --- |
+| Ridgeline Robotics | $8,025.32 | $30,630.32 | **$22,605.00** |
+| Kettle & Crumb Bakery | −$220.20 | −$17,220.20 | **$17,000.00** |
+
+Two screens, same account, same instant. The first gap is the known value-date
+one. **The second was not known**: the funding screen excluded future-dated
+CREDITS from its ledger term and then subtracted the uncleared-credit holds
+guarding those same credits — charging the customer for the same dollar twice,
+$17,000.00 on an account holding $16,779.80.
+
+**The future-dated question, decided.** A future-dated credit is NOT available
+— a customer cannot spend tomorrow's settlement today, and `availableBalance()`
+was handing the demo business $9,857.00 of credits value-dated **2027** as
+spendable money. A future-dated DEBIT is subtracted ANYWAY — $37,462.00 is
+already booked to leave that account tomorrow, and a customer who can spend it
+again in the window before it settles is a customer we overdrew on their own
+behalf.
+
+That asymmetry is the whole argument and it is deliberate: available is the
+money you could spend right now without relying on something that has not
+happened yet. A definition symmetric in *value date* is asymmetric in *risk*,
+and the risk is whose money it is. Ridgeline's available is now **−$1,831.68**
+and that is the honest number.
+
+**Where it lives.** A view cannot take an argument and a balance question has
+three — which business day, which watermark, which instant — so the canonical
+definition is a Postgres function, `ledger_availability()` (migration 0022).
+`v_available_balance` calls it. The TypeScript calls it. There is one body, so
+the view and the function cannot drift, because neither *contains* a
+definition. That is the `v_hold_drift` bargain kept by construction rather than
+by invariant. `v_balance_definition_drift` covers the one seam that is still
+two bodies — this function's release predicate against `v_hold_state`'s — and
+must return zero rows.
+
+**The release predicate went the way 046 warned about, and here is why that is
+now right.** `availableBalance()` released on a `hold_closure` row only;
+`v_hold_state` and the funding screen released on the clock. I took the clock.
+046 argued the closure row was the conservative side — and it was, while the
+sweep had no caller, because withholding money you should have released is the
+safe mistake. The sweep has a caller now, so the conservative reading has
+become the wrong one: it would have the funds-availability policy promise 09:00
+ET and the funds check say never. Exposure at the moment of the change: $0.00 —
+the two predicates agreed on every open hold.
+
+**One thing that had to change underneath.** `readSnapshot()` now takes its
+point from `clock_timestamp()`, not `now()`, and the live watermark has no time
+predicate at all. `now()` inside a transaction is the transaction's START and
+`ledger_append()` stamps `booking_time` from `clock_timestamp()` — so
+`MAX(booking_seq) WHERE booking_time <= now()`, read inside the transaction
+that just posted an entry, excludes that entry. Standing orders and pot
+transfers both funds-check inside the transaction that posts. This would have
+been a silent wrong answer in exactly the place a wrong answer costs money.
+
+**The boundary, because a boundary you cannot enforce is a preference.**
+`src/lib/ledger/boundary.test.ts` fails if any module outside
+`src/lib/ledger/**` writes SQL against `journal_entry`, `journal_line` or
+`account`. There are 235 such references across 50 files; all are allowlisted
+with the owning module named, and the test is a ratchet — a file may hold fewer
+than its recorded count, never more, and an entry that is paid off must be
+deleted. The list can only shrink. Heaviest: live-fire 33, pots 29, statements
+23, holds 19, rails 16.
+
+**What I did not do.** `listPostingRows()` still excludes future-dated entries,
+so the committed outflows that now reduce `available` are named on the screens
+but not yet itemised among the postings that explain them. `coreloop.mjs` still
+re-expresses the old query as its yardstick — deliberately, since its verdict
+must not run through application code, and its assertions are all deltas, so it
+is unaffected. Full measurement, every figure that moved and why it was wrong:
+`docs/BALANCE-DEFINITIONS.md`.

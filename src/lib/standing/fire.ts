@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The firing routine. One tick of the schedule.
  *
@@ -76,6 +74,8 @@ import "server-only";
  * where the derived key makes the retry free. A row that is visibly stuck
  * beats a row that quietly decided the wrong thing.
  */
+
+import "server-only";
 
 import { requestPayment } from "@/lib/approvals/instructions";
 import { availableBalance } from "@/lib/ledger/balances";
@@ -293,7 +293,8 @@ async function fireOne(
 
     // 5. THE MONEY QUESTION, ASKED OF AVAILABLE AND NOT OF THE LEDGER.
     //
-    //    `availableBalance()` = ledger − active card holds − uncleared credits.
+    //    `availableBalance()` = ledger − active holds − uncleared credits
+    //    − committed outflows (migration 0022).
     //    A $50 fuel-pump authorisation is money the customer has already
     //    committed; an ACH credit that has not cleared can still be pulled
     //    back. Paying rent out of either is lending, and this is a current

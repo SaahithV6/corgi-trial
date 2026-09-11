@@ -27,16 +27,31 @@ export type ConsoleBusiness = {
 };
 
 /**
- * The four figures the whole screen exists to contrast.
+ * The five figures the whole screen exists to contrast.
  *
- * `availableCents` is `ledger − holds − uncleared` and is DELIBERATELY allowed
- * to be negative — see the note in `availableBalance()`. Clamping it would
- * hide a real overdraft behind a cosmetic floor.
+ * `availableCents` is `ledger − holds − uncleared − pendingOutbound` and is
+ * DELIBERATELY allowed to be negative — see the note in
+ * `accountAvailability()`. Clamping it would hide a real overdraft behind a
+ * cosmetic floor.
+ *
+ * `ledgerCents` is the SETTLED balance: value date on or before today,
+ * booking_seq at or below the snapshot's watermark. It is not "every line".
+ * A credit value-dated 2027 is a fact we know, not money on today's book.
  */
 export type ConsoleBalances = {
   readonly ledgerCents: bigint;
   readonly holdsCents: bigint;
   readonly unclearedCents: bigint;
+  /**
+   * Debits already booked for a FUTURE value date. Positive = committed out.
+   *
+   * Not a hold — there is no hold row, there is a journal entry with
+   * tomorrow's value date — and therefore invisible to the holds table below.
+   * It is a term of `available` because money booked to leave has been
+   * committed, and a customer who can spend it again before it settles has
+   * been overdrawn on their own behalf.
+   */
+  readonly pendingOutboundCents: bigint;
   readonly availableCents: bigint;
 };
 

@@ -104,6 +104,7 @@ const LOADING_ACCOUNTS: FundingSnapshot["accounts"] = [
       availableDisplay: "$0.00",
       cardHoldsDisplay: "$0.00",
       unclearedDisplay: "$2,500.00",
+      pendingOutboundDisplay: "$0.00",
       availableIsNegative: false,
     },
     unclearedHolds: [

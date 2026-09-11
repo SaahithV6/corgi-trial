@@ -1,14 +1,3 @@
-import "server-only";
-
-import type { Sql } from "./db";
-
-/**
- * Re-exported so the adapter above this layer can name a connection without
- * importing `src/lib/ledger/db` — which `data-contract.ts` forbids anything
- * under `src/components/**` from doing. It is a type, so it is erased.
- */
-export type { Sql };
-
 /**
  * Read-only query helpers for the account screen.
  *
@@ -67,6 +56,17 @@ export type { Sql };
  * closure is a predicate over that set, a clock, and a `hold_closure` row.
  */
 
+import "server-only";
+
+import type { Sql } from "./db";
+
+/**
+ * Re-exported so the adapter above this layer can name a connection without
+ * importing `src/lib/ledger/db` — which `data-contract.ts` forbids anything
+ * under `src/components/**` from doing. It is a type, so it is erased.
+ */
+export type { Sql };
+
 /* -------------------------------------------------------------------------- */
 /* The connection                                                             */
 /* -------------------------------------------------------------------------- */
@@ -91,49 +91,16 @@ export async function ledgerConnection(): Promise<Sql> {
 /* -------------------------------------------------------------------------- */
 
 /**
- * One instant, one watermark, one business day — taken once and passed into
- * every other query in this module.
+ * Re-exported from `balance-definitions.ts`, which is where it is DEFINED.
  *
- * The data contract requires the three reads to be consistent as of a single
- * instant, so that the summary's ledger balance is a fold over exactly the
- * postings the screen lists and no others. Three queries each calling `now()`
- * would drift by however long the round trips took, and an entry booked in
- * that window would appear in one answer and not the other.
- *
- * `valueDate` comes from the database's own `book_date()`, so the business day
- * boundary is the Fed/ACH one (America/New_York) rather than the server's
- * locale, and there is one definition of it rather than two.
+ * There is one snapshot type in this system and one function that takes one.
+ * This module used to carry its own copy of both; the copy is gone, and this
+ * line is what is left of it.
  */
-export interface LedgerSnapshot {
-  /** Wall clock at the moment the snapshot was taken (transaction time). */
-  readonly asOf: Date;
-  /** Today in book time, `YYYY-MM-DD`. The value axis of §5. */
-  readonly valueDate: string;
-  /** The highest `booking_seq` recorded by `asOf`. The booking axis of §5. */
-  readonly bookingWatermark: bigint;
-}
+import type { LedgerSnapshot } from "./balance-definitions";
 
-export async function readSnapshot(conn: Sql): Promise<LedgerSnapshot> {
-  const rows = await conn<
-    { as_of: Date; value_date: string; booking_watermark: bigint }[]
-  >`
-    SELECT now()                                           AS as_of,
-           to_char(book_date(now()), 'YYYY-MM-DD')         AS value_date,
-           COALESCE((SELECT MAX(e.booking_seq)
-                       FROM journal_entry e
-                      WHERE e.booking_time <= now()), 0)::bigint
-                                                           AS booking_watermark`;
-
-  const row = rows[0];
-  if (row === undefined) {
-    throw new Error("snapshot query returned no row");
-  }
-  return {
-    asOf: row.as_of,
-    valueDate: row.value_date,
-    bookingWatermark: row.booking_watermark,
-  };
-}
+export type { LedgerSnapshot } from "./balance-definitions";
+export { readSnapshot } from "./balance-definitions";
 
 /* -------------------------------------------------------------------------- */
 /* Identity                                                                   */
@@ -249,35 +216,36 @@ export async function listDepositAccounts(
 /* -------------------------------------------------------------------------- */
 
 /**
- * The settled position: `Σ amount_cents × normal_side` over the account's
- * lines, on both axes of §5 at once.
+ * Q1, under the name this module's callers have always used.
  *
- * `value_date <= snapshot.valueDate` excludes future-dated entries — a
- * settlement booked today for tomorrow's business day is a fact we know and
- * not money the customer has — and `booking_seq <= snapshot.bookingWatermark`
+ * A THIN ALIAS. The definition is `settledBalanceCents` in
+ * `balance-definitions.ts`, which is a call to `ledger_settled_cents()` in
+ * Postgres, which is also what `v_available_balance` calls. There is one body.
+ *
+ * It asks: the settled position at this value date and this booking
+ * watermark. `value_date <= snapshot.valueDate` excludes future-dated entries
+ * — a settlement booked today for tomorrow's business day is a fact we know
+ * and not money the customer has — and `booking_seq <= snapshot.watermark`
  * pins what we had learned when the snapshot was taken.
  *
- * The `LEFT JOIN` from `account` is not decoration: an account with no lines
- * at all must return `0`, and an inner join would return no row and leave the
- * caller to guess whether that meant zero or missing.
+ * This function used to be one of four live definitions of the balance and it
+ * was the one that was RIGHT about the ledger. What it was wrong about was
+ * everything built on top of it: the screen that subtracted uncleared-credit
+ * holds whose credits this predicate had already excluded, and so charged the
+ * customer $3,750.00 twice. See `foldHoldTotals` below.
  */
-export async function ledgerBalanceCents(
-  accountId: string,
-  snapshot: LedgerSnapshot,
-  conn: Sql,
-): Promise<bigint> {
-  const rows = await conn<{ balance_cents: bigint }[]>`
-    SELECT COALESCE(SUM(l.amount_cents), 0)::bigint * a.normal_side AS balance_cents
-      FROM account a
-      LEFT JOIN journal_line l
-             ON l.account_id  = a.id
-            AND l.value_date  <= ${snapshot.valueDate}::date
-            AND l.booking_seq <= ${snapshot.bookingWatermark}
-     WHERE a.id = ${accountId}::uuid
-     GROUP BY a.normal_side`;
+export { settledBalanceCents as ledgerBalanceCents } from "./balance-definitions";
 
-  return rows[0]?.balance_cents ?? 0n;
-}
+/**
+ * Q2, re-exported so that the component layer has ONE import surface for the
+ * ledger.
+ *
+ * `src/components/**` is forbidden from importing `@/lib/ledger/db` (see
+ * `data-contract.ts`), and it should not have to know which file inside the
+ * ledger module a question lives in either. It asks `queries`; `queries`
+ * forwards.
+ */
+export { accountAvailability, type Availability } from "./balance-definitions";
 
 /* -------------------------------------------------------------------------- */
 /* 2. Holds                                                                   */
@@ -307,6 +275,21 @@ export interface HoldRow {
   readonly closed: boolean;
   /** Which limb of `closed(E)` fired, for display. `null` when it is open. */
   readonly closedReason: HoldClosedReason | null;
+  /**
+   * The hold's own value date has not arrived yet, so it withholds NOTHING
+   * from today's available balance.
+   *
+   * A hold value-dated tomorrow guards a credit that is also value-dated
+   * tomorrow, and that credit is not in `ledgerBalanceCents` either —
+   * `value_date <= snapshot.valueDate` excluded it. Subtracting the hold as
+   * well charges the customer twice for the same dollar. The funding screen
+   * did exactly that, for $3,750.00, until this field existed.
+   *
+   * The row is still LISTED, because a customer who can see the deposit ought
+   * to be able to see the hold that will apply to it. It is simply not folded
+   * into the totals. See `foldHoldTotals`.
+   */
+  readonly pending: boolean;
   readonly placedAt: Date;
   readonly expiresAt: Date | null;
   readonly availableAt: Date | null;
@@ -374,6 +357,7 @@ export async function listHoldRows(
       memo_cents: bigint;
       closed: boolean;
       closed_reason: HoldClosedReason | null;
+      pending: boolean;
       placed_at: Date;
       expires_at: Date | null;
       available_at: Date | null;
@@ -387,7 +371,7 @@ export async function listHoldRows(
   >`
     WITH held AS (
       SELECT h.id, h.kind, h.external_ref, h.created_at, h.expires_at,
-             h.available_at, h.memo_account_id, h.policy_id,
+             h.available_at, h.memo_account_id, h.policy_id, h.value_date,
              -- A closure that has been reversed is not a closure. Migration
              -- 0011 added hold_closure_reversal because hold_closure is
              -- append-only and three rows in it were simply wrong; the fix
@@ -497,6 +481,9 @@ export async function listHoldRows(
            t.memo_cents                           AS memo_cents,
            (t.closed_reason IS NOT NULL)          AS closed,
            t.closed_reason                        AS closed_reason,
+           -- The hold's value date has not arrived. It withholds nothing yet,
+           -- because the money it guards is not in the ledger term yet either.
+           (t.value_date > ${snapshot.valueDate}::date) AS pending,
            t.created_at                           AS placed_at,
            t.expires_at                           AS expires_at,
            t.available_at                         AS available_at,
@@ -525,6 +512,7 @@ export async function listHoldRows(
     memoBalanceCents: row.memo_cents,
     closed: row.closed,
     closedReason: row.closed_reason,
+    pending: row.pending,
     placedAt: row.placed_at,
     expiresAt: row.expires_at,
     availableAt: row.available_at,
@@ -550,15 +538,22 @@ export async function listHoldRows(
  * screen will actually list.
  *
  * Deliberately a pure function over `listHoldRows` rather than a second SQL
- * aggregate. The data contract requires
- * `available === ledger − activeHolds − unclearedCredits` *exactly*, and the
- * cheapest way to guarantee that the headline agrees with the table beneath it
- * is for both to be the same numbers, added up in one place.
+ * aggregate: the cheapest way to guarantee the headline agrees with the table
+ * beneath it is for both to be the same numbers, added up in one place.
  *
- * Note that a manual hold counts towards `activeHoldsCents`, alongside card
- * authorisations. `availableBalance()` in `balances.ts` answers a different,
- * business-wide question and buckets only `card_auth` there; summing the
- * screen's own rows is what keeps this screen's decomposition closed.
+ * IT MUST AGREE WITH `accountAvailability()`, and it does, term for term:
+ *
+ *   * a PENDING hold is skipped — its value date has not arrived, so the money
+ *     it guards is not in the ledger term either, and deducting it would
+ *     charge the customer twice. This is the $3,750.00 the funding screen was
+ *     deducting twice before migration 0022.
+ *   * a MANUAL hold counts towards `activeHoldsCents`, alongside card
+ *     authorisations. The old `availableBalance()` dropped it entirely.
+ *
+ * What this fold canNOT see is `pendingOutboundCents` — a future-dated debit
+ * is a journal entry, not a hold, so it has no row in this table. A screen
+ * that prints these two figures and calls the difference "available" will be
+ * wrong by exactly that term; take `available` from `accountAvailability()`.
  */
 export function foldHoldTotals(rows: readonly HoldRow[]): {
   readonly activeHoldsCents: bigint;
@@ -568,6 +563,7 @@ export function foldHoldTotals(rows: readonly HoldRow[]): {
   let unclearedCreditsCents = 0n;
 
   for (const row of rows) {
+    if (row.pending) continue;
     if (row.kind === "uncleared_credit") {
       unclearedCreditsCents += row.remainingCents;
     } else {

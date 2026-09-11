@@ -253,11 +253,11 @@ function BalanceStrip({ accounts }: { readonly accounts: readonly FundableAccoun
             <h2 className="text-sm font-semibold tracking-tight">{account.businessName}</h2>
             <p className="mt-0.5 text-xs text-muted">{account.accountName}</p>
           </header>
-          <div className="grid grid-cols-2 gap-px bg-border sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-px bg-border sm:grid-cols-5">
             <Figure
               label="Ledger balance"
               value={account.balance.ledgerDisplay}
-              hint="On the book. Every posting, summed."
+              hint="Settled on the book, at today's value date."
             />
             <Figure
               label="− Card holds"
@@ -269,6 +269,12 @@ function BalanceStrip({ accounts }: { readonly accounts: readonly FundableAccoun
               value={account.balance.unclearedDisplay}
               hint="Inbound credits still inside their return window."
               emphasis={account.balance.unclearedDisplay !== "$0.00"}
+            />
+            <Figure
+              label="− Committed out"
+              value={account.balance.pendingOutboundDisplay}
+              hint="Debits booked for a future value date. Already gone."
+              emphasis={account.balance.pendingOutboundDisplay !== "$0.00"}
             />
             <Figure
               label="= Available"

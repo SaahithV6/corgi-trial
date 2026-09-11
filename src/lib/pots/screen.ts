@@ -1,28 +1,3 @@
-import "server-only";
-
-import { ledgerConnection } from "@/lib/ledger/queries";
-import { fail, ok } from "@/lib/result";
-import type {
-  AvailabilityView,
-  BusinessOption,
-  IdentityView,
-  InvariantView,
-  MovementView,
-  PotView,
-  PotsResult,
-} from "@/components/pots/data-contract";
-
-import { decideMove, identityOf } from "./model";
-import {
-  bookDate,
-  listMovements,
-  listPotBusinesses,
-  listPots,
-  readAvailability,
-  readIdentity,
-  readInvariants,
-} from "./store";
-
 /**
  * The live implementation of `PotsDataSource`.
  *
@@ -45,6 +20,31 @@ import {
  * there is not one to read: `pnpm db:check` fails the build if a balance column
  * appears anywhere outside `statement`.
  */
+
+import "server-only";
+
+import { ledgerConnection } from "@/lib/ledger/queries";
+import { fail, ok } from "@/lib/result";
+import type {
+  AvailabilityView,
+  BusinessOption,
+  IdentityView,
+  InvariantView,
+  MovementView,
+  PotView,
+  PotsResult,
+} from "@/components/pots/data-contract";
+
+import { decideMove, identityOf, type Availability } from "./model";
+import {
+  bookDate,
+  listMovements,
+  listPotBusinesses,
+  listPots,
+  readAvailability,
+  readIdentity,
+  readInvariants,
+} from "./store";
 
 /** The one bigint -> number narrowing in the read path. Refuses, never rounds. */
 function toCents(value: bigint): number {
@@ -103,15 +103,7 @@ const INVARIANT_MEANING: Record<string, string> = {
  * A render must not write, and this one does not.
  * ===========================================================================
  */
-function edgeRefusal(
-  availability: {
-    readonly ledgerCents: bigint;
-    readonly holdsCents: bigint;
-    readonly unclearedCents: bigint;
-    readonly availableCents: bigint;
-  },
-  potName: string,
-) {
+function edgeRefusal(availability: Availability, potName: string) {
   const amountCents = availability.availableCents + 1n;
   const decision = decideMove(
     { direction: "in", amountCents },

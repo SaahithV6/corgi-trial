@@ -1086,10 +1086,38 @@ define(AF, "AF6", '"Code you cannot explain line by line." — PARTIALLY mechani
   for (const file of libFiles) {
     const text = readIfPresent(file);
     if (text === null) continue;
-    // A header is a comment block before the first import/export/statement.
-    const firstCode = text.split("\n").findIndex((l) => /^\s*(import|export|const|function|class|type|interface)\b/.test(l));
-    const head = firstCode <= 0 ? "" : text.split("\n").slice(0, firstCode).join("\n");
-    if (!/\/\*\*|\/\/|\/\*/.test(head)) headerless.push(file);
+    // A header is a comment block near the top of the file — NOT necessarily
+    // above the first statement.
+    //
+    // THIS CHECK WAS WRONG AND REPORTED 41 FALSE POSITIVES. It looked only at
+    // the lines ABOVE the first import/export, so when `firstCode` was 0 it
+    // took the empty branch and flagged the file. Thirty-five of the forty-one
+    // open with `import "server-only";` and carry their header on line 3 — a
+    // convention this repo uses deliberately, because the import is a build
+    // directive rather than prose. `src/lib/ledger/balances.ts`, cited in the
+    // debrief BY NAME as an exemplary header, was on its own failing list.
+    //
+    // A guard that measures "does line 1 begin a comment" while claiming to
+    // measure "is this module explained" would have had somebody write 41
+    // redundant headers to satisfy it. Scan the opening of the file instead,
+    // and require the comment to be substantial enough to be a header rather
+    // than a stray `// eslint-disable`.
+    // Count COMMENT LINES near the top rather than matching a whole block.
+    //
+    // The first attempt at this fix required a closing `*/` within forty lines
+    // and reported 47 files — MORE than the bug it replaced — because this
+    // repo's headers routinely run past forty lines. `cards/decide.ts`,
+    // `cards/budget.ts` and `fx/gate.ts` were all flagged, and all three open
+    // with a header good enough to read aloud in the debrief.
+    //
+    // Two wrong answers from one check in ten minutes is the argument for
+    // measuring the property you care about — "is there prose explaining this
+    // module" — rather than a proxy for its shape.
+    const lines = text.split("\n");
+    const commentLines = lines
+      .slice(0, 60)
+      .filter((l) => /^\s*(\/\/|\/\*|\*)/.test(l)).length;
+    if (commentLines < 5) headerless.push(file);
   }
   r.soft(
     headerless.length === 0,

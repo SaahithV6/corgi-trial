@@ -1,20 +1,3 @@
-import "server-only";
-
-import { createHash } from "node:crypto";
-
-import { sql, type Sql } from "@/lib/ledger/db";
-
-import { ageBucketOf } from "./aging";
-import { matchFile, readBreaks, type MatchPassResult } from "./diff";
-import {
-  isBreakKind,
-  isExplainedBy,
-  isReasonCode,
-  isSeverity,
-  type ReconBreak,
-  type ReconRunSummary,
-} from "./types";
-
 /**
  * A reconciliation run.
  *
@@ -47,6 +30,23 @@ import {
  * reproduce it, and a mismatch means something got past both the privilege
  * layer and the append-only trigger.
  */
+
+import "server-only";
+
+import { createHash } from "node:crypto";
+
+import { sql, type Sql } from "@/lib/ledger/db";
+
+import { ageBucketOf } from "./aging";
+import { matchFile, readBreaks, type MatchPassResult } from "./diff";
+import {
+  isBreakKind,
+  isExplainedBy,
+  isReasonCode,
+  isSeverity,
+  type ReconBreak,
+  type ReconRunSummary,
+} from "./types";
 
 export interface RunReconciliationInput {
   readonly fileId: string;

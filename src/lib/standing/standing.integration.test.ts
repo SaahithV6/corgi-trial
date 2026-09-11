@@ -147,7 +147,21 @@ d("standing orders, against the live database", () => {
     // available + $100. Sits strictly between available and ledger exactly
     // when this account carries more than $100 of holds plus uncleared
     // credits, which the test asserts below rather than assuming.
-    refusedAmount = before.availableCents + 10_000n;
+    // `available + $100`, floored at zero first.
+    //
+    // Migration 0022 gave `availableBalance()` one definition and it now
+    // subtracts committed outflows — debits already booked for a future value
+    // date. Ridgeline carries $37,462.00 of those, so its AVAILABLE balance is
+    // legitimately NEGATIVE, and `available + $100` was a negative mandate
+    // amount that `standing_order_amount_cents_check` refused outright.
+    //
+    // The edge being demonstrated is unchanged, because it is a RELATIONSHIP —
+    // `available < amount <= ledger` — and both halves are asserted below on
+    // the figures the refusal actually recorded. When available is negative,
+    // any positive amount is already above it; the floor just keeps the
+    // mandate legal.
+    refusedAmount =
+      (before.availableCents > 0n ? before.availableCents : 0n) + 10_000n;
 
     const refused = await store.createStandingOrder({
       accountId,

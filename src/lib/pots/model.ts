@@ -11,7 +11,8 @@
  * WHY `available` AND NOT `ledger`
  * ---------------------------------------------------------------------------
  *
- * `availableBalance()` is `ledger − active card holds − uncleared credits`. A
+ * `availableBalance()` is
+ * `ledger − active holds − uncleared credits − committed outflows`. A
  * $50.00 fuel-pump authorisation is money already committed to a merchant; an
  * ACH credit that has not cleared can still be pulled back. Both are in the
  * ledger balance and neither is spendable, so allowing either to be moved into
@@ -47,7 +48,7 @@ export function isMoveDirection(value: unknown): value is MoveDirection {
 }
 
 /**
- * The four figures `availableBalance()` returns, as this module needs them.
+ * The five figures `availableBalance()` returns, as this module needs them.
  *
  * Structurally identical to `AvailableBalance` in `ledger/balances.ts` and
  * deliberately restated rather than imported: that module is `server-only`, and
@@ -57,6 +58,8 @@ export interface Availability {
   readonly ledgerCents: bigint;
   readonly holdsCents: bigint;
   readonly unclearedCents: bigint;
+  /** Debits booked for a future value date: committed out, no hold row. */
+  readonly pendingOutboundCents: bigint;
   readonly availableCents: bigint;
 }
 
@@ -130,7 +133,13 @@ export function decideMove(
   }
 
   if (direction === "in") {
-    const { ledgerCents, holdsCents, unclearedCents, availableCents } =
+    const {
+      ledgerCents,
+      holdsCents,
+      unclearedCents,
+      pendingOutboundCents,
+      availableCents,
+    } =
       context.availability;
     if (amountCents > availableCents) {
       return {
@@ -138,7 +147,8 @@ export function decideMove(
         code: "INSUFFICIENT_AVAILABLE",
         reason:
           `${usd(amountCents)} cannot be earmarked into “${context.potName}”: only ${usd(availableCents)} is available. ` +
-          `Available is ledger ${usd(ledgerCents)} − card holds ${usd(holdsCents)} − uncleared credits ${usd(unclearedCents)} = ${usd(availableCents)}, ` +
+          `Available is ledger ${usd(ledgerCents)} − holds ${usd(holdsCents)} − uncleared credits ${usd(unclearedCents)} ` +
+          `− committed outflows ${usd(pendingOutboundCents)} = ${usd(availableCents)}, ` +
           `which is ${usd(amountCents - availableCents)} short. ` +
           (ledgerCents >= amountCents
             ? "The LEDGER balance covers it and the AVAILABLE balance does not — that difference is money already committed to a card authorisation or to a credit that has not cleared, and a pot may not earmark it."

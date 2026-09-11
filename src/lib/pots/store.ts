@@ -1,10 +1,3 @@
-import "server-only";
-
-import type { Sql } from "@/lib/ledger/db";
-import { availableBalance } from "@/lib/ledger/balances";
-
-import type { Availability, MoveDirection, PotFigure } from "./model";
-
 /**
  * Every read the pots screen makes.
  *
@@ -17,6 +10,13 @@ import type { Availability, MoveDirection, PotFigure } from "./model";
  *
  * The write path lives in `transfer.ts`. This module never posts.
  */
+
+import "server-only";
+
+import type { Sql } from "@/lib/ledger/db";
+import { availableBalance } from "@/lib/ledger/balances";
+
+import type { Availability, MoveDirection, PotFigure } from "./model";
 
 /* -------------------------------------------------------------------------- */
 /* Businesses                                                                 */

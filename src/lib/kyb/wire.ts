@@ -993,8 +993,32 @@ export async function refreshVerification(
   }
 
   const legs = (await latestLegs(conn, businessId)).get(businessId) ?? [];
-  const director = legs.find((l) => l.leg === "director_kyc");
-  const registry = legs.find((l) => l.leg === "business_registry");
+
+  // Refresh re-reads each leg FROM THE PROVIDER, so it must start from the
+  // provider's last word — not from an operator's.
+  //
+  // This regressed a live business. After a manual review the latest row on a
+  // leg is the review itself, whose `provider_reference` is a
+  // `manual.approve.…` string. Neither Stripe nor GLEIF can resolve that, both
+  // correctly reported unavailable, unavailable maps to `pending`, and pending
+  // beats approved under strictest-wins — so pressing "Refresh from the
+  // provider" silently knocked an approved, funded business back to pending
+  // and its evidence from `manual` to `simulated`.
+  //
+  // `priorProviderLeg()` already existed and already excluded manual rows; it
+  // was used on one path and not this one. Nothing is overwritten either way —
+  // the table is append-only, so the review is still on file and the operator
+  // decision is not lost. What changes is which row we hand to a provider and
+  // ask it to look up.
+  const providerLeg = async (leg: KybLegKind): Promise<LegView | undefined> => {
+    const latest = legs.find((l) => l.leg === leg);
+    if (latest === undefined) return undefined;
+    if (!isManualReview(latest)) return latest;
+    return (await priorProviderLeg(conn, businessId, leg)) ?? undefined;
+  };
+
+  const director = await providerLeg("director_kyc");
+  const registry = await providerLeg("business_registry");
   if (director === undefined || registry === undefined) {
     return fail(
       "KYB_NOT_STARTED",

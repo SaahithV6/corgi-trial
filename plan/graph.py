@@ -435,6 +435,7 @@ X06 X07 X08 X09 X10 X11
 Y01 Y02 Y03 Y04 Y06 Y07 Y08
 LF07 Z01 Z02 Z03 Z04 Z05 Z06 Z07 Z11 Z12 Z13 Z14 Z15 Z16 Z17 Z18 Z19 Z20 Z21
 Z22 Z23 Z24 Z25 Z26 Z27 Z28 Z29 Z30 Z31 Z32
+F01 F02 F03 F04 G01 G02 G03 G04
 """.split()
 
 # Discovered after the deploy went live.
@@ -603,6 +604,36 @@ def _finish():
     N("F07", "Final submission email: four things, both roles, links",
       "submission", 20, ["F05","F06"], "human", ["submission"])
 _finish()
+
+# --- Post-compliance. The checker found three violations on its first run. ---
+def _compliance():
+    N("G01", "Compliance checker: 41 rules from the trial pages, run mechanically",
+      "finish", 120, [], "agent", ["ops/compliance"], "done",
+      risk="a rule you can only check by reading gets skipped at hour 46")
+    N("G02", "Two LIVE secrets committed, one of them the ASA signing key",
+      "discovered", 60, ["G01"], "claude", ["ops/secrets"], "done",
+      risk="automatic fail, and anyone with the repo could forge a signed auth decision")
+    N("G03", "A probe that read HTTP 429 as 'live'", "discovered", 30, [], "claude", ["lib/probe"], "done",
+      risk="'simulated presented as live' arriving by accident rather than intent")
+    N("G04", "The invariant views were never in CI; the credit sweep had no caller",
+      "discovered", 50, [], "claude", ["ops/dbcheck"], "done",
+      risk="every uncleared hold matures 11h before freeze and nothing would have looked")
+
+    # --- OPEN ---
+    N("J01", "open_banking label flaps between live and simulated across readings",
+      "finish", 60, [], "agent", ["lib/probe"],
+      risk="a non-reproducible honesty label is worse than a wrong one")
+    N("J02", "41 of 161 modules carry no file header; 3 DECISIONS timestamps go backwards",
+      "finish", 90, [], "agent", ["docs/headers"],
+      risk="'code you cannot explain line by line' is an automatic fail")
+    N("J03", "Dispute intake on a settled card transaction, provisional credit done honestly",
+      "stretch", 130, [], "agent", ["lib/disputes"],
+      risk="stretch ladder; provisional credit is real money moved on a maybe")
+    N("J04", "Interest or fee accrual computed at end of day, visibly, on the ledger",
+      "stretch", 110, [], "agent", ["lib/accrual"],
+      risk="stretch ladder; the rounding rule is the whole exercise")
+    N("J05", "Wire the FX gate into the payout script", "finish", 15, [], "claude", ["ops/fx"])
+_compliance()
 
 def apply_status():
     idx = {n["id"]: n for n in NODES}

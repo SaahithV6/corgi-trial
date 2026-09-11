@@ -89,7 +89,7 @@ export function sortHolds(holds: readonly Hold[]): readonly Hold[] {
 /* -------------------------------------------------------------------------- */
 
 export type ReconciliationLine = {
-  readonly key: "ledger" | "holds" | "uncleared" | "available";
+  readonly key: "ledger" | "holds" | "uncleared" | "committed" | "available";
   readonly label: string;
   readonly cents: Cents;
   /** How the line combines into the total: `+`, `−`, or `=` for the result. */
@@ -99,7 +99,7 @@ export type ReconciliationLine = {
 
 export type Reconciliation = {
   readonly lines: readonly ReconciliationLine[];
-  /** `ledger − activeHolds − unclearedCredits`, computed here in integers. */
+  /** `ledger − activeHolds − unclearedCredits − committed`, in integers. */
   readonly derivedAvailableCents: Cents;
   /** True when the ledger's own `availableCents` agrees with the derivation. */
   readonly reconciles: boolean;
@@ -119,7 +119,10 @@ export type Reconciliation = {
  */
 export function reconcileBalances(summary: AccountSummary): Reconciliation {
   const derivedAvailableCents =
-    summary.ledgerCents - summary.activeHoldsCents - summary.unclearedCreditsCents;
+    summary.ledgerCents -
+    summary.activeHoldsCents -
+    summary.unclearedCreditsCents -
+    summary.pendingOutboundCents;
 
   const driftCents = summary.availableCents - derivedAvailableCents;
 
@@ -144,6 +147,13 @@ export function reconcileBalances(summary: AccountSummary): Reconciliation {
       cents: summary.unclearedCreditsCents,
       operator: "−",
       hint: "Money received but not yet available under the funds-availability policy.",
+    },
+    {
+      key: "committed",
+      label: "Committed outflows",
+      cents: summary.pendingOutboundCents,
+      operator: "−",
+      hint: "Debits booked for a future value date. No hold row — a journal entry.",
     },
     {
       key: "available",

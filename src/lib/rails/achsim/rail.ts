@@ -216,6 +216,10 @@ export class AchSimRail implements PaymentRail {
           ...base,
           type: 'settled' as const,
           settledAt: transfer.settledAt ?? occurredAt,
+          // Same face amount, same reason as the live adapter: ACH has no
+          // partial settlement, and the amount travels with the event so one
+          // settlement reporter covers every rail. See ../contract.ts.
+          amount: transfer.amount,
         });
       case 'submitted':
         return stamp({

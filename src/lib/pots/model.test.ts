@@ -22,6 +22,7 @@ const flush: Availability = {
   ledgerCents: 100_000n,
   holdsCents: 0n,
   unclearedCents: 0n,
+  pendingOutboundCents: 0n,
   availableCents: 100_000n,
 };
 
@@ -30,6 +31,7 @@ const committed: Availability = {
   ledgerCents: 100_000n,
   holdsCents: 30_000n,
   unclearedCents: 25_000n,
+  pendingOutboundCents: 0n,
   availableCents: 45_000n,
 };
 
@@ -110,6 +112,7 @@ describe("decideMove — out of a pot", () => {
       ledgerCents: 0n,
       holdsCents: 0n,
       unclearedCents: 0n,
+      pendingOutboundCents: 0n,
       availableCents: 0n,
     };
     expect(
@@ -148,6 +151,7 @@ describe("decideMove — out of a pot", () => {
           ledgerCents: 150_000n,
           holdsCents: 0n,
           unclearedCents: 0n,
+          pendingOutboundCents: 0n,
           availableCents: 150_000n,
         },
         potBalanceCents: 0n,

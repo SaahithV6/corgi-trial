@@ -1,21 +1,3 @@
-import "server-only";
-
-import { sql, type Sql } from "@/lib/ledger/db";
-import { postEntry, reverseAndRebook } from "@/lib/ledger/post";
-import { createAchRail, hours, type AchSimTransferRecord } from "@/lib/rails/achsim";
-import { SEC_CODE_BY_AUTHORIZATION } from "@/lib/rails/increase/client";
-
-import { importSchemeFile } from "./ingest";
-import { renderSchemeFile, type RenderRow } from "./parse";
-import { runReconciliation } from "./run";
-import {
-  malformedLines,
-  referenceOf,
-  settlementRowsFrom,
-  signedCentsOf,
-  spliceLines,
-} from "./simulate";
-
 /**
  * Seed the reconciliation demo against the real book.
  *
@@ -58,6 +40,24 @@ import {
  *   the same, then reversed and re-booked       -> amount_mismatch, EXPLAINED
  *   five lines no parser should accept          -> scheme_file_reject
  */
+
+import "server-only";
+
+import { sql, type Sql } from "@/lib/ledger/db";
+import { postEntry, reverseAndRebook } from "@/lib/ledger/post";
+import { createAchRail, hours, type AchSimTransferRecord } from "@/lib/rails/achsim";
+import { SEC_CODE_BY_AUTHORIZATION } from "@/lib/rails/increase/client";
+
+import { importSchemeFile } from "./ingest";
+import { renderSchemeFile, type RenderRow } from "./parse";
+import { runReconciliation } from "./run";
+import {
+  malformedLines,
+  referenceOf,
+  settlementRowsFrom,
+  signedCentsOf,
+  spliceLines,
+} from "./simulate";
 
 /** How many days of book_day rows to lay down behind today. */
 const CLOSED_DAYS = 46;

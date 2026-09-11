@@ -162,4 +162,108 @@ d("ledger, against the live database", () => {
   it("the financial book still nets to zero after all of that", async () => {
     expect(await bal.trialBalanceCents()).toBe(0n);
   });
+
+  /* ------------------------------------------------------------------------ */
+  /* The one definition, held to itself                                       */
+  /* ------------------------------------------------------------------------ */
+
+  it("the SQL view and the TypeScript function give the SAME four numbers", async () => {
+    // They cannot drift, because neither of them contains a definition: both
+    // are calls to ledger_availability() (migration 0022). This asserts the
+    // bargain rather than assuming it — if someone re-inlines the arithmetic
+    // into either one, this is what goes red.
+    const rows = await sql<
+      {
+        account_id: string;
+        ledger_balance_cents: string;
+        card_hold_cents: string;
+        uncleared_credit_cents: string;
+        pending_outbound_cents: string;
+        available_cents: string;
+      }[]
+    >`SELECT account_id,
+             ledger_balance_cents::text, card_hold_cents::text,
+             uncleared_credit_cents::text, pending_outbound_cents::text,
+             available_cents::text
+        FROM v_available_balance`;
+
+    expect(rows.length).toBeGreaterThan(0);
+
+    for (const row of rows) {
+      const fromFunction = await bal.availableBalanceForAccount(row.account_id);
+
+      // The view is read at its own instant and the function at its own, so a
+      // hold releasing between the two reads is a real (and correct)
+      // difference. Everything that is not clock-driven must agree exactly.
+      expect(fromFunction.ledgerCents).toBe(BigInt(row.ledger_balance_cents));
+      expect(fromFunction.pendingOutboundCents).toBe(
+        BigInt(row.pending_outbound_cents),
+      );
+
+      // And the identity closes on the function's own four terms.
+      expect(
+        fromFunction.ledgerCents -
+          fromFunction.holdsCents -
+          fromFunction.unclearedCents -
+          fromFunction.pendingOutboundCents,
+      ).toBe(fromFunction.availableCents);
+    }
+  });
+
+  it("v_balance_definition_drift is empty: the hold model and availability agree", async () => {
+    // The counterpart to v_hold_drift, one level up. ledger_availability()
+    // re-derives v_hold_state's release predicate at a PARAMETERISED instant
+    // rather than at now(), so these are genuinely two bodies and an edit to
+    // either that changes what "released" means shows up here.
+    //
+    // Nothing repairs what this reports. A row is a bug to fix, never a number
+    // to overwrite.
+    expect(await bal.balanceDefinitionDrift(sql)).toEqual([]);
+  });
+
+  it("a future-dated credit is a fact we know and not money the customer has", async () => {
+    // Post a credit value-dated a year out, inside this test's own run.
+    const before = await bal.availableBalanceForAccount(depositAccountId);
+
+    await postEntry({
+      entityId, valueDate: "2027-09-08", book: "financial",
+      description: "Standing-order settlement, next year",
+      idempotencyKey: `test:${run}:future-credit`, actorId, rail: "ach",
+      lines: [
+        { accountId: depositAccountId, amountCents: -500_00n },
+        { accountId: cashAccountId, amountCents: 500_00n },
+      ],
+    });
+
+    const after = await bal.availableBalanceForAccount(depositAccountId);
+
+    // Neither the settled ledger nor available moved. A customer cannot spend
+    // 2027's money in 2026, and availableBalance() used to let them.
+    expect(after.ledgerCents).toBe(before.ledgerCents);
+    expect(after.availableCents).toBe(before.availableCents);
+    expect(after.pendingOutboundCents).toBe(before.pendingOutboundCents);
+  });
+
+  it("a future-dated DEBIT comes off available immediately, and not off the ledger", async () => {
+    const before = await bal.availableBalanceForAccount(depositAccountId);
+
+    await postEntry({
+      entityId, valueDate: "2027-09-09", book: "financial",
+      description: "Outbound ACH, settles next year",
+      idempotencyKey: `test:${run}:future-debit`, actorId, rail: "ach",
+      lines: [
+        { accountId: depositAccountId, amountCents: 250_00n },
+        { accountId: cashAccountId, amountCents: -250_00n },
+      ],
+    });
+
+    const after = await bal.availableBalanceForAccount(depositAccountId);
+
+    // THE ASYMMETRY, asserted. Money booked to leave is committed: the
+    // customer must not be able to spend it again in the window before it
+    // settles. The ledger is untouched, because it has not settled yet.
+    expect(after.ledgerCents).toBe(before.ledgerCents);
+    expect(after.pendingOutboundCents).toBe(before.pendingOutboundCents + 250_00n);
+    expect(after.availableCents).toBe(before.availableCents - 250_00n);
+  });
 });

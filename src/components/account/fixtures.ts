@@ -272,6 +272,7 @@ function operatingSummary(accountId: string, authPending: boolean): AccountSumma
       OPERATING_LEDGER_CENTS - activeHoldsCents - unclearedCreditsCents,
     activeHoldsCents,
     unclearedCreditsCents,
+    pendingOutboundCents: 0,
     asOf: DEMO_NOW,
     bookingWatermark: 148_302,
   };
@@ -413,6 +414,7 @@ function fuelCardSummary(accountId: string): AccountSummary {
     availableCents: FUEL_CARD_LEDGER_CENTS - activeHoldsCents,
     activeHoldsCents,
     unclearedCreditsCents: 0,
+    pendingOutboundCents: 0,
     asOf: DEMO_NOW,
     bookingWatermark: 148_311,
   };
@@ -433,6 +435,7 @@ function emptySummary(accountId: string): AccountSummary {
     availableCents: 0,
     activeHoldsCents: 0,
     unclearedCreditsCents: 0,
+    pendingOutboundCents: 0,
     asOf: DEMO_NOW,
     bookingWatermark: 148_311,
   };

@@ -1,7 +1,3 @@
-import "server-only";
-import postgres from "postgres";
-import { env } from "@/lib/env";
-
 /**
  * The application's ONLY database handle.
  *
@@ -15,6 +11,11 @@ import { env } from "@/lib/env";
  * request. Importing it into the app would hand the running system the one
  * capability the whole design exists to withhold.
  */
+
+import "server-only";
+import postgres from "postgres";
+import { env } from "@/lib/env";
+
 export const sql = postgres(env.APP_DATABASE_URL, {
   // Vercel runs each lambda in its own process; a large pool per instance
   // exhausts Neon's connection limit under fan-out. The pooler multiplexes.

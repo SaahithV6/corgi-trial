@@ -1,26 +1,3 @@
-import "server-only";
-
-import type {
-  BreakDetail,
-  BreakRow,
-  ReconQuery,
-  ReconView,
-  RejectRow,
-  RunRow,
-} from "@/components/recon/data-contract";
-import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
-
-import { compareBreaks, severityReason } from "./aging";
-import {
-  readBreakNotes,
-  readBreaks,
-  readCorrectionGroup,
-  readFileRow,
-} from "./diff";
-import { listRejects } from "./ingest";
-import { listRuns } from "./run";
-import type { ReconBreak } from "./types";
-
 /**
  * The live implementation of the breaks screen's data contract.
  *
@@ -50,6 +27,29 @@ import type { ReconBreak } from "./types";
  * than silently rounds: a balance past 2^53 is a bug worth crashing on, not a
  * number to approximate in front of an operator.
  */
+
+import "server-only";
+
+import type {
+  BreakDetail,
+  BreakRow,
+  ReconQuery,
+  ReconView,
+  RejectRow,
+  RunRow,
+} from "@/components/recon/data-contract";
+import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
+
+import { compareBreaks, severityReason } from "./aging";
+import {
+  readBreakNotes,
+  readBreaks,
+  readCorrectionGroup,
+  readFileRow,
+} from "./diff";
+import { listRejects } from "./ingest";
+import { listRuns } from "./run";
+import type { ReconBreak } from "./types";
 
 /** The one bigint -> number narrowing in the read path. Refuses, never rounds. */
 function toCents(value: bigint): number {

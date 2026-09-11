@@ -8,9 +8,9 @@ import {
   type LedgerSnapshot,
   type PostingRow,
   type Sql,
+  accountAvailability,
   findDepositAccount,
   foldHoldTotals,
-  ledgerBalanceCents,
   ledgerConnection,
   listDepositAccounts,
   listHoldRows,
@@ -327,9 +327,11 @@ export function toPosting(row: PostingRow): LivePosting {
 /**
  * The summary, with the decomposition closed by construction.
  *
- * `availableCents` is computed here as `ledger − holds − uncleared` from the
- * very rows `listHolds` returns, so the identity the contract demands cannot
- * be violated by a second query drifting from the first. It is deliberately
+ * `activeHoldsCents` and `unclearedCreditsCents` are folded from the very rows
+ * `listHolds` returns, so the headline cannot disagree with the table beneath
+ * it. `ledgerCents` and `pendingOutboundCents` come from
+ * `accountAvailability()` — the one definition — so the headline cannot
+ * disagree with the console or the funding screen either. It is deliberately
  * not clamped: an over-captured authorisation settles above what was
  * authorised, and the honest answer is that the customer is overdrawn.
  */
@@ -337,11 +339,15 @@ export function toSummary(input: {
   readonly account: DepositAccountRow;
   readonly snapshot: LedgerSnapshot;
   readonly ledgerCents: bigint;
+  readonly pendingOutboundCents: bigint;
   readonly holds: readonly HoldRow[];
 }): AccountSummary {
   const { activeHoldsCents, unclearedCreditsCents } = foldHoldTotals(input.holds);
   const availableCents =
-    input.ledgerCents - activeHoldsCents - unclearedCreditsCents;
+    input.ledgerCents -
+    activeHoldsCents -
+    unclearedCreditsCents -
+    input.pendingOutboundCents;
 
   return {
     accountId: input.account.accountId,
@@ -353,6 +359,7 @@ export function toSummary(input: {
     availableCents: toCents(availableCents, "available balance"),
     activeHoldsCents: toCents(activeHoldsCents, "active holds"),
     unclearedCreditsCents: toCents(unclearedCreditsCents, "uncleared credits"),
+    pendingOutboundCents: toCents(input.pendingOutboundCents, "committed outflows"),
     asOf: toInstant(input.snapshot.asOf),
     bookingWatermark: toSafeInteger(
       input.snapshot.bookingWatermark,
@@ -466,13 +473,19 @@ export function createLiveAccountDataSource(
         const found = await account(accountId);
         if (found === null) return accountNotFound(accountId);
 
-        const [ledger, rows] = await Promise.all([
-          ledgerBalanceCents(found.accountId, snapshot, conn),
+        const [availability, rows] = await Promise.all([
+          accountAvailability(found.accountId, snapshot, conn),
           holdsFor(found.accountId),
         ]);
 
         return ok(
-          toSummary({ account: found, snapshot, ledgerCents: ledger, holds: rows }),
+          toSummary({
+            account: found,
+            snapshot,
+            ledgerCents: availability.ledgerCents,
+            pendingOutboundCents: availability.pendingOutboundCents,
+            holds: rows,
+          }),
         );
       } catch (thrown) {
         return readFailure("getAccountSummary", thrown);

@@ -27,6 +27,7 @@ import {
   type HoldRow,
   type LedgerSnapshot,
   type Sql,
+  accountAvailability,
   findDepositAccount,
   foldHoldTotals,
   isAccountId,
@@ -106,7 +107,7 @@ describe("readSnapshot", () => {
   it("takes one instant, one business day and one watermark", async () => {
     const { conn } = fakeSql([
       [
-        "book_date(now())",
+        "book_date(clock_timestamp())",
         [
           {
             as_of: new Date("2026-09-10T19:42:00.000Z"),
@@ -127,7 +128,7 @@ describe("readSnapshot", () => {
   it("reads the business day from the database's own book_date()", async () => {
     const { conn, calls } = fakeSql([
       [
-        "book_date(now())",
+        "book_date(clock_timestamp())",
         [{ as_of: new Date(), value_date: "2026-09-10", booking_watermark: 0n }],
       ],
     ]);
@@ -135,34 +136,137 @@ describe("readSnapshot", () => {
 
     // Not the server's locale, and not a second definition of the Fed calendar
     // day boundary living in TypeScript.
-    expect(calls[0]?.text).toContain("book_date(now())");
+    expect(calls[0]?.text).toContain("book_date(clock_timestamp())");
+  });
+
+  it("uses clock_timestamp(), so a posting in the same transaction counts", async () => {
+    const { conn, calls } = fakeSql([
+      [
+        "book_date(clock_timestamp())",
+        [{ as_of: new Date(), value_date: "2026-09-10", booking_watermark: 0n }],
+      ],
+    ]);
+    await readSnapshot(conn);
+
+    // now() is the TRANSACTION's start and ledger_append() stamps booking_time
+    // from clock_timestamp(). A watermark of "MAX(booking_seq) WHERE
+    // booking_time <= now()", read inside the transaction that just posted an
+    // entry, excludes that entry — and every funds check that posts and reads
+    // in one transaction (standing orders, pot transfers) reads this shape.
+    expect(calls[0]?.text).not.toContain("now()");
+    // And the LIVE watermark has no time predicate at all: MVCC already
+    // decides what this transaction can see.
+    expect(calls[0]?.text).not.toContain("booking_time");
   });
 });
 
 describe("ledgerBalanceCents", () => {
-  it("returns bigint cents, on both axes of the bitemporal model", async () => {
+  it("is the canonical settled balance, on both axes of the bitemporal model", async () => {
     const { conn, calls } = fakeSql([
-      ["balance_cents", [{ balance_cents: 3_329_289n }]],
+      ["ledger_settled_cents", [{ cents: 3_329_289n }]],
     ]);
 
     expect(await ledgerBalanceCents(ACCOUNT, SNAPSHOT, conn)).toBe(3_329_289n);
-    expect(calls[0]?.text).toContain("l.value_date  <=");
-    expect(calls[0]?.text).toContain("l.booking_seq <=");
+
+    // Both axes travel as arguments. The predicates themselves live once, in
+    // ledger_settled_cents() (migration 0022), which is also what
+    // v_available_balance calls — so the view and this function cannot drift.
     expect(calls[0]?.values).toContain("2026-09-10");
     expect(calls[0]?.values).toContain(160n);
   });
 
   it("reads zero for an account with no lines rather than no answer", async () => {
-    const { conn } = fakeSql([["balance_cents", []]]);
+    const { conn } = fakeSql([["ledger_settled_cents", []]]);
     expect(await ledgerBalanceCents(ACCOUNT, SNAPSHOT, conn)).toBe(0n);
   });
 
-  it("multiplies by normal_side, because a deposit is credit-normal", async () => {
-    const { conn, calls } = fakeSql([
-      ["balance_cents", [{ balance_cents: 0n }]],
-    ]);
+  it("holds no definition of its own — it is a call, not a copy", async () => {
+    const { conn, calls } = fakeSql([["ledger_settled_cents", [{ cents: 0n }]]]);
     await ledgerBalanceCents(ACCOUNT, SNAPSHOT, conn);
-    expect(calls[0]?.text).toContain("* a.normal_side");
+
+    // The moment this file contains "SUM(l.amount_cents)" again, there are two
+    // definitions of the balance and one of them will be edited alone. That is
+    // how this system got to four.
+    expect(calls[0]?.text).toContain("ledger_settled_cents");
+    expect(calls[0]?.text).not.toContain("SUM(l.amount_cents)");
+  });
+});
+
+describe("accountAvailability", () => {
+  it("is the ONE definition: one call, four terms and their sum", async () => {
+    const { conn, calls } = fakeSql([
+      [
+        "ledger_availability",
+        [
+          {
+            ledger_cents: 4_961_613n,
+            hold_cents: 41_100n,
+            uncleared_cents: 1_375_300n,
+            pending_outbound_cents: 3_721_200n,
+            available_cents: -175_987n,
+          },
+        ],
+      ],
+    ]);
+
+    const availability = await accountAvailability(ACCOUNT, SNAPSHOT, conn);
+
+    expect(availability).toEqual({
+      ledgerCents: 4_961_613n,
+      holdsCents: 41_100n,
+      unclearedCents: 1_375_300n,
+      pendingOutboundCents: 3_721_200n,
+      availableCents: -175_987n,
+    });
+
+    // The identity closes, and it closes in Postgres rather than here: this
+    // module does no arithmetic on money at all.
+    expect(
+      availability.ledgerCents -
+        availability.holdsCents -
+        availability.unclearedCents -
+        availability.pendingOutboundCents,
+    ).toBe(availability.availableCents);
+
+    // One statement, three arguments: the value axis, the booking axis and the
+    // instant. A balance question has all three and none of them is optional.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.values).toContain("2026-09-10");
+    expect(calls[0]?.values).toContain(160n);
+  });
+
+  it("does not clamp a negative available balance", async () => {
+    const { conn } = fakeSql([
+      [
+        "ledger_availability",
+        [
+          {
+            ledger_cents: -840n,
+            hold_cents: 1_200n,
+            uncleared_cents: 0n,
+            pending_outbound_cents: 0n,
+            available_cents: -2_040n,
+          },
+        ],
+      ],
+    ]);
+
+    // An over-capture settles above what was authorised. The honest answer is
+    // that the customer is overdrawn; a cosmetic floor would hide it.
+    expect((await accountAvailability(ACCOUNT, SNAPSHOT, conn)).availableCents).toBe(
+      -2_040n,
+    );
+  });
+
+  it("reads zero on every term for an account with nothing on it", async () => {
+    const { conn } = fakeSql([["ledger_availability", []]]);
+    expect(await accountAvailability(ACCOUNT, SNAPSHOT, conn)).toEqual({
+      ledgerCents: 0n,
+      holdsCents: 0n,
+      unclearedCents: 0n,
+      pendingOutboundCents: 0n,
+      availableCents: 0n,
+    });
   });
 });
 
@@ -325,9 +429,15 @@ function hold(kind: HoldRow["kind"], remainingCents: bigint): HoldRow {
     expiresAt: null,
     availableAt: null,
     policy: null,
+    pending: false,
     authCount: kind === "card_auth" ? 1 : 0,
     eventCount: kind === "card_auth" ? 1 : 0,
   };
+}
+
+/** The same hold, value-dated into the future: it withholds nothing yet. */
+function pendingHold(kind: HoldRow["kind"], remainingCents: bigint): HoldRow {
+  return { ...hold(kind, remainingCents), pending: true };
 }
 
 describe("foldHoldTotals", () => {
@@ -371,6 +481,37 @@ describe("foldHoldTotals", () => {
       activeHoldsCents: 0n,
       unclearedCreditsCents: 0n,
     });
+  });
+
+  it("skips a hold whose value date has not arrived — the $3,750.00 bug", () => {
+    // THE BUG THIS GUARDS.
+    //
+    // An inbound ACH funding value-dated TOMORROW posts a financial entry
+    // dated tomorrow and an uncleared-credit hold dated tomorrow. The ledger
+    // term excludes the credit (value_date <= today), so subtracting the hold
+    // as well charges the customer twice for the same dollar.
+    //
+    // Three such holds, $1,250.00 each, were live on the demo account and the
+    // funding screen was deducting all three. Measured 2026-09-11T02:10Z.
+    const totals = foldHoldTotals([
+      hold("uncleared_credit", 250_000n),
+      pendingHold("uncleared_credit", 125_000n),
+      pendingHold("uncleared_credit", 125_000n),
+      pendingHold("uncleared_credit", 125_000n),
+    ]);
+
+    expect(totals.unclearedCreditsCents).toBe(250_000n);
+    expect(totals.activeHoldsCents).toBe(0n);
+  });
+
+  it("skips a pending card hold too — the rule is about the clock, not the kind", () => {
+    expect(
+      foldHoldTotals([
+        hold("card_auth", 5_000n),
+        pendingHold("card_auth", 99_999n),
+        pendingHold("manual", 99_999n),
+      ]).activeHoldsCents,
+    ).toBe(5_000n);
   });
 });
 

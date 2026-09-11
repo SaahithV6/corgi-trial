@@ -1,11 +1,3 @@
-import "server-only";
-
-import { formatUsd } from "@/lib/format/money";
-import { sql, type Sql } from "@/lib/ledger/db";
-
-import { listPots, readAvailability, readIdentity } from "./store";
-import { movePotFunds, openPot } from "./transfer";
-
 /**
  * Stand up believable pots for a demo business, idempotently.
  *
@@ -29,6 +21,14 @@ import { movePotFunds, openPot } from "./transfer";
  *
  *   set -a; . ./.env; set +a; RUN_POT_DEMO=1 pnpm vitest run src/lib/pots/demo
  */
+
+import "server-only";
+
+import { formatUsd } from "@/lib/format/money";
+import { sql, type Sql } from "@/lib/ledger/db";
+
+import { listPots, readAvailability, readIdentity } from "./store";
+import { movePotFunds, openPot } from "./transfer";
 
 export interface DemoPotPlan {
   readonly name: string;

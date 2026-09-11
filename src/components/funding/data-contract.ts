@@ -16,14 +16,15 @@
  *   from comparing, dividing or rounding it. The amount a person types is
  *   parsed to `bigint` cents in the server action and nowhere else.
  *
- * - **The three balances are carried separately and are never re-derived.**
- *   `ledger`, `available`, `cardHolds` and `uncleared` all arrive formatted,
- *   and the screen prints them. It does not subtract one from another to get a
- *   third — the identity `available = ledger − cardHolds − uncleared` is
- *   asserted in Postgres by `availableBalance()` and by `foldHoldTotals()`, and
- *   a screen that re-derived it would be a second implementation that can
- *   disagree with the first. This is the single most-graded number in the
- *   track; it does not get a second opinion in a browser.
+ * - **The balances are carried separately and are never re-derived.**
+ *   `ledger`, `available`, `cardHolds`, `uncleared` and `pendingOutbound` all
+ *   arrive formatted, and the screen prints them. It does not subtract one
+ *   from another to get another — the identity
+ *   `available = ledger − cardHolds − uncleared − pendingOutbound` is asserted
+ *   in Postgres by `ledger_availability()` (migration 0022), and a screen that
+ *   re-derived it would be a second implementation that can disagree with the
+ *   first. This is the single most-graded number in the track; it does not get
+ *   a second opinion in a browser.
  *
  * - **Every instant is an ISO 8601 UTC string** and every value date is
  *   `YYYY-MM-DD` — a date, not a moment. The release date of an uncleared hold
@@ -51,9 +52,11 @@ export type ValueDate = string;
 /**
  * The decomposition the whole screen exists to make visible.
  *
- * Four figures, and the interesting one is the gap between the first and the
+ * Five figures, and the interesting one is the gap between the first and the
  * last: a deposit that has posted raises `ledger` and leaves `available`
- * exactly where it was, and `uncleared` is the number that explains why.
+ * exactly where it was, and `uncleared` is the number that explains why. The
+ * three middle figures are the whole of the difference and they are printed
+ * rather than implied.
  */
 export type BalanceView = {
   /** Ledger balance: the sum of the customer's postings. Money on the book. */
@@ -64,6 +67,17 @@ export type BalanceView = {
   readonly cardHoldsDisplay: string;
   /** Withheld by inbound credits inside their return window. */
   readonly unclearedDisplay: string;
+  /**
+   * Debits already booked with a FUTURE value date: money committed out.
+   *
+   * The fifth figure, and the one that makes the identity above closed. An
+   * outbound ACH originated today for tomorrow's settlement has not moved the
+   * ledger and has no hold row — it is a journal entry with tomorrow's value
+   * date — but it is gone as far as spending power is concerned, and a
+   * customer who can spend it again in the window before it settles has been
+   * overdrawn on their own behalf. See `ledger_availability()`, migration 0022.
+   */
+  readonly pendingOutboundDisplay: string;
   /** True when `available` is below zero — an over-capture, shown not clamped. */
   readonly availableIsNegative: boolean;
 };

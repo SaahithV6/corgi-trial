@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The live implementation of `Gateway`: every SQL statement the agent surface
  * can cause to run, in one file, so the tenant predicate can be reviewed in
@@ -44,6 +42,8 @@ import "server-only";
  * `bookingWatermarkAt`.
  * ---------------------------------------------------------------------------
  */
+
+import "server-only";
 
 import { getPayment, requestPayment } from "@/lib/approvals";
 import { destinationSchema, type PaymentDestination, type PayoutRail } from "@/lib/approvals/types";

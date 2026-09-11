@@ -441,7 +441,31 @@ export interface RailEventBase {
  */
 export type RailEvent =
   | (RailEventBase & { readonly type: 'submitted'; readonly submittedAt: string })
-  | (RailEventBase & { readonly type: 'settled'; readonly settledAt: string })
+  | (RailEventBase & {
+      readonly type: 'settled';
+      readonly settledAt: string;
+      /**
+       * THE AMOUNT THAT ACTUALLY SETTLED, which is not always the amount that
+       * was authorised.
+       *
+       * This field was added when `contract.ts` tried to write ONE settlement
+       * reporter across ACH, card and USDC and could not: `returned` carried
+       * its own amount and `settled` did not, so the only rail-agnostic thing a
+       * consumer could learn from a settlement was that one had happened. On
+       * ACH the missing number is recoverable (a settled ACH transfer settles
+       * for its face amount), which is why the gap survived — but on a card it
+       * is not, and "settlement is not authorisation. Different amount, days
+       * later" is the entire point of this track. A $50.00 fuel-pump hold that
+       * clears at $73.40 has a settled amount of 7340 and an authorised amount
+       * of 5000, and no amount of reading the original instruction will tell
+       * you the first.
+       *
+       * So it travels with the event, for the same reason it travels with
+       * `returned`: the ledger must be able to post what happened from the
+       * event alone.
+       */
+      readonly amount: Money;
+    })
   | (RailEventBase & {
       readonly type: 'returned';
       readonly returnedAt: string;

@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * Every SQL statement the payee book issues, in one file.
  *
@@ -21,6 +19,8 @@ import "server-only";
  *     the readable refusal in front of the structural one, never instead of
  *     it.
  */
+
+import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { fail, ok, type Result } from "@/lib/result";

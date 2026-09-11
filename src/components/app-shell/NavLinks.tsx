@@ -30,6 +30,7 @@ const LIVE = [
   { href: "/payouts", label: "Payouts" },
   { href: "/approvals", label: "Approvals" },
   { href: "/standing-orders", label: "Standing orders" },
+  { href: "/accruals", label: "Accruals" },
   { href: "/reconciliation", label: "Reconciliation" },
   { href: "/statements", label: "Statements" },
 ] as const;

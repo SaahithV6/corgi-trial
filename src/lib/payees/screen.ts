@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The payee screen's data source, against the live database.
  *
@@ -15,6 +13,8 @@ import "server-only";
  * days ago" a true statement rather than an artefact of when somebody last
  * looked at the screen.
  */
+
+import "server-only";
 
 import type {
   FindingRow,

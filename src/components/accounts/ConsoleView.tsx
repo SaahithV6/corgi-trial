@@ -64,12 +64,12 @@ function BalancePanel({ snapshot }: { readonly snapshot: ConsoleSnapshot }) {
     {
       label: "Ledger balance",
       cents: balances.ledgerCents,
-      note: "Σ amount_cents × normal_side over this account's journal lines.",
+      note: "Σ amount_cents × normal_side, value date ≤ today, booking_seq ≤ watermark.",
     },
     {
-      label: "Card-auth holds",
+      label: "Holds",
       cents: balances.holdsCents,
-      note: "Σ H(E) over every card hold with no live closure row.",
+      note: "Σ H(E) over every live card and manual hold whose value date has arrived.",
     },
     {
       label: "Uncleared credits",
@@ -77,9 +77,14 @@ function BalancePanel({ snapshot }: { readonly snapshot: ConsoleSnapshot }) {
       note: "Deposits inside their funds-availability window.",
     },
     {
+      label: "Committed out",
+      cents: balances.pendingOutboundCents,
+      note: "Debits booked for a future value date. No hold row — a journal entry.",
+    },
+    {
       label: "Available balance",
       cents: balances.availableCents,
-      note: "ledger − holds − uncleared. Never clamped at zero.",
+      note: "ledger − holds − uncleared − committed. Never clamped at zero.",
     },
   ];
 
@@ -90,11 +95,11 @@ function BalancePanel({ snapshot }: { readonly snapshot: ConsoleSnapshot }) {
       description="Two different questions. The ledger says what the journal has booked; available says what can be spent right now. The holds below are the whole of the difference."
       actions={
         <span className="font-mono text-[11px] text-muted">
-          available = ledger − holds − uncleared
+          available = ledger − holds − uncleared − committed
         </span>
       }
     >
-      <div className="grid gap-px bg-border sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-px bg-border sm:grid-cols-2 lg:grid-cols-5">
         {tiles.map((tile) => (
           <div key={tile.label} className="bg-surface px-5 py-4">
             <FieldLabel>{tile.label}</FieldLabel>
@@ -109,7 +114,8 @@ function BalancePanel({ snapshot }: { readonly snapshot: ConsoleSnapshot }) {
       <div className="border-t border-border px-5 py-4">
         <p className="font-mono text-xs text-muted">
           {formatUsd(balances.ledgerCents)} − {formatUsd(balances.holdsCents)} −{" "}
-          {formatUsd(balances.unclearedCents)} ={" "}
+          {formatUsd(balances.unclearedCents)} −{" "}
+          {formatUsd(balances.pendingOutboundCents)} ={" "}
           <span className="text-text">{formatUsd(balances.availableCents)}</span>
         </p>
 

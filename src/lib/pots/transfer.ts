@@ -1,27 +1,3 @@
-import "server-only";
-
-import { sql, type Sql } from "@/lib/ledger/db";
-import { postEntry } from "@/lib/ledger/post";
-import { rootLogger } from "@/lib/log";
-
-import {
-  decideMove,
-  moveDescription,
-  moveIdempotencyKey,
-  transferLegs,
-  type MoveDirection,
-  type RefusalCode,
-} from "./model";
-import {
-  bookDate,
-  findEntryByKey,
-  findPot,
-  isUuid,
-  ledgerPosterActorId,
-  readAvailability,
-  readIdentity,
-} from "./store";
-
 /**
  * The two writes this feature has: open a pot, and move money between a pot and
  * the main balance.
@@ -57,6 +33,30 @@ import {
  * failure mode maker-checker exists to prevent.
  * ===========================================================================
  */
+
+import "server-only";
+
+import { sql, type Sql } from "@/lib/ledger/db";
+import { postEntry } from "@/lib/ledger/post";
+import { rootLogger } from "@/lib/log";
+
+import {
+  decideMove,
+  moveDescription,
+  moveIdempotencyKey,
+  transferLegs,
+  type MoveDirection,
+  type RefusalCode,
+} from "./model";
+import {
+  bookDate,
+  findEntryByKey,
+  findPot,
+  isUuid,
+  ledgerPosterActorId,
+  readAvailability,
+  readIdentity,
+} from "./store";
 
 const log = rootLogger.child({ module: "pots" });
 
@@ -168,6 +168,8 @@ export interface Snapshot {
   readonly availableCents: bigint;
   readonly holdsCents: bigint;
   readonly unclearedCents: bigint;
+  /** Debits booked for a future value date: committed out, no hold row. */
+  readonly pendingOutboundCents: bigint;
 }
 
 export type MoveResult =
@@ -272,6 +274,7 @@ export async function movePotFunds(
             ledgerCents: before.mainCents,
             holdsCents: before.holdsCents,
             unclearedCents: before.unclearedCents,
+            pendingOutboundCents: before.pendingOutboundCents,
             availableCents: before.availableCents,
           },
           potBalanceCents: before.potCents,
@@ -399,5 +402,6 @@ async function snapshot(
     availableCents: availability.availableCents,
     holdsCents: availability.holdsCents,
     unclearedCents: availability.unclearedCents,
+    pendingOutboundCents: availability.pendingOutboundCents,
   };
 }

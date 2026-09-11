@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * Reading and writing quotes. The only module in this directory that opens a
  * connection.
@@ -36,6 +34,8 @@ import "server-only";
  * deployment binds `accepted_by` to the authenticated session, and the column
  * is already the right shape for it. docs/FX.md §8 says so out loud.
  */
+
+import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { err, fail, ok, type ErrorShape, type Result } from "@/lib/result";

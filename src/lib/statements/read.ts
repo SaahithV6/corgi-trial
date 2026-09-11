@@ -1,16 +1,3 @@
-import type { Sql } from "@/lib/ledger/queries";
-
-import { foldClosing, sortLines, withRunningBalances } from "./render";
-import type {
-  BookDay,
-  BusinessDate,
-  EntryType,
-  LatePosting,
-  PublishedStatement,
-  StatementDocument,
-  StatementLine,
-} from "./types";
-
 /**
  * The read path: everything a statement is rendered from.
  *
@@ -47,6 +34,19 @@ import type {
  * which is exactly the environment CI runs in, deliberately. `db.ts` carries
  * `server-only`, and reaching a real connection means going through it.
  */
+
+import type { Sql } from "@/lib/ledger/queries";
+
+import { foldClosing, sortLines, withRunningBalances } from "./render";
+import type {
+  BookDay,
+  BusinessDate,
+  EntryType,
+  LatePosting,
+  PublishedStatement,
+  StatementDocument,
+  StatementLine,
+} from "./types";
 
 /** The app's pooled handle, resolved lazily so importing this opens no socket. */
 export async function statementConnection(): Promise<Sql> {

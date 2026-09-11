@@ -1,16 +1,3 @@
-import "server-only";
-
-import { sql } from "@/lib/ledger/db";
-import { releaseAvailableCredits } from "@/lib/rails/plaid/adapter";
-import { logger } from "@/lib/log";
-
-import {
-  consumers,
-  dispatchUntilIdle,
-  type DispatchSummary,
-} from "./dispatch";
-import { createPostgresInboxStore, sqlExecutorFromPostgresJs } from "./inbox";
-
 /**
  * The drain: the thing that actually turns a stored webhook into money.
  *
@@ -35,6 +22,19 @@ import { createPostgresInboxStore, sqlExecutorFromPostgresJs } from "./inbox";
  * The inbox row is durable before any of these run, so losing all three loses
  * latency and never loses money.
  */
+
+import "server-only";
+
+import { sql } from "@/lib/ledger/db";
+import { releaseAvailableCredits } from "@/lib/rails/plaid/adapter";
+import { logger } from "@/lib/log";
+
+import {
+  consumers,
+  dispatchUntilIdle,
+  type DispatchSummary,
+} from "./dispatch";
+import { createPostgresInboxStore, sqlExecutorFromPostgresJs } from "./inbox";
 
 let registered = false;
 let registeredNames: string[] = [];

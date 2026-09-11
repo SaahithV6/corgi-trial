@@ -6,6 +6,7 @@ import { onboardingAction, type OnboardingResult } from "@/app/(app)/onboarding/
 import { FOCUS_RING } from "@/components/ui/primitives";
 
 import type { TransactGateView } from "./data-contract";
+import { OpenedAccounts } from "./OpenedAccounts";
 
 /**
  * Four verbs on one business, one server action, one place the answer lands.
@@ -62,6 +63,7 @@ const IDLE_RESULT: OnboardingResult = {
   hostedUrl: null,
   directorReference: null,
   legs: [],
+  accounts: null,
 };
 
 const FIXTURE_NOTE =
@@ -250,6 +252,13 @@ export function VerificationForm({
             )}
           </p>
           <p className="mt-1 max-w-prose text-muted">{mine.message}</p>
+          {/*
+            A refresh or a recheck can be the observation that tips a composite
+            to `approved` — a Stripe Identity session that finished since the
+            last look, a registry that now answers — so the account consequence
+            belongs on this form's response too, not only the reviewer's.
+          */}
+          {mine.accounts === null ? null : <OpenedAccounts accounts={mine.accounts} />}
 
           {mine.directorReference === null ? null : (
             <p className="mt-2 text-[11px] text-muted">

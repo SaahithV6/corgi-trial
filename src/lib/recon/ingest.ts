@@ -1,13 +1,3 @@
-import "server-only";
-
-import { sql, type Sql } from "@/lib/ledger/db";
-
-import {
-  parseSchemeFile,
-  type ParsedSchemeFile,
-  type RejectedRow,
-} from "./parse";
-
 /**
  * Importing a scheme/settlement file.
  *
@@ -37,6 +27,16 @@ import {
  * lie told by an append-only table, and an append-only table has no way to
  * take it back.
  */
+
+import "server-only";
+
+import { sql, type Sql } from "@/lib/ledger/db";
+
+import {
+  parseSchemeFile,
+  type ParsedSchemeFile,
+  type RejectedRow,
+} from "./parse";
 
 export interface ImportSchemeFileInput {
   readonly filename: string;

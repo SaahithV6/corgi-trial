@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The payouts screen's data source, against the live database.
  *
@@ -34,6 +32,8 @@ import "server-only";
  * The book listing makes no such call. Nothing happens on the default view but
  * one query.
  */
+
+import "server-only";
 
 import type {
   PayoutsDataSource,

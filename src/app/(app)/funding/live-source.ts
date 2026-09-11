@@ -46,8 +46,10 @@ import type {
 } from "@/components/funding/data-contract";
 import { formatUsd } from "@/lib/format/money";
 import {
-  foldHoldTotals,
-  ledgerBalanceCents,
+  accountAvailability,
+  type Availability,
+} from "@/lib/ledger/balance-definitions";
+import {
   listDepositAccounts,
   listHoldRows,
   readSnapshot,
@@ -69,87 +71,65 @@ import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
 /* -------------------------------------------------------------------------- */
 
 /**
- * The decomposition, folded from the rows the screen will actually list.
+ * The decomposition, taken from the ONE definition.
  *
- * `available` is computed HERE as `ledger − activeHolds − unclearedCredits` and
- * that is deliberately the same arithmetic `foldHoldTotals` documents for the
- * account screen: the cheapest way to guarantee the headline agrees with the
- * table beneath it is for both to be the same numbers, added up once.
+ * `available` is not computed here any more. It is `accountAvailability()`,
+ * which is a call to `ledger_availability()` in Postgres, which is also what
+ * `v_available_balance` calls and what `availableBalance()` calls. There is
+ * one body and this screen no longer has an opinion.
  *
  * It is allowed to go negative. An over-captured fuel-pump authorisation
  * settles above the amount authorised and the honest answer is that the
  * customer is overdrawn; clamping to zero here would hide a real overdraft
  * behind a cosmetic floor.
  */
-function foldBalance(ledgerCents: bigint, holds: readonly HoldRow[]): BalanceView {
-  const { activeHoldsCents, unclearedCreditsCents } = foldHoldTotals(holds);
-  const availableCents = ledgerCents - activeHoldsCents - unclearedCreditsCents;
-
+function foldBalance(availability: Availability): BalanceView {
   return {
-    ledgerDisplay: formatUsd(ledgerCents),
-    availableDisplay: formatUsd(availableCents),
-    cardHoldsDisplay: formatUsd(activeHoldsCents),
-    unclearedDisplay: formatUsd(unclearedCreditsCents),
-    availableIsNegative: availableCents < 0n,
+    ledgerDisplay: formatUsd(availability.ledgerCents),
+    availableDisplay: formatUsd(availability.availableCents),
+    cardHoldsDisplay: formatUsd(availability.holdsCents),
+    unclearedDisplay: formatUsd(availability.unclearedCents),
+    pendingOutboundDisplay: formatUsd(availability.pendingOutboundCents),
+    availableIsNegative: availability.availableCents < 0n,
   };
 }
 
 /**
- * The four figures for ONE account, as bigint cents, against one snapshot.
+ * The figures for ONE account, as bigint cents, against one snapshot.
  *
  * ===========================================================================
- * WHY THIS EXISTS RATHER THAN `availableBalance()` FROM `ledger/balances.ts`.
+ * WHAT THIS USED TO BE, AND WHY IT IS NOW FOUR LINES
  * ===========================================================================
  *
- * The two do not agree, and the difference is not a rounding artefact — it is
- * a different question, and on this account it is worth $30,662.10.
+ * This function was the THIRD definition of "available" in the system. It was
+ * written because the first two disagreed and the screen had to print one
+ * number, and the comment that used to sit here said so, at length, and then
+ * printed the number anyway:
  *
- *   `ledgerBalanceCents(accountId, snapshot)` filters
- *   `value_date <= snapshot.valueDate AND booking_seq <= snapshot.watermark`.
- *   That is "what does the ledger say about TODAY, using everything we know
- *   now" — a settlement booked today for tomorrow's business day is a fact we
- *   know and not money the customer has.
+ *   `ledgerBalanceCents()` filtered `value_date <= today AND booking_seq <=
+ *   watermark`. `availableBalance()` summed EVERY line with no value-date
+ *   predicate at all. On the seeded demo business the two differed by
+ *   $25,040.70 (measured 2026-09-11T02:10Z; $30,662.10 when this comment was
+ *   first written), because the book carries $37,212.00 of debits value-dated
+ *   tomorrow and a run of standing-order credits dated 2027.
  *
- *   `availableBalance(businessId)` sums EVERY line on the deposit account with
- *   no value-date predicate at all, so it includes future-dated postings.
+ * Both were wrong, in opposite directions, and this screen was wrong in a
+ * third: it excluded future-dated CREDITS from the ledger term and then
+ * subtracted the uncleared-credit holds guarding those same credits, charging
+ * the customer $3,750.00 twice.
  *
- * On the seeded demo business those two answers differ by five figures,
- * because the book carries $37,212.00 of debits value-dated tomorrow and a
- * run of standing-order credits dated 2027. Whichever is the right answer for
- * the account screen, THE ONE THING THIS SCREEN MUST NOT DO IS PRINT BOTH: a
- * headline balance and a receipt on the same page that disagree by $30,662.10
- * about the same account, at the same instant, is a screen that has taught the
- * reader its numbers cannot be trusted — and it is exactly the class of drift
- * that "derived, never stored" exists to make impossible.
- *
- * So the funding screen has one definition of its four numbers, this one, and
- * the receipt in `actions.ts` reads it too. `balances.ts` is not this worker's
- * module to change; the disagreement is recorded in `docs/FUNDING.md` rather
- * than papered over.
+ * Migration 0022 answered the question the disagreement was really about, once
+ * and in one place. See `src/lib/ledger/balance-definitions.ts` and
+ * `docs/BALANCE-DEFINITIONS.md`.
  */
-export interface BalanceCents {
-  readonly ledgerCents: bigint;
-  readonly cardHoldsCents: bigint;
-  readonly unclearedCents: bigint;
-  readonly availableCents: bigint;
-}
+export type BalanceCents = Availability;
 
 export async function readBalanceCents(
   accountId: string,
   conn: Sql = sql,
 ): Promise<BalanceCents> {
   const snapshot = await readSnapshot(conn);
-  const [ledgerCents, holds] = await Promise.all([
-    ledgerBalanceCents(accountId, snapshot, conn),
-    listHoldRows(accountId, snapshot, conn),
-  ]);
-  const { activeHoldsCents, unclearedCreditsCents } = foldHoldTotals(holds);
-  return {
-    ledgerCents,
-    cardHoldsCents: activeHoldsCents,
-    unclearedCents: unclearedCreditsCents,
-    availableCents: ledgerCents - activeHoldsCents - unclearedCreditsCents,
-  };
+  return accountAvailability(accountId, snapshot, conn);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -249,8 +229,8 @@ async function readAccount(
   conn: Sql,
   bankingDateOf: (at: Date) => string,
 ): Promise<FundableAccountView> {
-  const [ledgerCents, holds] = await Promise.all([
-    ledgerBalanceCents(row.accountId, snapshot, conn),
+  const [availability, holds] = await Promise.all([
+    accountAvailability(row.accountId, snapshot, conn),
     listHoldRows(row.accountId, snapshot, conn),
   ]);
 
@@ -260,7 +240,7 @@ async function readAccount(
     businessName: row.legalName,
     accountName: row.accountName,
     currency: row.currency,
-    balance: foldBalance(ledgerCents, holds),
+    balance: foldBalance(availability),
     unclearedHolds: orderUnclearedHolds(holds).map((hold) =>
       toUnclearedHoldView(hold, bankingDateOf),
     ),

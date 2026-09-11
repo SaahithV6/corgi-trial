@@ -1,10 +1,3 @@
-import { postEntry, reverseAndRebook } from "@/lib/ledger/post";
-import type { Sql } from "@/lib/ledger/queries";
-
-import { publishStatement, reissueStatement, closeDay } from "./publish";
-import { readStatementAccount } from "./read";
-import type { BookDay, PublishedStatement } from "./types";
-
 /**
  * The scenario, seeded into the live book.
  *
@@ -79,6 +72,13 @@ import type { BookDay, PublishedStatement } from "./types";
  * reason. Choosing the newest safe date is what keeps this day's difference
  * equal to exactly the reversal and the re-book.
  */
+
+import { postEntry, reverseAndRebook } from "@/lib/ledger/post";
+import type { Sql } from "@/lib/ledger/queries";
+
+import { publishStatement, reissueStatement, closeDay } from "./publish";
+import { readStatementAccount } from "./read";
+import type { BookDay, PublishedStatement } from "./types";
 
 /** The settlement day. See the note above on why this date and not another. */
 export const DEMO_BUSINESS_DATE = "2026-07-25";

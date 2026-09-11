@@ -14,6 +14,7 @@ import {
   type DeliverySql,
   type ProviderDeliveryContext,
 } from './delivery-health';
+import type { Liveness } from './probe';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -338,14 +339,34 @@ describe('the health document still has exactly one answer per slot', () => {
   /**
    * The vocabulary `/api/health` uses for LIVENESS. Sources: `SlotStatus` in
    * env.schema.ts and `Liveness` in probe.ts.
+   *
+   * IT HAD ALREADY DRIFTED. This was a hand-copied list and it was missing
+   * `unprobed`, so the disjointness invariant below was being proved against a
+   * vocabulary that was no longer the vocabulary — a guard checking a stale
+   * copy of the thing it guards. `rate_limited` would have been the second
+   * word to go missing.
+   *
+   * The list stays literal, because the test's job is to name the strings a
+   * reader might confuse, but it is now pinned to `Liveness` at COMPILE time:
+   * `Missing` is `never` only while every member of the union appears below,
+   * so adding a liveness verdict and forgetting this file fails `pnpm
+   * typecheck` instead of silently narrowing the check. It is a type-only
+   * import, so nothing here loads the env-parsing module at runtime.
    */
   const LIVENESS_WORDS = [
     'live',
     'simulated',
     'unauthorised',
     'unreachable',
+    'rate_limited',
     'not_configured',
+    'unprobed',
   ] as const;
+  type Missing = Exclude<Liveness, (typeof LIVENESS_WORDS)[number]>;
+  const noLivenessWordIsMissing: Missing extends never ? true : Missing = true;
+  it('names every liveness verdict, checked by the compiler', () => {
+    expect(noLivenessWordIsMissing).toBe(true);
+  });
 
   it('uses a verdict vocabulary disjoint from the liveness vocabulary', () => {
     // This is the structural reason the field cannot contradict the slot

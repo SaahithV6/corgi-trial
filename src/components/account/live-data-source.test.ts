@@ -89,6 +89,7 @@ function holdRow(overrides: Partial<HoldRow> = {}): HoldRow {
     expiresAt: new Date("2026-09-17T18:41:30.000Z"),
     availableAt: null,
     policy: null,
+    pending: false,
     authCount: 1,
     eventCount: 1,
     ...overrides,
@@ -182,9 +183,20 @@ const POSTING_ROW: Row = {
 
 function liveSource(routes: readonly (readonly [string, readonly Row[]])[] = []) {
   const { conn, count } = fakeSql([
-    ["book_date(now())", [SNAPSHOT_ROW]],
+    ["book_date(clock_timestamp())", [SNAPSHOT_ROW]],
     ["JOIN business b", [ACCOUNT_ROW]],
-    ["balance_cents", [{ balance_cents: 3_329_289n }]],
+    [
+      "ledger_availability",
+      [
+        {
+          ledger_cents: 3_329_289n,
+          hold_cents: 0n,
+          uncleared_cents: 0n,
+          pending_outbound_cents: 0n,
+          available_cents: 3_329_289n,
+        },
+      ],
+    ],
     ["WITH held", [HOLDS_ROW]],
     ["WITH entries", [POSTING_ROW]],
     ...routes,
@@ -390,6 +402,7 @@ describe("toSummary", () => {
       account: ACCOUNT,
       snapshot: SNAPSHOT,
       ledgerCents: 4_821_560n,
+      pendingOutboundCents: 0n,
       holds: [
         holdRow({ kind: "card_auth", remainingCents: 124_000n }),
         holdRow({ kind: "manual", remainingCents: 50_000n }),
@@ -400,7 +413,10 @@ describe("toSummary", () => {
     expect(summary.activeHoldsCents).toBe(174_000);
     expect(summary.unclearedCreditsCents).toBe(1_250_000);
     expect(summary.availableCents).toBe(
-      summary.ledgerCents - summary.activeHoldsCents - summary.unclearedCreditsCents,
+      summary.ledgerCents -
+        summary.activeHoldsCents -
+        summary.unclearedCreditsCents -
+        summary.pendingOutboundCents,
     );
   });
 
@@ -411,9 +427,30 @@ describe("toSummary", () => {
       account: ACCOUNT,
       snapshot: SNAPSHOT,
       ledgerCents: -840n,
+      pendingOutboundCents: 0n,
       holds: [holdRow({ remainingCents: 1_200n })],
     });
     expect(summary.availableCents).toBe(-2_040);
+  });
+
+  it("takes committed outflows off available, though they have no hold row", () => {
+    // An outbound ACH originated today for tomorrow's settlement: it has not
+    // moved the settled ledger and it appears in no holds table, and it is
+    // still gone as far as spending power is concerned. $37,212.00 of these
+    // sit on the demo account; the account screen used to spend them twice.
+    const summary = toSummary({
+      account: ACCOUNT,
+      snapshot: SNAPSHOT,
+      ledgerCents: 4_968_953n,
+      pendingOutboundCents: 3_721_200n,
+      holds: [],
+    });
+
+    expect(summary.pendingOutboundCents).toBe(3_721_200);
+    expect(summary.availableCents).toBe(4_968_953 - 3_721_200);
+    // And the ledger balance itself did NOT move: that is the whole point of
+    // keeping this a separate term rather than folding it into the sum.
+    expect(summary.ledgerCents).toBe(4_968_953);
   });
 
   it("equals the ledger balance when nothing is being withheld", () => {
@@ -421,6 +458,7 @@ describe("toSummary", () => {
       account: ACCOUNT,
       snapshot: SNAPSHOT,
       ledgerCents: 3_329_289n,
+      pendingOutboundCents: 0n,
       holds: [],
     });
     expect(summary.availableCents).toBe(summary.ledgerCents);
@@ -433,6 +471,7 @@ describe("toSummary", () => {
       account: ACCOUNT,
       snapshot: SNAPSHOT,
       ledgerCents: 0n,
+      pendingOutboundCents: 0n,
       holds: [],
     });
     expect(summary.asOf).toBe("2026-09-10T19:42:00.000Z");
@@ -479,7 +518,7 @@ describe("createLiveAccountDataSource", () => {
 
   it("says which account is missing instead of failing as an outage", async () => {
     const { conn } = fakeSql([
-      ["book_date(now())", [SNAPSHOT_ROW]],
+      ["book_date(clock_timestamp())", [SNAPSHOT_ROW]],
       ["JOIN business b", []],
     ]);
     const source = createLiveAccountDataSource({ conn });
@@ -493,7 +532,7 @@ describe("createLiveAccountDataSource", () => {
   });
 
   it("refuses a fixture id without pretending it is a database fault", async () => {
-    const { conn } = fakeSql([["book_date(now())", [SNAPSHOT_ROW]]]);
+    const { conn } = fakeSql([["book_date(clock_timestamp())", [SNAPSHOT_ROW]]]);
     const source = createLiveAccountDataSource({ conn });
 
     const result = await source.listHolds({ accountId: "acct_operating_4417" });
@@ -543,9 +582,20 @@ describe("createLiveAccountDataSource", () => {
 
   it("fails loudly rather than rounding a balance it cannot represent", async () => {
     const { conn } = fakeSql([
-      ["book_date(now())", [SNAPSHOT_ROW]],
+      ["book_date(clock_timestamp())", [SNAPSHOT_ROW]],
       ["JOIN business b", [ACCOUNT_ROW]],
-      ["balance_cents", [{ balance_cents: 9_007_199_254_740_993n }]],
+      [
+        "ledger_availability",
+        [
+          {
+            ledger_cents: 9_007_199_254_740_993n,
+            hold_cents: 0n,
+            uncleared_cents: 0n,
+            pending_outbound_cents: 0n,
+            available_cents: 9_007_199_254_740_993n,
+          },
+        ],
+      ],
       ["WITH held", []],
     ]);
     const source = createLiveAccountDataSource({ conn });
@@ -561,7 +611,7 @@ describe("createLiveAccountDataSource", () => {
     let asked: unknown = null;
     const conn = ((strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.join(" ? ");
-      if (text.includes("book_date(now())")) return Promise.resolve([SNAPSHOT_ROW]);
+      if (text.includes("book_date(clock_timestamp())")) return Promise.resolve([SNAPSHOT_ROW]);
       if (text.includes("JOIN business b")) return Promise.resolve([ACCOUNT_ROW]);
       if (text.includes("WITH entries")) asked = values[values.length - 1];
       return Promise.resolve([]);
@@ -589,9 +639,20 @@ describe("listLiveAccounts", () => {
   it("quotes the same fold the account screen renders", async () => {
     const { conn } = fakeSql([
       ["ORDER BY b.legal_name", [ACCOUNT_ROW]],
-      ["book_date(now())", [SNAPSHOT_ROW]],
+      ["book_date(clock_timestamp())", [SNAPSHOT_ROW]],
       ["JOIN business b", [ACCOUNT_ROW]],
-      ["balance_cents", [{ balance_cents: 3_329_289n }]],
+      [
+      "ledger_availability",
+      [
+        {
+          ledger_cents: 3_329_289n,
+          hold_cents: 0n,
+          uncleared_cents: 0n,
+          pending_outbound_cents: 0n,
+          available_cents: 3_329_289n,
+        },
+      ],
+    ],
       ["WITH held", [HOLDS_ROW]],
     ]);
 

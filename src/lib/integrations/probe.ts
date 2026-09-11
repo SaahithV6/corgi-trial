@@ -1,6 +1,12 @@
 import "server-only";
 import { env, integrations, type IntegrationSlot, type SlotReport } from "@/lib/env";
 import { probeLithicWebhooks } from "./probes/lithic-webhooks";
+import {
+  recallAttempt,
+  recallVerdict,
+  rememberAttempt,
+  rememberVerdict,
+} from "./verdict-cache";
 
 /**
  * Liveness by PROOF, not by presence.
@@ -33,6 +39,15 @@ export type Liveness =
   | "unauthorised"
   /** Network or provider failure — we do not know, so we do not claim. */
   | "unreachable"
+  /**
+   * The provider refused to evaluate the credential because we asked too
+   * often. Split out of `unreachable` deliberately: "the provider had a bad
+   * afternoon" and "we are polling harder than the provider permits" call for
+   * opposite responses — wait, versus ask less — and collapsing them hid the
+   * second inside the first for as long as this endpoint has existed. See
+   * ./verdict-cache.ts for the measurement. Never labelled LIVE.
+   */
+  | "rate_limited"
   /** No credential at all. */
   | "not_configured"
   /**
@@ -42,6 +57,23 @@ export type Liveness =
    */
   | "unprobed";
 
+/**
+ * The liveness vocabulary, enumerated so other modules can assert against it
+ * instead of re-typing it. `delivery-health.test.ts` proves the delivery
+ * verdicts are disjoint from these words, and it used to do that against a
+ * hand-copied list that had already drifted — it was missing `unprobed`, so
+ * the invariant it guards was being checked against a vocabulary that was no
+ * longer the vocabulary.
+ */
+export const LIVENESS_VERDICTS: readonly Liveness[] = [
+  "live",
+  "unauthorised",
+  "unreachable",
+  "rate_limited",
+  "not_configured",
+  "unprobed",
+];
+
 export interface ProbeResult {
   readonly slot: IntegrationSlot;
   readonly provider: string;
@@ -50,8 +82,21 @@ export interface ProbeResult {
   readonly label: "LIVE" | "SIMULATED";
   readonly mustBeLive: boolean;
   readonly detail: string;
+  /** When THIS reading was taken. */
   readonly checkedAt: string;
   readonly latencyMs: number | null;
+  /**
+   * True when the round trip behind this verdict happened during this reading.
+   * False when the verdict is quoted from the last one that was earned —
+   * always with `provenAt` and `ageSeconds` beside it, so a reader is never
+   * asked to take a dated fact for a present-tense one. Null where no round
+   * trip is involved at all (`not_configured`, `unprobed`).
+   */
+  readonly fresh: boolean | null;
+  /** ISO instant of the round trip that earned this verdict, when there was one. */
+  readonly provenAt: string | null;
+  /** Age of that round trip, in whole seconds. 0 on a fresh reading. */
+  readonly ageSeconds: number | null;
 }
 
 const TIMEOUT_MS = 4000;
@@ -105,9 +150,18 @@ function fromStatus(status: number): Liveness {
   // The request was authenticated, reached the application, and was rejected on
   // its CONTENT. That is the only 4xx shape that evidences a working credential.
   if (status === 400 || status === 409 || status === 422) return "live";
-  // Rate limiting, a missing path, a timeout: the credential was never judged.
-  // Not evidence of anything, in either direction.
-  if (status === 404 || status === 408 || status === 429) return "unreachable";
+  // Throttling is its OWN verdict now, not a shade of unreachable.
+  //
+  // Narrowing 429 out of `live` was the right fix and it was not the whole
+  // fix: it converted a silent wrong answer into a visible flapping one,
+  // because `unreachable` says "the provider failed" when what happened is
+  // "we asked eleven times in a minute and Plaid allows ten". Same label,
+  // SIMULATED, for the same reason — nothing was proven — but the evidence
+  // string now names the thing an operator has to change.
+  if (status === 429) return "rate_limited";
+  // A missing path or a timeout: the credential was never judged. Not
+  // evidence of anything, in either direction.
+  if (status === 404 || status === 408) return "unreachable";
   if (status >= 400 && status < 500) return "unreachable";
   return "unreachable";
 }
@@ -174,6 +228,21 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
       return {
         liveness: "unauthorised",
         detail: `credentials rejected (${body?.error_code ?? "400"})`,
+        ms,
+      };
+    }
+    // 429 carries Plaid's own error_code into the evidence, because
+    // `INSTITUTIONS_GET_LIMIT` is the difference between "Plaid is throttling
+    // this one endpoint" and "Plaid is throttling this credential", and the
+    // first is a probe-design problem while the second is an account problem.
+    // Measured: the bucket allows 10 calls and returns 429 on the 11th.
+    if (res.status === 429) {
+      const body = (await res.json().catch(() => null)) as { error_code?: string } | null;
+      return {
+        liveness: "rate_limited",
+        detail:
+          `POST /institutions/get -> 429 ${body?.error_code ?? "RATE_LIMIT_EXCEEDED"}` +
+          " — Plaid rationed this reading; the credential was never evaluated",
         ms,
       };
     }
@@ -404,6 +473,191 @@ const PROBES: Partial<Record<IntegrationSlot, Prober>> = {
   },
 };
 
+/* -------------------------------------------------------------------------- */
+/* Rationed slots                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Some providers ration the probe endpoint. For those, a health request is not
+ * free and a health request per probe call is a design error.
+ *
+ * THE MEASUREMENT (2026-09-11, ./verdict-cache.ts carries the full log). Plaid
+ * allows ten `/institutions/get` calls per credential per window and answers
+ * the eleventh with 429 `INSTITUTIONS_GET_LIMIT`. Reproduced against the
+ * deployment: fourteen consecutive `GET /api/health` requests produced ten
+ * `live` readings and then three `simulated` ones. One compliance run reads
+ * this endpoint four or more times by itself, audit-claims.mjs reads it again,
+ * and any uptime monitor pointed at it reads it for ever — so the eleventh
+ * reading was routine rather than exotic, which is why the flap showed up
+ * "roughly one run in three".
+ *
+ * A slot listed here is probed at most once per `refreshMs` — counted from the
+ * last ATTEMPT, not the last success, so a throttled window is not answered by
+ * hammering the provider that is throttling us. Between refreshes the last
+ * EARNED verdict is quoted with its age attached. When a refresh does fire and
+ * cannot reach a verdict — throttled, or the network failed — the last earned
+ * verdict is still quoted, up to `maxQuoteMs`, and past that the slot reports
+ * what actually happened this time and claims nothing.
+ *
+ * THE NUMBERS, AND WHY THESE ONES.
+ *
+ *   refreshMs 20s   Three calls a minute against a budget of ten. That leaves
+ *                   room for two more instances of this function, plus a
+ *                   script on a laptop sharing the same client_id, before
+ *                   anyone sees a 429 at all. Short enough that a credential
+ *                   revoked right now is reported within twenty seconds.
+ *   maxQuoteMs 5m   The cliff. If Plaid has refused to evaluate our credential
+ *                   for five unbroken minutes — which needs someone ELSE
+ *                   burning the budget, since our own draw is three a minute —
+ *                   then the honest answer stops being "it was live at 12:04"
+ *                   and becomes "we have not been able to check for five
+ *                   minutes". `rate_limited` is that answer, and it is
+ *                   SIMULATED, and it says why.
+ *
+ * DELIBERATELY ONLY PLAID. Every other slot still probes on every reading.
+ * Quoting is a concession bought by a measured ration, not a default: applied
+ * to `card_webhooks` or `card_issuing` it would put a five-minute delay
+ * between a Lithic outage and the endpoint admitting to it, and
+ * attack-07-provider-outage is the test that says that delay is unacceptable.
+ * A slot joins this table when someone has MEASURED a ration on it, and the
+ * measurement goes in the comment.
+ */
+interface RationPolicy {
+  readonly refreshMs: number;
+  readonly maxQuoteMs: number;
+  /** Shipped in the evidence string so the policy can be argued with. */
+  readonly ration: string;
+}
+
+const RATIONED: Partial<Record<IntegrationSlot, RationPolicy>> = {
+  open_banking: {
+    refreshMs: 20_000,
+    maxQuoteMs: 5 * 60_000,
+    ration: "Plaid allows 10 /institutions/get per credential per window",
+  },
+};
+
+/** Whole seconds, rounded down, for a human-facing age. */
+const seconds = (ms: number): number => Math.floor(ms / 1000);
+
+interface Reading {
+  readonly liveness: Liveness;
+  readonly detail: string;
+  readonly ms: number;
+  readonly fresh: boolean | null;
+  readonly provenAtMs: number | null;
+}
+
+/**
+ * One slot's reading, with the ration policy applied if it has one.
+ *
+ * The shape of the argument, in one place: a reading that did not reach a
+ * verdict must not overwrite one that did, and a verdict that is being quoted
+ * rather than re-earned must carry its age. Everything below is those two
+ * sentences.
+ */
+async function readSlot(slot: IntegrationSlot, probe: Prober): Promise<Reading> {
+  const policy = RATIONED[slot];
+  if (policy === undefined) {
+    const r = await probe();
+    const earned = r.liveness === "live" || r.liveness === "unauthorised";
+    return { ...r, fresh: earned ? true : null, provenAtMs: earned ? Date.now() : null };
+  }
+
+  // 1. Inside the refresh window: do not spend a unit of the ration at all.
+  const held = recallVerdict(slot, policy.refreshMs, Date.now());
+  if (held !== null) {
+    return {
+      liveness: held.liveness,
+      detail:
+        `${held.detail} [quoted, not re-probed: earned ${seconds(held.ageMs)}s ago; ` +
+        `${policy.ration}, so this slot round-trips at most once per ${seconds(policy.refreshMs)}s]`,
+      ms: held.latencyMs,
+      fresh: false,
+      provenAtMs: held.provenAtMs,
+    };
+  }
+
+  // 2. Due for a refresh — unless the last refresh ALSO reached no verdict
+  //    within the same interval. Measured: without this branch, a burst of
+  //    health checks against an already-empty bucket spent thirteen more
+  //    units of Plaid's ration in forty seconds, which keeps the bucket empty
+  //    and delays the recovery it is waiting for. One attempt per interval,
+  //    whether or not the last one worked.
+  const lastAttempt = recallAttempt(slot);
+  if (lastAttempt !== null && Date.now() - lastAttempt.atMs < policy.refreshMs) {
+    const waited = seconds(Date.now() - lastAttempt.atMs);
+    const fallback = recallVerdict(slot, policy.maxQuoteMs, Date.now());
+    if (fallback !== null) {
+      return {
+        liveness: fallback.liveness,
+        detail:
+          `${fallback.detail} [quoted, earned ${seconds(fallback.ageMs)}s ago; the attempt ` +
+          `${waited}s ago reached no verdict (${lastAttempt.detail}) and this slot will not ` +
+          `re-ask for another ${seconds(policy.refreshMs) - waited}s]`,
+        ms: fallback.latencyMs,
+        fresh: false,
+        provenAtMs: fallback.provenAtMs,
+      };
+    }
+    return {
+      // The cache is a dumb store and holds the verdict as a string; this is
+      // the one place it comes back into the type, and an unrecognised word
+      // becomes the verdict that claims least rather than being trusted.
+      liveness: LIVENESS_VERDICTS.find((v) => v === lastAttempt.liveness) ?? "unreachable",
+      detail:
+        `${lastAttempt.detail} [last attempt ${waited}s ago; no verdict earned within the last ` +
+        `${seconds(policy.maxQuoteMs)}s, so nothing is claimed for this slot]`,
+      ms: 0,
+      fresh: null,
+      provenAtMs: null,
+    };
+  }
+
+  // 3. A real round trip.
+  const now = Date.now();
+  const r = await probe();
+  // A slot with no credential never left the process: nothing to remember,
+  // nothing to back off from, and no ration was spent.
+  if (r.liveness === "not_configured" || r.liveness === "unprobed") {
+    return { ...r, fresh: null, provenAtMs: null };
+  }
+  rememberAttempt(slot, r, now);
+  if (r.liveness === "live" || r.liveness === "unauthorised") {
+    rememberVerdict(slot, r, now);
+    return { ...r, fresh: true, provenAtMs: now };
+  }
+
+  // 4. The round trip reached no verdict — throttled, or the network failed.
+  //    Report what we last KNEW, with its age, rather than downgrading the
+  //    slot on evidence we do not have.
+  const fallback = recallVerdict(slot, policy.maxQuoteMs, Date.now());
+  if (fallback !== null) {
+    return {
+      liveness: fallback.liveness,
+      detail:
+        `${fallback.detail} [quoted, earned ${seconds(fallback.ageMs)}s ago; ` +
+        `this reading reached no verdict: ${r.detail}]`,
+      ms: fallback.latencyMs,
+      fresh: false,
+      provenAtMs: fallback.provenAtMs,
+    };
+  }
+
+  // 5. Nothing recent enough to quote. Say so, and say which kind of silence
+  //    it was. This is the verdict that must NOT be smoothed away: it is the
+  //    endpoint admitting it has not been able to check.
+  return {
+    liveness: r.liveness,
+    detail:
+      `${r.detail} [no verdict earned within the last ${seconds(policy.maxQuoteMs)}s, ` +
+      `so nothing is claimed for this slot]`,
+    ms: r.ms,
+    fresh: null,
+    provenAtMs: null,
+  };
+}
+
 /**
  * Probe every slot. Runs concurrently; total wall time is one timeout.
  *
@@ -442,19 +696,30 @@ export async function probeIntegrations(): Promise<readonly ProbeResult[]> {
             ? "credential present but NOT probed — no round trip proves this slot works"
             : "no probe defined and no credential configured",
           checkedAt, latencyMs: null,
+          fresh: null, provenAt: null, ageSeconds: null,
         };
       }
-      const { liveness, detail, ms } = await probe();
+      const { liveness, detail, ms, fresh, provenAtMs } = await readSlot(slot.slot, probe);
       return {
         slot: slot.slot,
         provider: slot.provider,
         liveness,
         // The whole point: ONLY a proven round trip earns the LIVE label.
+        // A quoted verdict was proven by a round trip too — `provenAt` and
+        // `ageSeconds` say which one and how long ago, and `fresh: false` says
+        // out loud that this reading did not repeat it.
         label: liveness === "live" ? "LIVE" : "SIMULATED",
         mustBeLive: slot.mustBeLive,
         detail,
         checkedAt,
         latencyMs: ms || null,
+        fresh,
+        provenAt: provenAtMs === null ? null : new Date(provenAtMs).toISOString(),
+        // Clamped at zero. The round trip that earned a FRESH verdict finishes
+        // after this reading started, so a naive `start - provenAt` published
+        // an age of -1s on every unrationed slot — a small lie, in the field
+        // whose entire job is to stop small lies.
+        ageSeconds: provenAtMs === null ? null : Math.max(0, seconds(Date.now() - provenAtMs)),
       };
     }),
   );

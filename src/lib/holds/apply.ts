@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The state machine, such as it is.
  *
@@ -44,6 +42,8 @@ import "server-only";
  * state transition, by making state a function of an accumulating SET rather
  * than an increment on a mutable counter.
  */
+
+import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import type { Transaction } from "@/lib/rails/lithic/types";

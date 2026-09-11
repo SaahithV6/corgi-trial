@@ -518,7 +518,7 @@ function toBalanceView(balance: BalanceCents): BalanceSnapshotView {
   return {
     ledgerDisplay: formatUsd(balance.ledgerCents),
     availableDisplay: formatUsd(balance.availableCents),
-    cardHoldsDisplay: formatUsd(balance.cardHoldsCents),
+    cardHoldsDisplay: formatUsd(balance.holdsCents),
     unclearedDisplay: formatUsd(balance.unclearedCents),
   };
 }

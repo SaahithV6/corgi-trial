@@ -19,6 +19,10 @@
     {
       "path": "/api/cron/standing",
       "schedule": "23 5 * * *"
+    },
+    {
+      "path": "/api/cron/accrual",
+      "schedule": "41 6 * * *"
     }
   ]
 }

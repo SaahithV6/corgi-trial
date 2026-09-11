@@ -123,6 +123,8 @@ const INVARIANT_VIEWS = [
   ["v_hold_release_drift", "a released hold withholds nothing"],
   ["v_book_not_zero", "the whole book nets to zero, per entity and book"],
   ["v_deposit_control_drift", "the deposits subtree equals what we report"],
+  ["v_accrual_month_drift", "a month's daily shares sum to the fee exactly"],
+  ["v_accrual_ledger_drift", "every accrual claim matches the entry it cites"],
 ];
 
 console.log("\nINVARIANT VIEWS — each MUST return zero rows\n");

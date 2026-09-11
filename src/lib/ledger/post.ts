@@ -1,6 +1,3 @@
-import "server-only";
-import { sql, type Sql } from "./db";
-
 /**
  * The posting API. Every money write in the system goes through here, and
  * here goes through exactly one SQL function: ledger_append().
@@ -14,6 +11,9 @@ import { sql, type Sql } from "./db";
  * codebase INSERTs into journal_entry or journal_line except ledger_append,
  * and this module is the only thing that calls it.
  */
+
+import "server-only";
+import { sql, type Sql } from "./db";
 
 export type Rail = "card" | "ach" | "usdc" | "wire" | "internal";
 

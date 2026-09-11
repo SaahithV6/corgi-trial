@@ -122,6 +122,7 @@ const EDGE_SNAPSHOT: ConsoleSnapshot = {
     ledgerCents: EDGE_LEDGER_CENTS,
     holdsCents: EDGE_OPEN_HOLD_CENTS,
     unclearedCents: 0n,
+    pendingOutboundCents: 0n,
     // −840 − 1200 − 0 = −2040. Not clamped, on purpose.
     availableCents: EDGE_LEDGER_CENTS - EDGE_OPEN_HOLD_CENTS,
   },
@@ -245,6 +246,7 @@ const EMPTY_SNAPSHOT: ConsoleSnapshot = {
     ledgerCents: 0n,
     holdsCents: 0n,
     unclearedCents: 0n,
+    pendingOutboundCents: 0n,
     availableCents: 0n,
   },
   cards: [],

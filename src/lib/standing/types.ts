@@ -107,7 +107,8 @@ export type StandingOrderOccurrence = {
  *
  * WHICH NUMBER THE RULE USES, AND WHY IT IS NOT THE LEDGER BALANCE.
  *
- * `available = ledger − active holds − uncleared credits`. A standing order is
+ * `available = ledger − active holds − uncleared credits − committed outflows`.
+ * A standing order is
  * checked against AVAILABLE, and the difference is the entire point of the
  * track:
  *
@@ -128,6 +129,16 @@ export type AvailabilitySnapshot = {
   readonly ledgerCents: bigint;
   readonly holdsCents: bigint;
   readonly unclearedCents: bigint;
+  /**
+   * Debits already booked for a future value date. Committed out.
+   *
+   *   - Money booked to leave has been committed. A standing order funded out
+   *     of it would be funded twice out of the same dollar: once now, and
+   *     again tomorrow when the outbound actually settles. This is a current
+   *     account, not a credit facility, and the customer did not agree to the
+   *     overdraft that creates.
+   */
+  readonly pendingOutboundCents: bigint;
   readonly availableCents: bigint;
 };
 

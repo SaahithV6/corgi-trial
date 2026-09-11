@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The one line that goes in `requestPayment()`.
  *
@@ -52,6 +50,8 @@ import "server-only";
  * third parties inside a transaction would be a payment path that fails when
  * they do.
  */
+
+import "server-only";
 
 import type { PaymentDestination } from "@/lib/approvals/types";
 import { sql, type Sql } from "@/lib/ledger/db";

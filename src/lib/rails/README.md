@@ -1,15 +1,27 @@
 # Payment rails
 
-One interface, three rails, and an ACH simulator that produces the cases a
-sandbox will not.
+> **Start with `docs/RAILS.md`.** It is the directory-wide view: the five
+> operations a rail has, which rails genuinely have which, and the generated
+> capability matrix. This file is the ACH slot in detail — the Increase trap,
+> the simulator, and the three layers behind its `simulated` label.
 
 ```
 src/lib/rails/
-  types.ts          the PaymentRail interface — the contract everything below satisfies
-  increase/         ACH, the LIVE adapter (Increase)
+  contract.ts       the DIRECTORY-WIDE contract: identity, five operations, probe
+  adapters/         the five rails behind it, one file each
+  types.ts          the PaymentRail interface — the four-method ACH-shaped one
+  increase/         ACH, the LIVE adapter (Increase). Never run against a key.
   achsim/           ACH, the SIMULATOR — same interface, honest label
-  lithic/           cards, the LIVE adapter (owned elsewhere; it fits this interface)
+  lithic/           cards, the LIVE adapter
+  plaid/            account linking. Not a rail, and deliberately not one.
+  stablecoin/       USDC, two providers behind one interface
 ```
+
+**`PaymentRail` is not the directory's contract; it is the ACH slot's.** It has
+exactly two implementations and both of them are ACH. The card rail cannot
+originate a payment and the USDC rail receives no webhooks, so neither fits
+four methods that assume both — and `contract.ts` is the smaller thing all five
+do fit behind. See `docs/RAILS.md` §1 for what was there before and why.
 
 ---
 
@@ -22,7 +34,9 @@ src/lib/rails/
 | **Cards** | `lithic/` | `lithic.card` | **LIVE** | `live` | **Yes** — sandbox key, measurements in DECISIONS 006 |
 | **ACH** | `increase/client.ts` | `increase.ach` | **LIVE code path, NEVER RUN** | `live` | **No.** There is no Increase key in this repo. Every wire shape is `[DOCS]`, from `research/ach/NOTES.md`. Nothing in that file is marked `[MEASURED]`, because nothing in it has been measured. |
 | **ACH** | `achsim/` | `achsim.ach` | **SIMULATED** | `simulated` | n/a — it is the simulator |
-| **USDC** | *(not in this package)* | `base-sepolia.usdc` | research draft | — | see `research/usdc/` |
+| **USDC** | `stablecoin/adapter.ts` | `base.usdc` | **LIVE** | `live` | **Yes** — confirmed on Base Sepolia |
+| **USDC** | `stablecoin/circle-provider.ts` | `circle.w3s` | **LIVE** | `live` | **Yes** — Circle Web3 Services, hash verified against the chain |
+| **Open banking** | `plaid/` | `plaid` | **LIVE** | `live` | **Yes** — every shape `[MEASURED]`, see `docs/FUNDING.md` |
 
 **Which one is serving the ACH slot right now?** Whichever `createAchRail()`
 picked, and it says so out loud:
@@ -50,9 +64,11 @@ webhook integrations side by side.
 
 ---
 
-## 2. The interface
+## 2. The ACH interface
 
-`types.ts`. Four methods, and a rail is an **adapter**, not a schema.
+`types.ts`. Four methods, and a rail is an **adapter**, not a schema. This is
+the interface the two ACH adapters share; the contract every rail in the
+directory shares is `contract.ts`, described in `docs/RAILS.md`.
 
 ```ts
 interface PaymentRail {
@@ -119,6 +135,13 @@ One thing does throw: a **failed read-back**. Not knowing the state is not the
 same as the event being uninteresting, and swallowing it would let the
 dispatcher mark the row done. A throw is a retryable failure in `dispatch.ts`,
 which is the correct outcome.
+
+`settled` carries its own `amount`, as `returned` does. It did not until the
+directory-wide contract was written and a settlement reporter across ACH and
+cards turned out to be impossible without it: on ACH the number is recoverable
+from the transfer's face amount, and on a card it is not — an authorisation of
+$50.00 that clears at $73.40 has no way to tell you 7340 except by carrying it.
+See `docs/RAILS.md` §5.
 
 ### A return is a second money movement
 

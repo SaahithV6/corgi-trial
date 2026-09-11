@@ -1,5 +1,3 @@
-import 'server-only';
-
 /**
  * Link an external bank, fund the balance from it, and hold the money until the
  * return window says it is safe to spend.
@@ -90,6 +88,8 @@ import 'server-only';
  * the INSERT both pass it. The guarantee is still the index, and the index's
  * reach is still one Item. Both facts are in `docs/FUNDING.md`.
  */
+
+import 'server-only';
 
 import { BANKING_TIME_ZONE } from '@/lib/format/datetime';
 import { closeHold, ledgerPosterActorId, memoHoldBalance } from '@/lib/holds/store';

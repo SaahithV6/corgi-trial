@@ -182,6 +182,25 @@ export async function GET(request: Request): Promise<Response> {
         liveness: p.liveness,
         evidence: p.detail,
         latencyMs: p.latencyMs,
+        // WHEN the round trip behind this verdict happened, as three machine
+        // -readable fields rather than only as prose inside `evidence`.
+        //
+        // A rationed provider (Plaid allows ten /institutions/get per window,
+        // measured) cannot be asked once per health request without the
+        // eleventh reading contradicting the tenth — which is what it did:
+        // ten `live` readings then three `simulated` ones across fourteen
+        // consecutive calls. So a rationed slot round-trips on a cadence and
+        // QUOTES the verdict it earned in between.
+        //
+        // A quotation with no age on it would be exactly the sin this
+        // endpoint exists to prevent, a claim about the present tense that
+        // nobody checked. With `fresh`, `provenAt` and `ageSeconds` beside it,
+        // the reader is told precisely what was measured and when, and can
+        // discount it. `fresh: true` means the round trip happened during this
+        // request; null means no round trip is involved at all.
+        fresh: p.fresh,
+        provenAt: p.provenAt,
+        ageSeconds: p.ageSeconds,
       };
     });
     // integrationReports() derives its own per-slot status from credential

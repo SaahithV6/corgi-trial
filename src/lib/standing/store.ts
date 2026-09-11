@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * Every SQL statement standing orders issue, in one file.
  *
@@ -9,6 +7,8 @@ import "server-only";
  * module's job is to ask it. DECISIONS 024 is the argument — two definitions of
  * the same rule, held equal by an invariant, cannot be fixed one at a time.
  */
+
+import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { destinationSchema, type PayoutRail } from "@/lib/approvals/types";

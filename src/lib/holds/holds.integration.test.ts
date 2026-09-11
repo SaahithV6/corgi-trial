@@ -525,6 +525,7 @@ d("card holds, against the live database", () => {
           ledgerCents: after.ledgerCents - before.ledgerCents,
           holdsCents: after.holdsCents - before.holdsCents,
           unclearedCents: after.unclearedCents - before.unclearedCents,
+          pendingOutboundCents: 0n,
           availableCents: after.availableCents - before.availableCents,
         },
         hold: last.state.holdCents,

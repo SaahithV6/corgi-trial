@@ -1,15 +1,3 @@
-import "server-only";
-
-import { sql, type Sql } from "@/lib/ledger/db";
-
-import { ageBucketOf, severityOf } from "./aging";
-import {
-  isBreakKind,
-  isExplainedBy,
-  isReasonCode,
-  type ReconBreak,
-} from "./types";
-
 /**
  * The diff engine: matching, and the three break categories.
  *
@@ -67,6 +55,18 @@ import {
  * `v_recon_break.ledger_net_cents` is where the group stands now. The gap
  * between the two is the entire reversal-plus-rebook case.
  */
+
+import "server-only";
+
+import { sql, type Sql } from "@/lib/ledger/db";
+
+import { ageBucketOf, severityOf } from "./aging";
+import {
+  isBreakKind,
+  isExplainedBy,
+  isReasonCode,
+  type ReconBreak,
+} from "./types";
 
 export interface MatchPassResult {
   /** Pairings this file has, computed fresh from `v_recon_pair`. */

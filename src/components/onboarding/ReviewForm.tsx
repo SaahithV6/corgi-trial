@@ -7,6 +7,7 @@ import { FOCUS_RING } from "@/components/ui/primitives";
 import { MANUAL_MIN_REASON_LENGTH } from "@/lib/kyb/manual-review";
 
 import type { LegView } from "./data-contract";
+import { OpenedAccounts } from "./OpenedAccounts";
 
 /**
  * ============================================================================
@@ -51,6 +52,7 @@ const IDLE: OnboardingResult = {
   hostedUrl: null,
   directorReference: null,
   legs: [],
+  accounts: null,
 };
 
 function buttonClass(tone: "approve" | "decline"): string {
@@ -214,6 +216,14 @@ export function ReviewForm({
             )}
           </p>
           <p className="mt-1 max-w-prose text-muted">{mine.message}</p>
+          {/*
+            The consequence, on the same response as the decision. An operator
+            clearing this queue IS the approval event for a company the LEI
+            registry has never heard of, so the account it opens belongs here,
+            underneath the reason they typed, and not on some other screen they
+            would have to go and check.
+          */}
+          {mine.accounts === null ? null : <OpenedAccounts accounts={mine.accounts} />}
         </div>
       )}
     </form>

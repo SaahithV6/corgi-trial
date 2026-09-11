@@ -1,5 +1,3 @@
-import { z } from "zod";
-
 /**
  * Environment contract.
  *
@@ -18,6 +16,8 @@ import { z } from "zod";
  * So: exactly one variable is required to boot. Everything else degrades, and
  * the degradation is visible rather than silent.
  */
+
+import { z } from "zod";
 
 const EVM_PRIVATE_KEY = /^0x[0-9a-fA-F]{64}$/;
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;

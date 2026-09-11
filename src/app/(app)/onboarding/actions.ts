@@ -51,7 +51,8 @@ import {
   refreshVerification,
   transactGateForBusiness,
 } from "@/lib/kyb/wire";
-import { rootLogger } from "@/lib/log";
+import { rootLogger, type Logger } from "@/lib/log";
+import { openAccountsOnApproval, type OpenAccountsOutcome } from "@/lib/onboarding";
 import type { LegView, RegistryProbeView } from "@/components/onboarding/data-contract";
 
 /** What the form gets back. Serialised to the client, so: no row contents. */
@@ -71,6 +72,34 @@ export type OnboardingResult = {
   /** The live provider reference to quote in the debrief — `vs_…`. */
   readonly directorReference: string | null;
   readonly legs: readonly LegView[];
+  /**
+   * WHAT APPROVAL DID TO THE CHART OF ACCOUNTS, on the same response as the
+   * decision that caused it.
+   *
+   * Null on every verb that did not reach the account machinery — a refusal, a
+   * probe, an unreadable request. Present on every one that did, INCLUDING the
+   * ones that opened nothing: `kind: "not_yet"` is the honest answer for a
+   * business still under review, and `kind: "already"` is the answer to a
+   * second press, which is how "opening twice opens once" reaches the screen
+   * as something a reviewer can read rather than something a README asserts.
+   */
+  readonly accounts: AccountsOpenedView | null;
+};
+
+/** `openAccountsOnApproval()`'s outcome, flattened for the client. */
+export type AccountsOpenedView = {
+  readonly kind: "opened" | "already" | "not_yet" | "failed";
+  /** One sentence, already written. The screen renders it and decides nothing. */
+  readonly message: string;
+  /** Every leaf of this business's chart, whether or not this call opened it. */
+  readonly leaves: readonly {
+    readonly code: string;
+    readonly accountId: string;
+    readonly name: string;
+    readonly opened: boolean;
+  }[];
+  /** Where money would land, for the link. Null when nothing is open. */
+  readonly depositAccountId: string | null;
 };
 
 /**
@@ -100,6 +129,7 @@ const IDLE_RESULT: OnboardingResult = {
   hostedUrl: null,
   directorReference: null,
   legs: [],
+  accounts: null,
 };
 
 /**
@@ -135,6 +165,92 @@ function refused(
   message: string,
 ): OnboardingResult {
   return { ...IDLE_RESULT, status: "refused", intent, code, message, businessId };
+}
+
+/**
+ * ============================================================================
+ * THE CONSEQUENCE. Run after EVERY write to `kyb_verification_leg`.
+ * ============================================================================
+ *
+ * The brief's core loop opens "open an account behind a real KYB check", and
+ * until `src/lib/onboarding/` existed the check was real and the opening was
+ * not: `scripts/seed.mjs` created the per-customer leaves for one hardcoded
+ * fixture, and approval was wired to nothing. This call is the wire.
+ *
+ * IT IS NOT A BUTTON, and that is the design. There is no "open accounts"
+ * control on this screen or anywhere else, because a second step an operator
+ * has to remember is a step that will one day not happen — and its failure is
+ * silent. The business reads `approved`, `canTransact()` says yes, and the
+ * first inbound credit arrives to find nowhere to land.
+ *
+ * Called unconditionally after `begin`, `refresh`, `recheck` AND `review`,
+ * because any of the four can be the observation that tips a composite to
+ * `approved`: a refresh can pick up a Stripe session that finished, a recheck
+ * can pick up a registry that now answers, and a review is a human saying so.
+ * Sorting out which of them did is not this function's job — it re-derives the
+ * status itself and answers `not_yet` when nothing changed, which is the
+ * overwhelmingly common case and is not an error.
+ *
+ * NOTHING BELOW CAN LOSE THE KYB ROW. By the time this runs the observation is
+ * already committed to an append-only table, and that row is the compliance
+ * record. `openAccountsOnApproval()` returns a `Result` and never throws, so an
+ * account-machinery failure degrades to a sentence on the screen and a business
+ * sitting in `v_approved_without_accounts` until the next press — which is safe
+ * to leave, because opening is idempotent.
+ */
+async function accountsAfterKybWrite(
+  businessId: string,
+  actorId: string,
+  log: Logger,
+): Promise<AccountsOpenedView> {
+  const result = await openAccountsOnApproval(businessId, actorId, { log });
+
+  if (!result.ok) {
+    log.warn("accounts.open.failed", { code: result.error.code });
+    return {
+      kind: "failed",
+      message:
+        `${result.error.message} The verification itself is recorded and unaffected — ` +
+        "that row is append-only. Opening is idempotent, so pressing anything here again retries it.",
+      leaves: [],
+      depositAccountId: null,
+    };
+  }
+
+  return flattenOpening(result.value);
+}
+
+function flattenOpening(outcome: OpenAccountsOutcome): AccountsOpenedView {
+  if (outcome.kind === "not_yet") {
+    return {
+      kind: "not_yet",
+      message:
+        `No account was opened: this business is ${outcome.status}, not approved. ` +
+        "That is the gate doing its job rather than a step that failed — you cannot owe money to a business you have not verified, so an inbound credit for it has nowhere to land and parks in 2400 suspense.",
+      leaves: [],
+      depositAccountId: null,
+    };
+  }
+
+  const leaves = outcome.accounts.map((account) => ({
+    code: account.code,
+    accountId: account.accountId,
+    name: account.name,
+    opened: account.opened,
+  }));
+
+  return {
+    kind: outcome.kind,
+    message:
+      outcome.kind === "opened"
+        ? `Approval opened this business's chart of accounts: ${leaves
+            .filter((leaf) => leaf.opened)
+            .map((leaf) => leaf.code)
+            .join(", ")}. Nothing was posted to the journal — an account with no entries has a zero balance by construction, which is the point of deriving balances rather than storing them.`
+        : "Every leaf was already open, so this call opened nothing and returned the same account ids. Opening twice opens once: `account_code_scope` — UNIQUE NULLS NOT DISTINCT (entity_id, code, business_id) — is what refuses the second one, in the database, whoever calls and however often.",
+    leaves,
+    depositAccountId: outcome.depositAccountId,
+  };
 }
 
 export async function onboardingAction(
@@ -225,7 +341,14 @@ export async function onboardingAction(
     // The CLAIM is not stored; whether one was made is worth knowing.
     assertedLei: lei !== "",
   });
+
+  // The consequence. Any of these three verbs can be the observation that tips
+  // the composite to `approved` — a refresh picking up a finished Stripe
+  // session, a recheck picking up a registry that now answers — so the call is
+  // unconditional and the decision is re-derived inside it.
+  const accounts = await accountsAfterKybWrite(businessId, actor.id, log);
   revalidatePath("/onboarding");
+  revalidatePath("/accounts");
 
   const evidenceSentence =
     outcome.evidence === "live"
@@ -254,6 +377,7 @@ export async function onboardingAction(
     hostedUrl: outcome.hostedUrl,
     directorReference: outcome.directorReference,
     legs: outcome.legs,
+    accounts,
   };
 }
 
@@ -419,7 +543,13 @@ export async function reviewAction(
   }
 
   const outcome = result.value;
+
+  // The consequence, again — and this is the path that matters most, because a
+  // registry miss on an ordinary small company is resolved by a person and by
+  // nothing else. An operator clearing the queue IS the approval event here.
+  const accounts = await accountsAfterKybWrite(businessId, actor.id, log);
   revalidatePath("/onboarding");
+  revalidatePath("/accounts");
 
   return {
     status: "ok",
@@ -434,5 +564,6 @@ export async function reviewAction(
     hostedUrl: null,
     directorReference: outcome.directorReference,
     legs: outcome.legs,
+    accounts,
   };
 }

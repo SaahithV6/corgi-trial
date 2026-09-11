@@ -1,23 +1,3 @@
-import "server-only";
-
-import { describeDestination } from "@/lib/approvals/types";
-import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
-import type {
-  OccurrenceRow,
-  ScheduleRow,
-  StandingQuery,
-  StandingView,
-} from "@/components/standing/data-contract";
-
-import {
-  bookToday,
-  countDoubleFires,
-  countUnresolved,
-  listOccurrences,
-  listStandingOrders,
-} from "./store";
-import { INSUFFICIENT_FUNDS_CODE, type StandingOrder, type StandingOrderOccurrence } from "./types";
-
 /**
  * The live implementation of the standing-orders screen's data contract.
  *
@@ -46,6 +26,26 @@ import { INSUFFICIENT_FUNDS_CODE, type StandingOrder, type StandingOrderOccurren
  * rather than silently rounds: an amount past 2^53 is a bug worth crashing on,
  * not a number to approximate in front of an operator.
  */
+
+import "server-only";
+
+import { describeDestination } from "@/lib/approvals/types";
+import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
+import type {
+  OccurrenceRow,
+  ScheduleRow,
+  StandingQuery,
+  StandingView,
+} from "@/components/standing/data-contract";
+
+import {
+  bookToday,
+  countDoubleFires,
+  countUnresolved,
+  listOccurrences,
+  listStandingOrders,
+} from "./store";
+import { INSUFFICIENT_FUNDS_CODE, type StandingOrder, type StandingOrderOccurrence } from "./types";
 
 /** The one bigint -> number narrowing in the read path. Refuses, never rounds. */
 function toCents(value: bigint): number {

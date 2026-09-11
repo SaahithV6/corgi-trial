@@ -488,7 +488,16 @@ export class IncreaseAchRail implements PaymentRail {
           amount: transfer.amount,
         };
       case 'settled':
-        return { ...base, type: 'settled', settledAt: transfer.settledAt ?? ev.created_at };
+        return {
+          ...base,
+          type: 'settled',
+          settledAt: transfer.settledAt ?? ev.created_at,
+          // The face amount, because an ACH transfer settles for exactly what
+          // was instructed — there is no partial settlement on ACH. It travels
+          // with the event anyway so that one settlement reporter can read ACH
+          // and card without branching; see ../contract.ts.
+          amount: transfer.amount,
+        };
       case 'submitted':
         return { ...base, type: 'submitted', submittedAt: transfer.submittedAt ?? ev.created_at };
       case 'canceled':

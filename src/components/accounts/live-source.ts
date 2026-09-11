@@ -252,6 +252,7 @@ export async function loadConsoleSnapshot(
     ledgerCents: balances.ledgerCents,
     holdsCents: balances.holdsCents,
     unclearedCents: balances.unclearedCents,
+    pendingOutboundCents: balances.pendingOutboundCents,
     availableCents: balances.availableCents,
   };
 
@@ -300,7 +301,7 @@ export async function loadConsole(
   }
 }
 
-/** Just the four figures, for an action that wants a before and an after. */
+/** Just the five figures, for an action that wants a before and an after. */
 export async function readBalances(
   businessId: string,
 ): Promise<ConsoleBalances> {
@@ -310,6 +311,7 @@ export async function readBalances(
     ledgerCents: balances.ledgerCents,
     holdsCents: balances.holdsCents,
     unclearedCents: balances.unclearedCents,
+    pendingOutboundCents: balances.pendingOutboundCents,
     availableCents: balances.availableCents,
   };
 }

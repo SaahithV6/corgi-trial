@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * The expiry sweep.
  *
@@ -29,6 +27,8 @@ import "server-only";
  * hold that the clock has already released, which is exactly why the closure
  * row is written first and the posting second.
  */
+
+import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { bookDate } from "@/lib/mcp/time";

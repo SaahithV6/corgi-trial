@@ -1,19 +1,3 @@
-import type { Sql } from "@/lib/ledger/queries";
-
-import { verifyStatement } from "./publish";
-import {
-  currentWatermark,
-  listLatePostings,
-  listStatementVersions,
-  renderStatement,
-} from "./read";
-import type {
-  BusinessDate,
-  LatePosting,
-  PublishedStatement,
-  StatementComparison,
-} from "./types";
-
 /**
  * As published, versus as corrected.
  *
@@ -52,6 +36,22 @@ import type {
  * the delta and hoping — is how a reconciliation screen trains its readers to
  * ignore it.
  */
+
+import type { Sql } from "@/lib/ledger/queries";
+
+import { verifyStatement } from "./publish";
+import {
+  currentWatermark,
+  listLatePostings,
+  listStatementVersions,
+  renderStatement,
+} from "./read";
+import type {
+  BusinessDate,
+  LatePosting,
+  PublishedStatement,
+  StatementComparison,
+} from "./types";
 
 export interface CompareRequest {
   readonly accountId: string;

@@ -1,7 +1,3 @@
-import { createHash } from "node:crypto";
-
-import type { StatementDocument, StatementLine } from "./types";
-
 /**
  * The canonical rendering, and the hash taken over it.
  *
@@ -58,6 +54,10 @@ import type { StatementDocument, StatementLine } from "./types";
  * No floats anywhere: amounts enter as `bigint` and are rendered with
  * `toString()`, which is exact.
  */
+
+import { createHash } from "node:crypto";
+
+import type { StatementDocument, StatementLine } from "./types";
 
 /**
  * The renderer's version, first field of every preimage.

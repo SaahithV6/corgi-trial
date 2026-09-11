@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * Every database statement the hold machinery issues, and nothing else.
  *
@@ -19,6 +17,8 @@ import "server-only";
  *      an INSERT that some unique index may refuse, and a refusal is the
  *      answer, not an error to work around.
  */
+
+import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { postEntry } from "@/lib/ledger/post";

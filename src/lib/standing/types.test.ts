@@ -31,6 +31,7 @@ function snapshot(
     ledgerCents: ledger,
     holdsCents: holds,
     unclearedCents: uncleared,
+    pendingOutboundCents: 0n,
     availableCents: ledger - holds - uncleared,
   };
 }
