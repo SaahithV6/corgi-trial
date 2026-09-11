@@ -303,6 +303,49 @@ export async function fileDisputeAction(
   );
 
   if (result.kind === "refused") {
+    // -------------------------------------------------------------------
+    // OVER_CLAIMED is the one refusal whose sentence is written in MINOR
+    // UNITS, and a customer must never be shown one.
+    //
+    // `raiseDispute()` composes "Only 4250 cents of this 9900 cent charge is
+    // still unclaimed" because it serves both surfaces and the operator
+    // console reads cents. That file is the library and it is not this
+    // surface's to edit, so the code is caught HERE — at the boundary where a
+    // library answer becomes a sentence for the person whose money it is —
+    // and the figures are rendered through `formatUsd` like every other
+    // amount on this screen.
+    //
+    // It is reachable, and only one way: nobody types an amount here, so the
+    // claim is the outstanding figure read a few statements above, and the
+    // library re-derives the same figure under its own advisory lock. They
+    // disagree only when a second claim landed on this charge in between. The
+    // figures below therefore come from a FRESH read rather than from the
+    // pair that was already stale when the library refused it.
+    // -------------------------------------------------------------------
+    if (result.code === "OVER_CLAIMED") {
+      const nowCharge = await readCardCharge(disputedEntryId, sql);
+      const chargeCents = nowCharge?.netChargeCents ?? charge.netChargeCents;
+      const leftCents =
+        nowCharge === null
+          ? 0n
+          : nowCharge.netChargeCents - nowCharge.alreadyClaimedCents;
+      return refused(
+        result.code,
+        `Another claim was filed against this charge while this page was open, so there is less ` +
+          `left to claim than when the screen was drawn. ${formatUsd(leftCents)} of this ` +
+          `${formatUsd(chargeCents)} charge is still unclaimed, and you asked for ` +
+          `${formatUsd(outstandingCents)}. Nothing was written and no money moved. Reload this ` +
+          `page and file again for what is left.`,
+        disputedEntryId,
+        [
+          { label: "The charge", value: formatUsd(chargeCents) },
+          { label: "Still unclaimed", value: formatUsd(leftCents) },
+          { label: "You asked to claim", value: formatUsd(outstandingCents) },
+          { label: "Money moved", value: "none" },
+        ],
+      );
+    }
+
     // Carried through with its own code, not flattened. Every one of these has
     // a matching `RAISE EXCEPTION` in `assert_dispute_intake()`; an error the
     // library does not recognise was rethrown before it ever reached here.

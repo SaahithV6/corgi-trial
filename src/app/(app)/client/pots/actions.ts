@@ -211,7 +211,14 @@ function receiptFacts(
 ): readonly PotFact[] {
   const { receipt } = move;
   return [
-    { label: "Moved", value: formatUsd(receipt.amountCents) },
+    // NOT `receipt.amountCents` on a replay. The receipt carries the amount
+    // that was typed; the `Entry` line below carries the id of an entry that
+    // already existed, and the amount is not part of the idempotency key — so
+    // the two can describe different movements. `postedMessage()` says so in
+    // words, and this line stops the figure contradicting it.
+    receipt.replay
+      ? { label: "Moved", value: "nothing — this reference was already posted" }
+      : { label: "Moved", value: formatUsd(receipt.amountCents) },
     {
       label: `“${receipt.potName}” now holds`,
       value: formatUsd(receipt.after.potCents),
@@ -443,22 +450,72 @@ export async function transferBetweenClientPotsAction(
     );
   }
 
+  // ---------------------------------------------------------------------
+  // A REPLAY IS NOT A TRANSFER, AND EACH LEG REPLAYS ON ITS OWN.
+  //
+  // `moveIdempotencyKey()` is `pot:<potId>:<direction>:<reference>` and the
+  // AMOUNT IS DELIBERATELY NOT IN IT, so pressing the button twice — or typing
+  // a different figure under the same reference — lands on the entry that
+  // already exists and writes nothing. The receipt still carries the amount
+  // that was TYPED, because that is what the caller passed; the `entryId`
+  // beside it is the entry that was already there, which may have been posted
+  // for something else entirely. Printing the two together is how a screen
+  // tells somebody $500.00 moved when nothing did, under the id of an entry
+  // that says $50.00.
+  //
+  // So the typed amount is not printed on any replayed leg. What is printed is
+  // what is true: the pot balances, which on a replay are the balances read
+  // behind the lock a moment ago, and the entry the reference already names.
+  //
+  // The two legs replay independently and the three combinations mean three
+  // different things, including one where the money is sitting in the main
+  // balance — so they are answered separately rather than collapsed.
+  // ---------------------------------------------------------------------
+  const fromName = release.receipt.potName;
+  const toName = earmark.receipt.potName;
+  const balances: readonly PotFact[] = [
+    { label: `“${fromName}” now holds`, value: formatUsd(release.receipt.after.potCents) },
+    { label: `“${toName}” now holds`, value: formatUsd(earmark.receipt.after.potCents) },
+    { label: "Available to spend", value: formatUsd(earmark.receipt.after.availableCents) },
+    { label: "Release entry", value: release.receipt.entryId, mono: true },
+    { label: "Earmark entry", value: earmark.receipt.entryId, mono: true },
+  ];
+
+  if (release.receipt.replay && earmark.receipt.replay) {
+    return result(
+      "posted",
+      null,
+      `Nothing was written. Both halves of this transfer are already in your journal under the reference “${reference}”, so this press posted no entry and moved no money — what you are looking at is the pair of entries that already exist. The amounts on them are whatever they were posted for, which is not necessarily what you have just typed: a reference names one movement, and the amount is not part of what makes it one. The balances below are the pots as they stand right now. To move money again, give it a different reference.`,
+      balances,
+    );
+  }
+
+  if (release.receipt.replay) {
+    return result(
+      "posted",
+      null,
+      `Only the second half was written. “${fromName}” had already released money under the reference “${reference}” — that entry was left alone and nothing came out of the pot a second time — and the earmark into “${toName}” has now been posted for ${formatUsd(amountCents)}. Check the two balances below against what you meant to move: if the release you are replaying was for a different amount, this press has not moved the two pots by the same figure.`,
+      balances,
+    );
+  }
+
+  if (earmark.receipt.replay) {
+    return result(
+      "posted",
+      null,
+      `Only the first half was written, and your money is in your main balance. ${formatUsd(amountCents)} came out of “${fromName}”, but the earmark into “${toName}” was already in your journal under the reference “${reference}”, so nothing was set aside a second time and that ${formatUsd(amountCents)} is sitting spendable in your main balance right now. Nothing is lost. Move it into “${toName}” under a different reference, or put it back where it came from.`,
+      [
+        { label: "Released from", value: `“${fromName}”` },
+        { label: "Now in your main balance", value: formatUsd(release.receipt.after.mainCents) },
+        ...balances,
+      ],
+    );
+  }
+
   return result(
     "posted",
     null,
-    `${formatUsd(amountCents)} moved from “${release.receipt.potName}” to “${earmark.receipt.potName}”. That is two journal entries, not one: a release and an earmark, each decided on its own behind its own lock. Your total is unchanged — the money never left your account.`,
-    [
-      {
-        label: `“${release.receipt.potName}” now holds`,
-        value: formatUsd(release.receipt.after.potCents),
-      },
-      {
-        label: `“${earmark.receipt.potName}” now holds`,
-        value: formatUsd(earmark.receipt.after.potCents),
-      },
-      { label: "Available to spend", value: formatUsd(earmark.receipt.after.availableCents) },
-      { label: "Release entry", value: release.receipt.entryId, mono: true },
-      { label: "Earmark entry", value: earmark.receipt.entryId, mono: true },
-    ],
+    `${formatUsd(amountCents)} moved from “${fromName}” to “${toName}”. That is two journal entries, not one: a release and an earmark, each decided on its own behind its own lock. Your total is unchanged — the money never left your account.`,
+    balances,
   );
 }

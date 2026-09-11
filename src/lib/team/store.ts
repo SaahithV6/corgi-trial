@@ -394,8 +394,31 @@ export async function listTermsVersions(
 /* 2. Writes                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * 0064's refusal, by name.
+ *
+ * A terms version stamped at or before a payment approval already recorded
+ * against that member retroactively invalidates it, and `v_member_approval_
+ * without_right` — MUST BE EMPTY — would gain a row on an append-only book
+ * that cannot have it taken back out. The migration refuses the write, from a
+ * DEFERRED constraint trigger, so the error arrives at COMMIT with SQLSTATE
+ * 55006 and this name in `constraint_name`.
+ *
+ * It is mapped to a token for the reason 0057 §7 gives about
+ * `POT_WOULD_GO_NEGATIVE`: a refusal a caller can act on is a named code, not
+ * a five-character SQLSTATE that three unrelated guards share. And this one is
+ * ACTIONABLE in two different ways depending on which case it is — retry, or
+ * escalate to a human — so the caller has to be able to tell it apart from
+ * `VERSION_RACE` and from a generic write failure.
+ */
+export const TERMS_PREDATE_APPROVAL_CONSTRAINT = "team_member_version_predates_approval";
+export const TERMS_PREDATE_APPROVAL_CODE = "TERMS_PREDATE_RECORDED_APPROVAL";
+
 function failure(thrown: unknown, fallback: string): { ok: false; code: string; message: string } {
-  const code = (thrown as { code?: string }).code ?? "TEAM_WRITE_FAILED";
+  const pgCode = (thrown as { code?: string }).code ?? "TEAM_WRITE_FAILED";
+  const constraint = (thrown as { constraint_name?: string }).constraint_name;
+  const code =
+    constraint === TERMS_PREDATE_APPROVAL_CONSTRAINT ? TERMS_PREDATE_APPROVAL_CODE : pgCode;
   const message = thrown instanceof Error ? thrown.message : fallback;
   // A plpgsql RAISE arrives with the sentence the migration wrote, and that
   // sentence is the useful half: "actor X administers the team actor Y belongs

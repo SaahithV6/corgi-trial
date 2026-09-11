@@ -7,6 +7,7 @@ import {
   requestClientQuoteAction,
 } from "@/app/(app)/client/payouts/actions";
 import { FOCUS_RING } from "@/components/ui/primitives";
+import { formatCountdown, formatTimestamp } from "@/lib/format/datetime";
 
 import type { QuoteLine } from "./contract";
 import { ACCEPT_IDLE, QUOTE_REQUEST_IDLE } from "./state";
@@ -238,11 +239,52 @@ export function QuoteDesk({
             {offer.destination}. {quoteState.message}
           </p>
 
-          <p className="mt-3 text-sm">
-            This offer stops standing at <span className="font-mono">{offer.expiresAt}</span>, which
-            was {offer.expiresInSeconds} seconds away when this page was drawn. After that it is
-            not a rate anybody would deal at and accepting it will be refused.
-          </p>
+          {/* THE INSTANT, NOT THE ISO STRING, AND THE COUNTDOWN BESIDE IT.
+              `expiresAt` printed raw as `2026-09-11T19:04:22.117Z`, which is
+              the one figure on this panel a person has to act on and the one
+              they would have had to convert in their head. `formatTimestamp`
+              renders it in the same banking timezone as every other instant in
+              this build.
+
+              `now` is derived from the two fields the offer already carries —
+              the expiry instant less the seconds it had left when the server
+              drew it — rather than from `Date.now()`. This is a client
+              component, and reading the browser's clock here would make the
+              hydrated countdown disagree with the rendered one. It also keeps
+              the offer a pure function of its props, the same rule
+              `@/lib/format/datetime` states for every age in this build.
+
+              An offer that has run out is said so plainly and struck through,
+              because "expires in 0 seconds" and "this is no longer on the
+              table" are the same fact and only one of them is readable. */}
+          {(() => {
+            const nowIso = new Date(
+              Date.parse(offer.expiresAt) - offer.expiresInSeconds * 1000,
+            ).toISOString();
+            const gone = offer.expiresInSeconds <= 0;
+            return (
+              <p className="mt-3 text-sm">
+                This offer stops standing at{" "}
+                <span className={gone ? "text-muted line-through" : "font-medium"}>
+                  {formatTimestamp(offer.expiresAt)}
+                </span>
+                {gone ? (
+                  <>
+                    , and that moment has passed. It is no longer a rate anybody would deal at,
+                    and accepting it will be refused. Ask for a new one — asking costs nothing and
+                    commits nothing.
+                  </>
+                ) : (
+                  <>
+                    {" "}
+                    — {formatCountdown(offer.expiresAt, nowIso)} from when this page was drawn.
+                    After that it is not a rate anybody would deal at and accepting it will be
+                    refused.
+                  </>
+                )}
+              </p>
+            );
+          })()}
 
           {offer.rateEvidence === "simulated" ? (
             <p className="mt-3 rounded border border-border-strong bg-surface-raised px-3 py-2 text-sm">

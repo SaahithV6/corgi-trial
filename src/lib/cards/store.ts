@@ -30,10 +30,15 @@
 
 import "server-only";
 
-import { sql } from "@/lib/ledger/db";
+import { sql, type Sql } from "@/lib/ledger/db";
 import { isMemberState, isTeamRole } from "@/lib/team/roles";
 
-import { CONTROL_READ_BUDGET_MS, DECISION_APPEND_BUDGET_MS, withDeadline } from "./budget";
+import {
+  CONTROL_READ_BUDGET_MS,
+  DECISION_APPEND_BUDGET_MS,
+  stopwatch,
+  withDeadline,
+} from "./budget";
 import {
   PURCHASE_STATUSES,
   isJudgedRule,
@@ -123,12 +128,20 @@ export async function readControlsAndSpend(params: {
   readonly providerCardToken: string;
   readonly source: DecisionSource;
   readonly budgetMs?: number;
+  /**
+   * The connection to read on. Defaults to the pool. The ONLY caller that
+   * passes one is `decideUnderLock()`, which needs the read to happen inside
+   * the transaction that holds the lock — a read on a different connection is
+   * a read the lock does not cover, which is the entire bug.
+   */
+  readonly conn?: Sql;
 }): Promise<ControlLookup> {
   const budget = params.budgetMs ?? CONTROL_READ_BUDGET_MS;
+  const conn = params.conn ?? sql;
 
   try {
     const rows = await withDeadline(
-      sql<(LookupRow & MemberRow)[]>`
+      conn<(LookupRow & MemberRow)[]>`
         SELECT c.id                       AS card_id,
                cc.control_version_id,
                cc.version,
@@ -374,9 +387,12 @@ function decisionColumns(params: AppendDecisionParams) {
  * `numeric`, but every reader between here and a screen is JavaScript, and
  * `JSON.parse` turns 9007199254740993 into 9007199254740992.
  */
-export function startDecisionAppend(params: AppendDecisionParams): Promise<string | null> {
+export function startDecisionAppend(
+  params: AppendDecisionParams,
+  conn: Sql = sql,
+): Promise<string | null> {
   const c = decisionColumns(params);
-  return sql<{ id: string }[]>`
+  return conn<{ id: string }[]>`
     INSERT INTO card_auth_decision (
       provider, provider_auth_token, provider_card_token,
       card_id, control_version_id, member_id, member_version_id,
@@ -494,6 +510,153 @@ export async function appendDecision(
   budgetMs: number = DECISION_APPEND_BUDGET_MS,
 ): Promise<string | null> {
   return awaitDecisionAppend(startDecisionAppend(params), budgetMs);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 2b. The serialised decision — MEASUREMENT ONLY, NOT WIRED IN               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Read, judge and record ONE authorisation inside ONE transaction, behind a
+ * lock taken BEFORE the read.
+ *
+ * ─── WHY THIS EXISTS AND WHY NOTHING CALLS IT ON THE HOT PATH ───────────────
+ *
+ * The race is real and reproduced: `readControlsAndSpend()` sums today's
+ * approvals, `decide()` compares, `startDecisionAppend()` writes, and nothing
+ * holds the sum still across the three. Two authorisations in the same instant
+ * both read the pre-state and both approve. This function is the shape that
+ * closes it — lock, then read, then write, all inside one transaction, so the
+ * second arrival reads a sum that already contains the first.
+ *
+ * It is exported for the BENCHMARK (`lock.bench.test.ts`) and for the race
+ * probe, and it is deliberately NOT called by
+ * `src/app/api/webhooks/lithic-auth/route.ts`. See `docs`-free note below and
+ * the report: wiring it in requires changing that route's three-step shape,
+ * which is outside this change's remit, and shipping it into the harness lane
+ * alone would turn the race probe green while production still raced. That
+ * would be worse than leaving the probe red.
+ *
+ * ─── THE LOCK IS AN ADVISORY LOCK AND THAT IS A DEVIATION ───────────────────
+ *
+ * The house form is a SECURITY DEFINER function doing `SELECT ... FOR UPDATE`
+ * (`lock_card_authorization()`, `lock_business_deposits()`,
+ * `lock_business_team()`). It cannot be used here without a new migration:
+ * MEASURED as `corgi_app` against this book, every row-lock form on every card
+ * table is refused —
+ *
+ *   SELECT id FROM card              ... FOR UPDATE    -> 42501 permission denied
+ *   SELECT id FROM card_auth_decision... FOR UPDATE    -> 42501 permission denied
+ *   SELECT id FROM card              ... FOR KEY SHARE -> 42501 permission denied
+ *
+ * — because `FOR UPDATE` needs the UPDATE privilege and `corgi_app` provably
+ * holds none on a money table. A `lock_card_controls()` definer function is
+ * the right answer and it belongs in `db/migrations/`, which this change does
+ * not own. So the lock below is `pg_advisory_xact_lock()`, which needs no
+ * privilege, is released at the caller's COMMIT or ROLLBACK exactly as the
+ * definer locks are, and is namespaced by a classid so it cannot collide with
+ * another subsystem's key.
+ *
+ * The key is `(provider, provider_card_token)` and not the card id, because the
+ * token is what the request carries and the card id is not known until the read
+ * has already happened — locking on it would put the lock AFTER the read, which
+ * is the bug.
+ */
+
+/**
+ * Advisory-lock namespace for the card authorisation path. Arbitrary but fixed;
+ * the two-argument form of `pg_advisory_xact_lock` exists so that two
+ * subsystems hashing unrelated strings cannot serialise each other by accident.
+ */
+const CARD_AUTH_LOCK_CLASS = 0x0ca4d;
+
+export type SerialisedDecision = {
+  readonly lookup: ControlLookup;
+  readonly verdict: Verdict;
+  readonly decisionId: string | null;
+  /** Read plus judge, microseconds — the same figure the unlocked path records. */
+  readonly decisionLatencyUs: number;
+  /** Wall time of the whole transaction including lock acquisition, microseconds. */
+  readonly totalUs: number;
+};
+
+export async function decideUnderLock(params: {
+  readonly provider: string;
+  readonly providerCardToken: string;
+  readonly source: DecisionSource;
+  readonly requestId: string | null;
+  readonly request: AuthRequest;
+  /** `decide()`, passed in so this file still knows nothing about the rules. */
+  readonly judge: (lookup: ControlLookup) => Verdict;
+  readonly budgetMs?: number;
+  /** Take the lock. False prices the same transaction without it. Bench only. */
+  readonly lock?: boolean;
+  /** Roll back instead of committing. Bench only — leaves no row behind. */
+  readonly rollback?: boolean;
+}): Promise<SerialisedDecision> {
+  const total = stopwatch();
+  const out = await sql
+    .begin(async (tx) => {
+      const t = tx as unknown as Sql;
+
+      // 1. The lock. BEFORE the read, which is the whole point: a lock taken
+      //    after the sum has been read holds still a number that is already
+      //    stale.
+      if (params.lock !== false) {
+        await t`SELECT pg_advisory_xact_lock(
+                  ${CARD_AUTH_LOCK_CLASS}::int,
+                  hashtext(${`${params.provider}:${params.providerCardToken}`})::int)`;
+      }
+
+      const clock = stopwatch();
+      const lookup = await readControlsAndSpend({
+        provider: params.provider,
+        providerCardToken: params.providerCardToken,
+        source: params.source,
+        ...(params.budgetMs === undefined ? {} : { budgetMs: params.budgetMs }),
+        conn: t,
+      });
+      const verdict = params.judge(lookup);
+      const decisionLatencyUs = clock();
+
+      const decisionId = await startDecisionAppend(
+        {
+          provider: params.provider,
+          request: params.request,
+          lookup,
+          verdict,
+          latencyUs: decisionLatencyUs,
+          source: params.source,
+          requestId: params.requestId,
+        },
+        t,
+      );
+
+      const result = { lookup, verdict, decisionId, decisionLatencyUs };
+      if (params.rollback === true) throw new RollbackAfter(result);
+      return result;
+    })
+    .catch((thrown: unknown) => {
+      if (thrown instanceof RollbackAfter) return thrown.result;
+      throw thrown;
+    });
+
+  return { ...out, totalUs: total() };
+}
+
+/** Thrown to roll a priced transaction back while keeping what it computed. */
+class RollbackAfter extends Error {
+  constructor(
+    readonly result: {
+      readonly lookup: ControlLookup;
+      readonly verdict: Verdict;
+      readonly decisionId: string | null;
+      readonly decisionLatencyUs: number;
+    },
+  ) {
+    super("rollback after measurement");
+    this.name = "RollbackAfter";
+  }
 }
 
 /* -------------------------------------------------------------------------- */

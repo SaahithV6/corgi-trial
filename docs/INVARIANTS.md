@@ -221,6 +221,9 @@ actually touched, with `v_internal_transfer_impure` at `0 -> 0` because
 Band `[2025-09-10, 2028-03-11]`. Identical `$300,000.00` write:
 `2025-09-11` → `0 -> 0`; `2025-09-09` → `0 -> 1`.
 
+That is the **lower** edge, and it is what a threshold IS — see Part 4 #4,
+where the edge is separated from the finding.
+
 ### Measured rather than written
 
 **`v_refused_auth_hold` (14)** — the gate `active_hold_cents > 0` is *a balance
@@ -237,6 +240,11 @@ never questioned again. **CLOSED** by `v_advice_base_drift`.
 
 **`v_accrual_month_drift` (7)** — five accrual months, none complete. The
 guard's population is **zero**; `GUARD REACH` prints `EMPTY`.
+
+**`v_value_date_out_of_band` (26's census)** — the band's **upper** half has
+never evaluated true. **0** of its 1,712 rows are on the `beyond the settlement
+window` side, and **0** of the 220 forward-dated entries on this book are
+outside the band. Figures, and what the gap costs, in Part 4 #4.
 
 ---
 
@@ -360,7 +368,82 @@ this book* — 271 memo entries are booked after their hold's closure and they a
 ordinary settlement traffic. A guard asserting it would arrive red with 271 rows
 of correct behaviour.
 
-**#4 — `v_value_date_unexplained`'s band.** Dodgeable by one day.
+**#4 — `v_value_date_unexplained`'s band, and the ceiling that has never
+fired.**
+
+The one-day dodge is real and it is **not** the finding. Band
+`[2025-09-10, 2028-03-11]`: `2025-09-11` passes, `2025-09-09` fires (D‑H). Every
+band has two edges and a write one day inside either of them passes *by
+definition* — that is what a threshold is, and reporting it as a weakness would
+mean reporting every threshold in this document twice (rule 6). It stays
+written down because a reader is entitled to see where the edge is, not because
+moving it would buy anything.
+
+**The substantive weakness is the other edge, and it is not an edge — it is a
+ceiling nothing has ever touched.** `hi` is `book_date(now()) + 18 months`.
+Measured on this book, `book_date(now()) = 2026-09-11`:
+
+```
+journal entries dated after today                        220
+  ... of those, visible to v_value_date_out_of_band        0
+  ... furthest forward of them                    2027-12-08   (today + 453)
+v_value_date_out_of_band                               1,712 rows
+  ... on the 'beyond the settlement window' side           0
+  ... on the 'before the entity existed' side          1,712
+```
+
+All 1,712 out-of-band rows are on the **past** side. Not one entry in the life
+of this book has crossed the upper edge. A half-predicate that has never
+evaluated true has not been shown sound — it has been unexercised, and the
+distinction matters because the two halves of this band are answering different
+questions (below).
+
+**What that costs, concretely — the live-fire attack is invisible to it.**
+`src/test/livefire/attack-06-planted-break.test.ts` dates itself
+`today + 365 + (stamp % 90)`, so at most `today + 455`, roughly three months
+short of the ceiling. It has written **136** entries on this book:
+
+| `LF6-` entries on the book | count | what they are |
+| --- | --- | --- |
+| **total** | **136** | |
+| visible to `v_value_date_out_of_band` | **12** | dated 2002‑02‑15 … 2010‑05‑11 — out of band for the *opposite* reason, too far in the **past**, left by an earlier revision of the file |
+| forward-dated and **in-band** | **124** | dated 2027‑09‑22 … 2027‑12‑08 — inside `hi`, therefore invisible |
+
+0047 registers `LF6-` as a **declared writer**, and that registration is
+**inert for all 124**: a declared row is still a row the view produced, and the
+view produces none of them. It accounts for the 12 it can see and says nothing
+about the 124 it cannot. So the claim that **the book can distinguish a
+deliberately future-dated entry from a misdated one** was not true of those
+rows. The only thing on the book that says the 2027 date was chosen on purpose
+is free text in the entry's own description — which is
+`v_deposit_outflow_unexplained`'s weak arm in a different column, and carries
+exactly as much weight: it catches a writer that forgot, never one that lied.
+
+**The general form, which is the part worth keeping.** `today + 18 months` is
+not a calibration that is slightly too loose; it is the wrong kind of
+predicate. Any writer reaching `ledger_append()` may put money **fifteen months
+forward** and no guard on this book has an opinion — not this one, not
+`v_late_postings`, and not day close, which by DESIGN §13 accepts late and
+corrected value dates as a matter of design rather than tolerance. The
+predicate asks *"is this date physically absurd?"*. That is a **plausibility
+filter**, and it is being read as an answer to *"did anybody choose this
+date?"*, which would be an **anomaly detector**. Only the first question is
+asked. By rule 1 the quantity is tunable and the dodge needs no construction at
+all: pick any date inside eighteen months — which is every date a plausible
+forward-dated entry would carry anyway.
+
+**Why the repair is not "tighten `hi`".** A shorter band arrives red against
+legitimate forward-dated traffic the same way #3's *"no memo posting after
+closure"* would, and a band tight enough to catch a chosen date is tight enough
+to catch a real one; that is the same trade D‑I′ rejected for whitelists. The
+repair that would work is the one D‑I′ argued for — **provenance, not
+magnitude**: a forward date is explained by a row in another table naming who
+asked for it, in the shape `journal_value_date_residue` already has for the
+past. The band would keep its own narrow, honest claim: *it catches a date that
+cannot be right; it does not catch a date that nobody chose.*
+
+*(The view is not touched here. This entry records what it does, not a change
+to it.)*
 
 **#5 — The shared advice blind spot.** Both `v_advice_delta_unsound` and
 `v_advice_base_drift` draw their population from

@@ -1976,6 +1976,27 @@ N("J7e", "the FX corridor brief I wrote was wrong about the live book", "referen
        "rows, all already correct, including a JPY quote properly at exponent "
        "0. the constraint validated every one. second time today a brief of "
        "mine asserted a fact the agent then measured and corrected")
+N("J8a", "there was no error.tsx anywhere under (app)", "correctness", 0, [],
+  "claude", ["app/(app)/error.tsx"], "done",
+  risk="a reader that threw PAST ITS OWN GUARD left the page in its Suspense "
+       "fallback — a skeleton, animating, at HTTP 200, forever. an operator "
+       "could not tell 'this is loading' from 'this died', and the status code "
+       "said everything was fine. third member of the family that /team "
+       "(skeleton + 200 for hours) and /statements (HASH REPRODUCED with no "
+       "connection) belong to, and the one still standing. Next composes this "
+       "for every segment under (app), so a screen added tomorrow is covered "
+       "without anyone remembering — the same default-deny property the "
+       "authorisation policy uses. it does NOT auto-retry and does not claim "
+       "the money is fine: a read that threw says nothing about the book, so "
+       "the honest instruction is re-read, not re-submit")
+N("J8b", "GAUNTLET 7 IS PROVEN: a closed day re-derives byte-identically", "submission",
+  0, [], "agent", ["lib/statements"], "done",
+  risk="it was reported unproven because it SKIPS in the default gate — DB "
+       "tests are opt-in behind RUN_DB_TESTS=1. run with the gate on, all four "
+       "pass: 're-renders byte-identically, twice, at two different instants' "
+       "(9,485ms) and 'reproduces the Ridgeline 2026-09-08 correction, and "
+       "keeps reproducing it'. so the brief's 'identical every time, "
+       "corrections included' is demonstrated, not merely designed for")
 N("J2f", "deploy and re-run every scoreboard against one sha",
   "release", 20, ["J2a", "J2b", "J2c", "J2d", "J2e"], "claude", [], status="done",
   risk="the honesty tools check documents against the DEPLOYMENT and never checked "

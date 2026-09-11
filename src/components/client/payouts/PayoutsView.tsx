@@ -12,6 +12,7 @@ import {
   TD_CLASS,
   TH_CLASS,
 } from "@/components/ui/primitives";
+import { formatCountdown, formatTimestamp } from "@/lib/format/datetime";
 import { formatUsd } from "@/lib/format/money";
 
 import { CLIENT_SCREENS, clientHref, type ClientView } from "../view-state";
@@ -80,6 +81,51 @@ const STATE_WORDS: Record<string, { readonly label: string; readonly note: strin
     note: "The payout went out at the rate you accepted.",
   },
 };
+
+/**
+ * When the offer stops standing, and how long that is from now.
+ *
+ * The column used to be absent and `expiresAt` was carried to this screen
+ * unrendered, so the one figure that decides whether a rate is still yours to
+ * take was the one figure the page did not show. It is rendered against
+ * `screen.asOf` — the single instant every figure on this page was read at,
+ * already on the contract — so the countdown agrees with the balances beside
+ * it rather than with the viewer's clock, and the server render and the
+ * hydration agree. `formatCountdown` returns `due now` once the instant has
+ * passed; a lapsed offer is struck through as well as said, because a row a
+ * customer is scanning for a rate they can still take should not need reading
+ * to be ruled out.
+ *
+ * Only an `open` quote has a live countdown. Once a quote is accepted the rate
+ * is committed and this instant no longer governs anything — what governs then
+ * is the settlement deadline, which is in the commitments table above under
+ * "We must pay by" and is a different column with a different meaning.
+ */
+function QuoteExpiryCell({
+  quote,
+  asOf,
+}: {
+  readonly quote: PayoutsScreen["quotes"][number];
+  readonly asOf: string;
+}) {
+  const lapsed = quote.state === "expired" || quote.state === "lapsed";
+  return (
+    <td className={`${TD_CLASS} text-xs`}>
+      <span className={lapsed ? "text-muted line-through" : undefined}>
+        {formatTimestamp(quote.expiresAt)}
+      </span>
+      {quote.state === "open" ? (
+        <span className="mt-0.5 block text-muted">
+          {formatCountdown(quote.expiresAt, asOf)}
+        </span>
+      ) : lapsed ? (
+        <span className="mt-0.5 block text-muted">expired</span>
+      ) : (
+        <span className="mt-0.5 block text-muted">rate committed</span>
+      )}
+    </td>
+  );
+}
 
 function QuoteStateBadge({ state }: { readonly state: string }) {
   const words = STATE_WORDS[state];
@@ -211,7 +257,7 @@ export function PayoutsView({
           <MetaList
             items={[
               { label: "account", value: screen.legalName },
-              { label: "as of", value: screen.asOf },
+              { label: "as of", value: formatTimestamp(screen.asOf) },
             ]}
           />
         </div>
@@ -258,7 +304,22 @@ export function PayoutsView({
                         <Money cents={c.withheldCents} />
                       </td>
                       <td className={`${TD_CLASS} money`}>{c.deliveryDisplay}</td>
-                      <td className={`${TD_CLASS} font-mono text-xs`}>{c.settleBy ?? "—"}</td>
+                      {/* An instant, so it renders like every other instant in
+                          this build — in the banking timezone, with the time on
+                          it. "We must pay by" is a deadline a customer may act
+                          on, and a raw `2026-09-11T19:04:22.117Z` is not one. */}
+                      <td className={`${TD_CLASS} text-xs`}>
+                        {c.settleBy === null ? (
+                          "—"
+                        ) : (
+                          <>
+                            {formatTimestamp(c.settleBy)}
+                            <span className="mt-0.5 block text-muted">
+                              {formatCountdown(c.settleBy, screen.asOf)}
+                            </span>
+                          </>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -299,6 +360,7 @@ export function PayoutsView({
                     <th className={TH_CLASS}>You send</th>
                     <th className={TH_CLASS}>They receive</th>
                     <th className={TH_CLASS}>Your rate</th>
+                    <th className={TH_CLASS}>Offer stands until</th>
                     <th className={TH_CLASS}>Where it stands</th>
                   </tr>
                 </thead>
@@ -322,6 +384,7 @@ export function PayoutsView({
                       </td>
                       <td className={`${TD_CLASS} money`}>{q.deliveryDisplay}</td>
                       <td className={`${TD_CLASS} money`}>{q.rateDisplay}</td>
+                      <QuoteExpiryCell quote={q} asOf={screen.asOf} />
                       <td className={TD_CLASS}>
                         <QuoteStateBadge state={q.state} />
                         <span className="mt-1 block max-w-xs text-xs text-muted">

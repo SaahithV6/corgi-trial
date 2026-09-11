@@ -277,6 +277,15 @@ const ALLOWED: readonly (readonly [module: string, file: string, refs: number])[
   // named reader the publisher used would be asserting that one function
   // agrees with itself, which is not the claim gauntlet item 7 makes.
   ["statements", "src/lib/statements/reproducibility.integration.test.ts", 7],
+  // The interchange differential fuzzer, added on the last day. 4,008 generated
+  // cases proving TS and SQL price a settlement identically digit for digit,
+  // over the range the SCHEMA allows rather than the range the seeded rate card
+  // uses — "the app would never send that" is not a property of a column. It
+  // reaches the ledger because it asserts the nine conjuncts of
+  // `interchange_posting_arithmetic` accept the numbers TypeScript computes,
+  // which is a claim about what the DATABASE would take, not about what one
+  // function returns.
+  ["interchange", "src/lib/interchange/arith-fuzz.test.ts", 2],
   ["webhooks", "src/lib/webhooks/consumers/lithic-card.test.ts", 2],
 
   // ---- the live-fire attack suite --------------------------------------

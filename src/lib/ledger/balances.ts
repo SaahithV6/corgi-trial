@@ -27,6 +27,7 @@ import {
   accountAvailability,
   believedBalanceCents,
   businessAvailability,
+  unwrapLedgerRead,
   bookingWatermarkAt as bookingWatermarkAtConn,
   historicSnapshot,
   readSnapshot,
@@ -112,7 +113,21 @@ export async function availableBalance(
   conn: Sql = sql,
 ): Promise<AvailableBalance> {
   const snapshot = await readSnapshot(conn);
-  return businessAvailability(businessId, snapshot, conn);
+  // `businessAvailability()` can now answer LEDGER_NO_DEPOSIT_ACCOUNT, which is
+  // a state and not a balance. This function's signature promises a number, so
+  // it unwraps — and `unwrapLedgerRead()` THROWS on the refusal rather than
+  // composing zeros from nothing.
+  //
+  // Throwing is the honest minimum, not the destination. It surfaces through
+  // `(app)/error.tsx` as "this screen could not be drawn", which is true, where
+  // before every caller was handed `$0.00 − $0.00 − $0.00 − $0.00` under a
+  // green LIVE badge — an arithmetic nobody performed, presented as a read.
+  //
+  // The real repair is `AvailableBalance = BusinessAvailability`, pushing the
+  // state into the type at all eleven call sites so each one refuses in its own
+  // words. That is a wider change than the last hour allows and it is recorded
+  // as such; what is NOT acceptable in the meantime is the fabricated zero.
+  return unwrapLedgerRead(await businessAvailability(businessId, snapshot, conn));
 }
 
 /** Q2, account-scoped, taking its own snapshot. */

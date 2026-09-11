@@ -10,6 +10,8 @@ import {
   TH_CLASS,
 } from "@/components/ui/primitives";
 
+import { formatCountdown, formatTimestamp } from "@/lib/format/datetime";
+
 import type { BalanceScreen, BalanceTerms, HoldLine } from "./contract";
 import { ClientHeaderBar } from "./Chrome";
 import { holdKindExplanation, holdKindWord } from "./language";
@@ -103,7 +105,7 @@ export function BalanceView({
         <div className="mt-5 border-t border-border pt-3">
           <MetaList
             items={[
-              { label: "as of", value: header.asOf },
+              { label: "as of", value: formatTimestamp(header.asOf) },
               { label: "business day", value: header.valueDate },
               { label: "everything we have learned up to", value: `entry ${header.bookingWatermark}` },
             ]}
@@ -162,7 +164,7 @@ export function BalanceView({
         ) : (
           <ul className="divide-y divide-border">
             {holds.map((hold) => (
-              <HoldRow key={hold.holdId} hold={hold} />
+              <HoldRow key={hold.holdId} hold={hold} asOf={header.asOf} />
             ))}
           </ul>
         )}
@@ -293,7 +295,19 @@ function DerivationTable({ terms }: { readonly terms: BalanceTerms }) {
  * over-capture and a reversal arriving in any order. A screen that subtracted
  * two columns would be right until the day a reversal landed out of order.
  */
-function HoldRow({ hold }: { readonly hold: HoldLine }) {
+function HoldRow({
+  hold,
+  asOf,
+}: {
+  readonly hold: HoldLine;
+  /**
+   * The one instant the whole screen was read at, passed in rather than read
+   * from `Date.now()` here — `@/lib/format/datetime` states the rule and the
+   * reason: a page that reads the clock deep inside a component is not a pure
+   * function of its inputs and its fixtures stop being reproducible.
+   */
+  readonly asOf: string;
+}) {
   const card = hold.kind === "card_auth";
 
   return (
@@ -323,7 +337,7 @@ function HoldRow({ hold }: { readonly hold: HoldLine }) {
               ? hold.releaseWaitsOnAPerson
                 ? " · no release date: this one is released by a person"
                 : ""
-              : ` · expected to clear ${hold.availableAt}`}
+              : ` · expected to clear ${formatTimestamp(hold.availableAt)} (${formatCountdown(hold.availableAt, asOf)})`}
             {hold.policyDays === null
               ? ""
               : ` · held for ${hold.policyDays} banking day${hold.policyDays === 1 ? "" : "s"} under the funds policy in force when it was placed`}

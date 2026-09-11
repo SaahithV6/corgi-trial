@@ -6,6 +6,7 @@ import {
   Panel,
 } from "@/components/ui/primitives";
 import { describeMcc } from "@/lib/cards/mcc";
+import { formatTimestamp } from "@/lib/format/datetime";
 import { formatUsd } from "@/lib/format/money";
 
 import {
@@ -258,18 +259,41 @@ function CardRow({
           {limitSentence("Per payment", card.perTxnCents)}
           {limitSentence("Per day", card.dailyCents)}
           {limitSentence("Per month", card.monthlyCents)}
+          {/* AUTHORISED, NOT SPENT. These two figures are the sum of the
+              amounts we APPROVED on this card — `card_auth_decision` — and an
+              approval is a promise to stand behind an amount, not a payment.
+              A fuel pump authorises $50 before it knows what you pumped and
+              settles for $31.20; the note at the foot of this screen says so,
+              and "Spent today: $50.00" directly above it said otherwise.
+
+              They are labelled rather than recomputed because this is exactly
+              the figure the two limits beside them are compared against:
+              `decide.ts` checks the day and month windows against this same
+              sum, so relabelling makes the tile explain the limit next to it,
+              while a settled figure would explain nothing about either. What
+              actually left the account is on Activity, beside its
+              authorisation. */}
           <div>
-            <FieldLabel>Spent today</FieldLabel>
+            <FieldLabel>Authorised today</FieldLabel>
             <p className="text-sm">
               <Money cents={card.spentTodayCents} tone="neutral" />
             </p>
           </div>
           <div>
-            <FieldLabel>Spent this month</FieldLabel>
+            <FieldLabel>Authorised this month</FieldLabel>
             <p className="text-sm">
               <Money cents={card.spentThisMonthCents} tone="neutral" />
             </p>
           </div>
+          <p className="w-full max-w-prose text-left text-xs leading-relaxed text-muted">
+            The two figures above are what we approved on this card, which is
+            what the daily and monthly limits are measured against. They are not
+            what was taken from your account: an approval sets an amount aside
+            and the payment settles later, often for less. What was actually
+            taken is on your{" "}
+            <strong className="font-medium text-text">Activity</strong> page,
+            beside the authorisation it settled.
+          </p>
         </div>
       </div>
 
@@ -343,15 +367,31 @@ function DecisionRow({ decision }: { readonly decision: DecisionLine }) {
           <p className="mt-1 max-w-prose text-xs leading-relaxed">{decision.reason}</p>
 
           <p className="mt-1 text-[11px] text-muted">
-            {decision.decidedAt}
+            {/* `decidedAt` is an ISO instant and it used to print as one.
+                `formatTimestamp` renders every instant in this build in the
+                one banking timezone, so a decline's time can be compared with
+                a hold's release time and a statement's cut-off without the
+                reader converting anything in their head. */}
+            {formatTimestamp(decision.decidedAt)}
             {decision.mcc === null ? null : ` · ${describeMcc(decision.mcc)}`}
             {" · "}
             <code>{decision.rule}</code>
           </p>
         </div>
 
+        {/* EVERY ROW HERE IS AN AUTHORISATION, AND NONE OF THEM IS A CHARGE.
+            The figure is what the shop asked us to stand behind. On an
+            approval it was set aside as a hold and the money is still in the
+            account; on a decline nothing was set aside at all. The column used
+            to print the amount bare, which reads as a charge — and beside a
+            "Spent today" tile it read as a charge twice. */}
         <div className="shrink-0 text-right">
           <Money cents={decision.amountCents} tone="neutral" />
+          <p className="mt-0.5 text-[11px] text-muted">
+            {declined
+              ? "asked for · nothing held"
+              : "authorised · held, not yet taken"}
+          </p>
         </div>
       </div>
     </li>

@@ -11,6 +11,8 @@ import {
   TH_CLASS,
 } from "@/components/ui/primitives";
 
+import { formatTimestamp } from "@/lib/format/datetime";
+
 import type { ApprovalItem, ApproveScreen } from "./contract";
 import { ApproveForm } from "./ApproveForm";
 import { ClientHeaderBar } from "./Chrome";
@@ -261,7 +263,7 @@ function PaymentCard({
           Asked for by{" "}
           <span className="font-medium text-text">{item.requestedByName}</span>
           {item.requestedByKind === "human" ? "" : " (an automated assistant)"} on{" "}
-          {item.requestedAt}.{" "}
+          {formatTimestamp(item.requestedAt)}.{" "}
           {item.approvalsRequired === 0
             ? "It is under the amount that needs a second person."
             : `It has ${item.approvalsHeld} of ${item.approvalsRequired} approval${
@@ -309,7 +311,7 @@ function PaymentCard({
                 <span className="text-muted">
                   {" "}
                   — {event.actorName}
-                  {event.actorKind === "human" ? "" : " (automated)"}, {event.occurredAt}
+                  {event.actorKind === "human" ? "" : " (automated)"}, {formatTimestamp(event.occurredAt)}
                 </span>
                 {event.reason === null ? null : (
                   <span className="mt-0.5 block max-w-prose text-muted">

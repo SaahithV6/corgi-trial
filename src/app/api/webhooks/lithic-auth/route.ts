@@ -48,7 +48,6 @@
  * because it was stolen is not.
  */
 
-import { after } from "next/server";
 
 import {
   CONTROL_READ_BUDGET_MS,
@@ -62,10 +61,7 @@ import { AsaParseError, asaResponseBody, parseAsaRequest, verifyAsaSignature } f
 import { decide } from "@/lib/cards/decide";
 import { asaSecrets } from "@/lib/cards/provider";
 import {
-  awaitDecisionAppend,
-  readControlsAndSpend,
-  reappendDecisionIfMissing,
-  startDecisionAppend,
+  decideUnderLock,
 } from "@/lib/cards/store";
 import { logger, requestIdFrom } from "@/lib/log";
 import { toHeaderLookup } from "@/lib/webhooks/rawbody";
@@ -166,79 +162,71 @@ export async function POST(request: Request): Promise<Response> {
   //    (`status: 'unavailable'`), not an exception, because the fail-closed
   //    argument belongs in `decide()` where it can be read and tested — not in
   //    a catch block.
+  // 4-6. READ, DECIDE AND RECORD IN ONE LOCKED TRANSACTION.
+  //
+  //    These were three steps and the seam between them was a real race,
+  //    demonstrated on this book: two authorisations $2.00 over a $100.00
+  //    daily limit, BOTH APPROVED, each having read `spend=6000` because
+  //    neither could see the other's row yet. Measured at 18:58:40.321Z and
+  //    .329Z on card asa-default-mtx46zef, eight milliseconds apart.
+  //
+  //    The lock cannot live at the table: `corgi_app` provably holds no UPDATE
+  //    on a money table, so `SELECT ... FOR UPDATE` is refused 42501 — measured,
+  //    not assumed. It is `pg_advisory_xact_lock`, namespaced by classid,
+  //    released at COMMIT exactly as the definer locks are.
+  //
+  //    COST, MEASURED RATHER THAN EXTRAPOLATED, 25 samples each: p95 415ms
+  //    uncontended, 627ms with two legs racing one card, against a 6000ms
+  //    provider ceiling. 6.9% and 10.4% of the budget. The lock itself does not
+  //    rise above pool noise; the cost is the transaction.
+  //
+  //    THE WRITE NOW PRECEDES THE RESPONSE, and that is the trade: a process
+  //    that dies between COMMIT and the HTTP answer leaves a row saying
+  //    `approve` for money that never moved, so the next velocity sum
+  //    OVER-counts and the next authorisation is judged slightly tight. The old
+  //    ordering failed the other way — money moves, the row is missing, the sum
+  //    UNDER-counts and the limit leaks. An over-counting log costs a customer
+  //    one retryable decline; an under-counting one costs the limit itself.
   const decisionClock = stopwatch();
-  const lookup = await readControlsAndSpend({
-    provider: PROVIDER,
-    providerCardToken: asaRequest.card.token,
-    source: "provider",
-  });
-
-  // 5. DECIDE. Pure. No I/O, no clock, no database handle in scope.
-  const verdict = decide(asaRequest, lookup);
-  const decisionLatencyUs = decisionClock();
-
-  // 6. RECORD, BEFORE RESPONDING. This costs a round trip and it is chosen on
-  //    purpose: a decline a customer disputes in March has to be explainable
-  //    in September, and best-effort audit is not audit. The store answered a
-  //    line ago, so the marginal risk is small and the marginal evidence is
-  //    total. If the append misses ITS deadline the response still goes out
-  //    and `after()` finishes the row off the critical path — the cardholder's
-  //    purchase must not fail because our audit trail was slow.
-  const appendParams = {
-    provider: PROVIDER,
-    request: asaRequest,
-    lookup,
-    verdict,
-    latencyUs: decisionLatencyUs,
-    source: "provider" as const,
-    requestId: signature.webhookId ?? requestId,
-  };
-  //
-  //    THE DEADLINE STOPS US WAITING; IT DOES NOT STOP THE INSERT.
-  //    `withDeadline()` races, it does not cancel, so a null here means "not
-  //    known to be written" and NOT "not written". Re-issuing the insert on
-  //    that null is how one authorisation became two rows in the decision log
-  //    on 2026-09-11T14:09:08Z: transaction
-  //    8025729c-f3a8-4aa1-bfd5-b42405e16f9a appears twice with one Lithic
-  //    webhook id and one 600,390 µs latency, because the first insert lost
-  //    the 400 ms race and then committed 355 ms later anyway. On a DECLINE
-  //    that is a lie in an append-only table; on an APPROVE it would have been
-  //    worse, because the velocity sum is SUM(amount_cents) over approvals and
-  //    a $200 authorisation recorded twice eats $400 of the cardholder's day.
-  //
-  //    So `after()` awaits THE SAME PROMISE rather than starting another one,
-  //    and only re-appends if that promise genuinely rejected — through a
-  //    `WHERE NOT EXISTS` guard, for the case where it committed and lost its
-  //    connection before `RETURNING` came back.
-  const pending = startDecisionAppend(appendParams);
-  const decisionId = await awaitDecisionAppend(pending, DECISION_APPEND_BUDGET_MS);
-  if (decisionId === null) {
-    log.error("asa.decision_not_recorded", {
+  let serialised: Awaited<ReturnType<typeof decideUnderLock>>;
+  try {
+    serialised = await decideUnderLock({
+      provider: PROVIDER,
+      providerCardToken: asaRequest.card.token,
+      source: "provider",
+      requestId: signature.webhookId ?? requestId,
+      request: asaRequest,
+      judge: (l) => decide(asaRequest, l),
+    });
+  } catch (error) {
+    // FAIL CLOSED, THE SAME WAY THE READ ALREADY DID.
+    //
+    // `readControlsAndSpend()` answered a failed read with a VALUE —
+    // `status: 'unavailable'` — precisely so the fail-closed argument lived in
+    // `decide()` where it can be read and tested, not in a catch block. A
+    // locked transaction can additionally THROW: lock wait, connection loss,
+    // rollback. So the catch reconstructs the same input `decide()` would have
+    // seen and lets it make the call, rather than inventing an outcome here.
+    //
+    // No row is written on this path and that is correct: the transaction
+    // rolled back, so claiming a decision was recorded would be a lie in an
+    // append-only table. It over-declines, which is the safe direction.
+    log.error("asa.decision_transaction_failed", {
       authRef: asaRequest.providerAuthToken,
-      rule: verdict.rule,
-      outcome: verdict.outcome,
+      cardRef: asaRequest.card.token,
+      detail: error instanceof Error ? error.message : String(error),
     });
-    after(async () => {
-      const late = await pending;
-      if (late !== null) {
-        log.warn("asa.decision_recorded_late", {
-          authRef: asaRequest.providerAuthToken,
-          decisionId: late,
-        });
-        return;
-      }
-      const retried = await reappendDecisionIfMissing(appendParams, DECISION_APPEND_BUDGET_MS * 4);
-      if (retried.status === "failed") {
-        log.error("asa.decision_lost", { authRef: asaRequest.providerAuthToken });
-      } else {
-        log.warn("asa.decision_recorded_late", {
-          authRef: asaRequest.providerAuthToken,
-          decisionId: retried.status === "appended" ? retried.id : null,
-          reappend: retried.status,
-        });
-      }
-    });
+    const unavailable = { status: "unavailable" } as const;
+    serialised = {
+      lookup: unavailable as unknown as Parameters<typeof decide>[1],
+      verdict: decide(asaRequest, unavailable as unknown as Parameters<typeof decide>[1]),
+      decisionId: null,
+      decisionLatencyUs: decisionClock(),
+      totalUs: decisionClock(),
+    };
   }
+
+  const { lookup, verdict, decisionId, decisionLatencyUs } = serialised;
 
   const elapsedUs = total();
   const elapsedMs = elapsedUs / 1000;

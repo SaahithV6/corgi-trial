@@ -354,26 +354,135 @@ export async function mainDepositAccountId(
   return rows[0]?.id ?? null;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Q2 reached by business — and the one answer that is not a number           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The named state for "there was no account, so nothing was read".
+ *
+ * House form, the same one `PAYEE_BOOK_UNREADABLE` and `TRIAGE_NO_DATABASE`
+ * take: a code a caller can branch on, a message safe to show, and `details`
+ * shaped so it drops straight into `ErrorShape` and out through whichever
+ * refusal channel the screen already has. It is deliberately NOT an
+ * `Availability` — see `businessAvailability`.
+ */
+export const LEDGER_NO_DEPOSIT_ACCOUNT = "LEDGER_NO_DEPOSIT_ACCOUNT";
+
+export interface NoDepositAccount {
+  readonly code: typeof LEDGER_NO_DEPOSIT_ACCOUNT;
+  readonly message: string;
+  readonly details: {
+    readonly businessId: string;
+    /** A refresh does not open a deposit account. */
+    readonly retryable: false;
+    readonly source: "ledger.businessAvailability";
+    readonly operation: "the business deposit balance";
+  };
+}
+
+/**
+ * What Q2 answers when it is asked by business id: either the decomposition,
+ * or the reason there isn't one. Never both, and never a stand-in for one
+ * dressed as the other.
+ */
+export type BusinessAvailability = Availability | NoDepositAccount;
+
+/**
+ * The narrowing every caller must pass through before it can read a term.
+ *
+ * A type guard rather than a `code in x` written at each call site, so that
+ * the discriminant has one definition here too.
+ */
+export function isLedgerRead(result: BusinessAvailability): result is Availability {
+  return !("code" in result);
+}
+
+/** The refusal, or `null` if this was a real read. The other half of the pair. */
+export function noDepositAccountRefusal(
+  result: BusinessAvailability,
+): NoDepositAccount | null {
+  return "code" in result ? result : null;
+}
+
+/**
+ * The bridge for a caller whose own signature already promised a number.
+ *
+ * `balances.ts`'s `availableBalance()` returns `Promise<AvailableBalance>` and
+ * is called from eleven places that read `.availableCents` directly. Until
+ * those eleven narrow for themselves, this is what that layer wraps the call
+ * in: it hands back the decomposition when there was one, and THROWS when
+ * there was not. It never invents one.
+ *
+ * A throw, not a zero, because the two are not equally wrong. A screen that
+ * catches this shows an error; a screen handed five zeros shows a balance. The
+ * error is recoverable by a human reading it. The balance is not, because
+ * nobody can tell it is wrong.
+ *
+ * This is a migration aid and it is the weaker half of the pair — prefer
+ * `isLedgerRead()` at the call site, which makes the state part of the type
+ * rather than part of the control flow.
+ */
+export function unwrapLedgerRead(result: BusinessAvailability): Availability {
+  if (isLedgerRead(result)) return result;
+  throw Object.assign(new Error(result.message), {
+    code: result.code,
+    details: result.details,
+  });
+}
+
 /**
  * Q2, reached by business rather than by account.
  *
- * A business with no deposit account is zero on every term rather than an
- * error: "this business holds no money" is an answer, and the callers that ask
- * this way (standing orders, pots) need it to be one.
+ * ===========================================================================
+ * A BUSINESS WITH NO `2100` LEAF GETS A NAMED STATE, NOT FIVE ZEROS
+ * ===========================================================================
+ *
+ * This function used to answer that case with five hardcoded `0n`, under the
+ * argument that "this business holds no money" is an answer. It is an answer.
+ * It is not one this function performed. `ledger_availability()` was never
+ * called: there was no account id to call it with. The four terms the screen
+ * prints — ledger, holds, uncleared, committed — were not small, they were
+ * absent, and a caller handed `0n` in each of them has no way to tell that
+ * from a deposit account that really does sum to zero. Silverline Freight Co.
+ * is in this state on the live book right now, and the client surface drew a
+ * green LIVE badge over "Ledger $0.00 − card holds $0.00 − uncleared $0.00 −
+ * committed $0.00": four figures presented as a read of a ledger, none of
+ * which anyone read.
+ *
+ * The zeros were also load-bearing in the wrong direction. A funds check that
+ * reads `availableCents === 0n` declines, which is the safe outcome by luck
+ * rather than by construction — the same five zeros say "no money here" to a
+ * balance screen, which is a claim, and the claim is not ours to make.
+ *
+ * So: `ledger_availability()` is still the one definition, and this function
+ * still contains none of it. What changed is that when there is nothing to
+ * read, it says so by name instead of composing a result nobody computed.
+ * `isLedgerRead()` is the gate to the numbers; `NoDepositAccount` is what is
+ * on the other side of it.
+ *
+ * A REAL ZERO IS STILL A REAL ZERO. A business whose `2100` leaf exists and
+ * sums to nothing returns five genuine `0n` from the function, as it always
+ * did. Both halves are proved in `business-availability.integration.test.ts`,
+ * because a fix that refuses everything is as wrong as the bug.
  */
 export async function businessAvailability(
   businessId: string,
   snapshot: LedgerSnapshot,
   conn: Sql,
-): Promise<Availability> {
+): Promise<BusinessAvailability> {
   const accountId = await mainDepositAccountId(businessId, conn);
   if (accountId === null) {
     return {
-      ledgerCents: 0n,
-      holdsCents: 0n,
-      unclearedCents: 0n,
-      pendingOutboundCents: 0n,
-      availableCents: 0n,
+      code: LEDGER_NO_DEPOSIT_ACCOUNT,
+      message:
+        "This business has no deposit account, so no ledger balance, no hold, no uncleared credit and no committed debit was read. Nothing here is a statement about money: an absent account is not a customer holding nothing.",
+      details: {
+        businessId,
+        retryable: false,
+        source: "ledger.businessAvailability",
+        operation: "the business deposit balance",
+      },
     };
   }
   return accountAvailability(accountId, snapshot, conn);
