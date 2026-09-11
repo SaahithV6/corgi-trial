@@ -1184,3 +1184,115 @@ second half of the same discipline made permanent — every invariant states the
 population it ranges over, out loud, every run. This section is the first half:
 every invariant should also be able to state **its two independent inputs**, and
 a guard that cannot name them is a comment with a test runner attached.
+
+### 9.9 The absent memo posting that was the right answer — attack 7, 07:09Z
+
+Everything above this line is about a memo posting that is missing and **should
+not be**. This section is the case that looks identical and is its exact
+opposite, because it cost a live-fire attack a red for a working ledger and
+because the diagnosis is one query long.
+
+Live-fire attack 7 failed against the deployed tip with:
+
+```
+the backlog produced authorisation 688af4e6-c257-4a6f-a941-5911760a0808 and
+hold d22227bd-efad-4149-9ae6-1faf0e7ae7fe, but no memo posting withheld the
+money within 60s of it, so $50.00 is authorised and not held and the customer
+can spend it twice.
+POST https://corgi-trial-psi.vercel.app/api/drain answered HTTP 200
+claimed=0 processed=0 parked=0.
+```
+
+That is verbatim the under-withholding state of §9. It was not one. Measured on
+the live book, as the restricted `corgi_app` role:
+
+| Reading | Value |
+| --- | --- |
+| `hold.external_ref` | `lithic:688af4e6-…` |
+| `card_auth_event` rows | 1, `kind = 'declined'`, `amount_cents = 5000` |
+| `card_auth_event_result` | `result = 'DECLINED'`, `provider_step = 'AUTHORIZATION'`, `source = 'ingest'` |
+| `webhook_inbox` | 1 row, signature verified, `state = 'done'`, `processed_at − received_at = 129 ms` |
+| `v_card_auth_hold.target_hold_cents` | **0** |
+| `v_hold_state.memo_balance_cents` / `is_released` | **0** / **true** |
+| `v_hold_drift`, `v_hold_posting_incomplete`, `v_refused_auth_hold` | **empty for this hold, all three** |
+
+**Each of §9.1's three discriminators points the other way this time**, which is
+what makes them worth having:
+
+1. `external_ref` carries the `<provider>:<provider_auth_id>` prefix, the shape
+   only `ensureAuthorization()` emits. The four orphans of §9.1 had
+   `external_ref = provider_auth_id`, bare. **This went through `apply.ts`.**
+2. There **is** a `card_auth_event_result` row beside the fact, written by
+   `recordFacts()` in the same transaction (`source = 'ingest'`). The orphans
+   had none.
+3. There **is** a `webhook_inbox` row, and the event carries its `inbox_id`. The
+   orphans had `inbox_id IS NULL` and no delivery anywhere.
+
+So the authorisation took the atomic path, and the atomic path is why the answer
+is readable at all: since 0036 the compare-and-append is in the **same
+transaction** as the facts, so **a committed fact is proof the posting decision
+was taken**. The decision was `Δ = 0`, and `postHoldDelta()` returns `null`
+without appending for `Δ = 0`:
+
+```
+Lithic REFUSED the authorisation  →  kind = 'declined'  (migration 0026)
+declined feeds no term of H(E)    →  H(E) = 0
+memo balance                       =  0
+Δ = H(E) − memo                    =  0  →  no entry
+```
+
+There was nothing to withhold and the ledger withheld nothing. The customer
+could not "spend it twice" because no merchant was ever going to claim it. The
+cause of the refusal is the one README §2b records for attacks 1 and 2: the
+Lithic sandbox account's rolling 24-hour spend cap is exhausted, so **no**
+authorisation approves at any amount.
+
+**Would the sweeper have caught it?** No — and that is the correct answer, not a
+gap. `sweepIncompleteHoldPostings()` ranges over `v_hold_posting_incomplete`,
+which is defined FROM `v_hold_drift`, which compares `memo_balance_cents`
+against `target_hold_cents`. Both are 0 here, so the row is not in the
+population and there is nothing to complete. The sweeper is for a posting that
+is **owed**; none was. (Had one been owed, the answer would have been "yes, but
+slowly": the job is wired at `/api/cron/holds` and Vercel Hobby runs crons
+daily, so the attack is right to refuse to wait — see §9.6.)
+
+**And `claimed=0 processed=0 parked=0` was not a missing delivery.**
+`src/app/api/webhooks/[provider]/route.ts` calls `drain({ maxBatches: 2 })` in
+an `after()` callback the moment the 2xx is on its way, so the envelope was
+`state = 'done'` 129 ms after it arrived and the operator-style drain nudge
+found nothing left to claim. The loudest clue in the failure report was the
+delivery path working.
+
+**What this changes.** Nothing in `src/lib/**`. The defect was in the attack,
+which asserted a memo posting unconditionally while attacks 1 and 2 had already
+learned to read the network's verdict first (DECISIONS 050, README §2b). Attack
+7 now reads the verdict off the bytes it is about to deliver and off the
+provider's own copy of the template transaction, cross-checks it against
+`card_auth_event_result`, and branches:
+
+* **approved** — every prior assertion stands, including the missing-posting
+  failure with its original message;
+* **refused** — the smaller claim, named in the first evidence line: *a backlog
+  delivered twice after a dark window applies exactly once and withholds exactly
+  what the network granted.* Asserted as zero memo entries on the hold's own
+  memo leaf, zero financial entries, `active_hold_cents = 0`, `is_released`,
+  absence from `v_refused_auth_hold` and from `v_hold_posting_incomplete`, an
+  unchanged trial balance, and one inbox row / one fact / one hold;
+* **the body carried a verdict and the database has none** — a hard failure
+  naming DECISIONS 050/056, because that is the eight-hour production bug and
+  nothing else.
+
+**The transferable part.** §9.8 says a guard is worth its tick only if it
+compares two independently derived numbers and ranges over the state it is
+hunting. This is the third failure mode, and it belongs to *assertions* rather
+than to views:
+
+> **An assertion is worth its red only if the thing it demands is a consequence
+> of something it also checked.** Attack 7 demanded a withholding without ever
+> asking whether there was anything to withhold, so the one state it could not
+> distinguish from its target was the ledger being right.
+
+Every instance on this build's list of nineteen reported healthy on a broken
+book. This is the first that reported broken on a healthy one, and it is the
+same defect: the population the assertion ranged over included the correct
+behaviour.

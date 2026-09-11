@@ -75,6 +75,44 @@
  *      `v_hold_release_drift` are still empty — the hold model and the SQL
  *      view are held equal by invariant and a correction moved neither.
  *
+ * ============================================================================
+ * HOW THIS TEST FAILED AGAINST A CORRECT LEDGER, AND WHAT RETIRED IT.
+ *
+ * Part A reported "no reversal entry was produced by the provider's
+ * correction". Lithic had produced it, and the ledger had booked it correctly.
+ * What the test got wrong was HOW IT IDENTIFIED THE ROW: it waited for the
+ * transaction's SECOND financial entry and then looked for a reversal among
+ * whatever had arrived.
+ *
+ * A card settlement no longer produces one financial entry. `interchangeHook()`
+ * prices it in the same delivery, so a settlement posts the money AND its
+ * interchange under the same `external_ref`. MEASURED on the deployed tip, on
+ * Lithic transaction 8b119c1b-748a-4315-aa48-b74026361c57:
+ *
+ *   07:08:13.787  card:refund:141db235-…   entry b181c6e0   the money
+ *   07:08:13.952  interchange:141db235-…   entry 2a2589fc   +165ms
+ *   07:08:50.009  reversal:b181c6e0-…      entry 8a57b3fa   +36s, THE REPAIR
+ *   07:08:50.126  reversal:2a2589fc-…      entry 069c14ad   the unbooking
+ *
+ * "The second entry" was therefore the interchange, 36 seconds before the
+ * provider's asynchronous RETURN_REVERSAL, and its absence of a reversal was
+ * read as the provider having failed. The repair then landed at the original's
+ * value date, in the original's correction group, exactly as claimed — after
+ * the test had already given up on it.
+ *
+ * The same file passed 3/3 a few hours earlier because interchange was then
+ * being priced by a LATER reconcile pass: measured 819s behind the settlement
+ * at 05:46 and 0-1s from 06:58 onward. A green that depended on how far behind
+ * a second, unrelated posting was running was never evidence about the
+ * correction.
+ *
+ * So neither wait counts rows any more. Both parts wait for THE SUBJECT — the
+ * entry whose `reverses_entry_id` is the entry the provider corrected — which
+ * no interchange line, no other attack and no other process can satisfy. See
+ * `waitForReversalOf`. Nothing was loosened: the claim is narrower than the one
+ * that failed, not wider.
+ * ============================================================================
+ *
  * ISOLATION. Money tables are append-only, so there is no teardown. This
  * attack opens its OWN business (deterministic id, idempotent, owner role) and
  * mints its own Lithic card and its own transactions, so nothing it measures
@@ -398,6 +436,68 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     }
   }
 
+  /**
+   * Poll until the entry that REVERSES a named entry exists.
+   *
+   * ------------------------------------------------------------------------
+   * WHY THIS REPLACED `waitForEntries(txn, 2, …)`, AND WHY A COUNT WAS NEVER
+   * THE RIGHT SHAPE.
+   *
+   * Part A used to wait for this transaction's SECOND financial entry and then
+   * look for a reversal among what had arrived. That worked while a card
+   * settlement produced exactly one financial entry. It does not any more, and
+   * the reason is a feature rather than a regression: `interchangeHook()` in
+   * `src/lib/holds/apply.ts` prices the clearing in the SAME delivery, so a
+   * settlement now posts TWO entries under the same `external_ref` — the money
+   * and its interchange.
+   *
+   * MEASURED on the deployed tip, Lithic transaction
+   * 8b119c1b-748a-4315-aa48-b74026361c57:
+   *
+   *   07:08:13.787  card:refund:141db235-…        entry b181c6e0 (the money)
+   *   07:08:13.952  interchange:141db235-…        entry 2a2589fc  (+165ms)
+   *   07:08:50.009  reversal:b181c6e0-…           entry 8a57b3fa  (+36s)
+   *   07:08:50.126  reversal:2a2589fc-…           entry 069c14ad  (the unbooking)
+   *
+   * So "the second entry" arrived 165ms in and was the interchange, 36 seconds
+   * before Lithic's asynchronous RETURN_REVERSAL — and the test read the
+   * absence of a reversal in that set as the provider having failed to produce
+   * one. It had not: the correction landed, at the original's value date, in
+   * the original's correction group, exactly as this attack claims.
+   *
+   * The same run passed 3/3 earlier in the night because interchange was then
+   * being priced by a LATER reconcile pass rather than inline — measured at
+   * 819s behind the settlement at 05:46, and at 0-1s from 06:58 onward. A test
+   * whose verdict depends on how far behind a second, unrelated posting is
+   * running was never measuring the correction.
+   *
+   * The repair is the one §1 of the README asks for: not a longer wait and not
+   * a looser count, but a wait for THE SUBJECT. There is exactly one entry that
+   * satisfies this attack's claim — the one whose `reverses_entry_id` is the
+   * entry the provider corrected — and that is what is waited for and what is
+   * asserted on. It cannot be satisfied by an interchange line, by another
+   * attack's rows, or by anything else this or any other process books.
+   * ------------------------------------------------------------------------
+   */
+  async function waitForReversalOf(
+    txnToken: string,
+    originalId: string,
+    budgetMs: number,
+  ): Promise<{ repair: EntryRow | undefined; rows: EntryRow[]; drainStatus: string }> {
+    const deadline = Date.now() + budgetMs;
+    let drainStatus = "not attempted";
+    for (;;) {
+      const rows = await entriesFor(txnToken);
+      const repair = rows.find(
+        (r) => r.entry_type === "reversal" && r.reverses_entry_id === originalId,
+      );
+      if (repair !== undefined) return { repair, rows, drainStatus };
+      if (Date.now() >= deadline) return { repair: undefined, rows, drainStatus };
+      drainStatus = await nudgeDrain();
+      await new Promise((r) => setTimeout(r, 3_000));
+    }
+  }
+
   /** Why a wait gave up, in the words of the rows that did arrive. */
   async function diagnose(txnToken: string, drainStatus: string): Promise<string> {
     const filed = await sql<
@@ -506,14 +606,16 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     if (txn === undefined || txn === "") return;
 
     const settled = await waitForEntries(txn, 1, 90_000);
-    if (settled.rows.length < 1) {
+    // BY KEY, NOT BY POSITION. `interchangeHook()` prices the settlement in the
+    // same delivery, so this transaction's financial entries are the refund AND
+    // its interchange — `rows[0]` happens to be the money today only because
+    // `entriesFor` orders by `booking_seq` and the money commits first.
+    const original = settled.rows.find((r) => r.idempotency_key.startsWith("card:refund:"));
+    if (original === undefined) {
       throw new Error(
         `the $73.40 settlement never reached the ledger, so there is nothing to reverse and the attack is unproven. ${await diagnose(txn, settled.drainStatus)}`,
       );
     }
-    const original = settled.rows[0];
-    expect(original).toBeDefined();
-    if (original === undefined) return;
 
     // It came from a REAL delivery: the entry carries the inbox row Lithic's
     // signed webhook created. A test-authored entry has no inbox_id, which is
@@ -535,16 +637,19 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // shorter wait here reads as "the provider cannot do this", which is the
     // false negative that made an earlier note in the adapter README call void
     // "unproven".
-    const corrected = await waitForEntries(txn, 2, 180_000);
-    if (corrected.rows.length < 2) {
+    // Waited for BY SUBJECT — the entry that reverses THIS settlement — and not
+    // by a count of what the transaction has produced. See `waitForReversalOf`
+    // for the measurement that retired the count.
+    const corrected = await waitForReversalOf(txn, original.id, 180_000);
+    const repair = corrected.repair;
+    if (repair === undefined) {
       throw new Error(
-        `Lithic accepted the RETURN_REVERSAL but the correction never reached the ledger within 180s, so the rail is unproven. ${await diagnose(txn, corrected.drainStatus)}`,
+        `Lithic accepted the RETURN_REVERSAL but no entry reversing ${original.id} reached the ledger within 180s, ` +
+          `so the rail is unproven. What DID arrive for this transaction: ` +
+          `${corrected.rows.map((r) => `${r.idempotency_key} (${r.entry_type})`).join(", ") || "nothing"}. ` +
+          `${await diagnose(txn, corrected.drainStatus)}`,
       );
     }
-
-    const repair = corrected.rows.find((r) => r.entry_type === "reversal");
-    expect(repair, "no reversal entry was produced by the provider's correction").toBeDefined();
-    if (repair === undefined) return;
 
     // (1) It reverses the settlement, in the settlement's own correction group.
     expect(repair.reverses_entry_id).toBe(original.id);
@@ -751,11 +856,22 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     expect(tamperedBody.error?.code).toBe("WEBHOOK_SIGNATURE_INVALID");
 
     // ---- Production processes it ----------------------------------------
-    const repaired = await waitForEntries(txn, cleared.rows.length + 1, 120_000);
-    const repair = repaired.rows.find((r) => r.entry_type === "reversal");
+    // BY SUBJECT, like part A. This used to wait for one more entry than the
+    // clearing had already produced and then take the first reversal it found
+    // — a delta, which survived interchange being priced inline where part A's
+    // absolute count did not, but which still identified the correction by
+    // COUNT AND TYPE rather than by what it corrects. The correction unbooks
+    // the interchange as well as the money (`reversal:<interchange entry>`), so
+    // "the first reversal" is two rows, and which one arrives first is not a
+    // property this attack should be resting on.
+    const repaired = await waitForReversalOf(txn, clearing.id, 120_000);
+    const repair = repaired.repair;
     if (repair === undefined) {
       throw new Error(
-        `the signed CORRECTION_CREDIT was accepted (HTTP ${delivered.status}) but produced no correction within 120s. ${await diagnose(txn, repaired.drainStatus)}`,
+        `the signed CORRECTION_CREDIT was accepted (HTTP ${delivered.status}) but no entry reversing ` +
+          `${clearing.id} reached the ledger within 120s. What DID arrive for this transaction: ` +
+          `${repaired.rows.map((r) => `${r.idempotency_key} (${r.entry_type})`).join(", ") || "nothing"}. ` +
+          `${await diagnose(txn, repaired.drainStatus)}`,
       );
     }
 
@@ -883,6 +999,14 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     expect(await driftIsZero()).toEqual({ hold: 0, release: 0 });
 
     // ---- Idempotence: redeliver the same signed bytes --------------------
+    //
+    // The before-figure is read HERE rather than taken from the poll that
+    // found the reversal. The correction posts TWO entries — the money's
+    // reversal and the unbooking of the interchange it priced, measured 117ms
+    // and 132ms apart on two runs — so a poll that returns the instant the
+    // first one lands can hold a count that is one short of settled, and the
+    // replay would then be blamed for a row it did not write.
+    const beforeReplay = await entriesFor(txn);
     const replay = await fetch(`${BASE_URL}/api/webhooks/lithic`, {
       method: "POST",
       headers: {
@@ -896,7 +1020,7 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     expect(replay.status).toBe(200);
     await nudgeDrain();
     const afterReplay = await entriesFor(txn);
-    expect(afterReplay.length).toBe(repaired.rows.length);
+    expect(afterReplay.length).toBe(beforeReplay.length);
 
     record(
       "evidence",

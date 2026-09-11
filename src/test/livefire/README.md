@@ -104,7 +104,7 @@ drop attributable to card-auth holds, and the financial trial balance unmoved
 because a hold is memo-only.
 
 **Today it proves the other half of that sentence**, because Lithic refuses the
-authorisation — see §2b, which covers attacks 1 and 2 together.
+authorisation — see §2b, which covers attacks 1, 2 and 7 together.
 
 ### 2 — the over-capture
 
@@ -119,9 +119,9 @@ and only one of them holds today:
 * **the bookkeeping claim** — exactly one `hold_closure` row. This SKIPS, and
   the skip is a real finding rather than a missing feature. See §4.
 
-### 2b — what attacks 1 and 2 prove while the sandbox declines everything
+### 2b — what attacks 1, 2 and 7 prove while the sandbox declines everything
 
-Both attacks read the network's verdict from the provider before asserting
+Attacks 1 and 2 read the network's verdict from the provider before asserting
 anything (migration 0026), and both currently read
 `AUTHORIZATION 5000 result DECLINED [ACCOUNT_DAILY_SPEND_LIMIT_EXCEEDED]`. The
 Lithic sandbox account's rolling 24-hour cap is exhausted —
@@ -185,6 +185,53 @@ a tolerance to absorb another writer** — and the corollary this pass adds is
 that a global zero is not a tolerance at all, it is a claim about every other
 suite on the book, which an attack has no business making and cannot keep.
 
+**Attack 7's money half joined this branch, and it is the instructive one,
+because it failed in the OPPOSITE direction.** Its recovery test demanded that a
+memo posting follow the backlog's authorisation, and failed with *"no memo
+posting withheld the money within 60s of it, so $50.00 is authorised and not
+held and the customer can spend it twice."* The ledger was right. The
+authorisation had been REFUSED for the same exhausted daily cap as attacks 1 and
+2, so `H(E) = 0`, `Δ = 0` and `postHoldDelta()` correctly appended nothing —
+measured on hold `d22227bd-efad-4149-9ae6-1faf0e7ae7fe`: one `card_auth_event`
+with `kind = 'declined'`, a `card_auth_event_result` row beside it reading
+`DECLINED`/`AUTHORIZATION`/`ingest`, `v_card_auth_hold.target_hold_cents = 0`,
+and `v_hold_drift`, `v_hold_posting_incomplete` and `v_refused_auth_hold` all
+empty for it. Full diagnosis in `docs/HOLDS.md` §9.9.
+
+Two things follow, and both are on the record rather than patched around.
+
+*It went through `apply.ts`.* `hold.external_ref` carries the
+`<provider>:<provider_auth_id>` prefix that only `ensureAuthorization()` emits,
+the verdict row exists, and the `webhook_inbox` row exists — which is exactly
+the opposite of all three readings that identified the four hand-written orphans
+in HOLDS §9.1. Since migration 0036 the compare-and-append is in the same
+transaction as the facts, so **a committed fact is proof the posting decision
+was taken**; the decision was `Δ = 0`. The `claimed=0 processed=0 parked=0` from
+the drain nudge was not a lost delivery either: the webhook route drains in an
+`after()` callback, so the envelope was `state = 'done'` 129ms after it arrived.
+
+*So attack 7 now reads the verdict first*, off the bytes it is about to deliver
+and off the provider's own copy of the template transaction, cross-checks it
+against `card_auth_event_result`, and branches. On an approval nothing is
+weakened — the memo posting is still required and its absence still fails with
+the same message. On a refusal the first evidence line opens **THE PUBLISHED
+HAPPY PATH WAS NOT EXERCISED** and the smaller claim is named: *a backlog
+delivered twice after a dark window applies exactly once and withholds exactly
+what the network granted.* And a delivery that carried a verdict the database
+does not have is a hard failure naming DECISIONS 050/056, because that is the
+eight-hour production bug and nothing else. The dark-window half is
+verdict-independent and is asserted and recorded in full on both branches.
+
+**This is this build's one pattern with the sign flipped.** Every earlier
+instance — nineteen of them are written up in DECISIONS — was a guard that
+reported HEALTHY on a broken book because what it excluded was shaped like the
+failure. This assertion reported a BROKEN book on a healthy one, for the same
+structural reason: *it demanded a withholding without
+ever asking whether there was anything to withhold, so the one state it could
+not tell from its target was the ledger being right.* Reporting a working system
+as broken is the same misreport as the other, pointing the other way, and a red
+that is wrong burns a debrief exactly as fast as a green that is.
+
 One residual, recorded rather than fixed: attacks 1, 2 and 4 still pick their
 customer with `ORDER BY business_id LIMIT 1` and measure a delta on it, rather
 than opening their own business as attacks 3 and 7 do (§1). Every assertion
@@ -242,6 +289,40 @@ the attack's actual claim.
 A third test asks the database to `UPDATE journal_entry` and to `DELETE FROM
 journal_line` and asserts `permission denied` on both, because the whole
 correction argument rests on the original row being unchangeable.
+
+**And the wait for the correction no longer counts rows.** Part A reported *"no
+reversal entry was produced by the provider's correction"* against a ledger that
+had produced it correctly. It waited for the transaction's SECOND financial
+entry and then looked for a reversal among what had arrived — and a card
+settlement no longer produces one entry. `interchangeHook()` prices it in the
+same delivery, so the settlement and its interchange both land under the same
+`external_ref`. Measured on the deployed tip, Lithic transaction
+`8b119c1b-748a-4315-aa48-b74026361c57`:
+
+```
+07:08:13.787  card:refund:141db235-…   entry b181c6e0   the money
+07:08:13.952  interchange:141db235-…   entry 2a2589fc   +165ms
+07:08:50.009  reversal:b181c6e0-…      entry 8a57b3fa   +36s, THE REPAIR
+07:08:50.126  reversal:2a2589fc-…      entry 069c14ad   the interchange unbooked
+```
+
+"The second entry" was therefore the interchange, 36 seconds before Lithic's
+asynchronous `RETURN_REVERSAL`, and the attack read its own early exit as the
+provider having failed. The same file passed 3/3 a few hours earlier only
+because interchange was then being priced by a LATER reconcile pass — measured
+819s behind the settlement at 05:46, and 0–1s from 06:58 onward. **A green that
+depended on how far behind a second, unrelated posting was running was never
+evidence about the correction.**
+
+The repair is §1's rule and not a longer wait: **wait for the SUBJECT.** Both
+parts now poll for the entry whose `reverses_entry_id` is the entry the provider
+corrected, which no interchange line, no other attack and no other process can
+satisfy — and part B stops taking "the first reversal", because the correction
+unbooks the interchange as well as the money and which of those two commits
+first is not a property this attack should rest on. The claim is **narrower**
+than the one that failed. The idempotence check reads its before-count at the
+replay rather than reusing the poll's, for the same reason: the two reversals
+commit 117–132ms apart and a poll can return between them.
 
 ### 4 — settlement before its authorisation
 
@@ -318,9 +399,16 @@ signed, and then HELD — not POSTed — for the window.
   `/api/health` still answers with the database reachable. Nothing invented from
   an event we were never told about.
 * on recovery: the backlog is delivered twice, as a provider catching up and
-  retrying does. It produces one inbox row, one `card_auth_event`, one hold;
-  available drops by exactly 5000 and the ledger does not move. Nothing lost,
-  nothing double-counted.
+  retrying does. It produces one inbox row, one `card_auth_event`, one hold; the
+  hold withholds exactly what the network granted — 5000 on an approval, nothing
+  on a refusal — and the ledger does not move. Nothing lost, nothing
+  double-counted.
+
+The recovery half reads the network's verdict before it asserts any money, and
+**while the sandbox declines everything it proves the smaller, named claim** —
+see §2b, which now covers attacks 1, 2 and 7 together, and `docs/HOLDS.md` §9.9
+for the measurement. The dark-window half does not depend on the verdict and is
+asserted and recorded in full either way.
 
 The window is `LIVEFIRE_OUTAGE_SECONDS`, 20s by default. The published attack
 says five minutes; five minutes of a rehearsal suite is five minutes nobody

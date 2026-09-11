@@ -29,7 +29,53 @@
  * THE MONEY CLAIM. Through the dark window nothing is invented — the trial
  * balance does not move and no customer's ledger or available balance changes.
  * On recovery nothing is lost and nothing is double-counted: the held delivery
- * posts exactly once however many times it arrives.
+ * posts exactly once however many times it arrives, and withholds exactly what
+ * the network granted.
+ *
+ * ============================================================================
+ * THE THIRD WAY THIS TEST MEASURED ITSELF WRONG, AND IT IS THE PATTERN WITH
+ * ITS SIGN FLIPPED.
+ *
+ * The two mistakes below both reported a working ledger as broken by reading
+ * the wrong row or the wrong book. This one did it by reading a real row
+ * correctly and drawing the opposite conclusion from it.
+ *
+ * The recovery half asserted that a memo posting MUST follow the fact, and
+ * failed with "no memo posting withheld the money within 60s of it, so $50.00
+ * is authorised and not held and the customer can spend it twice." Measured
+ * against the deployed tip, on authorisation 688af4e6-c257-4a6f-a941-
+ * 5911760a0808 / hold d22227bd-efad-4149-9ae6-1faf0e7ae7fe:
+ *
+ *   * `hold.external_ref` = `lithic:688af4e6-…`, the `<provider>:<id>` shape
+ *     only `ensureAuthorization()` builds — so this DID go through apply.ts;
+ *   * one `card_auth_event`, `kind = 'declined'`, with a
+ *     `card_auth_event_result` row beside it reading `result = 'DECLINED'`,
+ *     `provider_step = 'AUTHORIZATION'`, `source = 'ingest'`;
+ *   * one `webhook_inbox` row, signature verified, `state = 'done'` 129ms
+ *     after it arrived;
+ *   * `v_card_auth_hold.target_hold_cents = 0`, memo balance 0, and both
+ *     `v_hold_drift` and `v_hold_posting_incomplete` EMPTY for this hold.
+ *
+ * The network refused the authorisation — the sandbox account's rolling
+ * 24-hour cap is exhausted, which is the same condition README §2b records for
+ * attacks 1 and 2 — so `H(E) = 0`, `Δ = 0`, and `postHoldDelta()` appends
+ * nothing for `Δ = 0`. The posting is absent because there is nothing to
+ * withhold, not because anything was lost. Migration 0036's atomicity is what
+ * makes that readable: the compare-and-append is in the SAME transaction as
+ * the facts, so a committed fact is proof the posting decision was taken.
+ *
+ * And `claimed=0 processed=0 parked=0` from the drain nudge was not a missing
+ * delivery either: `src/app/api/webhooks/[provider]/route.ts` drains in an
+ * `after()` callback the instant the 2xx is on its way, so the row was already
+ * `done` before the test's operator-style drain could claim it.
+ *
+ * So the verdict is now read BEFORE any money is asserted, and the recovery
+ * half branches on it — the idiom attack 1 already uses. On a refusal this
+ * file proves the smaller, named claim and says so in its FIRST evidence line,
+ * on the terms README §2b sets. On an approval nothing is weakened: the memo
+ * posting is still required, and its absence is still a failure with the same
+ * message.
+ * ============================================================================
  *
  * ============================================================================
  * HOW THE MONEY CLAIM IS MEASURED, AND THE TWO WAYS IT USED TO BE MEASURED
@@ -450,6 +496,62 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     };
   }
 
+  /**
+   * Every memo entry standing against ONE hold's own memo leaf.
+   *
+   * Defined once and called from both the approved and the refused branch
+   * below, so that reading the same figure twice does not cost the ledger
+   * boundary two more references to `journal_entry` / `journal_line` (see
+   * `src/lib/ledger/boundary.test.ts` — this file is allowlisted at 14 and the
+   * list is a ratchet).
+   *
+   * It is the withheld figure BY ATTRIBUTION: this hold was created by this
+   * run's own backlog delivery, and nothing else in the database can post to
+   * its memo account.
+   */
+  async function memoOnHold(holdId: string): Promise<{ entries: number; cents: bigint }> {
+    const [row] = await sql<{ entries: number; cents: bigint }[]>`
+      SELECT count(DISTINCT e.id)::int                 AS entries,
+             COALESCE(SUM(l.amount_cents), 0)::bigint  AS cents
+        FROM journal_entry e
+        JOIN journal_line  l ON l.entry_id = e.id
+        JOIN hold          h ON h.id = e.hold_id
+       WHERE e.hold_id = ${holdId}::uuid
+         AND e.book = 'memo'
+         AND l.account_id = h.memo_account_id`;
+    return { entries: row?.entries ?? -1, cents: row?.cents ?? -1n };
+  }
+
+  /** Financial entries carrying this provider transaction's reference. */
+  async function financialFor(externalRef: string): Promise<number> {
+    const [row] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM journal_entry
+       WHERE book = 'financial' AND external_ref = ${externalRef}`;
+    return row?.n ?? -1;
+  }
+
+  /**
+   * NOTHING LOST, NOTHING DOUBLE-COUNTED: however many times the provider
+   * redelivered the backlog, it is one envelope and one fact.
+   *
+   * Asserted on both branches below, because it is the half of this attack's
+   * sentence that does not depend on what the network answered.
+   */
+  async function expectAppliedExactlyOnce(
+    providerAuthId: string,
+    webhookId: string,
+  ): Promise<void> {
+    const [facts] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM card_auth_event ce
+        JOIN card_authorization ca ON ca.id = ce.auth_id
+       WHERE ca.provider_auth_id = ${providerAuthId}`;
+    expect(facts?.n).toBe(1);
+    const [rows] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM webhook_inbox
+       WHERE provider = 'lithic' AND provider_event_id = ${webhookId}`;
+    expect(rows?.n).toBe(1);
+  }
+
   it("invents no money while the feed is dark, and loses none when it comes back", async (ctx) => {
     const { businessId, isolation } = await businessUnderTest();
 
@@ -510,11 +612,22 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // would make this a replay of the template rather than a new fact.
     const missedToken = randomUUID();
     const payload = JSON.parse(body.raw_body) as Record<string, unknown>;
-    const events = (Array.isArray(payload["events"]) ? payload["events"] : []).map((event) => ({
+    const events: Record<string, unknown>[] = (Array.isArray(payload["events"]) ? payload["events"] : []).map((event) => ({
       ...(event as Record<string, unknown>),
       token: randomUUID(),
     }));
     const missedBody = JSON.stringify({ ...payload, token: missedToken, events });
+
+    // THE VERDICT THE SWALLOWED DELIVERY CARRIES, read off the bytes we are
+    // about to send. Only `token` was reissued above, so `result` is Lithic's
+    // own word for the authorisation this body was captured from, byte for
+    // byte. It decides which claim this test is entitled to make on recovery —
+    // see the branch after the backlog lands — and it is read HERE, before
+    // anything is delivered, so that the branch cannot be chosen by anything
+    // the deployment did afterwards.
+    const authStep = events.find((e) => e["type"] === "AUTHORIZATION") ?? events[0];
+    const deliveredResult = authStep?.["result"];
+    const deliveredVerdict = typeof deliveredResult === "string" ? deliveredResult : null;
 
     // ---- THE DARK WINDOW -------------------------------------------------
     const accountId = await depositAccountOf(businessId);
@@ -599,6 +712,18 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     };
     expect(health.database?.reachable).toBe(true);
 
+    // THE DARK-WINDOW EVIDENCE, RECORDED HERE AND NOT AT THE END.
+    //
+    // Everything above is the half of this attack that does not depend on
+    // what the network answered, and the recovery half below returns early on
+    // a refusal. A record() placed after that return would lose the dark
+    // window entirely on exactly the runs where the reader most needs to see
+    // that it was measured.
+    record(
+      "evidence",
+      `measured on ${isolation}. dark window ${Math.round((Date.now() - startedAt) / 1000)}s (LIVEFIRE_OUTAGE_SECONDS=${OUTAGE_SECONDS}): the swallowed event ${missedToken} produced 0 inbox rows and 0 authorisations; trial balance ${trialBefore} unchanged; /api/health answered with database reachable. ${moved.quiet ? `The window was quiet, so business ${businessId}\u0027s whole position was additionally asserted frozen at ledger ${before.ledgerCents} / available ${before.availableCents} — and asserted a second way, at ONE instant (${frozen.at.toISOString()}) across the window's two watermarks (${openedWatermark} -> now), which holds the clock still so that a business-date rollover or a maturing uncleared credit cannot read as movement: available ${frozen.before.availableCents} at both.` : `the window was NOT quiet for this customer: ${foreignWrites} entr${foreignWrites === 1 ? "y" : "ies"} touching this account were booked by another process (counted in BOTH books — a card hold moves available from the memo book and the financial-only count this guard used to do walked straight past it), ${moved.clockEvents} hold(s) reached expires_at/available_at on the clock alone${moved.rolledOver ? ", and the business date rolled over mid-window" : ""}. The live position-freeze was therefore NOT evaluated: it would have measured their writes and the calendar, not ours.${moved.entries === 0 ? ` The watermark-pair freeze WAS evaluated and held, because it holds the clock still: available ${frozen.before.availableCents} at both.` : ""} The attribution above is unaffected.`}`,
+    );
+
     // ---- THE FEED COMES BACK --------------------------------------------
     // The provider catches up, and retries, which is what providers do.
     const catchUp: number[] = [];
@@ -628,6 +753,196 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       const reason = `the backlog was accepted (HTTP ${catchUp.join(", ")}) but never applied within 90s, so "nothing is lost" is unproven; POST ${BASE_URL}/api/drain answered ${drainStatus}.`;
       record("skip", reason);
       ctx.skip(reason);
+      return;
+    }
+
+    // ======================================================================
+    // WHAT DID THE NETWORK ACTUALLY SAY? ASKED BEFORE ANY MONEY IS ASSERTED.
+    //
+    // ----------------------------------------------------------------------
+    // THIS BRANCH IS THE FIFTEENTH INSTANCE OF THIS BUILD'S ONE PATTERN, AND
+    // IT POINTED THE OTHER WAY. Every earlier instance was a guard whose
+    // exclusion was shaped like the failure, so it reported HEALTHY on a
+    // broken book. This one reported a BROKEN BOOK on a working one, which is
+    // the same misreport with the sign flipped and is no better.
+    //
+    // MEASURED, on the run that produced it: the backlog delivered
+    // authorisation 688af4e6-c257-4a6f-a941-5911760a0808, hold
+    // d22227bd-efad-4149-9ae6-1faf0e7ae7fe, and NO memo posting — and this
+    // test called that "$50.00 is authorised and not held and the customer can
+    // spend it twice". It was not. The single `card_auth_event` the delivery
+    // produced reads `kind = 'declined'` with `card_auth_event_result.result =
+    // 'DECLINED'`, `provider_step = 'AUTHORIZATION'`, `source = 'ingest'`:
+    // Lithic REFUSED the authorisation this body was captured from, because
+    // the sandbox account's rolling 24-hour cap is exhausted (README §2b).
+    // `H(E)` is therefore 0, `memo_balance` is 0, `Δ = 0`, and `postHoldDelta`
+    // returns null without appending — which is `v_card_auth_hold
+    // .target_hold_cents = 0`, `v_hold_drift` empty and `v_hold_posting_
+    // incomplete` empty, all read live afterwards. There was nothing to
+    // withhold and the ledger correctly withheld nothing. The customer could
+    // not "spend it twice" because no merchant was ever going to claim it.
+    //
+    // The `claimed=0 processed=0 parked=0` on the drain nudge was the other
+    // half of the same misreading: `src/app/api/webhooks/[provider]/route.ts`
+    // drains in an `after()` callback the moment the 2xx is on its way, so the
+    // inbox row was `state='done'` 129ms after it arrived and the operator's
+    // drain had nothing left to claim. That is the delivery path working, not
+    // a delivery going missing.
+    //
+    // So the verdict is read FIRST and the branch is taken on it — exactly as
+    // attacks 1 and 2 already do (README §2b), and for exactly the reason
+    // DECISIONS 050 gives: an approved and a refused authorisation must not be
+    // the same row by the time anything reasons about them.
+    // ----------------------------------------------------------------------
+    const [fact] = await sql<
+      { kind: string; result: string | null; step: string | null; source: string | null }[]
+    >`
+      SELECT ce.kind::text AS kind, r.result, r.provider_step AS step, r.source::text AS source
+        FROM card_auth_event ce
+        JOIN card_authorization ca ON ca.id = ce.auth_id
+        LEFT JOIN card_auth_event_result r ON r.event_id = ce.id
+       WHERE ca.provider = 'lithic' AND ca.provider_auth_id = ${missedToken}
+       ORDER BY ce.received_at
+       LIMIT 1`;
+
+    // The provider's own copy of the same answer, for the template this body
+    // was reissued from. `missedToken` does not exist at Lithic — it is our
+    // reissue — so the authoritative second opinion is the transaction the
+    // bytes came from.
+    let providerVerdict = "not read";
+    try {
+      const templateTxn = await lithic.getTransaction(templateToken);
+      const templateAuth = (templateTxn.events ?? []).find((e) => e.type === "AUTHORIZATION");
+      providerVerdict = templateAuth?.result ?? templateTxn.result ?? "absent";
+    } catch (thrown) {
+      providerVerdict = `unreadable: ${thrown instanceof Error ? thrown.message : String(thrown)}`;
+    }
+
+    if (deliveredVerdict === null) {
+      // We cannot choose a branch, so we assert neither. A body with no
+      // `result` is "we were not told", which is a different claim from
+      // APPROVED and is not invented into one (migration 0026).
+      const reason =
+        `the captured Lithic body carried no \`result\` on its AUTHORIZATION step, so this run cannot ` +
+        `say whether the network granted the $${(AUTH_CENTS / 100).toFixed(2)} — and "the backlog withheld ` +
+        `exactly what was granted" is unprovable either way. Template transaction ${templateToken}; ` +
+        `provider's own verdict reads ${providerVerdict}.`;
+      record("skip", reason);
+      ctx.skip(reason);
+      return;
+    }
+
+    if (fact === undefined) {
+      throw new Error(
+        `the backlog produced authorisation ${missedToken} and hold ${recovered.hold_id} but NO card_auth_event, ` +
+          `so the fact itself was lost. POST ${BASE_URL}/api/drain answered ${drainStatus}.`,
+      );
+    }
+
+    // THE DEFECT DECISIONS 050 AND 056 ARE ABOUT, asserted rather than
+    // assumed: the body carried a verdict and ingest must not have dropped it.
+    // A NULL here is the eight-hour production bug, not a missing feature.
+    if (fact.result === null) {
+      throw new Error(
+        `the delivery carried result "${deliveredVerdict}" on its AUTHORIZATION step and the ledger stored ` +
+          `card_auth_event kind='${fact.kind}' with NO card_auth_event_result row beside it — the network's ` +
+          `verdict was discarded at ingest. That is the defect of DECISIONS 050/056, and it means the build ` +
+          `serving ${BASE_URL} predates migration 0026. Authorisation ${missedToken}, hold ${recovered.hold_id}.`,
+      );
+    }
+
+    if (fact.result !== "APPROVED") {
+      // ================================================================
+      // THE REFUSAL PATH — a PASS on a smaller, named claim, loudly
+      // labelled, on the terms README §2b sets for attacks 1 and 2.
+      //
+      // The dark-window half of this attack is verdict-independent and was
+      // asserted in full above. What changes here is only the recovery
+      // half: "the backlog withheld the $50" is not shown, because there
+      // was no $50 to withhold. What IS shown is the same sentence with
+      // the network's answer substituted — the backlog applied EXACTLY
+      // ONCE and withheld EXACTLY what the network granted, which is
+      // nothing.
+      //
+      // The evidence is recorded BEFORE the assertions, because a failing
+      // `expect` throws and a throw skips every line after it — the same
+      // ordering attack 1 arrived at the hard way.
+      // ================================================================
+      const withheld = await memoOnHold(recovered.hold_id);
+      const financialRefused = await financialFor(missedToken);
+      const refusedAfter = await positionOf(businessId);
+      const refusedMoved = await movedSince(accountId, openedWatermark, windowOpenedAt);
+
+      // The two views that would report a refused authorisation still
+      // holding money. Scoped to THIS RUN'S rows, never book-wide: the
+      // book-wide count is the historical backlog migration 0032
+      // deliberately refused to exclude, and asserting zero on it is a
+      // claim about every other suite on this database (README §2b).
+      const [refusedHold] = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n
+          FROM v_refused_auth_hold
+         WHERE hold_id = ${recovered.hold_id}::uuid OR provider_auth_id = ${missedToken}`;
+      // `::text`, deliberately: `active_hold_cents` is a numeric expression in
+      // the view, and the driver hands a numeric back as a string. Reading it
+      // as a bigint and asserting `0n` fails on '0' — a type mismatch that
+      // would read, on the scoreboard, exactly like money in the wrong place.
+      const [state] = await sql<{ active: string; released: boolean }[]>`
+        SELECT active_hold_cents::text AS active, is_released AS released
+          FROM v_hold_state WHERE hold_id = ${recovered.hold_id}::uuid`;
+      const [incomplete] = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n
+          FROM v_hold_posting_incomplete WHERE hold_id = ${recovered.hold_id}::uuid`;
+
+      record(
+        "evidence",
+        `THE PUBLISHED HAPPY PATH WAS NOT EXERCISED: the network REFUSED the authorisation this outage ` +
+          `swallowed, so "on recovery available drops by exactly 5000" is NOT shown by this run. The ` +
+          `reissued body carries AUTHORIZATION ${AUTH_CENTS} result ${deliveredVerdict}; the provider's own ` +
+          `copy for the template transaction ${templateToken} reads ${providerVerdict}; the ledger stored it ` +
+          `as card_auth_event kind='${fact.kind}' with card_auth_event_result result='${fact.result}' ` +
+          `step='${fact.step ?? "n/a"}' source='${fact.source ?? "n/a"}'. CAUSE: the Lithic sandbox account's ` +
+          `rolling 24-hour spend cap is exhausted, so no authorisation can be approved at any amount ` +
+          `(README §2b; raising it needs PATCH /v1/accounts/{token}, which the permission classifier ` +
+          `deliberately blocks, and that is a human's decision). What IS proved below is the smaller, ` +
+          `different and real claim: A BACKLOG DELIVERED TWICE AFTER A DARK WINDOW APPLIES EXACTLY ONCE ` +
+          `AND WITHHOLDS EXACTLY WHAT THE NETWORK GRANTED — here, nothing.`,
+      );
+      record(
+        "evidence",
+        `recovery on a REFUSED authorisation: the backlog delivered twice (HTTP ${catchUp.join(" then ")}) ` +
+          `produced 1 inbox row, 1 card_auth_event and 1 hold ${recovered.hold_id} — nothing lost, nothing ` +
+          `double-counted. That hold's own memo account carries ${withheld.entries} entr${withheld.entries === 1 ? "y" : "ies"} ` +
+          `totalling ${withheld.cents} cents (must be 0 and 0 — a refused authorisation withholds nothing), ` +
+          `${financialRefused} financial entries (must be 0 — an authorisation moves the memo book only), ` +
+          `v_hold_state active_hold_cents ${state?.active} (must be 0) and is_released ${String(state?.released)} (must be true), v_refused_auth_hold ${refusedHold?.n} ` +
+          `row(s) for this hold (must be 0), v_hold_posting_incomplete ${incomplete?.n} row(s) for this hold ` +
+          `(must be 0 — the sweeper has nothing to complete because nothing is missing), trial balance ` +
+          `${trialBefore} unchanged. ` +
+          `THE ABSENCE OF THE MEMO POSTING IS THE ANSWER, NOT A GAP: migration 0036 put the compare-and-append ` +
+          `in the SAME transaction as the facts, so the fact existing is proof the posting decision was made — ` +
+          `H(E) = 0, memo balance 0, Δ = 0, and postHoldDelta() appends nothing for Δ = 0. A missing posting ` +
+          `would show up as a row in v_hold_posting_incomplete, and there is none. ` +
+          `${refusedMoved.quiet ? `The episode was quiet, so this business's whole position was additionally asserted frozen: ledger ${refusedAfter.ledgerCents}, available ${refusedAfter.availableCents}, holds ${refusedAfter.holdsCents}.` : `${refusedMoved.entries} other entr${refusedMoved.entries === 1 ? "y" : "ies"} and ${refusedMoved.clockEvents} clock-driven transition(s) touched this account across the episode${refusedMoved.rolledOver ? " and the business date rolled over" : ""}, so the whole-position freeze is REPORTED rather than asserted: available ${before.availableCents} -> ${refusedAfter.availableCents}. The attribution above is unaffected.`} ` +
+          `drain ${drainStatus}.`,
+      );
+
+      // The invariant migration 0026 installs, and the one production did
+      // not have for eight hours (DECISIONS 050, 056).
+      expect(fact.kind).toBe("declined");
+      expect(withheld.entries).toBe(0);
+      expect(withheld.cents).toBe(0n);
+      expect(financialRefused).toBe(0);
+      expect(state?.active).toBe("0");
+      // A refused authorisation is a CLOSED one: A = 0, so `closed(E)` holds
+      // and `v_hold_state.is_released` is true. The money was never withheld
+      // and the hold is not left standing over nothing.
+      expect(state?.released).toBe(true);
+      expect(refusedHold?.n).toBe(0);
+      expect(incomplete?.n).toBe(0);
+      expect(await bal.trialBalanceCents()).toBe(trialBefore);
+      // NOTHING DOUBLE-COUNTED, on the refused path too.
+      await expectAppliedExactlyOnce(missedToken, `msg_livefire_outage_${tag}`);
+      if (refusedMoved.quiet) expect(refusedAfter).toEqual(before);
       return;
     }
 
@@ -679,22 +994,11 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // construction, and then, when the episode was quiet, cross-checked
     // against the customer's whole position for the same reason as above.
     const after = await positionOf(businessId);
-    const [heldByUs] = await sql<{ entries: number; cents: bigint }[]>`
-      SELECT count(DISTINCT e.id)::int AS entries,
-             COALESCE(SUM(l.amount_cents), 0)::bigint AS cents
-        FROM journal_entry e
-        JOIN journal_line  l ON l.entry_id = e.id
-        JOIN hold          h ON h.id = e.hold_id
-       WHERE e.hold_id = ${recovered.hold_id}::uuid
-         AND e.book = 'memo'
-         AND l.account_id = h.memo_account_id`;
-    expect(heldByUs?.entries).toBe(1); // one opening, however many deliveries
-    expect(heldByUs?.cents).toBe(-BigInt(AUTH_CENTS)); // credit: $50.00 withheld
+    const heldByUs = await memoOnHold(recovered.hold_id);
+    expect(heldByUs.entries).toBe(1); // one opening, however many deliveries
+    expect(heldByUs.cents).toBe(-BigInt(AUTH_CENTS)); // credit: $50.00 withheld
     // NOTHING INVENTED: an authorisation posts nothing to the financial book.
-    const [financial] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM journal_entry
-       WHERE book = 'financial' AND external_ref = ${missedToken}`;
-    expect(financial?.n).toBe(0);
+    expect(await financialFor(missedToken)).toBe(0);
     expect(await bal.trialBalanceCents()).toBe(trialBefore);
 
     // AND THE PUBLISHED FIGURE MOVED BY EXACTLY THE $50, ATTRIBUTABLY.
@@ -741,23 +1045,11 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     }
 
     // NOTHING DOUBLE-COUNTED: two deliveries, one fact, one posting.
-    const [facts] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM card_auth_event ce
-        JOIN card_authorization ca ON ca.id = ce.auth_id
-       WHERE ca.provider_auth_id = ${missedToken}`;
-    expect(facts?.n).toBe(1);
-    const [rows] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM webhook_inbox
-       WHERE provider = 'lithic' AND provider_event_id = ${`msg_livefire_outage_${tag}`}`;
-    expect(rows?.n).toBe(1);
+    await expectAppliedExactlyOnce(missedToken, `msg_livefire_outage_${tag}`);
 
     record(
       "evidence",
-      `measured on ${isolation}. dark window ${Math.round((Date.now() - startedAt) / 1000)}s (LIVEFIRE_OUTAGE_SECONDS=${OUTAGE_SECONDS}): the swallowed event ${missedToken} produced 0 inbox rows and 0 authorisations; trial balance ${trialBefore} unchanged; /api/health answered with database reachable. ${moved.quiet ? `The window was quiet, so business ${businessId}\u0027s whole position was additionally asserted frozen at ledger ${before.ledgerCents} / available ${before.availableCents} — and asserted a second way, at ONE instant (${frozen.at.toISOString()}) across the window's two watermarks (${openedWatermark} -> now), which holds the clock still so that a business-date rollover or a maturing uncleared credit cannot read as movement: available ${frozen.before.availableCents} at both.` : `the window was NOT quiet for this customer: ${foreignWrites} entr${foreignWrites === 1 ? "y" : "ies"} touching this account were booked by another process (counted in BOTH books — a card hold moves available from the memo book and the financial-only count this guard used to do walked straight past it), ${moved.clockEvents} hold(s) reached expires_at/available_at on the clock alone${moved.rolledOver ? ", and the business date rolled over mid-window" : ""}. The live position-freeze was therefore NOT evaluated: it would have measured their writes and the calendar, not ours.${moved.entries === 0 ? ` The watermark-pair freeze WAS evaluated and held, because it holds the clock still: available ${frozen.before.availableCents} at both.` : ""} The attribution above is unaffected.`}`,
-    );
-    record(
-      "evidence",
-      `recovery: the backlog delivered twice (HTTP ${catchUp.join(" then ")}) produced 1 inbox row, 1 card_auth_event and 1 hold ${recovered.hold_id}, whose memo account carries exactly 1 entry of ${heldByUs?.cents} (the $${(AUTH_CENTS / 100).toFixed(2)} withheld once, not twice) and 0 financial entries. ` +
+      `recovery: the backlog delivered twice (HTTP ${catchUp.join(" then ")}) produced 1 inbox row, 1 card_auth_event and 1 hold ${recovered.hold_id}, whose memo account carries exactly 1 entry of ${heldByUs.cents} (the $${(AUTH_CENTS / 100).toFixed(2)} withheld once, not twice) and 0 financial entries. ` +
         `ISOLATED, NOT GUARDED: the app\u0027s own accountAvailability() asked at ONE instant (${isolated.at.toISOString()}) at the two watermarks either side of this run\u0027s own opening posting (booking_seq ${opening.booking_seq - 1n} -> ${opening.booking_seq}) reads available ${isolated.before.availableCents} -> ${isolated.after.availableCents} (exactly -${AUTH_CENTS}), holds ${isolated.before.holdsCents} -> ${isolated.after.holdsCents} (exactly +${AUTH_CENTS}) and ledger unchanged at ${isolated.after.ledgerCents}. Every other write in the database is in BOTH readings and cancels, so no other attack and no other process can move this figure. ` +
         `${quietEpisode ? `The episode was additionally quiet in both books, so the whole-business figures were asserted too: available ${before.availableCents} -> ${after.availableCents}, ledger unchanged at ${after.ledgerCents}` : `${foreignAcross} other entr${foreignAcross === 1 ? "y" : "ies"} touching this customer, ${movedAcross.clockEvents} clock-driven hold transition(s)${movedAcross.rolledOver ? " and a business-date rollover" : ""} landed across the episode, so the whole-business deltas are reported rather than asserted: available ${before.availableCents} -> ${after.availableCents}, ledger ${before.ledgerCents} -> ${after.ledgerCents}. The isolated figure above is unaffected — that is the point of it`}; drain ${drainStatus}`,
     );
