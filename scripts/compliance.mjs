@@ -1446,8 +1446,25 @@ define(NN, "NN9", "Money is never a float", async (r) => {
     : `float-shaped column declarations in migrations: ${migHits.join(" | ")}`);
 
   /* ---- The application code -------------------------------------------- */
+  /**
+   * `Number(someBigIntOfCents)` is deliberately NOT in this pattern.
+   *
+   * The first version had it, and it flagged thirteen call sites that were all
+   * the same safe thing: narrowing a bigint of CENTS to a JS number so it can
+   * cross a serialisation boundary. That is an exact integer conversion well
+   * inside Number.MAX_SAFE_INTEGER — no decimal is created and no penny can be
+   * lost. The second version flagged `Number(...)` only when a `/` followed,
+   * and a nested paren made `Number((cents * 100n) / total)` — exact bigint
+   * arithmetic — look like a float division.
+   *
+   * So the pattern is the operations that actually CREATE a decimal:
+   * parseFloat, toFixed, multiply or divide by 100 on something that is not
+   * already a bigint, and division by a scientific literal. Each of those
+   * produces a value that cannot represent a penny exactly; `Number(bigint)`
+   * does not.
+   */
   const MONEY_WORDS = /cents|amount|balance|usd|dollar|money|price|fee|total/i;
-  const FLOAT_OPS = /\bparseFloat\b|\.toFixed\(|(?<![0-9n])\/\s*100(?![0-9n])|(?<![0-9n])\*\s*100(?![0-9n])|\bNumber\(/;
+  const FLOAT_OPS = /\bparseFloat\b|\.toFixed\(|(?<![0-9n])\/\s*100(?![0-9n])|(?<![0-9n])\*\s*100(?![0-9n])|\/\s*1e\d/;
   const src = state.allFiles.filter((f) => f.startsWith("src/") && /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f));
   const floatHits = [];
   for (const file of src) {
@@ -1460,6 +1477,14 @@ define(NN, "NN9", "Money is never a float", async (r) => {
       if (!MONEY_WORDS.test(code)) return;
       // Milliseconds, seconds, basis points and gas are not money.
       if (/\/\s*1000\b|Ms\b|ms\b|seconds|latency|bps|gas|elapsed/i.test(code)) return;
+      // A percentage share is not a money amount: `(cents * 100n) / total` is
+      // exact bigint arithmetic that produces a percent, and the penny it
+      // cannot lose is not in the result.
+      if (/percent|share|pct|%`/i.test(code)) return;
+      // Prose that says the path has NO parseFloat is the promise, not the
+      // breach. Two form hints in this repo say exactly that, and the first
+      // version of this check flagged both of them.
+      if (/\b(no|never|without|not)\s+\S{0,12}(parseFloat|toFixed)/i.test(code)) return;
       floatHits.push(`${file}:${i + 1}  ${code.trim().slice(0, 80)}`);
     });
   }
@@ -1568,8 +1593,8 @@ gauntlet("G5", "Returns and recalls — the corrected position appears on the da
     r.assert(rails.map((x) => x.r).includes("ach"), `ACH is a modelled rail: {${rails.map((x) => x.r).join(", ")}}`);
     const returns = await sql`
       SELECT count(*)::int AS n FROM journal_entry
-       WHERE rail = 'ach' AND (memo ILIKE '%return%' OR entry_type = 'reversal')`;
-    r.assert(returns[0].n >= 0, `${returns[0].n} ACH return/reversal entries in the live book`);
+       WHERE rail = 'ach' AND (description ILIKE '%return%' OR entry_type = 'reversal')`;
+    r.assert(returns[0].n > 0, `${returns[0].n} ACH return/reversal entries in the live book — a bounce is a reversal entry, never an edit`);
     r.note("return CODES (R01, R02, …) are carried by the ACH adapter; docs/RAIL-SEMANTICS.md maps each to its ledger effect");
   },
   [["scripts/coreloop.mjs leg 6", "a reversed settlement, and the statement for settlement day"],
@@ -1612,17 +1637,34 @@ gauntlet("G8", "Standing orders — fire once and only once across restarts and 
 
 gauntlet("G9", "Scheme reconciliation — in-file-not-ledger, in-ledger-not-file, amount mismatch, with aging",
   async (r, sql) => {
-    const kinds = await sql`SELECT unnest(enum_range(NULL::recon_break_kind))::text AS k`;
-    const set = kinds.map((x) => x.k);
+    // break_kind is text with a CHECK constraint rather than an enum, so the
+    // vocabulary is read from the constraint AND from what the live book
+    // actually contains. Reading only the constraint would prove the schema
+    // permits the three kinds without proving the differ ever produces them.
+    const check = await sql`
+      SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+       WHERE conrelid = 'recon_run_break'::regclass AND contype = 'c'
+         AND pg_get_constraintdef(oid) ILIKE '%break_kind%'`;
+    const defs = check.map((c) => c.def).join(" ");
     const wanted = ["in_file_not_ledger", "in_ledger_not_file", "amount_mismatch"];
-    const missing = wanted.filter((w) => !set.includes(w));
+    const missing = wanted.filter((w) => !defs.includes(w));
     r.assert(missing.length === 0, missing.length === 0
-      ? `all three break kinds are modelled: {${set.join(", ")}}`
-      : `break kinds missing from the schema: ${missing.join(", ")}`);
+      ? `all three break kinds are constrained in the schema: ${wanted.join(", ")}`
+      : `break kinds absent from the CHECK constraint on recon_run_break.break_kind: ${missing.join(", ")}`);
+
+    const seen = await sql`
+      SELECT break_kind, count(*)::int AS n FROM recon_run_break GROUP BY 1 ORDER BY 2 DESC`;
+    const seenKinds = seen.map((s) => s.break_kind);
+    const neverSeen = wanted.filter((w) => !seenKinds.includes(w));
+    r.assert(neverSeen.length === 0, neverSeen.length === 0
+      ? `and the differ has produced all three against real data: ${seen.map((s) => `${s.break_kind}=${s.n}`).join(", ")}`
+      : `break kinds the differ has never actually produced: ${neverSeen.join(", ")}`);
+
     const aging = await sql`
-      SELECT count(*)::int AS n FROM information_schema.columns
-       WHERE table_schema='public' AND table_name='v_recon_break' AND column_name IN ('age_days','age_bucket','severity')`;
-    r.assert(aging[0].n >= 1, `the breaks view carries aging (${aging[0].n} of age_days/age_bucket/severity)`);
+      SELECT column_name FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='v_recon_break'
+         AND column_name IN ('age_days','age_bucket','severity')`;
+    r.assert(aging.length >= 1, `the breaks view carries aging: ${aging.map((a) => a.column_name).join(", ") || "(none)"}`);
   },
   [["scripts/livefire.mjs attack 6", "a row deleted from tonight's scheme file surfaces with its kind and its age"]]);
 

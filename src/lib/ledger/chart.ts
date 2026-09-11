@@ -295,6 +295,15 @@ export const CHART: readonly ChartAccount[] = [
     postable: true,
     why: "Fees we charge the customer — wire, expedited ACH, monthly platform — credited here at the same instant the customer's deposit account is debited for them.",
   },
+  {
+    code: "4300",
+    name: "FX quote settlement variance",
+    type: "income",
+    book: "financial",
+    parent: "4000",
+    postable: true,
+    why: "The difference between the rate a customer accepted and what the payout actually cost us by the time it settled. ONE signed account rather than a gain and a loss pair, because an FX variance is one fact with two signs and splitting it invites someone to report only the favourable half. It is not fee income — 4200 is what we charge, and netting variance into it would make a spread look like a price, which is exactly what 5100's own note forbids. It is not a credit loss either: nobody defaulted, the market moved. An accepted quote is a commitment we honour, so when it moves against us that is a real cost of having made a promise, and it belongs where someone can see the size of it.",
+  },
 
   // =========================================================================
   // 5000 EXPENSE — debit-normal. What things cost us.

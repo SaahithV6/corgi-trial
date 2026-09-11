@@ -144,33 +144,30 @@ export async function PayoutsView({
               <SendPayoutForm quote={focus} disabled={fixture} />
             ) : null}
             {focus.state === "expired" ? (
-              <Panel
-                title="2 · Accept the rate"
-                description="This offer has lapsed. Accepting it is refused by the database, not by a disabled button."
+              <AcceptQuoteForm
+                quote={focus}
+                disabled={fixture}
+                description="This offer has lapsed. Accepting it is refused by the database, not by a disabled button — press it and see."
               >
-                <div className="space-y-4 px-5 py-4">
-                  <Note emphasis title="Too late — the rate you were looking at is gone">
-                    <p>
-                      {focus.quoteRef} expired at {formatTimestamp(focus.expiresAt)} without being
-                      accepted. We committed to nothing and the customer lost nothing, which is
-                      what an expiry is for.
-                    </p>
-                    <p className="mt-2">
-                      An acceptance sent now does not get a polite client-side message — it
-                      reaches the database and{" "}
-                      <code>fx_quote_acceptance_guard()</code> raises, because the trigger reads
-                      the quote&rsquo;s own <code>expires_at</code> against the transaction clock.
-                      That is also what closes the race a pre-check cannot: between reading the
-                      expiry and writing the row, an offer can lapse.
-                    </p>
-                    <p className="mt-2">
-                      The expired quote stays on file forever — nothing here is edited or deleted
-                      — and the remedy is one click. Request a new quote on the left.
-                    </p>
-                  </Note>
-                  <AcceptQuoteForm quote={focus} disabled={fixture} />
-                </div>
-              </Panel>
+                <Note emphasis title="Too late — the rate you were looking at is gone">
+                  <p>
+                    {focus.quoteRef} expired at {formatTimestamp(focus.expiresAt)} without being
+                    accepted. We committed to nothing and the customer lost nothing, which is what
+                    an expiry is for.
+                  </p>
+                  <p className="mt-2">
+                    An acceptance sent now does not get a polite client-side message — it reaches
+                    the database and <code>fx_quote_acceptance_guard()</code> raises, because the
+                    trigger reads the quote&rsquo;s own <code>expires_at</code> against the
+                    transaction clock. That is also what closes the race a pre-check cannot:
+                    between reading the expiry and writing the row, an offer can lapse.
+                  </p>
+                  <p className="mt-2">
+                    The expired quote stays on file forever — nothing here is edited or deleted —
+                    and the remedy is one click. Request a new quote on the left.
+                  </p>
+                </Note>
+              </AcceptQuoteForm>
             ) : null}
             {focus.state === "lapsed" || focus.state === "settled" ? (
               <Panel

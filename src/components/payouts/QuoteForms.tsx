@@ -239,9 +239,15 @@ export function RequestQuoteForm({
 export function AcceptQuoteForm({
   quote,
   disabled,
+  description,
+  children,
 }: {
   readonly quote: QuoteView;
   readonly disabled: boolean;
+  /** Overridden on an expired offer, where the panel has a different thing to say. */
+  readonly description?: string;
+  /** Shown above the form. The expired state puts its explanation here. */
+  readonly children?: React.ReactNode;
 }) {
   const [state, formAction, pending] = useActionState(acceptQuoteAction, ACCEPT_IDLE);
   const referenceId = useId();
@@ -250,9 +256,13 @@ export function AcceptQuoteForm({
     <Panel
       id="accept-quote"
       title="2 · Accept the rate"
-      description="Acceptance is a row, not an edit. Whether it is allowed is decided by a trigger in the database against the quote's own expiry — not by this button and not by the countdown."
+      description={
+        description ??
+        "Acceptance is a row, not an edit. Whether it is allowed is decided by a trigger in the database against the quote's own expiry — not by this button and not by the countdown."
+      }
     >
       <form action={formAction} className="space-y-4 px-5 py-4">
+        {children}
         <input type="hidden" name="quoteRef" value={quote.quoteRef} />
 
         <Field
