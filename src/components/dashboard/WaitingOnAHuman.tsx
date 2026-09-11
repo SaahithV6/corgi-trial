@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Route } from "next";
 
 import { Money } from "@/components/ui/Money";
+import { formatAge } from "@/lib/recon/aging";
 import {
   Badge,
   FOCUS_RING,
@@ -172,7 +173,7 @@ export function WaitingOnAHuman({ human }: { readonly human: HumanSection }) {
                           </Badge>
                         </td>
                         <td className={`${TD_CLASS} money text-xs`}>
-                          {b.ageDays}d · {b.closesCrossed} close
+                          {formatAge(b.ageDays, "d")} · {b.closesCrossed} close
                           {b.closesCrossed === 1 ? "" : "s"}
                         </td>
                         <td className={TD_CLASS}>
@@ -329,7 +330,7 @@ export function WaitingOnAHuman({ human }: { readonly human: HumanSection }) {
                 >
                   <p className="money text-xs">{u.transferId}</p>
                   <p className="mt-1 text-xs text-muted">
-                    first seen {u.firstSeenAt} · {u.ageDays}d · {u.deliveries} deliver
+                    first seen {u.firstSeenAt} · {formatAge(u.ageDays, "d")} · {u.deliveries} deliver
                     {u.deliveries === 1 ? "y" : "ies"} · {u.stillParked} still parked ·{" "}
                     {u.deadLettered} dead-lettered · attributed:{" "}
                     {u.attributed ? "yes" : "no"}

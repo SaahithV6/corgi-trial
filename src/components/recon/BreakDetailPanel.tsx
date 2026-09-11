@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { formatAge } from "@/lib/recon/aging";
 
 import { Money } from "@/components/ui/Money";
 import {
@@ -66,7 +67,7 @@ export function BreakDetailPanel({
         <MetaList
           items={[
             { label: "value date", value: formatDate(row.valueDate) },
-            { label: "age", value: `${row.ageDays} business day${row.ageDays === 1 ? "" : "s"}` },
+            { label: "age", value: formatAge(row.ageDays, " days") },
             {
               label: "day closes crossed",
               value: String(row.closesCrossed),
