@@ -150,7 +150,18 @@ export async function ledgerPosterActorId(conn: Sql = sql): Promise<string> {
   return row.id;
 }
 
-async function houseAccountId(code: string, entityId: string, conn: Sql): Promise<string> {
+/**
+ * The entity's house leaf for a chart code — `9900 memo contra` in practice.
+ *
+ * EXPORTED, and the export is the reason this comment exists. `availability.ts`
+ * needs the same contra leaf `postHoldDelta()` needs, and the alternative was
+ * to write `SELECT id FROM account …` a second time inside that module — a
+ * second answer to "which account is 9900", which is precisely the shape
+ * `src/lib/ledger/boundary.test.ts` exists to refuse and which
+ * `resolveChartCodes()` was extracted to end elsewhere. One body, one answer,
+ * and the ledger boundary's reference count does not move.
+ */
+export async function houseAccountId(code: string, entityId: string, conn: Sql): Promise<string> {
   const [row] = await conn<{ id: string }[]>`
     SELECT id FROM account
      WHERE code = ${code} AND business_id IS NULL AND entity_id = ${entityId}::uuid

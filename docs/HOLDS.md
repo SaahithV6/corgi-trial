@@ -31,6 +31,12 @@ in **§9.8**, the one property that separates `v_hold_drift` from the nineteen
 guards on this build that reported healthy while the thing they watched was
 broken.
 
+**Then a view grew thirteen rows with nobody writing anything.** That is
+**§12**, migration **0048** — the third clock in this system, on the funding
+path rather than the card path, and the one sub-population of
+`v_hold_release_drift` where 0036 §3's "a human has to decide" does not apply,
+because there is no closure to adjudicate.
+
 ---
 
 ## 1. The model, for context
@@ -1804,3 +1810,270 @@ caught — the same device FINDING 1 uses, for the same reason.
 
 **A named gap is better than an unnamed one. It is not a substitute for closing
 it.**
+
+
+---
+
+## 12. The third clock — migration 0048
+
+`expiry.ts` is a clock at the end of a card authorisation's life. `completion.ts`
+is the opening whose memo posting never landed. **There is a third clock, it is
+on the funding path, and until 2026-09-11 nothing on the hold side knew about
+it.**
+
+### 12.1 What happened
+
+`v_hold_release_drift` was **empty at 12:24Z and at 12:47Z**. At **13:17Z it held
+thirteen rows**. Nothing wrote them.
+
+```
+SELECT count(*) FROM v_hold_release_drift;   -- 13   (db now 2026-09-11T13:17:06Z)
+```
+
+All thirteen are `uncleared_credit` holds opened by the Plaid funding path
+between `2026-09-10T22:36Z` and `2026-09-11T03:39Z`. Every one carries
+
+```
+available_at = 2026-09-11T13:00:00.000Z      -- 09:00 America/New_York
+policy_id    = c2ada775-2384-54a8-9f9a-5efdd64f4390   (ach/self, 1 banking day, 09:00 ET)
+```
+
+and every one has **exactly one journal entry** against it — the opening
+withholding, booked the day it was funded — and **no `hold_closure` row at all**.
+Measured, per hold: `entries = 1`, `has_closure = false`, `is_released = true`.
+
+So the trigger was the clock. `v_hold_state.is_released` has three arms and only
+one of them can have fired:
+
+```
+  a standing hold_closure row                          -- there is none
+  the card fold (kind = 'card_auth')                   -- wrong kind
+  kind = 'uncleared_credit' AND now() >= available_at  <-- this one
+```
+
+### 12.2 The money was already right, and that is the point
+
+`ledger_availability()` re-derives the same arm at a parameterised instant, so
+this is not a report of a release — it *is* the release. Same account, same value
+date, same booking watermark, two instants:
+
+| `p_as_of` | ledger | card holds | uncleared | available |
+| --------- | -----: | ---------: | --------: | --------: |
+| `2026-09-11T12:59:59Z` | 5,621,471 | 41,000 | 3,345,518 | **1,984,953** |
+| `2026-09-11T13:00:01Z` | 5,621,471 | 41,000 | 1,720,118 | **3,610,353** |
+
+$16,254.00 became spendable on Ridgeline's account, correctly, on the instant the
+policy names, **with nothing running**. What was left behind was the memo book,
+still carrying the withholding — which is precisely the state migration 0011
+created `v_hold_release_drift` to report.
+
+And it grows by itself. 45 more uncleared credits carry a finite future
+`available_at` — 28 at `2026-09-14T13:00Z` and 17 at `2026-09-15T13:00Z`, three
+of the latter already closed — so **42 more rows arrive on those two instants**
+with nobody writing them either. (A further 24 carry `available_at = infinity`:
+dispute provisional credits, released by a person and never by a clock. All 24
+are already closed and flat; no clock can ever reach them, which is exactly what
+`infinity` is for. See docs/FUNDING.md §0.1.)
+
+### 12.3 The sweep that already existed — and the reason it is not a fix
+
+The brief for this work said `sweepExpiredHolds()` "has no uncleared-credit
+equivalent". **It has one.** `releaseAvailableCredits()` in
+`src/lib/rails/plaid/adapter.ts` is its exact sibling, `drainOnce()` calls it,
+and `/api/drain` is on cron. Nothing is missing.
+
+It has simply **never had a due hold at a moment it ran**, and the reason is
+structural rather than bad luck:
+
+```
+every uncleared credit on the ACH rail matures at   09:00 ET  = 13:00Z
+/api/drain                                          04:17Z    = 00:17 ET
+/api/cron/holds                                     08:11Z    = 04:11 ET
+```
+
+Both scheduled triggers fire **before** the maturity, every day. A same-day
+release is impossible from either, so the memo book is behind for roughly
+nineteen hours by construction. Measured, and it is the cleanest evidence in this
+section: `hold_closure.source = 'availability_sweep'` has **zero rows** on this
+database, and all thirteen entries keyed `hold:%:after:availability:%` were
+written by the zero-day **wire** path, inline with the credit.
+
+That guaranteed lateness carries the second defect, and it is the one that
+reaches a statement. `releaseAvailableCredits()` books at `bookDateOf(now)` — the
+day the sweeper happened to run. Swept at 04:17Z on the 12th, thirteen releases
+whose policy instant was 09:00 ET on the 11th would be value-dated **2026-09-12**,
+and the statement for the 11th would show money withheld that the policy had
+already freed. On a build whose differentiator is bitemporality, a value date
+that depends on cron timing is not a rounding error.
+
+### 12.4 Where the repair went, and the two candidates it beat
+
+**It is a sweep** — `src/lib/holds/availability.ts`,
+`sweepMaturedUnclearedCredits()` — scheduled as the third call in
+`/api/cron/holds`, with its value date taken from the policy instant instead of
+from the clock that triggers it:
+
+```
+valueDate = book_date(hold.available_at)
+```
+
+derived from immutable data, identical on every run for ever.
+
+**Candidate 1: post the release at funding time, dated to `available_at`, so no
+clock is involved.** This is the tempting one and it is wrong on the domain. A
+value date is a **day**; `available_at` is an **instant** — 09:00 ET. Neither
+`v_hold_state`'s memo lateral nor `ledger_availability()`'s memo CTE has a
+value-date predicate today, so a pre-posted release would flatten the hold
+immediately and the money would be spendable **at funding time**: core-loop leg
+2 ("ledger rises, available does not") would fail on the spot. Adding the
+predicate does not save it — it would make the release land at 00:00 ET on the
+release day, **nine hours early**. docs/FUNDING.md §4.2 already prices a
+*one*-hour version of that mistake as unacceptable. Releasing customer funds
+early to keep a bookkeeping view green is narrowing the guard by other means.
+
+**Candidate 2: never write the memo entry; derive the withholding from the hold
+row.** `hold` carries no amount column — `id, account_id, memo_account_id, kind,
+external_ref, value_date, expires_at, available_at, policy_id, created_at` — so
+this needs one: a second stored number for money that is currently derived,
+which is the first thing the track's own domain gauntlet forbids. It would also
+delete the 9200 evidence trail docs/FUNDING.md §3 prints, and it cannot be
+applied to the 95 uncleared holds already standing on this book.
+
+### 12.5 Why this is mechanical where 0036 §3 said it was not
+
+Migration 0036 §3 kept `v_hold_release_drift` out of its sweeper, and the
+reasoning is correct and is **not** overturned:
+
+> a row here means EITHER the memo posting never landed OR the closure should
+> never have been written, and posting the release would silence the alarm
+> without answering the question.
+
+**The question exists because a closure exists.** These thirteen have no closure
+row at all. `is_released` came from `now() >= hold.available_at`, a predicate over
+a column written once when the credit is booked, on a table nothing may `UPDATE`.
+There is no act of judgement standing behind the release that could be the thing
+that is wrong, so there is nothing for a human to answer — the only available
+reading is that the posting has not landed. That is the *opening* direction's
+situation, one hold kind over.
+
+`v_uncleared_release_due` (0048 §1) is drawn exactly there and nowhere wider:
+
+* **`kind = 'uncleared_credit'` only.** A card hold's release folds over
+  `card_auth_event`, whose *input* can be wrong — §7's lost `DECLINE` is the
+  proof, and two derivations of an impoverished input agree perfectly while both
+  are wrong.
+* **No `hold_closure` row at all**, reversed or not. The moment somebody has
+  written one, 0036 §3's question is live again and
+  `scripts/repair-0011-spurious-closures.mjs` is where a human answers it.
+
+Nothing is narrowed. The view is defined `FROM v_hold_release_drift` — 0036 §1's
+load-bearing line — so the repair cannot range over rows the alarm cannot see,
+and 0048 §2 asserts three things at apply time: that every queued row really was
+released by the clock, that no drift row with the queue's own shape is missing
+from it, and what the **residue** is, counted and printed rather than implied.
+
+### 12.6 The repair, and what it wrote
+
+```
+node scripts/repair-0048-uncleared-release.mjs            # dry run
+node scripts/repair-0048-uncleared-release.mjs --apply
+```
+
+13 examined, 13 closed, 13 released, **$17,504.00** returned to the memo book, all
+thirteen value-dated **2026-09-11** — the day the policy released the money, which
+for this batch is also the day the repair ran. `booking_seq` 5459–5471:
+
+```
+d82ce4ff-2d3b-44cd-828e-515845c76a47  5459  2026-09-11      $1.00  hold 2c5ab3aa-…
+1dfc543c-0445-44d1-904d-775bd0833e87  5460  2026-09-11      $1.00  hold 312ad4a3-…
+787fb44a-3908-4258-8442-27b07892209f  5461  2026-09-11  $2,500.00  hold 3fd3a8c5-…
+46a88d5f-9c33-49f7-9d58-3a7f8f5f5199  5462  2026-09-11  $1,250.00  hold 805ed9b9-…
+5a9a281a-20fe-4f22-9337-23f9987f9be7  5463  2026-09-11  $5,000.00  hold 8ea2eeeb-…
+9ba648ec-06d8-4965-a508-3d0ef411ac72  5464  2026-09-11      $1.00  hold a0151609-…
+17f301dd-ec4a-41f7-855d-d7ed54a80c3a  5465  2026-09-11  $1,250.00  hold a35383ae-…
+e948b910-5d10-4d57-9970-b953fb58d397  5466  2026-09-11      $1.00  hold a646ee8a-…
+a47581fc-a51c-48a4-8159-8fa5f9249d04  5467  2026-09-11  $2,500.00  hold ace8e45f-…
+9bfbe990-6ee0-4296-92af-facea68c25cc  5468  2026-09-11  $1,250.00  hold c8f5d2f1-…
+95bb23df-c974-4524-be22-0ce6a8868241  5469  2026-09-11  $1,250.00  hold d62bd51e-…
+80cfa224-9986-4dd6-924d-31c239edf7fc  5470  2026-09-11  $1,250.00  hold e06a7486-…
+3b3ff494-89c2-4272-a44d-16a04aff276b  5471  2026-09-11  $1,250.00  hold fdbedcbe-…
+```
+
+**Not one customer-facing figure moved**, which is the proof that the customer
+was already right and this was bookkeeping. Both affected 2100 leaves, before and
+after, to the cent:
+
+```
+a0c41a37-…  ledger 5,621,471  card holds 41,000  uncleared 1,720,118  available 3,610,353
+66fdc0f8-…  ledger -85,894,145  card holds 428,300  uncleared 0  available -86,322,445
+```
+
+The thirteen closures carry `source = 'availability_sweep'` — **declared**, unlike
+`releaseAvailableCredits()`'s, which predates 0040's column and is outside that
+change's write scope — so `v_hold_closure_census` can count them by construction
+rather than by matching English against `reason`.
+
+### 12.7 What handles the 42 still to come, proved rather than promised
+
+The sweep arriving. Demonstrated against this database in a transaction that was
+**rolled back**: an `uncleared_credit` hold was fabricated with
+`available_at = 2026-09-09T13:00:00Z` — two days in the past, on a day that is
+**not** today — and its opening withholding posted.
+
+```
+v_hold_release_drift  0 -> 1     the clock released it; nothing wrote a thing
+queued                5465ac95-…  withholding 4321c, release value date 2026-09-09
+sweep                 examined 1  closed 1  released 1  4321c
+v_hold_release_drift  1 -> 0
+entry                 3102fa21-…  value_date 2026-09-09  book memo  rail ach
+                      hold:5465ac95-…:after:availability:2026-09-09T13:00:00.000Z
+closure               source=availability_sweep  "funds availability reached at 2026-09-09T…"
+second sweep          examined 0  released 0  0c
+(rolled back)         v_hold_release_drift 0
+```
+
+**The value date is 2026-09-09 and the run date is 2026-09-11.** That is the
+whole difference from `releaseAvailableCredits()` in one line, and it is why the
+holds maturing on the 14th and the 15th will be booked on the day the policy
+released them however late anybody notices.
+
+Re-counted at 13:39Z, after the core-loop leg-2 verification below funded another
+$1,250.00 through the deployed `/funding`: **43** uncleared credits now carry a
+finite future `available_at` and no closure — **29** at `2026-09-14T13:00Z` and
+**14** at `2026-09-15T13:00Z`. The number moves because customers keep funding
+accounts, which is the system working; what matters is that
+`v_uncleared_release_due` is derived from `v_hold_release_drift` and therefore
+finds whatever is there on the day.
+
+### 12.8 Exactly-once, and why there are two triggers rather than two mechanisms
+
+There is no row lock and there cannot be: `corgi_app` holds no `UPDATE` on
+`hold`, so `FOR UPDATE` is not expressible, and unlike a card authorisation there
+is no `SECURITY DEFINER` helper for one. The guarantee is the usual three:
+
+1. `hold_closure` has `PRIMARY KEY (hold_id)` — no second row to write;
+2. the release entry's idempotency key is derived from the hold id and its
+   immutable `available_at`, so racers compute the same key and Postgres refuses
+   the second;
+3. the amount is read from the memo book inside the transaction, and a zero
+   balance posts nothing at all.
+
+The key is **byte-identical** to `releaseAvailableCredits()`'s —
+`hold:<hold_id>:after:availability:<available_at ISO>`. That is deliberate: the
+drain and the holds cron are two *triggers for one append*, not two mechanisms.
+Whichever runs first writes the entry; the other finds the closure standing and
+the memo balance at zero.
+
+### 12.9 The cut list this leaves
+
+Two things are right and are outside this change's write scope, so they are
+written down rather than silently assumed:
+
+* **`vercel.json`.** `/api/cron/holds` at `11 8 * * *` is 04:11 ET. Moving it
+  past `14 00 * * *` puts it after 09:00 ET in both halves of the year and
+  shrinks the drift window from ~19 hours to about one.
+* **`src/lib/rails/plaid/adapter.ts`.** `releaseAvailableCredits()` should be
+  deleted and `drainOnce()` should call `sweepMaturedUnclearedCredits()`. Until
+  it is, the drain can still win the race on a late batch and book that batch's
+  release at the run date. The two cannot double-post — §12.8 — but they can
+  disagree about which day it happened, and only one of them is right.

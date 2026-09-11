@@ -8,6 +8,8 @@
  *   corrections.ts    the repair: reverse at the ORIGINAL value date. Pure choice,
  *                     impure posting.
  *   expiry.ts         the clock release, which is bookkeeping and not a repair.
+ *   availability.ts   the OTHER clock: an uncleared credit whose funds-availability
+ *                     instant has passed. Same shape, funding path instead of cards.
  *   completion.ts     the other end of the lifecycle: an OPENING whose memo
  *                     posting never landed. Idempotent, total, safe mid-flight.
  *
@@ -96,3 +98,14 @@ export {
   type HoldCompletionSweepResult,
   type IncompleteHoldPosting,
 } from "./completion";
+
+export {
+  findUnclearedReleasesDue,
+  releaseOne,
+  sweepMaturedUnclearedCredits,
+  unclearedReleaseKey,
+  unclearedReleaseReason,
+  type UnclearedReleaseDue,
+  type UnclearedReleaseResult,
+  type UnclearedReleaseSweepResult,
+} from "./availability";

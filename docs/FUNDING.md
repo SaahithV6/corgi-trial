@@ -367,21 +367,73 @@ becomes "available Tuesday, because Saturday and Sunday are not banking days and
 Monday is Labor Day" — an answer an operator can check, and checking it is the
 only way anyone ever notices the holiday table is wrong.
 
-### 4.3 Release needs nothing to be running
+### 4.3 Release needs nothing to be running — and the bookkeeping that does
 
 `v_hold_state`'s release predicate (migration 0011) already reads
-`kind = 'uncleared_credit' AND now() >= available_at`, so available rises on the
-clock whether or not any sweep executes. `releaseAvailableCredits()` exists to do
-the two things the database cannot do for itself: write the `hold_closure` row so
-every reader agrees — including `availableBalance()`, whose predicate is
-closure-only and does not know about `available_at` — and post the memo entry
-that drives the 9200 leaf back to zero so `v_hold_release_drift` stays empty.
-**Running it never is safe.** The customer's available balance is already right.
+`kind = 'uncleared_credit' AND now() >= available_at`, and
+`ledger_availability()` (0022) re-derives the same arm at a parameterised
+instant, so **available rises on the clock whether or not any sweep executes.**
+Measured on Ridgeline's 2100 leaf across one of these boundaries, same value date
+and same booking watermark:
+
+| `p_as_of` | ledger | card holds | uncleared | available |
+| --------- | -----: | ---------: | --------: | --------: |
+| `2026-09-11T12:59:59Z` | 5,621,471 | 41,000 | 3,345,518 | **1,984,953** |
+| `2026-09-11T13:00:01Z` | 5,621,471 | 41,000 | 1,720,118 | **3,610,353** |
+
+$16,254.00, spendable on the instant the policy names, with nothing running.
+**A sweep that never runs is safe. The customer's available balance is already
+right.**
+
+What a sweep is for is the two things the database cannot do for itself: write
+the `hold_closure` row so every reader agrees — including `availableBalance()`,
+whose predicate is closure-only and does not know about `available_at` — and post
+the memo entry that drives the 9200 leaf back to zero so `v_hold_release_drift`
+stays empty.
+
+**That second one is bookkeeping, and on 2026-09-11 it was measured not
+happening.** The guard was empty at 12:47Z and held thirteen rows at 13:17Z, all
+thirteen `uncleared_credit`, all `available_at = 2026-09-11T13:00:00.000Z`, every
+one with a single journal entry and no closure row. Nothing wrote them; a clock
+struck. The full account is **docs/HOLDS.md §12** and migration **0048**; the
+three things a reader of this file needs are:
+
+1. **`releaseAvailableCredits()` is not missing — its schedule is unusable.**
+   Every uncleared credit on the ACH rail matures at 09:00 ET (13:00Z in summer).
+   `/api/drain` runs 04:17Z and `/api/cron/holds` 08:11Z; **both fire before the
+   maturity, every day**, so a same-day release is impossible from either and the
+   memo book is behind for ~19 hours by construction. `hold_closure.source =
+   'availability_sweep'` had **zero rows** on this database when that was
+   measured: the sweep had never once had a due hold at a moment it ran.
+2. **The release's value date must come from the policy, not from the cron.**
+   `releaseAvailableCredits()` books at `bookDateOf(now)`, so a batch swept the
+   morning after maturity is value-dated the *following* banking day and the
+   statement for the release day shows money withheld that the policy had freed.
+   `sweepMaturedUnclearedCredits()` (`src/lib/holds/availability.ts`, scheduled
+   third in `/api/cron/holds`) books at `book_date(hold.available_at)` — derived
+   from immutable data, identical on every run for ever. Proved in a rolled-back
+   transaction: a hold matured `2026-09-09T13:00Z` and swept on 2026-09-11 books
+   value date **2026-09-09**.
+3. **Pre-posting the release at funding time was considered and is wrong.** A
+   value date is a day; `available_at` is an instant. Neither memo-balance
+   predicate in this system has a value-date filter today, so a pre-posted
+   release would flatten the hold immediately and **leg 2 of the core loop would
+   fail on the spot** — ledger up, available up with it. Adding the filter makes
+   it land at 00:00 ET instead of 09:00 ET, nine hours early, which is §4.2's
+   one-hour mistake multiplied by nine. Money is not released early to keep a
+   view green.
+
+The 13 were repaired append-only at their own release value date by
+`scripts/repair-0048-uncleared-release.mjs` — $17,504.00 back to the memo book,
+`booking_seq` 5459–5471 — and **not one customer-facing figure moved**, which is
+this section's claim restated as a measurement. The 42 uncleared credits maturing
+`2026-09-14T13:00Z` and `2026-09-15T13:00Z` are handled by the sweep arriving.
 
 Exactly-once comes from `hold_closure PRIMARY KEY (hold_id)` plus a release
 idempotency key derived from the hold id and its immutable `available_at` — not
 from a lock, because `corgi_app` holds no `UPDATE` on `hold` and `FOR UPDATE` is
-not expressible.
+not expressible. Both sweeps build **the same key**, so the drain and the holds
+cron are two triggers for one append rather than two mechanisms.
 
 ---
 
