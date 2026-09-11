@@ -46,7 +46,19 @@ if (!URL_DB) {
 const sql = postgres(URL_DB, { ssl: "require" });
 
 const rows = [];
-const add = (area, brief, verdict, evidence) => rows.push({ area, brief, verdict, evidence });
+/**
+ * `standIn` names what the evidence ACTUALLY is when it is not what the row's
+ * sentence implies. Every row below whose proof is a READ standing in for a
+ * WRITE passes one, and it is printed on the row — not buried in a header.
+ *
+ * This exists because this script reported 23 pass · 0 partial · 0 fail on the
+ * same commit where `coreloop` reported three failed legs. It never attempts a
+ * write, so every row it has ever printed is a read; the header above promises
+ * there is no verdict here meaning "looks right", and a green board assembled
+ * entirely out of reads is exactly that verdict wearing a different word.
+ */
+const add = (area, brief, verdict, evidence, standIn = null) =>
+  rows.push({ area, brief, verdict, evidence, standIn });
 
 const one = async (q) => {
   try {
@@ -67,6 +79,25 @@ const http = async (path, cookie) => {
     return r.status;
   } catch {
     return 0;
+  }
+};
+
+/**
+ * The ONE write this script attempts, and it attempts it anonymously on
+ * purpose: a refusal is the result being measured. It carries no session and
+ * no body, so it cannot succeed and cannot write a row to the book.
+ */
+const anonPost = async (path) => {
+  try {
+    const r = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { accept: "application/json" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(20_000),
+    });
+    return { status: r.status, authz: r.headers.get("x-corgi-authz") ?? "(absent)" };
+  } catch {
+    return { status: 0, authz: "(request failed)" };
   }
 };
 
@@ -183,7 +214,14 @@ const scope = [
   ["the ledger itself", counts?.entries, "journal entries"],
 ];
 for (const [what, n, unit] of scope) {
-  add("v1 scope", what, (n ?? 0) > 0 ? "PASS" : "FAIL", `${n ?? "?"} ${unit}`);
+  add(
+    "v1 scope",
+    what,
+    (n ?? 0) > 0 ? "PASS" : "FAIL",
+    `${n ?? "?"} ${unit}`,
+    "a COUNT of rows already on the book — this script wrote none of them, so the row proves the " +
+      "capability has run at some point, not that it runs now",
+  );
 }
 add("v1 scope", "a mobile app", "CUT", "cut by Saahith, three times, explicitly. Recorded in the graph with his reasoning.");
 
@@ -211,6 +249,8 @@ for (const [what, [op, cust]] of Object.entries(routeFor)) {
     cust === null
       ? `operator ${op} ${opStatus}; no customer surface (operator capability)`
       : `operator ${op} ${opStatus}, customer ${cust} ${custStatus}`,
+    "a GET of the screen — that it RENDERS is not proof the write behind it works; " +
+      "coreloop and livefire drive those",
   );
 }
 
@@ -228,16 +268,87 @@ add(
   `customer /accounts ${custOnOperator}, staff /accounts ${staffOnOperator}, customer /client ${custOnClient}`,
 );
 
+/**
+ * THE VACUOUS GREEN, AND WHY THIS ROW IS NOW TWO.
+ *
+ * "0 self-approvals on the whole book" was printed as a pass. It is true, and
+ * on a book where nobody ever approved anything it is true the way "no aircraft
+ * I have built has crashed" is true. The count says nothing about the trigger
+ * unless something was ATTEMPTED and refused.
+ *
+ * So: the denominator first. If the book holds no approvals at all, a zero
+ * numerator establishes nothing and the row is UNPROVEN with that reason.
+ * And in EITHER case the second row says plainly that this script attempted no
+ * self-approval — `coreloop` leg 5 is the thing that presses the trigger and
+ * reads its refusal.
+ */
 const selfApprove = await one(sql`
   SELECT count(*)::int AS n
     FROM payment_instruction_event e
     JOIN payment_instruction i ON i.id = e.instruction_id
    WHERE e.kind = 'approved' AND e.actor_id = i.requested_by`);
+const approvals = await one(sql`
+  SELECT count(*)::int AS n FROM payment_instruction_event WHERE kind = 'approved'`);
+const approvalsSeen = approvals?.n ?? 0;
 add(
   "maker-checker",
   "the initiator can never approve their own payment",
-  selfApprove?.n === 0 ? "PASS" : "FAIL",
-  `${selfApprove?.n ?? "?"} self-approvals on the whole book — enforced by trigger, not by a screen`,
+  selfApprove?.n !== 0
+    ? "FAIL"
+    : approvalsSeen === 0
+      ? "UNPROVEN"
+      : "PASS",
+  approvalsSeen === 0
+    ? "the book holds NO approval events at all, so 0 self-approvals is vacuous — nothing was " +
+      "ever approved, so nothing was ever refused. node scripts/coreloop.mjs leg 5 presses the trigger."
+    : `${selfApprove?.n ?? "?"} self-approvals across ${approvalsSeen} recorded approvals — ` +
+      `enforced by trigger, not by a screen`,
+  "a READ over approvals that already exist. This script attempts no approval, so it never " +
+    "makes the trigger refuse one; node scripts/coreloop.mjs leg 5 does exactly that",
+);
+
+// ---------------------------------------------------------------------------
+// 5b. THE WRITE PATH — the hole this script used to have, named.
+//
+// Every row above is a read. That was not a flaw in any one of them; it became
+// a flaw when the board they add up to was printed as clean on a commit where
+// `coreloop` — the script that actually writes — was failing three legs. A
+// board assembled from reads cannot go green about writes, so this section
+// measures what it honestly can and marks the rest UNPROVEN by name.
+//
+// Two things ARE measurable here without a session, and both are real:
+//   * an anonymous POST is a genuine write attempt, and its refusal is the
+//     gate working;
+//   * whether THIS SHELL holds the passphrase decides whether the write path
+//     can be driven from here at all.
+// ---------------------------------------------------------------------------
+const anonWrite = await anonPost("/accounts");
+const anonRead = await http("/accounts");
+add(
+  "write path",
+  "writes are behind the passphrase, reads are not",
+  (anonWrite.status === 401 || anonWrite.status === 503) && anonRead === 200 ? "PASS" : "FAIL",
+  `anonymous POST /accounts -> ${anonWrite.status} ${anonWrite.authz} (401 SIGN_IN_REQUIRED, or ` +
+    `503 with the deployment's CONSOLE_PASSWORD unset); anonymous GET /accounts -> ${anonRead}. ` +
+    `This row is the only WRITE this script attempts, and it is meant to be refused.`,
+);
+
+const havePassphrase =
+  process.env.CONSOLE_PASSWORD !== undefined && process.env.CONSOLE_PASSWORD !== "";
+add(
+  "write path",
+  "the seven-leg core loop actually moves money",
+  havePassphrase ? "UNPROVEN" : "FAIL",
+  havePassphrase
+    ? "NOT MEASURED HERE. This script attempts no authenticated write — it opens no account, " +
+      "funds nothing, issues no card and raises no payment. node scripts/coreloop.mjs is the " +
+      "only thing that drives all seven, and its tally is the one to read; a clean board here " +
+      "is not a statement about it."
+    : "CONSOLE_PASSWORD is not set in this shell, so the write path cannot be driven from here " +
+      "AT ALL: node scripts/coreloop.mjs will fail every write leg at the door with 401 " +
+      "SIGN_IN_REQUIRED. This is an authentication failure, not a verdict about KYB, funding, " +
+      "issuing or approvals. Export it:  set -a; . ./.env; set +a   See docs/AUTH.md.",
+  "there is no read that stands in for this one, which is why it is not green",
 );
 
 // ---------------------------------------------------------------------------
@@ -276,6 +387,21 @@ console.log("CONFIRMATION — the brief, measured against this book and this dep
 console.log(`${BASE}   ${new Date().toISOString()}`);
 console.log("");
 
+const wrapTo = (text, width, indent) => {
+  const out = [];
+  let line = "";
+  for (const word of String(text).split(/\s+/)) {
+    if (line === "") line = word;
+    else if (line.length + 1 + word.length <= width) line += ` ${word}`;
+    else {
+      out.push(`${indent}${line}`);
+      line = word;
+    }
+  }
+  if (line !== "") out.push(`${indent}${line}`);
+  return out;
+};
+
 let area = "";
 for (const r of rows) {
   if (r.area !== area) {
@@ -283,6 +409,14 @@ for (const r of rows) {
     console.log(`\n${area.toUpperCase()}`);
   }
   console.log(`  ${MARK[r.verdict] ?? r.verdict} ${W(r.brief, 52)} ${r.evidence}`);
+  // A row whose proof is a read standing in for a write says so, ON THE ROW.
+  // Out of sight of the verdict it would be a footnote nobody reads, which is
+  // how a board of reads came to be printed as a clean board in the first place.
+  if (r.standIn !== null) {
+    for (const line of wrapTo(`stands in: ${r.standIn}`, 96, "")) {
+      console.log(`         ${" ".repeat(52)} ${line}`);
+    }
+  }
 }
 
 const fails = rows.filter((r) => r.verdict === "FAIL");
@@ -297,6 +431,43 @@ if (fails.length > 0) {
   console.log("\nFAILING:");
   for (const f of fails) console.log(`  ${f.brief} — ${f.evidence}`);
 }
+if (unproven.length > 0) {
+  console.log("\nUNPROVEN — measured by nothing here, and NOT inheriting a neighbour's green:");
+  for (const u of unproven) {
+    console.log(`  ${u.brief}`);
+    for (const line of wrapTo(u.evidence, 92, "    ")) console.log(line);
+  }
+}
+
+/**
+ * THE LINE THIS SCRIPT HAS TO EARN.
+ *
+ * Every row above is a read except one — the anonymous POST that is supposed
+ * to be refused. So the board cannot be called clean, whatever the tally says.
+ * It reports the shape of its own evidence rather than letting a reader assume
+ * the shape from the colour.
+ */
+const standIns = rows.filter((r) => r.standIn !== null).length;
+console.log("");
+console.log("A SKIP IS NOT A PASS, AND NEITHER IS A READ.");
+console.log(
+  `  Exactly ONE of the ${rows.length} rows above is a write this script performed: the anonymous`,
+);
+console.log(
+  "  POST it expects to be REFUSED. Every other row is a read of the book or of a screen, or is",
+);
+console.log(
+  `  a row this script does not measure at all. ${standIns} rows say which, on the row itself.`,
+);
+console.log(
+  "  It opens no account, funds nothing, issues no card and raises no payment, so nothing here",
+);
+console.log("  is evidence that those work.");
+console.log(
+  "  THE WRITE PATH IS VERIFIED BY:  node scripts/coreloop.mjs   — seven legs, all of them writes.",
+);
+console.log("  Read its tally next to this one. A clean board here says nothing about that one.");
+
 console.log(
   "\nNot covered here, on purpose, because another script owns each and says so itself:" +
     "\n  the seven live-fire attacks   node scripts/livefire.mjs" +

@@ -157,3 +157,28 @@ export function severityReason(facts: AgingFacts, severity: Severity): string {
 
 /** Every bucket, in order, for a filter control that must not reorder itself. */
 export const AGE_BUCKET_ORDER: readonly AgeBucket[] = AGE_BUCKETS;
+
+
+/**
+ * An age, in words a person can read, including when it is NEGATIVE.
+ *
+ * A break can be dated AHEAD of the axis it is aged against — the live-fire
+ * reconciliation attack forward-dates its settlements on purpose so a planted
+ * run is reachable from a screen that orders by business date. That is correct
+ * and deliberate, and it produced `-453d` on the breaks table: a minus sign in
+ * a column a reader scans for "how long has this been rotting", filed under
+ * `0-1 days` because `ageBucketOf()` correctly buckets anything <= 1 there.
+ *
+ * `ExplainedBreaksView` already said "453d ahead" and `BreaksTable` said
+ * "-453d" — two screens over the same number, one of them unreadable. The
+ * formatter lives here now so there is one answer rather than two.
+ *
+ * The bucket is NOT changed. A row dated into the future genuinely has not
+ * aged, and moving it out of `0-1` would be inventing a staleness it does not
+ * have. What was wrong was the printing, not the ladder.
+ */
+export function formatAge(ageDays: number, unit: "d" | " days"): string {
+  if (ageDays === 0) return "today";
+  if (ageDays > 0) return `${ageDays}${unit}`;
+  return `${-ageDays}${unit} ahead`;
+}

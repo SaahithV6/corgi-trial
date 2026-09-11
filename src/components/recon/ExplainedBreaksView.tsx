@@ -13,6 +13,7 @@ import {
   TH_CLASS,
   type BadgeTone,
 } from "@/components/ui/primitives";
+import { formatAge } from "@/lib/recon/aging";
 import { formatDate, formatTimestamp } from "@/lib/format/datetime";
 import {
   AGING_AXIS_LABELS,
@@ -601,11 +602,8 @@ function Absent({
  * `unit` is `"d"` for the table's narrow column and `" days"` for the detail
  * cards, so both surfaces get the same three cases from one place.
  */
-function formatAge(ageDays: number, unit: "d" | " days"): string {
-  if (ageDays === 0) return "today";
-  if (ageDays > 0) return `${ageDays}${unit}`;
-  return `${-ageDays}${unit} ahead`;
-}
+// Moved to `src/lib/recon/aging.ts` so BreaksTable renders the same number the
+// same way. This screen said "453d ahead" while that one said "-453d".
 
 /* -------------------------------------------------------------------------- */
 /* The drill-through                                                          */

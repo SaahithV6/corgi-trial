@@ -311,6 +311,9 @@ let consoleSession = "";
  */
 let authFailure = null;
 
+/** The remedy for `authFailure`, printed ONCE at the top and once at the foot. */
+let authRemedy = "";
+
 async function http(path, options = {}) {
   httpCalls += 1;
   const controller = new AbortController();
@@ -352,6 +355,12 @@ function postFailure(what, res) {
       `${what} answered 401 SIGN_IN_REQUIRED — an AUTHENTICATION failure, not a finding about ` +
       `the subsystem behind it. This run holds no operator session. ` +
       (authFailure ?? "The corgi_console cookie was not sent, or the deployment did not accept it.")
+    );
+  }
+  if (res.status === 403) {
+    return (
+      `${what} answered 403 — an AUTHORISATION failure: this session is signed in but the ROLE it ` +
+      `carries may not perform this write. Not a finding about the subsystem behind it.`
     );
   }
   if (res.status === 503) {
@@ -558,14 +567,13 @@ async function submitForm(path, form, overrides, { role = null, actionId = null 
 async function signIn() {
   const password = process.env.CONSOLE_PASSWORD;
   if (password === undefined || password === "") {
-    return (
-      "the console passphrase is not set, so the write legs cannot run, and a skip is not a pass. " +
-      "CONSOLE_PASSWORD is absent from THIS SHELL's environment, so this run cannot sign in, and " +
-      "every write below would answer 401 SIGN_IN_REQUIRED at the door — which is an " +
-      "AUTHENTICATION failure and says nothing about KYB, funding, issuing or approvals. " +
-      "Export the value the deployment holds:  set -a; . ./.env; set +a   " +
-      "(or `export CONSOLE_PASSWORD=...`). See docs/AUTH.md."
-    );
+    authRemedy =
+      "CONSOLE_PASSWORD is absent from THIS SHELL's environment, so this run cannot sign in and " +
+      "every write below would be turned away at the door with 401 SIGN_IN_REQUIRED — an " +
+      "AUTHENTICATION failure, which says nothing whatever about KYB, funding, card issuing or " +
+      "approvals. Export the value the deployment holds:  set -a; . ./.env; set +a   " +
+      "(or `export CONSOLE_PASSWORD=...`). See docs/AUTH.md.";
+    return "AUTHENTICATION: the console passphrase is not set, so the write legs cannot run, and a skip is not a pass";
   }
 
   let page;
@@ -575,11 +583,11 @@ async function signIn() {
     return `GET /signin failed (${e?.message ?? String(e)}), so this run cannot sign in`;
   }
   if (page.includes("CONSOLE_NOT_CONFIGURED")) {
-    return (
-      "the DEPLOYMENT has no CONSOLE_PASSWORD set, so its console is closed and no passphrase " +
-      "will open it. This is an AUTHENTICATION failure on the deployment, not a finding about " +
-      "anything behind the door. Set CONSOLE_PASSWORD on the project and redeploy. See docs/AUTH.md."
-    );
+    authRemedy =
+      "The DEPLOYMENT has no CONSOLE_PASSWORD set, so its console is closed and no passphrase " +
+      "will open it. Nothing behind the door was reached, so nothing in this run is a finding " +
+      "about what is behind it. Set CONSOLE_PASSWORD on the project and redeploy. See docs/AUTH.md.";
+    return "AUTHENTICATION: the deployment's console is closed (CONSOLE_NOT_CONFIGURED), so the write legs cannot run";
   }
 
   const id = page.match(/\$ACTION_ID_([a-f0-9]+)/);
@@ -596,11 +604,11 @@ async function signIn() {
     : [res.headers.get("set-cookie") ?? ""];
   const set = raw.find((c) => c.startsWith("corgi_console="));
   if (set === undefined) {
-    return (
-      `POST /signin answered ${res.status} and set no corgi_console cookie — the CONSOLE_PASSWORD ` +
-      `in this shell is not the passphrase this deployment holds. An AUTHENTICATION failure; ` +
-      `nothing behind the door was reached. See docs/AUTH.md.`
-    );
+    authRemedy =
+      `POST /signin answered ${res.status} and set no corgi_console cookie: the CONSOLE_PASSWORD in ` +
+      `this shell is not the passphrase this deployment holds. Nothing behind the door was ` +
+      `reached, so nothing in this run is a finding about what is behind it. See docs/AUTH.md.`;
+    return "AUTHENTICATION: the passphrase in this shell was rejected by the deployment, so the write legs cannot run";
   }
   if (!/httponly/i.test(set)) {
     return "the deployment's session cookie is not HttpOnly, so a visitor could mint one — refusing to drive writes through it";
@@ -1427,7 +1435,8 @@ if (!gateWasReached()) {
   console.log(RED("    that column are this script saying IT COULD NOT TELL, not a verdict from the gate."));
   if (authFailure !== null) {
     console.log("");
-    for (const line of wrap(authFailure, WIDTH - 6, 0)) console.log(RED(`    ${line.trim()}`));
+    console.log(RED(`    ${authFailure}`));
+    for (const line of wrap(authRemedy, WIDTH - 6, 0)) console.log(DIM(`    ${line.trim()}`));
   }
   console.log("");
   console.log(RED("    The write legs below FAIL by name on this. They do not skip: a skip is not a pass."));
@@ -2863,7 +2872,8 @@ console.log(DIM("  surface in this run, and the reason above names exactly what 
 if (authFailure !== null) {
   console.log("");
   console.log(RED("  AND NEITHER IS A 401 A VERDICT ABOUT ANYTHING BEHIND THE DOOR."));
-  for (const line of wrap(authFailure, WIDTH - 4, 0)) console.log(RED(`  ${line.trim()}`));
+  console.log(RED(`  ${authFailure}`));
+  for (const line of wrap(authRemedy, WIDTH - 4, 0)) console.log(DIM(`  ${line.trim()}`));
   console.log(
     DIM("  Nothing above is a finding about KYB, funding, card issuing or approvals: this run"),
   );

@@ -585,6 +585,16 @@ const INVARIANT_VIEWS = [
   // nothing and are outside this guard by construction, counted rather than
   // hidden by v_payment_release_census.
   ["v_payment_release_unheld", "every approved, unreleased payment withholds exactly what it will pay"],
+  // 0066's. The generalisation of "no UPDATE or DELETE on money rows, anywhere,
+  // ever" — enforced by a walk rather than by a list somebody maintains.
+  // `money_reachable_relations()` starts at `ledger_availability` and follows
+  // view->relation, function->relation and function->function edges out to
+  // everything a balance can reach; this intersects that set with the app
+  // role's UPDATE and DELETE grants. A table joined into a balance tomorrow
+  // enters the population the moment its migration commits, with nobody
+  // declaring it — which is the property every other guard in this file had to
+  // be given by hand.
+  ["v_money_writable_by_app", "nothing a balance can reach is writable by the app role"],
   // ---- 0056's one: hole 3, the far side of a threshold -----------------
   //
   // `v_advice_delta_unsound` asks whether an advice's implied base is
@@ -1705,6 +1715,11 @@ const REACH = [
   // Backfilling holds for them was never an option: it would move availability
   // on a live book to make a view green, which is the shape of every defect
   // this file exists to catch.
+  ["v_money_writable_by_app",
+    "relations reachable from a balance",
+    `SELECT count(*)::int AS n FROM money_reachable_relations()`,
+    `SELECT count(*)::int AS n FROM pg_class WHERE relkind IN ('r','v','m')`],
+
   ["v_payment_release_unheld",
     "payments approved under the 0061 regime and not yet released or withdrawn",
     `SELECT COALESCE(SUM(instructions), 0)::int AS n FROM v_payment_release_census

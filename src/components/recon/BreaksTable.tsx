@@ -1,3 +1,5 @@
+import { formatAge } from "@/lib/recon/aging";
+
 import Link from "next/link";
 
 import { Money } from "@/components/ui/Money";
@@ -136,9 +138,7 @@ export function BreaksTable({
 
                 <td className={TD_CLASS}>
                   <span className="tabular-nums">
-                    {row.ageDays === 0
-                      ? "today"
-                      : `${row.ageDays}d`}
+                    {formatAge(row.ageDays, "d")}
                   </span>
                   <span className="mt-0.5 block text-xs text-muted">
                     {row.closesCrossed === 0

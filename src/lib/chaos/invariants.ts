@@ -262,6 +262,12 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
     'v_payment_release_unheld',
     'every approved, unreleased payment withholds exactly what it will pay',
   ],
+  [
+    // 0066's. Reachability from a balance, computed from the catalog, not
+    // declared — so a table added tomorrow is covered tomorrow.
+    'v_money_writable_by_app',
+    'nothing a balance can reach is writable by the app role',
+  ],
   // 0056's one — the far side of a threshold. `v_advice_delta_unsound`
   // asks whether an advice's implied base is BELOW ZERO; 12 of the 13
   // advices on this book have a base of zero or more and were never
