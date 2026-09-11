@@ -483,6 +483,17 @@ const RAIL_EVENT_SEMANTICS = [
     valueDateSource: "payload.notifications_of_change[].created_at",
     note: "A NOC corrects the counterparty's routing or account number. No money moves and nothing posts — it is recorded so the next entry uses the corrected details.",
   },
+  // The two INBOUND rows. Both were unreachable code until 2026-09-11 —
+  // `increaseAchConsumer` parked every `inbound_ach_transfer` delivery before
+  // any semantics lookup ran — and the first thing that happened when the
+  // consumer finally asked was that one of them turned out to be wrong.
+  // `db/migrations/0039_inbound_recall.sql` corrected the recall row's
+  // value_date_source from the OUTBOUND `return.created_at` shape to the
+  // inbound object's own `transfer_return.returned_at`, measured on the
+  // Increase sandbox, and withdrew the posting claim in both notes. Those are
+  // the rows below, verbatim: the seed is the source of truth for this table,
+  // and an `ON CONFLICT DO UPDATE` seed that still carried the old string
+  // would revert a measured fix the next time anybody ran it.
   {
     rail: "ach",
     provider: "increase",
@@ -490,7 +501,7 @@ const RAIL_EVENT_SEMANTICS = [
     canonicalKind: "inbound_ach_credit",
     semantics: "new_event",
     valueDateSource: "payload.effective_date",
-    note: "Someone is sending our customer money. Debits 1130 and credits their 2100 leaf on the effective date, and opens an uncleared-credit hold in 9200 under the funds-availability policy for that counterparty class.",
+    note: "Someone is sending money to the programme's FBO account number, effective on the date the originator chose -- a NEW EVENT at payload.effective_date, which is right and is why this column is unchanged. WHAT THIS BUILD DOES WITH IT IS NOTHING, and the earlier note overstated it: there is no debit of 1130, no credit of a 2100 leaf and no 9200 hold, because there is nobody to credit. MEASURED 2026-09-11: GET /account_numbers returns exactly one account_number (sandbox_account_number_96mzhz3n61f5p0jpvytc), on the programme's own FBO account, shared by all six businesses on this book; no account_number -> business mapping exists in this schema and no path issues per-customer numbers. So the object's account_number_id identifies the programme, not a customer, and posting would mean guessing whose money it is. The delivery PARKS on inbound_ach_account_mapping -- bounded, then a dead letter in front of a human -- and an operator either attributes it by hand or returns it to the originator. This note describes the build that exists; when per-customer account numbers are issued, the posting rule in the first sentence of the old note is the right one to write.",
   },
   {
     rail: "ach",
@@ -498,8 +509,94 @@ const RAIL_EVENT_SEMANTICS = [
     providerEventType: "inbound_ach_transfer.updated/returned",
     canonicalKind: "inbound_ach_return",
     semantics: "new_event",
-    valueDateSource: "payload.return.created_at",
-    note: "An inbound credit we already posted has been returned. Its own date, again — and the matching 9200 hold is closed explicitly rather than allowed to expire, because the money is not coming.",
+    valueDateSource: "payload.transfer_return.returned_at",
+    note: "THE RECALL OF AN INBOUND CREDIT, and on this build its ledger consequence is nothing. MEASURED 2026-09-11 on sandbox_inbound_ach_transfer_n8dm6ffh9tijbi27of5b: returning an inbound ACH adds ONE block, transfer_return {reason, returned_at, transaction_id}, and the object carries no `return` key at all -- the outbound ach_transfer shape (return.created_at) does not apply here, and this row shipped naming it because nothing could reach the row to find out. Still a NEW EVENT at its own date: the credit really did arrive on the effective date and really did go back on the returned_at date, so a recall never rewrites the arrival day. What it does NOT do here is reverse a posting, because this build issues no virtual account numbers, cannot attribute an inbound credit to a customer, and therefore never booked one -- there is no entry to reverse and no 9200 hold to close. The consumer records the recall, reports the value date from this field, and RESOLVES the parked arrival delivery, because the money has gone back and there is no longer anything for an operator to attribute.",
+  },
+
+  // ---- Increase (wire) ----------------------------------------------------
+  // Mirrored from `db/migrations/0025_wires.sql`, which inserted these eight
+  // directly with the Fedwire measurements in each note. They lived only in
+  // the migration for a day, which meant the deployed table had 30 rows and
+  // this file seeded 22: a database restored from the seed alone would have
+  // come up with no wire classifications at all, and every wire delivery
+  // would have parked. The seed is the source of truth for the table, so the
+  // rows live here and the migration is the deployment of them.
+  //
+  // A wire is not an ACH. It cannot be returned, so every row here is a
+  // new_event and not one of them anchors on the original's value date:
+  // money coming back on this rail is a SECOND PAYMENT, measured
+  // (class_name inbound_wire_reversal, its own IMAD, null return_reason_code).
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "wire_transfer.created",
+    canonicalKind: "wire_originated",
+    semantics: "new_event",
+    valueDateSource: "payload.created_at",
+    note: "The instruction exists and nothing has been put on a wire: measured status pending_creating, submission null. Booked as its own event on the day it was raised. Nothing about the money has happened yet, which is why the ledger consequence of this row is nothing.",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "wire_transfer.updated/submitted",
+    canonicalKind: "wire_submitted",
+    semantics: "new_event",
+    valueDateSource: "payload.submission.submitted_at",
+    note: "Handed to Fedwire, IMAD issued, and on this rail that is a transient status rather than a resting one -- measured, the object went pending_creating -> complete inside one simulated submit. Recorded as a new event at its own submission time.",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "wire_transfer.updated/complete",
+    canonicalKind: "wire_settled",
+    semantics: "new_event",
+    valueDateSource: "payload.submission.submitted_at",
+    note: "THE SETTLEMENT, and it reads its value date from the SUBMISSION timestamp because a wire has no settlement object to read one from. Fedwire is real-time gross settlement: acceptance of the message IS the transfer of funds. This is the exact mirror of the Increase ACH trap -- there, status stays `submitted` and a `settlement.settled_at` appears, so submitted+settled_at must be promoted to settled; here, status becomes `complete` and no settlement object ever appears, so submission.submitted_at IS the settlement time. An adapter that waited for a settlement field on a wire would wait forever.",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "wire_transfer.updated/reversed",
+    canonicalKind: "wire_return_of_funds",
+    semantics: "new_event",
+    valueDateSource: "payload.reversal.created_at",
+    note: "NOT a correction, and not a return either. Measured: the reversal carries class_name inbound_wire_reversal, its own IMAD, its own transaction id and a null return_reason_code -- it is a SECOND PAYMENT the beneficiary's bank chose to send back, not an unwinding of ours. The original wire settled, was final, and its value date stays true; the money coming back is a new receipt on the day it came back. Taking the original's value date would make the ledger claim the payment never happened on the day it provably did.",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "wire_transfer.updated/canceled",
+    canonicalKind: "wire_canceled",
+    semantics: "new_event",
+    valueDateSource: "payload.cancellation.canceled_at",
+    note: "Cancelled BEFORE submission -- the only window in which a wire can be stopped at all, and it closes the moment the Fed accepts the message. No money moved, so there is nothing to correct and nothing to reverse.",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "wire_transfer.updated/rejected",
+    canonicalKind: "wire_rejected",
+    semantics: "new_event",
+    valueDateSource: "payload.created_at",
+    note: "Refused before it left: Increase declined to submit. No IMAD was ever issued and no money was put on a wire, so this is a new event about an instruction, never a correction of a payment.",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "inbound_wire_transfer.created",
+    canonicalKind: "inbound_wire_credit",
+    semantics: "new_event",
+    valueDateSource: "payload.acceptance.accepted_at",
+    note: "THE INBOUND LEG, and its value date is the acceptance instant because that is when the money became ours. Measured: acceptance.accepted_at equals created_at exactly -- an inbound wire has no pending stage. Compare inbound_ach_transfer.created, which dates from payload.effective_date because an inbound ACH credit is a promise about a future settlement day. This row is where \"available immediately\" comes from: there is no gap between arrival and value.",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "inbound_wire_transfer.updated/reversed",
+    canonicalKind: "inbound_wire_returned",
+    semantics: "new_event",
+    valueDateSource: "payload.reversal.reversed_at",
+    note: "We sent it back. Measured: POST /inbound_wire_transfers/{id}/reverse is a PRODUCTION API method, not a simulation, and it took reason=creditor_request -- the creditor being us. So this is not the network recalling a payment, it is this bank ORIGINATING a wire in the other direction, and it dates from the day we did it. The customer's balance goes down on the day the funds left, not on the day they arrived; the arrival really happened and the statement for that day must keep saying so.",
   },
 
   // ---- Base (USDC) --------------------------------------------------------

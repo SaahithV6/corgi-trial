@@ -57,6 +57,74 @@ and 04:41Z**. Re-run them before the debrief and quote the new run, not this one
 | `curl /api/health` | **7 of 7 live**, database reachable 108 ms, commit `4c682e1` | 04:28:33Z |
 | `POST /api/mcp` `tools/list` | **8 tools** — 7 read, 1 that queues for a human | 04:29:36Z |
 
+### 0.0 RE-RUN — 2026-09-11 between 09:38Z and 10:02Z, against commit `544b481`
+
+**The table above is left exactly as it was measured at 04:26–04:41Z. This is
+the re-run it asks for**, against the deployed origin and the live Neon
+database. Quote this one, and re-run it again before the room.
+
+| Command | Result | Taken at |
+| --- | --- | --- |
+| `curl /api/health` | `status: "ok"`, **7 of 7 live**, database reachable 149 ms, commit `544b481` | 09:38:36Z |
+| `node scripts/dbcheck.mjs` | **36 passed, 2 failed** — both failures deliberate, item 1 below | 09:40Z |
+| `node scripts/dbcheck.mjs --prove` | **22 of 22 invariant views, 24 proofs**, 8 of them needing a trigger disabled on the owner connection; **61 passed, 2 failed** | 09:41Z |
+| `node scripts/livefire.mjs` | **7 PASS / 0 FAIL / 1 SKIP of 8 attacks**, 334 s | 09:43:31 – 09:49:05Z |
+| `node scripts/coreloop.mjs` | **6 PASS / 1 FAIL / 0 SKIP of 7 legs**, 84 s, 104 HTTP calls to the deployed origin + 3 to Lithic, invariants 36/2 | 09:49:20 – 09:50:44Z |
+| `node scripts/compliance.mjs` | **25 PASS / 5 FAIL / 0 WARN / 4 UNKNOWN / 7 CITED of 41**, 22 s | 09:51Z |
+| `node scripts/audit-claims.mjs` | **exit 1 — 7 contradictions**, all of them false positives; §0.0b | 09:39Z |
+
+**Four things in that table are worse than the 04:26Z reading, and they should
+read as worse.**
+
+1. **`dbcheck` is 36/2, not 26/0.** Twenty-two invariant views now run where
+   fifteen did, and **two of them are deliberate standing reds**:
+   `v_refused_auth_hold` (**154 rows** at 09:40Z, every one `verdict =
+   'unanswered'`, 130 holds, **$9,786.20** withheld behind a verdict the network
+   never gave us — migration 0032 refused to exclude them) and
+   `v_hold_expiry_drift` (**9 rows**, all released, **zero cents of exposure** —
+   nine fixtures that took two `now()` readings 135–158 ms apart). Both are
+   green-able with one `WHERE` clause and both `WHERE` clauses would be
+   shaped like the failure. `compliance.mjs` AF3 spawns `dbcheck` and asserts
+   exit 0, so **AF3 reports this as a violation**, correctly.
+2. **`coreloop` is 6/1, not 7/0.** Leg 4 fails: *"holds moved $0.00, expected
+   $50.00"*. The subject also changed — DECISIONS 057 made evidence tier a
+   ranking term ahead of the alphabet, so the run is now **Ridgeline Robotics,
+   Inc.** (director leg live on Stripe Identity), not Kettle & Crumb.
+3. **`compliance.mjs` is 5 FAIL, not 2.** AF1, AF2, AF3, AF5 and G1. AF2 fails
+   *only* because `audit-claims.mjs` exits 1 — see §0.0b.
+4. **Live fire's SKIP is still attack 2**, and this run degraded its own
+   explanation: *"1 passed, 2 skipped — the attack is NOT proven · waiting on:
+   (no reason recorded — investigate)"*. A skip that cannot say what it is
+   waiting on is worse than one that can, and it is reported here as such.
+
+**What moved the right way, and is not softened:** live fire is 7/0/1 rather
+than 4/3/1 — attacks 3 and 7 both now pass every assertion, which is the two
+failures the 04:34Z run found being genuinely closed, not re-labelled.
+
+### 0.0b The seven `audit-claims.mjs` contradictions are all false positives
+
+`node scripts/audit-claims.mjs` exits 1 with seven findings at 09:39Z, and
+**not one of them is a simulated slot presented as live.** The checker's first
+rule matches `/(\d+)\s+(?:live of|of)\s+(\d+)/` and fires on **any** "N of 7"
+in any document, whatever the seven are:
+
+| Where | What it reads | What it is |
+| --- | --- | --- |
+| `DECISIONS.md:2846` | `PASS 7 FAIL 0 SKIP 0 of 7 legs` | coreloop's **seven legs** |
+| `docs/CUT-LIST.md:42` | `PASS 6 · FAIL 1 · SKIP 0 of 7` | coreloop's seven legs again |
+| `docs/CUT-LIST.md:87` | `understood the spelling "N of 7" only` | the log **quoting the checker's own historical bug** |
+| `docs/RAILS.md:66–69` | `5 of 7`, `4 of 7`, `6 of 7`, `3 of 7` | the rail capability matrix's **seven adapters** |
+
+Three separate populations of seven, none of them integration slots. The
+checker's second rule — the one that would catch an automatic fail — reports
+nothing, and `/api/health` has **no simulated slot** for it to catch. **This is
+instance 4 of §1 recurring in the same tool**: 033 recorded that the auditor
+understood one spelling of the claim; the fix taught it a second spelling and
+did not teach it what the denominator *means*. The honest repair is to require
+the word `live` next to the number, or to scope the rule to lines naming a slot,
+and it is one line in a script this worker may not edit. **Until it lands,
+`compliance.mjs` AF2 will read FAIL for a reason that is not AF2.**
+
 **Say the second dbcheck row out loud.** Two runs of the same command, 105
 seconds apart, gave different answers — 24/1 then 26/0 — because another worker
 landed a fix to the stored-balance check between them. Twelve agents are writing
@@ -163,7 +231,18 @@ is the honest answer: the TypeScript half landed and the SQL half is queued.
 
 ---
 
-## 1. The organising argument — fourteen guards, one failure shape
+## 1. The organising argument — twenty-two guards, one failure shape
+
+> **RECONCILED 2026-09-11T09:55Z.** This section used to say *fourteen*, and
+> three other documents were counting the same pattern with three different
+> numberings: `DECISIONS.md` 056 said *nineteen*, `docs/COMPLIANCE.md` §5 was
+> headed *"sixteen, seventeen and eighteen"*, and `docs/EVALUATION.md` called
+> `card_auth_event`'s missing `result` column *"the fifteenth guard"* where the
+> table below numbers it **13**. They are now one list with one numbering, and
+> **the numbering below is the canonical one** — rows 1–14 are unchanged, so
+> every `instance N` back-reference elsewhere in this document still resolves.
+> Eight instances are appended; the total is **22**. The working is in
+> `DECISIONS.md` 058, and the inclusion rule is stated under the table.
 
 This is the most interesting thing this build has to say, and it goes first
 rather than buried in an appendix at the end.
@@ -181,7 +260,7 @@ decline and an approval were literally the same row. Attack 7's quiet-window
 guard counted entries in the **financial** book to protect a quantity the **memo**
 book moves.
 
-Two of the fourteen were claims *I* wrote down and had to retract.
+Two of the first fourteen were claims *I* wrote down and had to retract.
 
 ### The table
 
@@ -194,19 +273,48 @@ Two of the fourteen were claims *I* wrote down and had to retract.
 | 5 | secret scanner v2 | `0x` + 64 hex *shape* | would have fired on 24 curve constants and been switched off | 032, 033 |
 | 6 | `v_deposit_control_drift` | **reported** side was a flat `code = '2100'` | a pot: subtree 13,577,077 vs reported 13,527,077 — **my own written claim that it "cannot silently break"** | 041, 045 |
 | 7 | `reconcile-usdc.mjs` | one address from the environment | a second wallet: 90¢ of "drift" reported against a ledger that was exactly right — **my own premise** | 044, 045 |
-| 8 | `v_standing_order_double_fire` | joins on a **UNIQUE** column | everything — the count it tests cannot exceed 1, so the view is tautologically empty | 045 |
+| 8 | `v_standing_order_double_fire` | joined on a **UNIQUE** column | everything — the count it tested could not exceed 1, so the view was tautologically empty. **Repaired by migration 0023 and, on 2026-09-11, made to fail for the first time** — see §5.4 | 045, 058 |
 | 9 | probe `fromStatus()` | any non-auth 4xx ⇒ `live` | a 404, which Lithic answers with **no credential at all** — 011 wearing the costume of the fix for 011 | 045 |
 | 10 | Stripe Connect probe | an `else` branch meaning "success" | a **dashboard click in another tab** flipped `/api/health` to `business_registry: live` while the leg was still the simulator. No code changed. No deploy happened. | 034 |
 | 11 | `probeIntegrations()` fallback | a slot with **no probe** inherited the env-derived status | `card_webhooks` read LIVE with evidence reading *"no probe defined for this slot"*. Four probes had this bug and I fixed each one; the fifth was the fallback, and I never looked at it because I was checking the probes rather than the thing that runs when there is no probe. | 026 |
 | 12 | `compliance.mjs` AF6 stamp check | only sees a decrease against the **immediately preceding** entry | 4 duplicated timestamps exist; it reports 3. *"A guard that catches half a defect and reports a count is more dangerous than one that catches none, because the count reads as complete."* | 047 |
 | 13 | `card_auth_event` | **the column itself** — there is no `result` | 60+ authorisations the network **refused** raised `A(E)` at full value. 24 were still withholding **$1,151.00** across three businesses. Attacks 1 and 2 were passing *because we ingested declines as approvals.* | 050 |
 | 14 | `terminallyClosed`'s `A <= 0` arm | a predicate on a running total **that can go back up**, licensing a permanent row | `{authorization 0}` ⇒ closed for ever; a later incremental reopens `H` to 1. A $0 card-on-file verification split across two deliveries — *the ordinary case, and exactly the case the brief tells you to survive* — permanently closes the hold, writing `reason = "authorisation fully reversed"`, **a false statement in an append-only audit table**. | 051 |
+| 15 | `IncreaseAchRail.parseEvent` — and the **test fixture** that proved it worked | `startsWith('ach_transfer_')`, while the test's `eventBody` helper hardcoded `associated_object_type` and varied only the id | every id Increase's sandbox issues is `sandbox_ach_transfer_…`, so the whole ACH rail answered `200` and discarded. The first instance where the blind spot was a **fixture holding constant the field under test**, not a view's `WHERE`. | 052 |
+| 16 | `v_refused_auth_hold` | `INNER JOIN card_auth_event_result` **and** `r.result IS NOT NULL` — the two ways this schema spells *we have no verdict* | 98 of 130 authorisation events on holds withholding money (75%), $5,665.60, invisible to the guard that exists to catch exactly a lost verdict. Repaired in 0032. | COMPLIANCE §5.1 |
+| 17 | `/api/health` webhook freshness | `MAX(webhook_inbox.received_at)` — **arrival**, which is not disposition | a rail receiving everything and processing nothing read as *maximally fresh*, with 179 Increase deliveries verified and dead-lettered 4 minutes before the reading. | COMPLIANCE §5.4 |
+| 18 | `coreloop.mjs` subject ranking | read `kyb_evidence` out of `v_business_kyb` and then **never used it** | the alphabet picked "Hold Fuzzer Fixture Co.", approved by `simulated-hold-fuzzer`, to demonstrate leg 1's *"real KYB check"*. | COMPLIANCE §5.5, 057 |
+| 19 | `v_hold_closure_not_terminal` | a population chosen by matching **English** against a free-text `hold_closure.reason` | 64 of 184 closures (35%) outside the guard by *wording*, including 0032's own. Repaired by 0040's `source` column. | 056 |
+| 20 | `v_accrual_month_drift` | `WHERE month_complete` — over **zero** complete accrual months | vacuous: green because there is nothing to be green about. Its predicate is sound; its population is empty, which is a different failure and now prints under GUARD REACH. | 056 |
+| 21 | `scripts/audit-claims.mjs` | compares documents to `/api/health` and **never compares `/api/health` to the tree** | the authority every document is checked against can be a build nobody in this repository is looking at, and the check cannot see that it is. Still open — COMPLIANCE §5.7. | 056 |
+| 22 | `v_balance_definition_drift` | it compares the definitions of "available" **it has been told about** | the agent surface kept a fifth, unregistered definition and told an agent it had **$17,035.50 more** than the customer's own screen said. | 054 |
+
+**The inclusion rule, stated so the count can be checked rather than believed:**
+a row belongs here when a check, view, probe, gate or test **reported healthy
+because the defect was outside its population by construction** — the `WHERE`,
+the `every`, the `else`, the missing column, the fixture that pinned the field
+under test, the population that was empty. Two things adjacent to this pattern
+are deliberately **not** counted, and naming them is the only way the number
+means anything: a guard that is correct but that **nothing runs**
+(`v_wire_availability_drift` and `v_hold_release_drift` both sat in that state —
+five invariants in this build have), and a **defect a new guard found**
+(`v_hold_expiry_drift`'s two clocks, 0040). Neither is a guard with a blind
+spot. Counting them would have made the number 27 and the number would have
+meant less.
 
 Instances 1–5 are DECISIONS 033's table. 6–9 are 045's extension. 10, 11 and 12
 are recorded in 034, 026 and 047 without being numbered into either table. 050
-calls itself the thirteenth and 051 is the fourteenth. **If the panel counts and
-gets a different number, that gap is real and I would rather say so than defend a
-count.** The numbering is not the point; the shape is.
+calls itself the thirteenth, 051 is the fourteenth and 052 calls itself the
+fifteenth. 16–18 are `docs/COMPLIANCE.md` §5, which numbered them *sixteen,
+seventeen and eighteen* and was right. 19–21 are DECISIONS 056's three, which
+called itself *"bringing the count to nineteen"* — it had the right three and
+the wrong total, because it counted 16 before them when COMPLIANCE §5 had
+already taken 16, 17 and 18. 22 is DECISIONS 054, which described the instance
+and never numbered it. Ordered by the timestamp of the entry that recorded each,
+that is **22**, and `DECISIONS.md` 058 shows the arithmetic line by line.
+**If the panel counts and gets a different number, that gap is real and I would
+rather say so than defend a count.** The numbering is not the point; the shape
+is.
 
 ### The rule, phrased so it can be pushed back on
 
@@ -250,10 +358,10 @@ nobody reads twice.
 
 ### Why this is the argument and not the apology
 
-A team that can name its own failure mode precisely — with fourteen worked
+A team that can name its own failure mode precisely — with twenty-two worked
 examples, the exclusion clause in each, and the measurement that caught it — is
 demonstrating the thing the trial says it is testing. The alternative version of
-this submission has nine of these still undiscovered and a README that says every
+this submission has most of these still undiscovered and a README that says every
 invariant passes. That version scores better on a checklist and is worth less.
 
 ---
@@ -1445,9 +1553,15 @@ the first invocation.** A delivery for a provider with no registered consumer is
 supposed to be loud. Once the flag is set, it is not — which is the exact
 "looks identical to working" failure the surrounding comment is written against.
 **This is the same shape as instance 3** (`slots.every(live)`): a state that
-suppresses the alarm is set by ordinary operation. Two real Increase deliveries
-reached the deployed endpoint, verified, and were **dead-lettered** with *"no
-consumer registered for provider 'increase'"*.
+suppresses the alarm is set by ordinary operation. The evidence that used to sit
+here — two real Increase deliveries verified and dead-lettered with *"no
+consumer registered for provider 'increase'"* — **is no longer true of the
+book**: the consumer is registered, the backlog was redriven, and as at
+2026-09-11T09:47Z no `increase` row is dead and no row anywhere carries that
+string (§5.8). **The flag's defect is not repaired by that**, and losing the
+symptom is the reason to say so: the shape is still in `drain.ts`, and the next
+unregistered provider gets the same silence with no dead letters to notice it
+by.
 
 **2. `RETURN_REVERSAL` has three incompatible readings in this repo.**
 `adapters/card.ts` treats it as a settlement; `holds/lithic-events.ts` stores it
@@ -1457,11 +1571,15 @@ the *semantics row* is what routes it. But `canonicalKind` is decorative
 (§3.10), and three artefacts naming one event differently is how the next person
 gets it wrong.
 
-**3. `increase/client.ts`'s `parseEvent` cannot see a single sandbox transfer**,
-because it filters `startsWith('ach_transfer_')` and the sandbox does not use
-that prefix. That is why a parallel consumer exists — and `adapters/ach.ts`
-still advertises `observe` as supported. The exclusion is shaped exactly like
-the traffic it exists to parse.
+**3. `increase/client.ts`'s `parseEvent` could not see a single sandbox
+transfer** — it filtered `startsWith('ach_transfer_')` and every sandbox id is
+`sandbox_ach_transfer_…`, so the whole rail was answered `200` and discarded.
+This is **instance 15**, and the interesting half is that its *test* passed,
+because the fixture hardcoded `associated_object_type` and varied only the id.
+**Closed (DECISIONS 052):** dispatch is on `associated_object_type`, the helper
+takes the type as a parameter, and `adapters/ach.ts`'s `observe` is now
+`proof: 'measured'` — earned against the raw signed bytes of five real
+deliveries rather than a fixture (§5.7).
 
 **4. `plaid/adapter.ts`'s `resolveChart` is the four-deep self-join that
 `resolveChartCodes` was extracted to replace**, and the refactor landed in
@@ -1936,7 +2054,7 @@ saying so is better than picking whichever number is flattering.
 
 ## 5. Every weakness, volunteered
 
-*Read `DECISIONS.md` end to end (51 entries; the last three are tonight's) and
+*Read `DECISIONS.md` end to end (58 entries as at 2026-09-11T10:00Z; 050 onward are tonight's) and
 `docs/CUT-LIST.md` §3 for the long form. This is the say-it-first list.*
 
 ### 5.1 The one that is live right now
@@ -1980,13 +2098,18 @@ both runs. Both are the difference between a suite that proves a property and a
 suite that proves a property *when the machine is quiet*, and the brief's whole
 point is that the machine is not quiet.
 
-### 5.2 The one whose SQL half has not landed
+### 5.2 The one whose SQL half has not landed — CLOSED
 
 `src/lib/holds/model.ts` dropped the non-monotone `A <= 0` arm from
-`terminallyClosed` at 04:31Z. **Migration 0028 does not exist on disk**, and the
-comment in the file cites it. `closed` is unchanged, so `v_hold_drift` is
-unaffected and nothing has drifted — but the code references a migration that is
-not there, and if someone greps, that is the answer.
+`terminallyClosed` at 04:31Z, and for a few hours the comment in that file cited
+a **migration that did not exist on disk**. It exists now:
+`db/migrations/0028_terminal_closure.sql`, applied. `closed` is unchanged, so
+`v_hold_drift` was unaffected throughout and nothing drifted.
+
+**What is still true, and is the more useful sentence:** `0004`, `0010`, `0027`
+and `0030` are missing from `db/migrations/`. The numbering has gaps because
+numbers were claimed and then not used, not because a migration was deleted —
+`migrate.mjs` records what it applies and the journal has no hole.
 
 ### 5.3 `v_hold_drift` still cannot see a spurious closure
 
@@ -1995,14 +2118,36 @@ spuriously-closed hold **by construction**. The three rows it was sitting on hav
 been repaired by append (§4.4), but **the exclusion clause is unchanged**, and the
 next person will trust that view. Week-two item 2.
 
-### 5.4 `v_standing_order_double_fire` is tautologically empty
+### 5.4 `v_standing_order_double_fire` was tautologically empty — CLOSED 2026-09-11
 
-Instance 8. It joins `payment_instruction` to the occurrence on the idempotency
-key and reports more than one instruction per key — but **that column is UNIQUE**,
-so the count can never exceed one. The failure worth detecting, two instructions
-for one occurrence under *different* keys, is exactly what it cannot see, **and a
-test presents its emptiness as evidence.** It passed in tonight's `dbcheck`, and
-that pass means nothing.
+Instance 8. The body **joined** `payment_instruction` to the occurrence on the
+idempotency key and reported more than one instruction per key — but **that
+column is UNIQUE**, so the count could never exceed one. The failure worth
+detecting, two instructions for one occurrence under *different* keys, was
+exactly what it could not see, and a test, a document and `compliance.mjs` all
+presented its emptiness as evidence.
+
+**This is now closed, and closing it is worth more than the guard.** Migration
+0023 repointed the body at the mandate's *keyspace* — `'standing:<order id>:%'`
+— which is the question the unique index does not answer. Between 0023 and
+tonight **nobody ran it**, so the repair was a description of a measurement
+rather than a measurement. `node scripts/dbcheck.mjs --prove` now builds the
+violating state on every run. Measured against the live database at
+**2026-09-11T09:41Z**, in a transaction that was rolled back:
+
+```
+PASS  v_standing_order_double_fire CAN fail — 0 -> 1 after a second instruction
+      for one occurrence, under a different spelling of the derived key
+```
+
+The plant is a second `payment_instruction` on one occurrence in the mandate's
+keyspace — `standing:6d27bdba-c9ab-4df1-912c-cd6ff033a6b0:2026-09-11` (the real
+one, written by the firing routine) alongside
+`standing:6d27bdba-c9ab-4df1-912c-cd6ff033a6b0:2026-9-11#retry-after-a-restart`
+(an unpadded, `DateStyle`-dependent key from a retry). The row names **both**
+keys in `instruction_keys`, and it is 0 again after the rollback. **The UNIQUE
+index is perfectly satisfied by that pair**, which is precisely why the old body
+could not see it. Full narrative: `docs/STANDING-ORDERS.md` §8.
 
 ### 5.5 `v_hold_release_drift` is correct and was queried by nothing
 
@@ -2027,32 +2172,73 @@ README says money is never a float and three lines in the working tree say
 otherwise, which is precisely "code you cannot explain when we point at it". The
 fix is `formatCents()` and it is minutes.
 
-### 5.7 The Increase adapter's four money operations have never run
+### 5.7 The Increase adapter's four money operations HAVE now run — CLOSED 2026-09-11
 
-Its probe is genuinely measured (`GET /accounts?limit=1` answers 200 on every
-`/api/health`), and `originate`, `observe`, `settle` and `reverse` are `~` on the
-capability matrix: **supported, and never run against the provider.** The full
-create/submit/settle/return lifecycle in DECISIONS 019 was driven against the live
-Increase sandbox **by hand, not through this adapter** — the sandbox transfer
-carries no `Idempotency-Key` and `initiateCredit` always sends one, which is how we
-know. Two real Increase deliveries reached the deployed endpoint and had their
-signatures verified; **both were dead-lettered** with "no consumer registered for
-provider 'increase'", so `parseEvent` has never seen a real delivery either.
-**Letting the one earned cell promote its neighbours would be liveness by presence
-wearing a round trip as a disguise.**
+**What this section said, and it was true when it was written at 04:41Z:** the
+probe was the only measured cell; `originate`, `observe`, `settle` and `reverse`
+were `~` on the capability matrix — supported, and never run against the
+provider. The full create/submit/settle/return lifecycle in DECISIONS 019 was
+driven against the live Increase sandbox **by hand, not through this adapter**,
+which is still the correct account of *that* transfer. Two real Increase
+deliveries had reached the deployed endpoint, verified, and been dead-lettered
+with *"no consumer registered for provider 'increase'"*, so `parseEvent` had
+never seen a real delivery either.
 
-### 5.8 Parked and dead-lettered deliveries
+**All five cells now read `proof: 'measured'`** in
+`src/lib/rails/adapters/ach.ts`, and the thing worth saying is *why the old
+evidence string was wrong rather than merely stale*. It described a **different
+transfer**: `sandbox_ach_transfer_s2iljuavdzp2p68rh7v7`, $742.19, whose
+`idempotency_key` is **null** — which is exactly the evidence that it did not
+come from this code, because `createAchTransfer` is the only thing in this repo
+that sends an `Idempotency-Key` to `/ach_transfers`. The transfer that earns the
+cell is a second one:
 
-At 04:05Z: `webhook_inbox` held 424 `done`, **35 `parked`**, **28 `dead`**, 15
-`pending`, and the parked count grows every time live fire runs. Every parked row
-is a card authorisation on a Lithic card created directly in the sandbox and never
-registered to a customer here — **the consumer will not guess whose money to
-move**, so it parks with the card token in the reason and stops. I would rather a
-grader saw that than a clean zero. What is genuinely missing is the **claim path**:
-there is no screen or script mapping an orphan card token to a business, so the
-only way to clear them today is a hand-written `INSERT`. The dead letters come from
-earlier consumer iterations, are retained rather than deleted, and **nothing
-re-drives them.**
+| operation | what earns it |
+| --- | --- |
+| `originate` | `POST /ach_transfers` → `sandbox_ach_transfer_x5vdo5m7b6k924sszlms`, **$6,000.00**, `Idempotency-Key: test:approvals:1789097931095:gate` — a released payment instruction from the maker-checker suite |
+| `observe` | `parseEvent` run against the **raw signed bytes** of 5 real `ach_transfer.*` deliveries read out of `webhook_inbox.raw_body`, not a fixture anybody typed |
+| `settle` | `submitted` + `settlement.settled_at` promoted to `settled`, on the book: `ach:settled:…x5vdo5m7b6k924sszlms`, DR 2300 600000 / CR 1110 −600000 |
+| `reverse` | R01 `insufficient_fund` end to end: `ach:return:…x5vdo5m7b6k924sszlms:644288470109390`, DR 1110 600000 / CR 2100 −600000, posted at `return.created_at` with the settlement left standing |
+| `probe` | `GET /accounts?limit=1` → 200 against `sandbox.increase.com` |
+
+**The gap that remains, stated because it is the same failure shape one level
+down: R02–R29 are table-driven and unexercised.** One return code is measured;
+twenty-eight are a table. Letting R01 promote its neighbours would be exactly
+the move this section was written to refuse.
+
+### 5.8 Parked and dead-lettered deliveries — the Increase half is CLOSED
+
+**What this said at 04:05Z:** `webhook_inbox` held 424 `done`, 35 `parked`, 28
+`dead`, 15 `pending`; every parked row was a Lithic card authorisation on an
+orphan token; the dead letters were retained and **nothing re-drove them**.
+
+**Measured again at 2026-09-11T09:47Z, against the same database:**
+
+| provider | done | parked | dead |
+| --- | ---: | ---: | ---: |
+| `lithic` | 905 | 27 | **26** |
+| `increase` | 124 | 119 | **0** |
+| `plaid` | 3 | 0 | 0 |
+| `stripe` | 10 | 0 | 0 |
+
+**Increase went to zero dead, and it did not get there by deletion.** No
+`increase` row carries a `dead_lettered_at` at all any more (243 rows, 0
+non-null), and **no row anywhere in the table carries the string "no consumer
+registered"**. The consumer was registered and the backlog redriven;
+`/api/health` reads `status: "ok"` in consequence, not `degraded`.
+
+**Three things here are still real and should read as real.** Lithic's **26 dead
+letters** are unchanged — every one is *"parked 12 times waiting for
+card:<token>"*, an authorisation on a card created directly in the sandbox and
+never registered to a customer here, and **there is still no claim path**: no
+screen and no script maps an orphan card token to a business, so the only way to
+clear them is a hand-written `INSERT`. Increase's **119 parked** rows are wire
+deliveries and one $10,000.00 inbound ACH credit that is parked *on purpose* —
+the object names the programme's single shared FBO account number, so the field
+that should say whose money it is names the programme, and the consumer refuses
+rather than guessing (`docs/GAUNTLET.md` §5 addendum). And the parked count
+still grows every time live fire runs. I would rather a grader saw all of that
+than a clean zero.
 
 ### 5.9 The USDC payout's three honest gaps
 
@@ -2129,10 +2315,11 @@ granted **and it is held**, because we may have to take it back.
 - **`listPostingRows()` still excludes future-dated entries**, so the committed
   outflows that now reduce `available` are named on the screens but not itemised
   among the postings that explain them.
-- **`scripts/precommit.sh --audit`** is documented in a comment and **no argument
-  handling exists**, so the flag does nothing. A comment documenting a capability
-  the file does not have is the same class of over-claim as a probe reporting live
-  without a round trip. One function, or one deleted sentence.
+- **`scripts/precommit.sh --audit`** was documented in a comment before it
+  existed as code — a comment documenting a capability the file did not have,
+  which is the same class of over-claim as a probe reporting live without a
+  round trip. **Closed:** the flag is implemented at `scripts/precommit.sh:21`
+  and prints the secret/public partition of `.env` it is assuming.
 - **Standing orders' "book days" is calendar-day subtraction** while the prose
   implies banking days; the banking-day code exists in the funding module and is
   not used there.
@@ -2257,8 +2444,8 @@ merely undocumented. Everything here was found by reading the file tonight.*
   name out of `match`; thirteen can (§3.23).
 - **`disputes/operations.ts`'s header** claims one transaction per transition
   with the event inside it; true of three paths, false of six.
-- **`scripts/precommit.sh --audit`** is documented in a comment and no argument
-  handling exists.
+- **`scripts/precommit.sh --audit`** was documented in a comment before the
+  argument handling existed. Closed — it is implemented.
 - **`db/migrations/0001_ledger.sql`'s comment** on `v_deposit_control_drift`
   claimed the view *"cannot silently break"* when a sub-account level is added.
   It broke, eight lines below the sentence (instance 6). **The comment is now
@@ -2295,10 +2482,11 @@ merely undocumented. Everything here was found by reading the file tonight.*
 
 - **`mcp/auth.ts`** — fold `MCP_AGENT_TOKENS` into `envSchema`; blocked because
   `src/lib/env.ts` is owned by another worker.
-- **`mcp/audit.ts`** — ~28 lines of `mcp_audit` table DDL including the grants
-  and the append-only triggers, `TODO(migrations owned elsewhere)`. **Until it
-  lands, the audit trail for MCP reads is log lines only**, which the header
-  states plainly.
+- **`mcp/audit.ts`** — ~28 lines of `mcp_audit` table DDL carried as
+  `TODO(migrations owned elsewhere)`, with the audit trail for MCP reads being
+  log lines only until it landed. **Closed:** the table landed in
+  `db/migrations/0035_audit.sql` and was wired to the MCP surface in
+  `0037_mcp_audit_wiring.sql`.
 
 ### 7.5 Three inconsistencies across the repo, said before they are found
 

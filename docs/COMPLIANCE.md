@@ -334,12 +334,22 @@ CITED is not PASS and the scoreboard says so. Run them before the debrief.
 
 ---
 
-## 5. The guard audit — sixteen, seventeen and eighteen
+## 5. The guard audit — instances 16, 17 and 18 of 22
+
+> **NUMBERING RECONCILED 2026-09-11T09:58Z.** These three were numbered
+> *sixteen, seventeen and eighteen* when this section was written, and **they
+> keep those numbers** — the canonical list in `docs/DEBRIEF.md` §1 now runs to
+> **22** and rows 16, 17 and 18 are §5.1, §5.4 and §5.5 below, unchanged. Two
+> other documents were counting differently and are corrected rather than this
+> one: `DECISIONS.md` 056 said its three brought the count "to nineteen" when
+> they are 19, 20 and 21, and `docs/EVALUATION.md` called `card_auth_event`'s
+> missing `result` column "the fifteenth guard" where it is 13. The arithmetic
+> is in `DECISIONS.md` 058.
 
 Written 2026-09-11T05:40Z after three measurements that reported healthy while
 the thing they measured was broken. All three are the same shape, which this
-log has now recorded sixteen times: **the exclusion was built in the shape of
-the failure.** Everything below is a measurement with its output, taken against
+log had by then recorded sixteen times and has now recorded **twenty-two**:
+**the exclusion was built in the shape of the failure.** Everything below is a measurement with its output, taken against
 the production database and the deployed endpoint.
 
 ### 5.1 `v_refused_auth_hold` — the guard could not see its own failure
@@ -413,7 +423,14 @@ $600.00 back, of which **$300.00 was Kettle & Crumb Bakery's** money.
 
 ### 5.3 The red that is the correct answer
 
-`pnpm db:check` is **30 passed, 1 failed**, and the failure is
+> **As measured at 05:40Z, and left as measured.** `dbcheck` has since grown
+> from fifteen invariant views to twenty-two and gained a second deliberate red.
+> **Re-measured 2026-09-11T09:40Z it reads 36 passed, 2 failed**, and
+> `v_refused_auth_hold` is **154 rows / 130 holds / $9,786.20**, all
+> `unanswered` — the population grows because the book keeps running, and the
+> exclusion is still refused. §5.9 carries the second red.
+
+`pnpm db:check` was **30 passed, 1 failed** at 05:40Z, and the failure was
 `v_refused_auth_hold`:
 
 ```
@@ -569,15 +586,15 @@ this build to pass through that state, after 0022's, 0026's and 0028's. It now
 runs on every `pnpm db:check` and is empty over a population of 10 wire-credit
 holds.
 
-It is listed in a second array, `UNMIRRORED_INVARIANT_VIEWS`, and that needs a
-follow-up by whoever owns `src/lib/chaos/**`:
+It was listed in a second array, `UNMIRRORED_INVARIANT_VIEWS`, because
 `src/lib/chaos/invariants.test.ts` parses the `INVARIANT_VIEWS` literal out of
 `dbcheck.mjs` and asserts the chaos dashboard lists exactly the same views in
-the same order. That test is right. Adding the wire view to the mirrored array
-without the matching edit in `src/lib/chaos/invariants.ts` — outside this
-change's remit — would turn the suite red. **So the chaos dashboard currently
-checks 15 invariants where `dbcheck` checks 16**, and the fix is a two-line
-addition to `src/lib/chaos/invariants.ts`.
+the same order — a right test that would have gone red on a one-sided edit, and
+`src/lib/chaos/**` was outside this change's remit. **Closed. Verified
+2026-09-11T09:56Z: there is no second array in `scripts/dbcheck.mjs` at all, and
+`INVARIANT_VIEWS` in `scripts/dbcheck.mjs` and in
+`src/lib/chaos/invariants.ts` are the same 22 views in the same order.** The
+mirroring test is what holds them that way.
 
 #### `v_hold_closure_not_terminal` discriminated on free text — REPAIRED by 0040
 
@@ -732,7 +749,7 @@ FAILURE on the next run.
 | `v_hold_expiry_drift` | 9 → 10 | a hold and its authorisation given expiry instants one second apart |
 | `v_balance_definition_drift` | 0 → 1 | a card hold whose own clock ran out while the authorisation's has not — the same asymmetry, turned into money |
 | `v_refused_auth_hold` (refused) | 0 → 1 | a `DECLINED` verdict on a live hold's authorisation |
-| `v_refused_auth_hold` (unanswered) | 149 → 150 | an authorisation event with no verdict at all — the one 0026's body could not express |
+| `v_refused_auth_hold` (unanswered) | 154 → 155 *(re-read 09:41Z; it was 149 → 150 at 05:40Z — the population grows with the book, and the claim is the delta of exactly one, not the base)* | an authorisation event with no verdict at all — the one 0026's body could not express |
 | `v_wire_availability_drift` | 0 → 1 | a wire credit spendable an hour after it was booked |
 | `v_accrual_month_drift` | 0 → 1 | **a whole February built first** — this guard's population is empty, so the month had to be created before it could be broken |
 | `v_accrual_ledger_drift` | 0 → 1 | an accrual day posted against an entry belonging to a different day |

@@ -790,6 +790,22 @@ export function createPostgresInboxStore(sql: SqlExecutor): InboxStore {
          set state = 'parked',
              park_attempts = park_attempts + 1,
              parked_on_kind = $2, parked_on_ref = $3, parked_reason = $4,
+             -- Clearing processing_error is the point, not tidiness.
+             --
+             -- Parking writes parked_reason and used to leave processing_error
+             -- standing, so 122 rows carried TWO opinions about why they were
+             -- stuck: a current parked_reason beside archaeology. /api/health
+             -- quoted the stale half — "no consumer registered for provider
+             -- 'increase'" — with newestAgeSeconds 8123, long after a consumer
+             -- had been registered, and the deployment read degraded because
+             -- of it.
+             --
+             -- One row, one opinion. A row that is parked is not a row that
+             -- failed: parking is the system refusing to guess whose money to
+             -- move, which is a deliberate and correct state, and describing
+             -- it with a leftover error is how a correct refusal reads as a
+             -- fault to whoever is on call.
+             processing_error = null,
              next_attempt_at = $5, locked_until = null
          where id = $1 and state = 'pending'`,
         [id, waitingFor.kind, waitingFor.ref, reason, nextAttemptAt],

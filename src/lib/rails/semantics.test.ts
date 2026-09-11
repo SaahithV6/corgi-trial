@@ -249,7 +249,7 @@ const EXPECTED: readonly Expected[] = [
     canonicalKind: "inbound_ach_credit",
     semantics: "new_event",
     valueDateSource: "payload.effective_date",
-    why: "someone is sending our customer money, effective on the date the originator chose",
+    why: "someone is sending money to the programme's FBO number, effective on the date the originator chose; nothing posts, because nothing here can say whose money it is",
   },
   {
     rail: "ach",
@@ -258,8 +258,108 @@ const EXPECTED: readonly Expected[] = [
     step: "returned",
     canonicalKind: "inbound_ach_return",
     semantics: "new_event",
-    valueDateSource: "payload.return.created_at",
-    why: "an inbound credit we already posted has been returned — its own date again, and the 9200 hold is closed explicitly",
+    // 0039. The row shipped naming `payload.return.created_at`, which is the
+    // OUTBOUND `ach_transfer` shape copied across by analogy, and it was
+    // unfalsifiable because the consumer parked before the lookup ran. Measured
+    // 2026-09-11 on sandbox_inbound_ach_transfer_n8dm6ffh9tijbi27of5b: the
+    // returned object grows ONE block, `transfer_return {reason, returned_at,
+    // transaction_id}`, and carries no `return` key at all. `valueDateSource()`
+    // returns null for a path that is not there and the consumer parks, so the
+    // old string could never have dated a recall even once the branch existed.
+    valueDateSource: "payload.transfer_return.returned_at",
+    why: "an inbound credit has been recalled — its own date again, read from the INBOUND object's transfer_return.returned_at, not the outbound return.created_at it was copied from",
+  },
+
+  // ---- Increase (wire) ----------------------------------------------------
+  // `db/migrations/0025_wires.sql` inserted these eight directly and the seed
+  // was not updated, so this suite's live half compared 30 rows against 22 and
+  // had been red on the length check ever since. Reviewing them here is what
+  // lets the seed carry them, and the seed carrying them is what stops a
+  // re-seed from dropping every wire classification on the floor.
+  //
+  // NOT ONE OF THEM IS A CORRECTION, and that is the rail's whole character: a
+  // wire is real-time gross settlement and final on acceptance, so there is
+  // never an original posting that was false about its own value date. Money
+  // that comes back comes back as a second payment.
+  {
+    rail: "wire",
+    provider: "increase",
+    eventType: "wire_transfer.created",
+    step: null,
+    canonicalKind: "wire_originated",
+    semantics: "new_event",
+    valueDateSource: "payload.created_at",
+    why: "the instruction exists and nothing has been put on a wire — measured status pending_creating, submission null",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    eventType: "wire_transfer.updated",
+    step: "submitted",
+    canonicalKind: "wire_submitted",
+    semantics: "new_event",
+    valueDateSource: "payload.submission.submitted_at",
+    why: "handed to Fedwire and an IMAD issued; measured, this is a transient status rather than a resting one",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    eventType: "wire_transfer.updated",
+    step: "complete",
+    canonicalKind: "wire_settled",
+    semantics: "new_event",
+    valueDateSource: "payload.submission.submitted_at",
+    why: "THE settlement, dated from the submission because a wire has no settlement object — the exact mirror of the Increase ACH trap, and an adapter waiting for settlement.settled_at on a wire would wait forever",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    eventType: "wire_transfer.updated",
+    step: "reversed",
+    canonicalKind: "wire_return_of_funds",
+    semantics: "new_event",
+    valueDateSource: "payload.reversal.created_at",
+    why: "not a correction and not a return: measured class_name inbound_wire_reversal with its own IMAD and a null return_reason_code, so it is a SECOND payment on the day it arrived",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    eventType: "wire_transfer.updated",
+    step: "canceled",
+    canonicalKind: "wire_canceled",
+    semantics: "new_event",
+    valueDateSource: "payload.cancellation.canceled_at",
+    why: "stopped before submission — the only window in which a wire can be stopped at all; no money moved, so there is nothing to correct",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    eventType: "wire_transfer.updated",
+    step: "rejected",
+    canonicalKind: "wire_rejected",
+    semantics: "new_event",
+    valueDateSource: "payload.created_at",
+    why: "Increase declined to submit; no IMAD was ever issued, so this is a new event about an instruction and never a correction of a payment",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    eventType: "inbound_wire_transfer.created",
+    step: null,
+    canonicalKind: "inbound_wire_credit",
+    semantics: "new_event",
+    valueDateSource: "payload.acceptance.accepted_at",
+    why: "the money became ours at the acceptance instant — measured, acceptance.accepted_at equals created_at exactly, which is where 'available immediately' comes from",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    eventType: "inbound_wire_transfer.updated",
+    step: "reversed",
+    canonicalKind: "inbound_wire_returned",
+    semantics: "new_event",
+    valueDateSource: "payload.reversal.reversed_at",
+    why: "we sent it back: measured, POST /inbound_wire_transfers/{id}/reverse is a production method taking reason=creditor_request, so this bank originated a wire the other way on the day it did it",
   },
 
   // ---- Base (USDC) --------------------------------------------------------
@@ -344,9 +444,17 @@ const EXPECTED_ROWS: readonly RailEventSemantics[] = EXPECTED.map(asRow);
  *
  * The seed opens a database connection at module scope and exits the process
  * on a missing URL, so it cannot be imported; it is read as text instead. The
- * extractor asserts it found the array and 22 uniformly-shaped entries, so a
+ * extractor asserts it found the array and 30 uniformly-shaped entries, so a
  * reformat of the seed fails this suite loudly rather than silently matching
  * fewer rows and declaring everything fine.
+ *
+ * `note` is matched as a full JS string literal — escapes included — and run
+ * through `JSON.parse`, because the wire rows mirrored out of
+ * `0025_wires.sql` contain quoted phrases. A `[^"]*` note pattern silently
+ * skipped those rows, and a row this extractor skips is a row the "the seed
+ * carries exactly these rows" check would have reported as MISSING FROM THE
+ * SEED when it was sitting right there — the same class of quiet
+ * under-matching the paragraph above exists to prevent.
  */
 function seededRows(): RailEventSemantics[] {
   const path = fileURLToPath(new URL("../../../scripts/seed.mjs", import.meta.url));
@@ -359,7 +467,7 @@ function seededRows(): RailEventSemantics[] {
   const block = source.slice(start, end);
 
   const entry =
-    /\{\s*rail:\s*"([^"]+)",\s*provider:\s*"([^"]+)",\s*providerEventType:\s*"([^"]+)",\s*canonicalKind:\s*"([^"]+)",\s*semantics:\s*"([^"]+)",\s*valueDateSource:\s*"([^"]+)",\s*note:\s*"([^"]*)"/g;
+    /\{\s*rail:\s*"([^"]+)",\s*provider:\s*"([^"]+)",\s*providerEventType:\s*"([^"]+)",\s*canonicalKind:\s*"([^"]+)",\s*semantics:\s*"([^"]+)",\s*valueDateSource:\s*"([^"]+)",\s*note:\s*("(?:[^"\\]|\\.)*")/g;
 
   const rows: RailEventSemantics[] = [];
   for (const m of block.matchAll(entry)) {
@@ -371,7 +479,10 @@ function seededRows(): RailEventSemantics[] {
         canonicalKind: m[4] ?? "",
         semantics: m[5] ?? "",
         valueDateSource: m[6] ?? "",
-        note: m[7] ?? "",
+        // The literal, unescaped. JS and JSON string escapes agree on
+        // everything the seed uses, and `checkedRow` rejects an empty note, so
+        // a note that failed to unescape cannot pass silently.
+        note: JSON.parse(m[7] ?? '""') as string,
       }),
     );
   }
@@ -389,11 +500,16 @@ function seededByKey(): Map<string, RailEventSemantics> {
 // ---------------------------------------------------------------------------
 
 describe("rail_event_semantics — one assertion per seeded row", () => {
-  it("the seed carries exactly the 22 rows this suite reviews, and no others", () => {
+  it("the seed carries exactly the 30 rows this suite reviews, and no others", () => {
     // The whole point of the per-row rule: adding a row without adding a test
     // here fails, so an unreviewed row cannot reach the database quietly.
-    expect(SEEDED).toHaveLength(22);
-    expect(EXPECTED).toHaveLength(22);
+    //
+    // 30 = the 22 original rows + the 8 wire rows `0025_wires.sql` inserted
+    // directly. The literal is deliberate: growing the table has to be a
+    // deliberate edit HERE, in the file that carries the review, and not a
+    // number that quietly follows whatever somebody added.
+    expect(SEEDED).toHaveLength(30);
+    expect(EXPECTED).toHaveLength(30);
     expect([...seededByKey().keys()].sort()).toEqual(EXPECTED.map(keyOf).sort());
   });
 
@@ -1015,7 +1131,84 @@ describe("table vs. consumer behaviour", () => {
 // ---------------------------------------------------------------------------
 
 d("against the live database", () => {
+  /**
+   * The key sets, which is the assertion that has to fail LOUDLY.
+   *
+   * This suite was red from `0025_wires.sql` until 2026-09-11 on
+   * `expected live to have a length of 22 but got 30`, and a length is the
+   * worst possible way to report that: it says a number is wrong and not which
+   * rows, so the reading it invites is "the test is stale" rather than "a
+   * migration wrote rows the seed does not know about". A migration inserting
+   * a row without the seed learning about it is not a counting error — it is a
+   * row that disappears the next time anybody re-seeds — so the difference is
+   * named in both directions, by key.
+   */
+  function keyDiff(
+    live: readonly RailEventSemantics[],
+  ): { liveOnly: string[]; seedOnly: string[] } {
+    const liveKeys = new Set(live.map((r) => `${r.provider} ${r.providerEventType}`));
+    const seedKeys = new Set(SEEDED.map((r) => `${r.provider} ${r.providerEventType}`));
+    return {
+      liveOnly: [...liveKeys].filter((k) => !seedKeys.has(k)).sort(),
+      seedOnly: [...seedKeys].filter((k) => !liveKeys.has(k)).sort(),
+    };
+  }
+
   it("the deployed table is exactly what scripts/seed.mjs seeds", async () => {
+    const { sql } = await import("@/lib/ledger/db");
+    const live = await loadRailEventSemantics(sql);
+    const { liveOnly, seedOnly } = keyDiff(live);
+
+    expect(
+      liveOnly,
+      "rows are LIVE that scripts/seed.mjs does not carry. A migration inserted them " +
+        "directly; the seed's insert is ON CONFLICT DO UPDATE, so it will not remove them — " +
+        "but a database stood up from the seed alone comes up without them and every delivery " +
+        "they classify parks. Mirror them into RAIL_EVENT_SEMANTICS and into EXPECTED above.",
+    ).toEqual([]);
+
+    expect(
+      seedOnly,
+      "rows are in scripts/seed.mjs and NOT deployed. Re-seed: " +
+        "set -a; . ./.env; set +a; node scripts/seed.mjs",
+    ).toEqual([]);
+
+    // Length from the seed, not from a literal: the literal that has to be
+    // edited by hand lives in §1, next to the review it stands for.
+    expect(live).toHaveLength(SEEDED.length);
+
+    // Every column, INCLUDING the note. The note is the review — it is where
+    // "measured on Increase on 2026-09-11, transfer_return.returned_at" lives —
+    // and a live table whose notes have drifted from the seed's is a table
+    // where somebody corrected a row in a migration and the seed still holds
+    // the sentence that was wrong. `0039_inbound_recall.sql` is exactly that
+    // case: one value_date_source and two notes.
+    const full = (rows: readonly RailEventSemantics[]) =>
+      [...rows]
+        .map((r) => ({
+          provider: r.provider,
+          providerEventType: r.providerEventType,
+          rail: r.rail,
+          canonicalKind: r.canonicalKind,
+          semantics: r.semantics,
+          valueDateSource: r.valueDateSource,
+          note: r.note,
+        }))
+        .sort((a, b) =>
+          `${a.provider} ${a.providerEventType}`.localeCompare(
+            `${b.provider} ${b.providerEventType}`,
+          ),
+        );
+
+    expect(full(live)).toEqual(full(SEEDED));
+  });
+
+  it("the deployed table is also exactly what this file REVIEWED", async () => {
+    // seed <-> EXPECTED is asserted in §1 without a database; this closes the
+    // triangle, so the deployed rows are tied to the reviewed answer directly
+    // and not only through the seed. The note is not compared here: `why` is a
+    // one-line reason for a test name, the seed's `note` is the long-form
+    // review, and they are deliberately different texts.
     const { sql } = await import("@/lib/ledger/db");
     const live = await loadRailEventSemantics(sql);
 
@@ -1031,8 +1224,31 @@ d("against the live database", () => {
         ])
         .sort((a, b) => `${a[0]}${a[1]}`.localeCompare(`${b[0]}${b[1]}`));
 
-    expect(live).toHaveLength(22);
     expect(norm(live)).toEqual(norm(EXPECTED_ROWS));
+  });
+
+  it("the 0039 correction is what is deployed, and what a re-seed would write", async () => {
+    // The specific thing a re-seed would have reverted: the inbound recall row
+    // named the OUTBOUND `return.created_at` shape, which does not exist on an
+    // `inbound_ach_transfer`, so `valueDateFromSource()` would return null and
+    // the consumer would park rather than date the recall.
+    const { sql } = await import("@/lib/ledger/db");
+    const key = "increase inbound_ach_transfer.updated/returned";
+
+    const live = (await loadRailEventSemantics(sql)).find(
+      (r) => `${r.provider} ${r.providerEventType}` === key,
+    );
+    const seeded = SEEDED.find((r) => `${r.provider} ${r.providerEventType}` === key);
+
+    expect(live?.valueDateSource).toBe("payload.transfer_return.returned_at");
+    expect(seeded?.valueDateSource).toBe("payload.transfer_return.returned_at");
+    expect(seeded?.note).toBe(live?.note);
+    // And the outbound row it was copied from is untouched: the two shapes are
+    // genuinely different objects, not one of them mis-typed.
+    const outbound = SEEDED.find(
+      (r) => `${r.provider} ${r.providerEventType}` === "increase ach_transfer.updated/returned",
+    );
+    expect(outbound?.valueDateSource).toBe("payload.return.created_at");
   });
 
   it("resolves a Lithic clearing, a Lithic clearing reversal and an Increase return off the live table", async () => {

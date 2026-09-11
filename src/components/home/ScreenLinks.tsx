@@ -235,9 +235,11 @@ export function ScreenLinks() {
           Every screen in this build
         </h2>
         <p className="mt-1 max-w-prose text-xs text-muted">
-          Six screens and the JSON endpoint behind the integration table.
-          Everything built in this trial is reachable from here, nothing here is
-          a stub, and a test fails if any of these stops resolving.
+          {SCREENS.filter((s) => !s.external).length} screens and the JSON
+          endpoint behind the integration table. Everything built in this trial
+          is reachable from here, nothing here is a stub, and a test walks{" "}
+          <code>src/app</code> and fails if any page is missing from this list
+          — or from the nav.
         </p>
       </header>
 

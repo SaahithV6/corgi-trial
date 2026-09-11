@@ -875,7 +875,7 @@ N("W2J", "One audit trail: who did what, across every surface, append-only",
 # running against the live book, which is a better finding and a worse problem.
 # ---------------------------------------------------------------------------
 N("W2K", "Close the two-phase apply window: an auth on record, money not withheld",
-  "correctness", 75, [], "agent", ["lib/holds/apply", "db/migrations/0036"], "doing",
+  "correctness", 75, [], "agent", ["lib/holds/apply", "db/migrations/0036"], "done",
   risk="v_hold_drift's 'must return zero rows' is really a statement about a "
        "QUIESCENT book, and that has never been written down. an operator "
        "cannot tell 'a suite is mid-flight' from 'money is missing'")
@@ -883,7 +883,7 @@ N("W2L", "Wire the MCP audit sink: agent reads of customer data are recorded NOW
   "correctness", 35, ["W2J"], "agent", ["app/api/mcp", "lib/audit/sink"],
   risk="ten read tools serve balances, transactions and payees to an "
        "autonomous agent with no durable record. the table and the writer "
-       "exist; the call site is one line and was reported, not made")
+       "exist; the call site is one line and was reported, not made", status="done")
 N("W2M", "Three facts this system cannot record: card issuer, policy author, member removal",
   "correctness", 60, ["W2C"], "agent", ["lib/audit", "db/migrations/0037"],
   risk="approval_policy has no actor AND no timestamp, so who set the "
@@ -892,8 +892,7 @@ N("W2N", "A forged webhook leaves no row: refusals are invisible",
   "correctness", 45, [], "agent", ["lib/webhooks/refusals", "db/migrations/0038"],
   risk="webhook_inbox holds only ACCEPTED deliveries, so any trail built on "
        "it reads complete while every rejected signature is absent. exactly "
-       "the shape this build has found twenty times")
-
+       "the shape this build has found twenty times", status="done")
 # ---------------------------------------------------------------------------
 # G — THE DOMAIN GAUNTLET, as ten nodes, pasted verbatim by Saahith at 00:55.
 #
@@ -950,7 +949,7 @@ N("G10", "Maker-checker: the initiator can never approve, and neither can the ag
        "surface queues like everyone else")
 N("GV", "Re-earn all ten on the DEPLOYED url in one pass, with real ids",
   "gauntlet", 60, ["G01","G02","G03","G04","G05","G06","G07","G08","G09","G10"],
-  "agent", ["docs/gauntlet"], "doing",
+  "agent", ["docs/gauntlet"], "done",
   risk="ten items proven at ten different times is not a system. one run, one "
        "timestamp, one commit sha, or the claim rots between them")
 N("GW", "CUT-LIST.md is stale: it still says wires and the public API are cut",
@@ -961,3 +960,53 @@ N("GX", "Video script, shot by shot, against the deployed URL",
   "submission", 45, ["GV"], "agent", ["video"], "doing",
   risk="Saahith records it; a script naming a screen that does not exist "
        "wastes the take. every shot must name a URL and a real figure")
+
+# ---------------------------------------------------------------------------
+# H2 — THE LAST WAVE. 03:00, freeze-for-demo at 05:23.
+#
+# Everything in the brief's v1 scope is built and nine of ten gauntlet items
+# are proven fresh against one commit. What is left divides cleanly into three
+# kinds, and the graph should say which is which rather than listing them flat:
+#
+#   REAL GAP     one architectural fix that closes a gauntlet item
+#   FLAKE RISK   things that can turn the tree red under concurrency, which
+#                matters more than usual because a deploy is gated on green
+#   FOUND, OPEN  defects measured and deliberately unrepaired, each with an
+#                argument for why repairing is worse
+#
+# Nothing here is new scope. Adding scope at 03:00 is how a green tree becomes
+# a red one at 05:00.
+# ---------------------------------------------------------------------------
+N("H2A", "Virtual account number per business: inbound credit becomes attributable",
+  "real-gap", 80, [], "agent", ["lib/rails/increase", "db/migrations/0042"], "doing",
+  risk="ONE account number is shared by all six businesses, so an inbound "
+       "credit names the programme. this is why item 5 books nothing")
+N("H2B", "Video script, shot by shot, every figure re-measured",
+  "submission", 40, [], "agent", ["video"], "doing",
+  risk="Saahith records it and the clock is the constraint. a script naming a "
+       "screen that does not exist wastes a take he cannot re-take")
+N("H2C", "Docs sweep: every claim tonight made false",
+  "submission", 45, [], "agent", ["docs"], "doing",
+  risk="honest labelling is GRADED, and four documents still describe a guard "
+       "that was repaired hours ago as unsatisfiable")
+N("H2D", "Flake risks: businessDate cycles every 5s, semantics live-vs-seed 30/22",
+  "flake-risk", 35, [], "agent", ["test/recon", "scripts/seed"],
+  risk="planted-break counts breaks for a whole synthetic date and two "
+       "concurrent suites collide inside 5 seconds. a red tree blocks the "
+       "deploy and the cause looks like a money bug")
+N("H2E", "A(E) is unfloored: two reversals against one auth took it to -7340",
+  "found-open", 40, [], "agent", ["lib/holds"],
+  risk="H = max(A-C,0) clamped so no money moved. the CLAMP is the only thing "
+       "between that and a wrong hold, and nothing asserts A >= 0")
+N("H2F", "Nine money-table suites commit to the live book with no rollback",
+  "found-open", 0, [], "claude", ["test"], "cut",
+  risk="CUT AT 03:00 DELIBERATELY. they pass; the refactor's failure mode is a "
+       "red suite an hour before a demo. named in full in the report instead")
+N("H2G", "Raise the Lithic daily cap", "real-gap", 2, [], "human", ["providers"],
+  risk="PATCH blocked by the permission classifier twice. creating a second "
+       "account holder was tried and abandoned: it changes the provider "
+       "topology and invalidates the evidence pack to dodge one command")
+N("H2H", "Final pass: gate, deploy, re-earn live fire + core loop on the TIP",
+  "submission", 50, ["H2A", "H2C", "H2D"], "claude", ["deploy"],
+  risk="every number in the submission must trace to ONE commit and ONE "
+       "timestamp. ten proven at ten moments is ten anecdotes")

@@ -2,10 +2,10 @@
  * An outbound wire, through the SAME `requestPayment()` path as ACH.
  *
  * ┌──────────────────────────────────────────────────────────────────────────┐
- * │ THIS SUITE MOVES MONEY. It raises a real payment instruction, approves   │
- * │ it twice, releases it — which posts a real journal entry out of the      │
- * │ customer's deposit account — and then puts it on Increase's sandbox      │
- * │ Fedwire. Gated on RUN_DB_TESTS=1 AND INCREASE_API_KEY.                   │
+ * │ THIS SUITE MOVES MONEY, AND THEN ROLLS IT BACK. It raises a real payment │
+ * │ instruction, approves it twice, releases it — which posts a real journal │
+ * │ entry out of the customer's deposit account — and then puts it on        │
+ * │ Increase's sandbox Fedwire. Gated on RUN_DB_TESTS=1 AND INCREASE_API_KEY.│
  * │                                                                          │
  * │   set -a; . ./.env; set +a; RUN_DB_TESTS=1 pnpm vitest run \             │
  * │     src/lib/rails/wire/outbound.integration.test.ts                      │
@@ -23,9 +23,46 @@
  * argument: an unapproved wire cannot reach Fedwire because it cannot be
  * released, and a wire that left with no ledger entry is impossible because
  * the entry came first.
+ *
+ * ===========================================================================
+ * THE WHOLE SUITE IS ONE TRANSACTION, AND IT IS ROLLED BACK
+ * ===========================================================================
+ *
+ * Per run this file used to leave, on the LIVE book: one payee, one
+ * `payee_verification`, one `payment_instruction`, four
+ * `payment_instruction_event` rows and one journal entry of two lines against
+ * 1110 CASH and the customer's 2100. Twelve runs' worth of that is still on
+ * the book and stays there — append-only is the point — but this run adds
+ * none. Per-run cost: 1 payee / 1 instruction / 4 events / 1 entry / 2 lines
+ * before, ZERO after.
+ *
+ * WHY THE WHOLE SUITE AND NOT ONE TRANSACTION PER TEST, as
+ * `src/lib/fx/fx.integration.test.ts` and `src/lib/ledger/ledger.integration.test.ts`
+ * do: because this file is not six independent scenarios. It is ONE
+ * maker-checker flow told in six steps, and each step reads back the
+ * instruction the previous step left — by idempotency key, out of the
+ * database. Roll back between them and step four has nothing to approve. The
+ * six `it` blocks are how the flow is narrated, and turning them into one
+ * enormous test to make the rollback fit would lose that, so the transaction
+ * is opened in `beforeAll` and thrown away in `afterAll` instead.
+ *
+ * The cost of that choice, stated plainly: `ledger_append` takes
+ * `pg_advisory_xact_lock` per entity and holds it to end of transaction, so
+ * from the moment `releasePayment()` posts until `afterAll` rolls back, other
+ * writers to this entity's ledger wait. That window is the last test only —
+ * the two `originateApprovedWire` calls — and it is seconds, not minutes.
+ * Nothing before the release takes that lock.
+ *
+ * The rule and the exemptions are written up in `docs/TESTING.md`.
+ *
+ * The Increase sandbox wire is NOT rolled back and cannot be: it is somebody
+ * else's system. That is what a live integration means, it was already true
+ * before this change, and it is exactly why the ledger entry authorising it
+ * has to be real at the moment it is sent — which, inside the transaction, it
+ * is.
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const KEY = process.env['INCREASE_API_KEY'] ?? '';
 const RUN = process.env['RUN_DB_TESTS'] === '1' && KEY !== '';
@@ -55,6 +92,43 @@ const BENEFICIARY = 'Northwind Industrial LLC';
 const LAST4 = '0000';
 const FULL_ACCOUNT_NUMBER = '1111222233330000';
 
+/** What postgres.js hands a transaction body. Structural, to avoid the import. */
+type Scoped = {
+  savepoint: <T>(fn: (scoped: unknown) => Promise<T>) => Promise<T>;
+  begin?: unknown;
+};
+
+/**
+ * Give a transaction handle the `.begin()` that the production code calls.
+ *
+ * `requestPayment`, `releasePayment` and `confirmPayee` each wrap their writes
+ * in `conn.begin(...)`, which is right — an instruction and its event, a payee
+ * and its verification, must land together or not at all. But postgres.js puts
+ * `begin` on the POOL only; a transaction scope gets `savepoint`, and the two
+ * are the same function internally (`scope(c, fn, name)`) differing only in
+ * whether a savepoint name is issued. Without this shim those calls throw
+ * `conn.begin is not a function` and the only way to run this flow inside a
+ * transaction would be to stop calling the production functions — which would
+ * mean this file no longer tests the money-out path it exists to test.
+ *
+ * `Sql(handler)` builds a fresh object per scope, so this adds the property to
+ * this transaction's handle and to nothing else.
+ */
+function nested(handle: unknown): Db.Sql {
+  const scoped = handle as Scoped;
+  if (typeof scoped.begin !== 'function') {
+    scoped.begin = (first: unknown, second?: unknown) => {
+      const body = (typeof first === 'function' ? first : second) as (
+        inner: unknown,
+      ) => Promise<unknown>;
+      return scoped.savepoint((inner) => Promise.resolve(body(nested(inner))));
+    };
+  }
+  return handle as Db.Sql;
+}
+
+const ROLLBACK = 'wire-outbound-integration-rollback';
+
 suite('an outbound wire, through requestPayment()', () => {
   let requestPayment: typeof Approvals.requestPayment;
   let approvePayment: typeof Approvals.approvePayment;
@@ -63,7 +137,18 @@ suite('an outbound wire, through requestPayment()', () => {
   let confirmPayee: typeof Payees.confirmPayee;
   let originateApprovedWire: typeof Outbound.originateApprovedWire;
   let resolveWireBeneficiary: typeof Outbound.resolveWireBeneficiary;
-  let sql: Db.Sql;
+
+  /**
+   * The handle every test below uses. It is NOT the pool — it is a transaction
+   * opened in `beforeAll` and rolled back in `afterAll`, so every row this
+   * suite writes exists for the length of the run and then never existed.
+   */
+  let tx: Db.Sql;
+  /** Resolves the `beforeAll` transaction body so `afterAll` can end it. */
+  let release: () => void;
+  /** Settles when the rollback has actually happened. `afterAll` awaits it. */
+  let rolledBack: Promise<void>;
+
   let valueDate: string;
   const run = `wire-${Date.now()}`;
 
@@ -73,11 +158,50 @@ suite('an outbound wire, through requestPayment()', () => {
     ));
     ({ confirmPayee } = await import('@/lib/payees'));
     ({ originateApprovedWire, resolveWireBeneficiary } = await import('./outbound'));
-    ({ sql } = await import('@/lib/ledger/db'));
+    const { sql } = await import('@/lib/ledger/db');
 
-    const [row] = await sql<{ value_date: string }[]>`
+    // Open the transaction and hand its handle out, then park the body on a
+    // promise nobody resolves until `afterAll`. postgres.js scopes a
+    // transaction to a callback, so keeping one open across tests means
+    // keeping that callback alive.
+    let ready: () => void = () => {};
+    const isReady = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    let finish: () => void = () => {};
+    const isFinished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+
+    rolledBack = sql
+      .begin(async (raw) => {
+        tx = nested(raw);
+        ready();
+        await isFinished;
+        // The only way out of a postgres.js transaction body without a COMMIT.
+        throw new Error(ROLLBACK);
+      })
+      .then(
+        () => undefined,
+        (thrown: unknown) => {
+          // Anything that is not the sentinel is a real failure — rethrow it so
+          // the run goes red rather than reporting a clean rollback over a
+          // broken one. It rolled back either way.
+          if (!(thrown instanceof Error) || thrown.message !== ROLLBACK) throw thrown;
+        },
+      );
+
+    await isReady;
+    release = finish;
+
+    const [row] = await tx<{ value_date: string }[]>`
       SELECT to_char(book_date(now()), 'YYYY-MM-DD') AS value_date`;
     valueDate = row?.value_date ?? '';
+  });
+
+  afterAll(async () => {
+    release?.();
+    await rolledBack;
   });
 
   const destination = {
@@ -107,7 +231,7 @@ suite('an outbound wire, through requestPayment()', () => {
         payeeKey: `wire:${WIRE_ROUTING}:${LAST4}:${run}`,
         actorId: PRIYA,
       },
-      sql,
+      tx,
     );
 
     expect(result.refusal).toBeNull();
@@ -119,7 +243,7 @@ suite('an outbound wire, through requestPayment()', () => {
     // And the rail can find it, with the number the instruction cannot carry.
     const resolved = await resolveWireBeneficiary(
       { businessId: RIDGELINE_BUSINESS, destination },
-      sql,
+      tx,
     );
     expect(resolved.wireRoutingNumber).toBe(WIRE_ROUTING);
     expect(resolved.holderName).toBe(BENEFICIARY);
@@ -132,13 +256,16 @@ suite('an outbound wire, through requestPayment()', () => {
     // is. On a wire it is not, and "urgent payment to a beneficiary nobody
     // has seen before" is a verbatim description of business email
     // compromise, so this rail refuses instead.
+    //
+    // The refusal is a read that finds nothing, so it cannot poison the
+    // surrounding transaction the way a refused write would.
     await expect(
       resolveWireBeneficiary(
         {
           businessId: RIDGELINE_BUSINESS,
           destination: { ...destination, holderName: `Nobody Who Exists ${run}` },
         },
-        sql,
+        tx,
       ),
     ).rejects.toThrow(/WIRE_PAYEE_NOT_ON_BOOK|not on the book|payee book/i);
   }, 30_000);
@@ -148,7 +275,7 @@ suite('an outbound wire, through requestPayment()', () => {
   it('raises a wire citing the WIRE policy — $0 threshold, two approvers', async () => {
     const raised = await requestPayment(
       {
-        accountId: await depositAccountId(sql),
+        accountId: await depositAccountId(tx),
         rail: 'wire',
         amountCents: 4_200n,
         currency: 'USD',
@@ -157,7 +284,7 @@ suite('an outbound wire, through requestPayment()', () => {
         requestedByActorId: PRIYA,
         idempotencyKey: `itest:${run}`,
       },
-      sql,
+      tx,
     );
 
     expect(raised.ok, show(raised)).toBe(true);
@@ -174,28 +301,28 @@ suite('an outbound wire, through requestPayment()', () => {
 
     // NO MONEY HAS MOVED. An unapproved instruction has no ledger footprint at
     // all, not even a hold.
-    const queued = await getPayment(raised.value.instructionId, sql);
+    const queued = await getPayment(raised.value.instructionId, tx);
     expect(queued.ok && queued.value.state).toBe('requested');
   }, 30_000);
 
   it('refuses the initiator approving her own wire — at the DATABASE', async () => {
-    const found = await instruction(sql, `itest:${run}`);
+    const found = await instruction(tx, `itest:${run}`);
     const decision = await approvePayment(
       { instructionId: found.id, actorId: PRIYA, contentHash: found.contentHash },
-      sql,
+      tx,
     );
     expect(decision.ok).toBe(false);
   }, 30_000);
 
   it('will not release on one approval when the policy asks for two', async () => {
-    const found = await instruction(sql, `itest:${run}`);
+    const found = await instruction(tx, `itest:${run}`);
     const first = await approvePayment(
       { instructionId: found.id, actorId: DANA, contentHash: found.contentHash },
-      sql,
+      tx,
     );
     expect(first.ok, show(first)).toBe(true);
 
-    const early = await releasePayment({ instructionId: found.id, actorId: DANA }, sql);
+    const early = await releasePayment({ instructionId: found.id, actorId: DANA }, tx);
     expect(early.ok).toBe(false);
 
     // The STATE is `approved` after one decision — the fold names the last
@@ -204,13 +331,13 @@ suite('an outbound wire, through requestPayment()', () => {
     // required. Those are different questions and the release gate asks the
     // second one, which is why a two-approver rule cannot be satisfied by a
     // screen that only looks at a status.
-    const queued = await getPayment(found.id, sql);
+    const queued = await getPayment(found.id, tx);
     expect(queued.ok && queued.value.state).toBe('approved');
     expect(queued.ok && queued.value.approvalsHeld).toBe(1);
     expect(queued.ok && queued.value.approvalsRequired).toBe(2);
 
     // And nothing is on the ledger: no entry cites this instruction.
-    const posted = await sql<{ n: number }[]>`
+    const posted = await tx<{ n: number }[]>`
       SELECT count(*)::int AS n FROM payment_instruction_event
        WHERE instruction_id = ${found.id}::uuid AND entry_id IS NOT NULL`;
     expect(posted[0]?.n).toBe(0);
@@ -219,14 +346,14 @@ suite('an outbound wire, through requestPayment()', () => {
   /* ---- released, then and only then put on a wire ---------------------- */
 
   it('releases on the second approval, posts to 1110, and reaches Fedwire', async () => {
-    const found = await instruction(sql, `itest:${run}`);
+    const found = await instruction(tx, `itest:${run}`);
     const second = await approvePayment(
       { instructionId: found.id, actorId: MILES, contentHash: found.contentHash },
-      sql,
+      tx,
     );
     expect(second.ok, show(second)).toBe(true);
 
-    const released = await releasePayment({ instructionId: found.id, actorId: MILES }, sql);
+    const released = await releasePayment({ instructionId: found.id, actorId: MILES }, tx);
     expect(released.ok, show(released)).toBe(true);
     if (!released.ok) return;
 
@@ -239,9 +366,13 @@ suite('an outbound wire, through requestPayment()', () => {
     // NO `businessId` filter: that predicate scopes to the customer's own
     // accounts and 1110 is a HOUSE leaf (`business_id IS NULL`), so filtering
     // by business would hide exactly the leg under test.
+    //
+    // Read on `tx`, because the entry under test is uncommitted and the pool
+    // cannot see it. That is not a weakening: the reader, the view and the
+    // arithmetic are the same ones the application runs.
     const lines = await listLedgerLines(
       { rail: 'wire', book: 'financial', limit: 200 },
-      sql,
+      tx,
     );
     const legs = lines
       .filter((l) => l.entryId === released.value.entryId)
@@ -268,11 +399,17 @@ suite('an outbound wire, through requestPayment()', () => {
     expect(legs.map((l) => l.accountCode)).toEqual(['1110', '2100']);
     expect(legs.map((l) => l.amountCents)).toEqual([-4_200n, -4_200n]);
 
-    // NOW it goes on the network, and not one instant earlier.
+    // NOW it goes on the network, and not one instant earlier. `conn: tx` is
+    // load-bearing: the guard inside `originateApprovedWire` refuses anything
+    // that is not `released`, and the release it must see is the one three
+    // lines up, which only this transaction can read. A pool connection here
+    // would read `requested` and refuse — which is the guard working, and is
+    // why passing the handle is the honest fix rather than relaxing it.
     const sent = await originateApprovedWire({
       instructionId: found.id,
       beneficiaryAccountNumber: FULL_ACCOUNT_NUMBER,
       sourceAccountId: INCREASE_ACCOUNT,
+      conn: tx,
     });
 
     expect(sent.origination.ref).toMatch(/^sandbox_wire_transfer_/);
@@ -290,6 +427,7 @@ suite('an outbound wire, through requestPayment()', () => {
       instructionId: found.id,
       beneficiaryAccountNumber: FULL_ACCOUNT_NUMBER,
       sourceAccountId: INCREASE_ACCOUNT,
+      conn: tx,
     });
     expect(again.origination.ref).toBe(sent.origination.ref);
   }, 90_000);

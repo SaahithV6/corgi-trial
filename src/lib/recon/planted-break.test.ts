@@ -27,7 +27,60 @@
  * run picks its own synthetic business date and its own reference prefix, so
  * two invocations never see each other's rows, and every assertion looks a
  * break up BY REFERENCE rather than counting rows in a shared table.
+ *
+ * ─── WHAT THAT PARAGRAPH CLAIMED AND DID NOT DO (2026-09-11) ────────────────
+ *
+ * It was true about the references and false about everything that counted.
+ *
+ *   1. The date was `dayFromEpoch(Date.now() % 5000)`, so the synthetic date
+ *      space was FIVE SECONDS WIDE and cycled. Two suites starting inside the
+ *      same five seconds did not collide by bad luck — they collided BY
+ *      CONSTRUCTION, because the clock is the same clock.
+ *   2. `v_recon_break` category (b) is every `financial` entry on the file's
+ *      rail whose `value_date` equals the file's `business_date` and which
+ *      this file does not match (0006_recon.sql §4a). It is scoped to the
+ *      DATE, not to the run. So the other suite's planted rows arrived inside
+ *      this suite's diff as `in_ledger_not_file` breaks, and
+ *      `expect(breaks).toHaveLength(0)` — a count over a shared table, which
+ *      the paragraph above said this file does not do — went red reading
+ *      *"a file whose every row is booked has breaks"*. That failure looks
+ *      exactly like a money bug to anyone who has not traced it, which makes a
+ *      red here more expensive than an ordinary flake.
+ *   3. Two tests then re-found their file with `WHERE filename = '…' ORDER BY
+ *      imported_at DESC LIMIT 1`, and the filename was a constant, so a
+ *      concurrent run's file was there to be picked up.
+ *
+ * The repair is the one `src/test/livefire/README.md` §1 settled on after
+ * attacks 3 and 7: **never widen a tolerance to absorb another writer;
+ * isolate, or take a delta.** So, in order:
+ *
+ *   • the date space is 146,097 days (1600-01-02 … 1999-12-31) drawn from
+ *     `randomInt`, not 5,000 milliseconds drawn from the wall clock;
+ *   • the reference prefix carries 8 bytes of `randomBytes` as well as the
+ *     clock, so two runs in one millisecond are distinct too;
+ *   • every count is over THIS RUN'S OWN ROWS — `ours()` keeps only the breaks
+ *     whose `external_ref` carries this run's prefix — so what each test now
+ *     claims is *"the rows this run planted reconcile exactly so"*, which is
+ *     the claim the suite can actually own on a shared database, and a
+ *     stranger's row on the same date can no longer be reported as ours;
+ *   • every file is re-found by the `fileId` this run imported, never by name.
+ *
+ * Nothing was loosened to get there: the three planted breaks are still
+ * asserted one-for-one, on the reference, the kind, the reason code and both
+ * amounts.
+ *
+ * MEASURED, not argued. The date space was pinned to a single day and two
+ * copies of this suite were run against Neon at the same instant, both on
+ * 1999-12-31. Both went green. The collision was real and is still in the
+ * database: on that date `journal_entry` holds 14 ACH financial entries from
+ * the two runs, and each run's own file carries SIX breaks in `v_recon_break`
+ * — the other run's five rows plus its unbooked one — against the ZERO and ONE
+ * that `ours()` sees. Six is exactly the red that was reported an hour
+ * earlier; it is now attributed to the writer that caused it instead of to the
+ * file that did not.
  */
+import { randomBytes, randomInt } from "node:crypto";
+
 import { beforeAll, describe, expect, it } from "vitest";
 
 import type { sql as SqlHandle } from "@/lib/ledger/db";
@@ -46,12 +99,32 @@ import { findAccount } from "@/lib/ledger/queries";
 const RUN = typeof process.env.APP_DATABASE_URL === "string";
 const d = RUN ? describe : describe.skip;
 
-/** `2000-01-01 + n` days, in UTC so no zone can shift it. */
+/** `2000-01-01 + n` days, in UTC so no zone can shift it. Negative goes back. */
 function dayFromEpoch(offset: number): string {
   const at = new Date("2000-01-01T00:00:00.000Z");
   at.setUTCDate(at.getUTCDate() + offset);
   return at.toISOString().slice(0, 10);
 }
+
+/**
+ * The synthetic business-date space: one Gregorian cycle, 146,097 days,
+ * ending the day before the epoch this file counts from.
+ *
+ * Every date it can produce is in 1600-01-02 … 1999-12-31, which is (a) far
+ * enough back that it cannot land on a seeded, demo or provider-originated
+ * date and be mistaken for one, and (b) 146,097 wide, so two concurrent runs
+ * share a date with probability 1/146,097 ≈ 7e-6 instead of the near-certainty
+ * a five-second modulus gave them. `randomInt` is the CSPRNG, not the clock:
+ * two processes started together get independent draws, which is the property
+ * that actually matters and the one `Date.now() % 5000` did not have.
+ *
+ * The band is kept in the PAST on purpose. A past-dated ACH credit matures
+ * into the ledger term immediately; a future-dated one sits in
+ * `ledger_availability` as an uncleared credit and would move the AVAILABLE
+ * balance of a customer other suites are measuring. Same isolation argument,
+ * one rail over.
+ */
+const DATE_SPACE_DAYS = 146_097;
 
 d("the planted break, against the live database", () => {
   // Imported inside beforeAll so a missing APP_DATABASE_URL cannot blow up at
@@ -72,14 +145,72 @@ d("the planted break, against the live database", () => {
   let depositAccountId: string;
   let achReceivableId: string;
 
-  // Unique per invocation. Two runs in the same millisecond is not a scenario.
+  // Unique per invocation. The clock for readability — a tag sorts roughly by
+  // when it was minted — and 8 random bytes for the uniqueness, because "two
+  // runs in the same millisecond is not a scenario" was the same reasoning
+  // that produced the five-second date window, and it was wrong there too.
   const stamp = Date.now();
-  const tag = stamp.toString(36).toUpperCase();
-  const businessDate = dayFromEpoch(stamp % 5000);
+  const tag = `${stamp.toString(36)}${randomBytes(8).toString("hex")}`.toUpperCase();
+  const businessDate = dayFromEpoch(-1 - randomInt(DATE_SPACE_DAYS));
+
+  /**
+   * Every reference this run plants starts with this, and nothing else in the
+   * database does. It is what makes a count a count of OUR rows.
+   */
+  const REF_PREFIX = `PLANT-${tag}-`;
+
+  /**
+   * This run's own breaks.
+   *
+   * `v_recon_break` is scoped to the file's business DATE, so a run of this
+   * suite that drew the same date, or any other writer that booked an ACH
+   * entry on it, appears in the diff alongside us. Those rows are real breaks
+   * of that file — they are simply not evidence about the rows THIS run
+   * planted, and this suite only ever claims the second thing.
+   */
+  function ours(breaks: readonly ReconBreak[]): readonly ReconBreak[] {
+    return breaks.filter((b) => b.externalRef.startsWith(REF_PREFIX));
+  }
+
+  /**
+   * The same set as a list of `kind externalRef` strings.
+   *
+   * Assertions are written against this rather than against `.length`, so a
+   * failure prints WHICH break turned up instead of `expected 1 to be 0` — the
+   * difference between a red that explains itself and a red somebody has to
+   * re-run with a debugger.
+   */
+  function summarise(breaks: readonly ReconBreak[]): string[] {
+    return ours(breaks)
+      .map((b) => `${b.kind} ${b.externalRef}`)
+      .sort();
+  }
+
+  /**
+   * The filenames this run uses. Tagged, because two concurrent runs writing
+   * `planted-v4-amount-changed.csv` and then re-finding it by name is how a
+   * test ends up asserting about somebody else's file.
+   */
+  const NAME = {
+    complete: `planted-${tag}-v1-complete.csv`,
+    renamed: `renamed-by-the-provider-${tag}.csv`,
+    deleted: `planted-${tag}-v2-row-deleted.csv`,
+    extra: `planted-${tag}-v3-extra-row.csv`,
+    changed: `planted-${tag}-v4-amount-changed.csv`,
+  } as const;
+
+  /**
+   * The mismatch file's id, kept from the run that imported it.
+   *
+   * The two tests that follow it used to re-find it with `WHERE filename = …
+   * ORDER BY imported_at DESC LIMIT 1`. Carrying the id is not a convenience:
+   * it is the only version of those tests that is about our own file.
+   */
+  let changedFileId = "";
 
   /** The nightly file, as first issued. Five inbound ACH settlements. */
   const baseRows: RenderRow[] = [1, 2, 3, 4, 5].map((n) => ({
-    externalRef: `PLANT-${tag}-${n}`,
+    externalRef: `${REF_PREFIX}${n}`,
     amountCents: BigInt(10_000 + n * 1_111),
     valueDate: businessDate,
     descriptor: `PLANTED ${n}`,
@@ -94,7 +225,7 @@ d("the planted break, against the live database", () => {
 
   /** A settled transfer that reaches the file and never reaches the book. */
   const unbooked: RenderRow = {
-    externalRef: `PLANT-${tag}-UNBOOKED`,
+    externalRef: `${REF_PREFIX}UNBOOKED`,
     amountCents: 77_777n,
     valueDate: businessDate,
     descriptor: "NEVER BOOKED",
@@ -184,20 +315,24 @@ d("the planted break, against the live database", () => {
     }
   });
 
-  it("reconciles a file whose every row is booked with zero breaks", async () => {
-    const { breaks } = await ingestAndRun("planted-v1-complete.csv", baseRows);
-    expect(breaks).toHaveLength(0);
+  it("every row this run planted is booked, so this run contributes zero breaks", async () => {
+    const { breaks } = await ingestAndRun(NAME.complete, baseRows);
+    // The claim is about OUR five references, not about the file's total: the
+    // diff is scoped to a business date and a date is shared. Zero of ours is
+    // the thing the money question actually asks — "is everything we booked
+    // agreed with the file" — and it is the thing this run can prove.
+    expect(summarise(breaks)).toEqual([]);
   });
 
   it("re-importing the identical bytes is a no-op decided by the hash", async () => {
     const first = await importSchemeFile(
-      { filename: "planted-v1-complete.csv", content: render(baseRows), importedBy: actorId },
+      { filename: NAME.complete, content: render(baseRows), importedBy: actorId },
       sql,
     );
     const again = await importSchemeFile(
       // A different filename on purpose: the CONTENT is the natural key, not
       // the name a provider happened to put on it.
-      { filename: "renamed-by-the-provider.csv", content: render(baseRows), importedBy: actorId },
+      { filename: NAME.renamed, content: render(baseRows), importedBy: actorId },
       sql,
     );
     expect(again.imported).toBe(false);
@@ -207,10 +342,10 @@ d("the planted break, against the live database", () => {
 
   it("finds the row the graders deleted: in_ledger_not_file, right reference, right amount", async () => {
     const withoutRow = baseRows.filter((_, i) => i !== DELETED_INDEX);
-    const { breaks } = await ingestAndRun("planted-v2-row-deleted.csv", withoutRow);
+    const { breaks } = await ingestAndRun(NAME.deleted, withoutRow);
 
-    // Exactly one break, and it is the deleted row's counterpart.
-    expect(breaks).toHaveLength(1);
+    // Exactly one break OF OURS, and it is the deleted row's counterpart.
+    expect(summarise(breaks)).toEqual([`in_ledger_not_file ${deleted.externalRef}`]);
 
     const found = find(breaks, deleted.externalRef);
     expect(found).toBeDefined();
@@ -229,9 +364,9 @@ d("the planted break, against the live database", () => {
   });
 
   it("finds a row nobody booked: in_file_not_ledger, right reference, right amount", async () => {
-    const { breaks } = await ingestAndRun("planted-v3-extra-row.csv", [...baseRows, unbooked]);
+    const { breaks } = await ingestAndRun(NAME.extra, [...baseRows, unbooked]);
 
-    expect(breaks).toHaveLength(1);
+    expect(summarise(breaks)).toEqual([`in_file_not_ledger ${unbooked.externalRef}`]);
 
     const found = find(breaks, unbooked.externalRef);
     expect(found?.kind).toBe("in_file_not_ledger");
@@ -251,9 +386,10 @@ d("the planted break, against the live database", () => {
         ? { ...row, amountCents: row.amountCents + MISMATCH_DELTA }
         : row,
     );
-    const { breaks } = await ingestAndRun("planted-v4-amount-changed.csv", changed);
+    const { fileId, breaks } = await ingestAndRun(NAME.changed, changed);
+    changedFileId = fileId;
 
-    expect(breaks).toHaveLength(1);
+    expect(summarise(breaks)).toEqual([`amount_mismatch ${mismatched.externalRef}`]);
 
     const found = find(breaks, mismatched.externalRef);
     expect(found?.kind).toBe("amount_mismatch");
@@ -271,10 +407,10 @@ d("the planted break, against the live database", () => {
   });
 
   it("re-running produces a NEW run and does not touch the previous one", async () => {
-    const [file] = await sql<{ id: string }[]>`
-      SELECT id FROM scheme_file WHERE filename = 'planted-v4-amount-changed.csv'
-       ORDER BY imported_at DESC LIMIT 1`;
-    if (!file) throw new Error("the mismatch file should already be imported");
+    // OUR file, by the id we imported it under. Looking it up by filename
+    // would pick whichever concurrent run imported last.
+    if (!changedFileId) throw new Error("the mismatch file should already be imported");
+    const file = { id: changedFileId };
 
     const before = await listRuns({ fileId: file.id }, sql);
     const firstRun = before[0];
@@ -307,10 +443,8 @@ d("the planted break, against the live database", () => {
   });
 
   it("the edge case: a reversal plus re-book explains the break without erasing it", async () => {
-    const [file] = await sql<{ id: string }[]>`
-      SELECT id FROM scheme_file WHERE filename = 'planted-v4-amount-changed.csv'
-       ORDER BY imported_at DESC LIMIT 1`;
-    if (!file) throw new Error("the mismatch file should already be imported");
+    if (!changedFileId) throw new Error("the mismatch file should already be imported");
+    const file = { id: changedFileId };
 
     const runsBefore = await listRuns({ fileId: file.id }, sql);
     const earlier = runsBefore[0];
