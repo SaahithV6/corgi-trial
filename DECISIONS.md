@@ -2336,3 +2336,24 @@ re-expresses the old query as its yardstick — deliberately, since its verdict
 must not run through application code, and its assertions are all deltas, so it
 is unaffected. Full measurement, every figure that moved and why it was wrong:
 `docs/BALANCE-DEFINITIONS.md`.
+
+### Postscript to 048 — two things found while making the suites green
+
+**`standing_order_outcome` records four of the five terms.** 0012 stores
+`observed_ledger/holds/uncleared/available` as the figures a refusal was decided
+against — deliberately stored, on the same axis as `statement.closing_balance_cents`,
+so re-deriving them tomorrow cannot rewrite why a payment was refused. 0022 gave
+`available` a fifth term and that table has no column for it, so the recorded
+identity is now an inequality: `available <= ledger − holds − uncleared`. The
+test asserts it as one, names the missing term, and asserts the full five-term
+identity against the live figures instead. A `0023` adding
+`observed_pending_outbound_cents` is the fix; it was not this worker's migration
+to write.
+
+**The boundary test caught its own author.** Giving the standing suite a funded
+precondition meant finding the house cash leaf, and the first version of that
+was `SELECT id FROM account WHERE code = '1110'` — new SQL against `account`
+from outside `src/lib/ledger/`, in the same change that added the test forbidding
+it. The ratchet went red on the next run. It is now `houseAccountId('1110')` in
+`src/lib/ledger/`, which is the first payment against the 235 rather than the
+first exception to them. A guard that only catches other people is not a guard.

@@ -19,6 +19,11 @@ import {
  * different query string, so each state has a URL that reproduces it. Switching
  * between them writes nothing and moves no money: the two live states read the
  * ledger and the policy table, and the other three read nothing at all.
+ *
+ * EVERY LINK CARRIES `?business=` FORWARD. A state bar that dropped it would
+ * send somebody who had selected a customer, pressed `edge` to look at their
+ * uncleared hold, and pressed `default` to come back, to a different customer's
+ * balances under the same heading.
  */
 export function DemoStateBar({ view }: { readonly view: FundingView }) {
   return (
@@ -36,7 +41,7 @@ export function DemoStateBar({ view }: { readonly view: FundingView }) {
             return (
               <Link
                 key={state}
-                href={`/funding${demoQuery(state)}`}
+                href={`/funding${demoQuery({ state, businessId: view.businessId })}`}
                 aria-current={current ? "page" : undefined}
                 title={DEMO_STATE_HINTS[state]}
                 className={`rounded px-2 py-1 text-xs ${FOCUS_RING} ${

@@ -1,8 +1,8 @@
 /**
  * The loading state.
  *
- * Shaped like the screen it stands in for — the two-figure headline, then the
- * document, then the comparison — so nothing jumps when the data lands. It is
+ * Shaped like the screen it stands in for — the pickers, the two-figure
+ * headline, then the document — so nothing jumps when the data lands. It is
  * the real Suspense fallback, not a decoration: `?state=loading` makes the
  * fixture genuinely slow and this is what renders while it is.
  */
@@ -29,7 +29,7 @@ export function StatementsSkeleton() {
       aria-live="polite"
       className="animate-pulse space-y-6"
     >
-      <span className="sr-only">Re-deriving the published statement…</span>
+      <span className="sr-only">Re-deriving both readings from the ledger…</span>
 
       <div>
         <Bar className="h-5 w-56" />

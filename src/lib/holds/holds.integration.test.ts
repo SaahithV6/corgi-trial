@@ -889,7 +889,31 @@ d("card holds, against the live database", () => {
     });
 
     const held = await bal.availableBalance(businessId);
-    expect(held.holdsCents - start.holdsCents).toBe(4500n);
+
+    // AVAILABILITY DOES NOT MOVE, AND THAT IS THE POINT AFTER MIGRATION 0022.
+    //
+    // This authorisation was created with `expires_at` an hour in the PAST, so
+    // by the hold model it was never live: `closed(E)` fires on the clock, and
+    // `H(E) = 0` the moment the row exists. `v_hold_state`, `v_card_auth_hold`
+    // and `listHoldRows()` all said so already — the funding and account
+    // screens showed $0.00 for a hold in this state.
+    //
+    // `availableBalance()` was the one reader that disagreed: it released on a
+    // `hold_closure` row and nothing else, so it went on withholding $45.00
+    // that every other reader had already given back, until a sweep happened
+    // to run. This test asserted THAT reader's answer. It now asserts the
+    // model's, which is the one definition the whole system shares.
+    //
+    // The claim the test is really making — the sweep finds an expired hold,
+    // writes its closure and its release posting EXACTLY ONCE, and is a no-op
+    // on the second pass — is untouched and is asserted below.
+    expect(held.holdsCents - start.holdsCents).toBe(0n);
+
+    // The memo book, however, still carries the money: the hold was OPENED and
+    // nothing has given it back yet. That gap between "availability has
+    // released it" and "the memo book has been squared" is exactly the work
+    // the sweep exists to do.
+    expect(await store.memoHoldBalance(identity.holdId, memoAccountId)).toBe(4500n);
 
     // Real clock. The sweep must find this on its own merits, not because the
     // test moved time forward — and using the real clock also means the sweep
@@ -899,8 +923,9 @@ d("card holds, against the live database", () => {
     expect(firstPass.releasedCents).toBeGreaterThanOrEqual(4500n);
 
     const afterSweep = await bal.availableBalance(businessId);
-    expect(afterSweep.holdsCents - held.holdsCents).toBe(-4500n);
+    expect(afterSweep.holdsCents).toBe(held.holdsCents);
     expect(afterSweep.ledgerCents).toBe(held.ledgerCents); // an expiry moves no money
+    // THE SWEEP'S OWN WORK: the memo book is square again.
     expect(await store.memoHoldBalance(identity.holdId, memoAccountId)).toBe(0n);
 
     const secondPass = await expiry.sweepExpiredHolds({ now: new Date(), limit: 200, conn: sql });

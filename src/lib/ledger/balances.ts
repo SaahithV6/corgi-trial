@@ -43,6 +43,7 @@ export {
   accountAvailability,
   believedBalanceCents,
   businessAvailability,
+  houseAccountId,
   mainDepositAccountId,
   readSnapshot,
   settledBalanceCents,

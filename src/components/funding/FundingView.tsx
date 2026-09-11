@@ -1,8 +1,11 @@
+import Link from "next/link";
+
 import { createLiveFundingSource } from "@/app/(app)/funding/live-source";
 import { ROLE_LABEL, readRole } from "@/components/app-shell/role";
 import {
   Badge,
   FieldLabel,
+  FOCUS_RING,
   MetaList,
   Note,
   Panel,
@@ -17,14 +20,17 @@ import { ErrorPanel } from "./ErrorPanel";
 import { FundForm } from "./FundForm";
 import { FundingSkeleton } from "./FundingSkeleton";
 import { ItemErrorsPanel } from "./ItemErrorsPanel";
+import { LinkPanel } from "./LinkPanel";
 import type {
+  BusinessView,
   FundableAccountView,
   FundingDataSource,
   FundingSnapshot,
   PolicyView,
+  TransactGateView,
   UnclearedHoldView,
 } from "./data-contract";
-import { isLiveState, type FundingView as View } from "./demo-state";
+import { demoQuery, isLiveState, type FundingView as View } from "./demo-state";
 import { createFixtureSource } from "./fixtures";
 
 export { FundingSkeleton };
@@ -55,6 +61,22 @@ export { FundingSkeleton };
  * appears — so there is no second number to drift and no cron job to fix it.
  * ============================================================================
  *
+ * ============================================================================
+ * ANY BUSINESS, NOT THE ONE THIS WAS BUILT AGAINST
+ * ============================================================================
+ *
+ * The screen is pointed at a customer by `?business=<uuid>` — the lever
+ * `/accounts`, `/pots`, `/payouts` and `/disputes` already use — and at the
+ * first business that may transact and has an account when the query string
+ * says nothing. Whichever is selected, the KYB gate is read for it and printed
+ * with its code, exactly as `/payments` does, and the form for a business that
+ * may not transact is refused at the write rather than merely hidden.
+ *
+ * The gate table lists EVERY business on the book, not every deposit account,
+ * because a business that has never had an account opened is invisible to an
+ * account-shaped list — and "why can I not fund this one" is a question the
+ * screen has to be able to answer about a customer that has nothing yet.
+ *
  * An async server component behind the page's Suspense boundary. `default` and
  * `edge` are the live database; the other three states are fixtures so a slow
  * read, a failed read and an empty book can each be shown on demand without
@@ -70,20 +92,22 @@ export async function FundingView({ view }: { readonly view: View }) {
       // live states because writing one would be writing a fake deposit.
       createFixtureSource(view.state as "loading" | "empty" | "error");
 
-  const result = await source.getSnapshot();
+  const result = await source.getSnapshot(view.businessId);
 
   if (isErr(result)) {
     return (
       <div className="space-y-6">
-        <Header role={role} live={live} asOf={null} environment={null} />
+        <Header role={role} live={live} asOf={null} environment={null} selected={null} />
         <ErrorPanel error={result.error} />
       </div>
     );
   }
 
   const snapshot = result.value;
+  const selected =
+    snapshot.businesses.find((business) => business.id === snapshot.selectedBusinessId) ?? null;
   const held = snapshot.accounts.flatMap((account) =>
-    account.unclearedHolds.filter((hold) => !hold.released),
+    (account.unclearedHolds ?? []).filter((hold) => !hold.released),
   );
 
   return (
@@ -93,7 +117,12 @@ export async function FundingView({ view }: { readonly view: View }) {
         live={live}
         asOf={snapshot.asOf}
         environment={snapshot.provider.environment}
+        selected={selected}
       />
+
+      <BusinessPicker view={view} businesses={snapshot.businesses} selected={selected} />
+
+      {selected === null ? null : <SelectedGateNote business={selected} />}
 
       <Note title="What this screen does, and the one thing it does not">
         <p>
@@ -130,15 +159,47 @@ export async function FundingView({ view }: { readonly view: View }) {
         </p>
       </Note>
 
+      <GatePanel businesses={snapshot.businesses} selectedId={snapshot.selectedBusinessId} />
+
+      <Panel
+        id="link"
+        title="Step one — link an external bank"
+        description="The first half of the leg, on its own, for any business the gate allows. It creates a real Plaid Item and prints what came back. It posts nothing: no journal entry, no hold, no balance movement. Nothing here runs on render and nothing polls — every Plaid call on this screen is behind a press, because linking creates real objects at a provider that rations its sandbox."
+        actions={
+          <Badge tone={live && snapshot.provider.configured ? "positive" : "quiet"}>
+            {live && snapshot.provider.configured ? "LIVE" : "UNAVAILABLE"}
+          </Badge>
+        }
+      >
+        {selected === null ? (
+          <div className="px-5 py-10 text-center">
+            <p className="text-sm font-medium">No business is on this book to link a bank for.</p>
+          </div>
+        ) : (
+          <LinkPanel
+            businessId={selected.id}
+            businessName={selected.legalName}
+            enabled={live && snapshot.provider.configured && selected.gate.allowed}
+            disabledReason={
+              !selected.gate.allowed
+                ? `${selected.legalName} may not transact — ${selected.gate.code}. No Item will be created in its name. Resolve the verification on /onboarding first.`
+                : !snapshot.provider.configured
+                  ? "Plaid holds no credentials in this deployment, so nothing can be linked. The button is disabled rather than failing halfway."
+                  : "Demo fixture. Nothing is linked from a state with no live business behind it."
+            }
+          />
+        )}
+      </Panel>
+
       {snapshot.accounts.length === 0 ? (
         <EmptyBook />
       ) : (
         <>
-          <BalanceStrip accounts={snapshot.accounts} />
+          <BalanceStrip accounts={snapshot.accounts} selectedId={snapshot.selectedBusinessId} />
 
           <Panel
             id="fund"
-            title="Link an external bank and fund the balance"
+            title="Step two — fund the balance from it"
             description="One form, one server action, one transaction. The hold, the financial entry and the memo entry commit together or not at all — a crash between the deposit and the hold would leave the customer able to spend money that has not cleared, which is the exact failure the hold exists to prevent, so it is not a window that is made small but one that does not exist."
             actions={
               <Badge tone={live && snapshot.provider.configured ? "positive" : "quiet"}>
@@ -153,6 +214,7 @@ export async function FundingView({ view }: { readonly view: View }) {
               prefillAmount={view.state === "edge" ? "2500.00" : null}
               live={live}
               plaidConfigured={snapshot.provider.configured}
+              selectedBusinessId={snapshot.selectedBusinessId}
             />
           </Panel>
         </>
@@ -195,11 +257,13 @@ function Header({
   live,
   asOf,
   environment,
+  selected,
 }: {
   readonly role: "staff" | "approver";
   readonly live: boolean;
   readonly asOf: string | null;
   readonly environment: string | null;
+  readonly selected: BusinessView | null;
 }) {
   return (
     <header>
@@ -215,6 +279,15 @@ function Header({
         <MetaList
           items={[
             { label: "Acting as", value: ROLE_LABEL[role] },
+            ...(selected === null
+              ? []
+              : [
+                  { label: "Business", value: selected.legalName },
+                  {
+                    label: "Business id",
+                    value: <span className="font-mono text-[11px]">{selected.id}</span>,
+                  },
+                ]),
             { label: "Provider", value: "Plaid" },
             ...(environment === null
               ? []
@@ -224,6 +297,279 @@ function Header({
         />
       </div>
     </header>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Choosing the customer                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Which business this screen is pointed at — a row of links, and nothing more.
+ *
+ * Selection is a URL, not a session and not a form: every entry is a plain
+ * `href` to `/funding?business=<id>` carrying the current demo state, so the
+ * view somebody is looking at can be pasted into a message and reproduces
+ * exactly. That is the same contract the demo-state bar keeps and the same
+ * lever `/accounts?business=` already had.
+ *
+ * SELECTING A BUSINESS GRANTS NOTHING. Every row is clickable, including ones
+ * the gate refuses, because "why can I not fund this customer" is a question the
+ * screen has to be able to answer — and it answers it by showing the refusal
+ * with its code rather than by hiding the customer. The permission is decided by
+ * `canTransact()` at the write, never by which link was pressed.
+ */
+function BusinessPicker({
+  view,
+  businesses,
+  selected,
+}: {
+  readonly view: View;
+  readonly businesses: readonly BusinessView[];
+  readonly selected: BusinessView | null;
+}) {
+  if (businesses.length === 0) return null;
+
+  return (
+    <aside
+      aria-label="Business"
+      className="rounded-lg border border-border bg-surface px-4 py-3"
+    >
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+          Business
+        </span>
+        <div className="flex flex-wrap items-center gap-1">
+          {businesses.map((business) => {
+            const current = business.id === selected?.id;
+            return (
+              <Link
+                key={business.id}
+                href={`/funding${demoQuery({ state: view.state, businessId: business.id })}`}
+                aria-current={current ? "page" : undefined}
+                title={business.gate.message}
+                className={`rounded px-2 py-1 text-xs ${FOCUS_RING} ${
+                  current
+                    ? "bg-surface-raised font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border-strong)]"
+                    : "text-muted hover:text-text"
+                }`}
+              >
+                {business.legalName}
+                <span className={business.gate.allowed ? "ml-1.5 text-positive" : "ml-1.5 text-negative"}>
+                  {business.gate.allowed ? "✓" : (business.gate.code ?? "refused")}
+                </span>
+              </Link>
+            );
+          })}
+        </div>
+      </div>
+      <p className="mt-2 max-w-prose text-[11px] leading-relaxed text-muted">
+        <code className="font-mono">?business=&lt;uuid&gt;</code> selects the customer, the same
+        lever <code className="font-mono">/accounts</code>, <code className="font-mono">/pots</code>
+        , <code className="font-mono">/payouts</code> and <code className="font-mono">/disputes</code>{" "}
+        honour. It composes with <code className="font-mono">?state=</code>, it is matched against
+        the businesses actually on the book, and it grants nothing — the KYB gate is read for
+        whichever business is selected and read again inside the write path.
+      </p>
+    </aside>
+  );
+}
+
+/**
+ * The selected business's gate, said plainly, above everything else.
+ *
+ * A refusal has to be the first thing on the screen for the customer it applies
+ * to, not a cell in a table further down that somebody has to find. This is the
+ * same decision `canTransact()` made, with the same code, in the same words
+ * `/payments` uses.
+ */
+function SelectedGateNote({ business }: { readonly business: BusinessView }) {
+  if (business.gate.allowed) {
+    return (
+      <Note title={`${business.legalName} may transact`}>
+        <p>
+          {business.gate.message} Status{" "}
+          <code className="font-mono">{business.gate.status ?? "—"}</code>, evidence{" "}
+          <code className="font-mono">{business.gate.evidence ?? "—"}</code>.{" "}
+          {business.depositAccountId === null ? (
+            <>
+              No deposit account has been opened for it yet, so there is nowhere for an inbound
+              credit to land. Open one on <code className="font-mono">/onboarding</code>.
+            </>
+          ) : (
+            <>
+              Deposit account <code className="font-mono">{business.depositAccountId}</code> is open
+              and can receive a credit.
+            </>
+          )}
+        </p>
+        {business.gateIfLiveRequired.allowed ? null : (
+          <p className="mt-2">
+            Under the stricter policy a real-money deployment would run —{" "}
+            <code className="font-mono">requireLiveEvidence: true</code> — this same business is
+            refused <code className="font-mono">{business.gateIfLiveRequired.code}</code>. Both
+            answers are shown because the deployment&rsquo;s policy is a choice, and a screen that
+            only printed the permissive one would be hiding which choice was made.
+          </p>
+        )}
+      </Note>
+    );
+  }
+
+  return (
+    <section
+      aria-labelledby="funding-gate-title"
+      className="rounded-lg border border-negative/40 bg-surface"
+    >
+      <div className="border-b border-border px-5 py-4">
+        <div className="flex flex-wrap items-baseline gap-2">
+          <h2 id="funding-gate-title" className="text-sm font-semibold tracking-tight text-negative">
+            {business.legalName} may not transact
+          </h2>
+          <code className="font-mono text-xs text-negative">{business.gate.code}</code>
+        </div>
+        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">{business.gate.message}</p>
+      </div>
+      <div className="px-5 py-4">
+        <dl className="grid gap-x-6 gap-y-2 text-xs sm:grid-cols-[12rem_1fr]">
+          <dt className="text-muted">KYB status</dt>
+          <dd className="font-mono">{business.gate.status ?? "(none on file)"}</dd>
+          <dt className="text-muted">Evidence</dt>
+          <dd className="font-mono">{business.gate.evidence ?? "(none on file)"}</dd>
+          <dt className="text-muted">Deposit account</dt>
+          <dd className="font-mono break-all">
+            {business.depositAccountId ?? "(none opened)"}
+          </dd>
+          <dt className="text-muted">What happens if you post anyway</dt>
+          <dd className="max-w-prose">
+            The same refusal, from the server. The gate is re-read in{" "}
+            <code className="font-mono">fundFromExternalBankAction</code> before a single byte goes
+            to Plaid, so a hand-assembled POST to this route is refused{" "}
+            <code className="font-mono">{business.gate.code}</code> without creating an Item and
+            without posting an entry. Hiding the form is a courtesy; the gate is the control.
+          </dd>
+        </dl>
+        <p className="mt-4 max-w-prose text-xs leading-relaxed text-muted">
+          Funding is transacting. Money arriving raises a customer liability and can be returned for
+          days afterwards, so the brief&rsquo;s rule — unverified entities can look but not transact
+          — has no inbound exemption. Resolve the verification on{" "}
+          <Link
+            href="/onboarding"
+            className={`underline underline-offset-4 hover:text-text ${FOCUS_RING}`}
+          >
+            /onboarding
+          </Link>
+          .
+        </p>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * EVERY business on the book, gated — not every deposit account.
+ *
+ * The shape `/payments` uses, with one deliberate difference: the rows come from
+ * `business` rather than from the account list, so a customer who has never had
+ * an account opened still appears. An account-shaped table simply omits such a
+ * business, and an omission is indistinguishable from a bug to whoever is asking
+ * about it.
+ *
+ * Both columns are the same call under two policies, as on `/payments`: what
+ * this deployment does, and what a deployment requiring live third-party
+ * evidence would do. Printing only the first would be quietly choosing the
+ * permissive answer on the reader's behalf.
+ */
+function GatePanel({
+  businesses,
+  selectedId,
+}: {
+  readonly businesses: readonly BusinessView[];
+  readonly selectedId: string | null;
+}) {
+  return (
+    <Panel
+      id="gate"
+      title="The KYB gate, read for every business on the book"
+      description="A preview, not the control. The gate that decides runs inside the funding action, before anything is sent to Plaid — so a business approved when this page rendered and revoked a second later is refused at the write, which is the only place it matters."
+    >
+      {businesses.length === 0 ? (
+        <div className="px-5 py-10 text-center">
+          <p className="text-sm font-medium">No business has been onboarded yet.</p>
+        </div>
+      ) : (
+        <TableScroll>
+          <table className="w-full border-collapse">
+            <thead>
+              <tr className="border-b border-border">
+                <th scope="col" className={TH_CLASS}>
+                  Business
+                </th>
+                <th scope="col" className={TH_CLASS}>
+                  Status
+                </th>
+                <th scope="col" className={TH_CLASS}>
+                  Evidence
+                </th>
+                <th scope="col" className={TH_CLASS}>
+                  Deposit account
+                </th>
+                <th scope="col" className={TH_CLASS}>
+                  This deployment
+                </th>
+                <th scope="col" className={TH_CLASS}>
+                  If live evidence were required
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {businesses.map((business) => (
+                <tr
+                  key={business.id}
+                  className={`border-b border-border last:border-b-0 ${
+                    business.id === selectedId ? "bg-surface-raised" : ""
+                  }`}
+                >
+                  <td className={TD_CLASS}>
+                    <div>{business.legalName}</div>
+                    <div className="font-mono text-[11px] text-muted">{business.id}</div>
+                  </td>
+                  <td className={`${TD_CLASS} font-mono text-xs`}>{business.gate.status ?? "—"}</td>
+                  <td className={`${TD_CLASS} font-mono text-xs`}>
+                    {business.gate.evidence ?? "—"}
+                  </td>
+                  <td className={TD_CLASS}>
+                    {business.depositAccountId === null ? (
+                      <span className="text-muted">none opened</span>
+                    ) : (
+                      <span className="font-mono text-[11px] break-all">
+                        {business.depositAccountId}
+                      </span>
+                    )}
+                  </td>
+                  <td className={TD_CLASS}>
+                    <GateCell gate={business.gate} />
+                  </td>
+                  <td className={TD_CLASS}>
+                    <GateCell gate={business.gateIfLiveRequired} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </TableScroll>
+      )}
+    </Panel>
+  );
+}
+
+function GateCell({ gate }: { readonly gate: TransactGateView }) {
+  return gate.allowed ? (
+    <Badge tone="positive">may be funded</Badge>
+  ) : (
+    <code className="font-mono text-xs text-negative" title={gate.message}>
+      {gate.code}
+    </code>
   );
 }
 
@@ -240,19 +586,60 @@ function Header({
  * a string the server formatted from a `bigint`; this component performs no
  * arithmetic at all.
  */
-function BalanceStrip({ accounts }: { readonly accounts: readonly FundableAccountView[] }) {
+function BalanceStrip({
+  accounts,
+  selectedId,
+}: {
+  readonly accounts: readonly FundableAccountView[];
+  readonly selectedId: string | null;
+}) {
+  // The selected customer first. Every account stays on the page — funding is a
+  // book-wide screen and the form can target any of them — but the one the URL
+  // points at is the one the reader came for.
+  const ordered = [...accounts].sort((a, b) => {
+    const aSelected = a.businessId === selectedId ? 0 : 1;
+    const bSelected = b.businessId === selectedId ? 0 : 1;
+    return aSelected - bSelected || a.businessName.localeCompare(b.businessName);
+  });
+
   return (
     <div className="space-y-4">
-      {accounts.map((account) => (
+      {ordered.map((account) => (
         <section
           key={account.id}
           aria-label={`${account.businessName} balances`}
-          className="rounded-lg border border-border bg-surface"
+          className={`rounded-lg border bg-surface ${
+            account.businessId === selectedId ? "border-border-strong" : "border-border"
+          }`}
         >
           <header className="border-b border-border px-5 py-3">
-            <h2 className="text-sm font-semibold tracking-tight">{account.businessName}</h2>
+            <div className="flex flex-wrap items-baseline gap-2">
+              <h2 className="text-sm font-semibold tracking-tight">{account.businessName}</h2>
+              {account.gate.allowed ? null : (
+                <code className="font-mono text-[11px] text-negative" title={account.gate.message}>
+                  {account.gate.code}
+                </code>
+              )}
+            </div>
             <p className="mt-0.5 text-xs text-muted">{account.accountName}</p>
           </header>
+
+          {account.balance === null ? (
+            <div className="px-5 py-6">
+              <p className="text-sm font-medium text-negative">
+                This account&rsquo;s balances could not be read.
+              </p>
+              <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
+                {account.readError?.message ??
+                  "No detail came back with the failure, which is itself the fact worth reporting."}
+              </p>
+              <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted">
+                No figure is shown rather than a zero standing in for one, and the rest of this book
+                is unaffected: a read that fails for one customer is one customer&rsquo;s failure,
+                not the screen&rsquo;s. Nothing was funded — this is a read.
+              </p>
+            </div>
+          ) : (
           <div className="grid grid-cols-2 gap-px bg-border sm:grid-cols-5">
             <Figure
               label="Ledger balance"
@@ -284,6 +671,7 @@ function BalanceStrip({ accounts }: { readonly accounts: readonly FundableAccoun
               strong
             />
           </div>
+          )}
         </section>
       ))}
     </div>
@@ -338,8 +726,9 @@ function Figure({
  */
 function HoldsPanel({ accounts }: { readonly accounts: readonly FundableAccountView[] }) {
   const rows = accounts.flatMap((account) =>
-    account.unclearedHolds.map((hold) => ({ account, hold })),
+    (account.unclearedHolds ?? []).map((hold) => ({ account, hold })),
   );
+  const unread = accounts.filter((account) => account.unclearedHolds === null);
 
   return (
     <Panel
@@ -389,6 +778,15 @@ function HoldsPanel({ accounts }: { readonly accounts: readonly FundableAccountV
           </table>
         </TableScroll>
       )}
+
+      {unread.length === 0 ? null : (
+        <p className="border-t border-border px-5 py-3 text-xs leading-relaxed text-muted">
+          {unread.map((account) => account.businessName).join(", ")} could not be read, so no hold
+          is listed for{" "}
+          {unread.length === 1 ? "that account" : "those accounts"} — an omission that is stated
+          rather than left to look like an empty result.
+        </p>
+      )}
     </Panel>
   );
 }
@@ -408,7 +806,16 @@ function HoldRowView({
       </td>
       <td className={`${TD_CLASS} money text-right font-medium`}>{hold.amountDisplay}</td>
       <td className={TD_CLASS}>
-        {hold.releaseDate === null ? (
+        {hold.neverReleases ? (
+          // `available_at = infinity`. Not a missing date and not a bug: a
+          // dispute's provisional credit is released by a person deciding the
+          // case, never by a clock. Printing a date here would be inventing one,
+          // and formatting this value as one is what took the screen down.
+          <>
+            <div className="font-medium">on a decision, not a clock</div>
+            <div className="font-mono text-[11px] text-muted">available_at = infinity</div>
+          </>
+        ) : hold.releaseDate === null ? (
           <span className="text-muted">—</span>
         ) : (
           <>

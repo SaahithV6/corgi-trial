@@ -79,6 +79,8 @@ function only<T>(rows: readonly T[]): T {
 const BUSINESS_ID = "e274546d-6bdd-5266-b0fb-cc839a7811f9";
 /** Priya Raman — the payments initiator persona. can_approve = false. */
 const INITIATOR = "b3c4f786-5d1b-5194-9aae-6342ba0ef606";
+/** The mandate that must actually fire. Named so the top-up can size itself. */
+const FUNDED_AMOUNT_CENTS = 400_000n;
 
 d("standing orders, against the live database", () => {
   let sql: typeof SqlHandle;
@@ -114,15 +116,67 @@ d("standing orders, against the live database", () => {
     if (account === undefined) throw new Error("the seeded Ridgeline deposit account is missing");
     accountId = account.id;
 
+    // ---- establish the precondition rather than assume it ---------------
+    //
+    // This suite used to assume the seeded book happened to be rich enough to
+    // fund a $4,000.00 mandate. Two things make that a bad assumption now.
+    //
+    // The first is contention: other suites post to Ridgeline continuously,
+    // which is the lesson the holds and pots suites already learned.
+    //
+    // The second is migration 0022. `availableBalance()` now subtracts
+    // COMMITTED OUTFLOWS — debits already booked for a future value date — and
+    // Ridgeline carries $37,462.00 of outbound ACH value-dated tomorrow,
+    // against $49,794.32 settled. Its available balance is therefore
+    // legitimately NEGATIVE, and a standing order funded out of it would be
+    // funded twice out of the same dollar: once now and again tomorrow when
+    // the outbound settles. The refusal is the right answer, which is exactly
+    // why this suite cannot demonstrate the FUNDED path without first putting
+    // money in the account.
+    //
+    // So it does. A deposit, value-dated today, through postEntry() like every
+    // other money movement in this system — not a fixture, not a stored number,
+    // and not a weakening of the rule the suite exists to prove.
+    const opening = await balances.availableBalance(BUSINESS_ID);
+    const shortfall = FUNDED_AMOUNT_CENTS + 100_00n - opening.availableCents;
+    if (shortfall > 0n) {
+      const { postEntry } = await import("@/lib/ledger/post");
+      // `houseAccountId()` rather than a SELECT against `account` — this suite
+      // is inside the boundary `src/lib/ledger/boundary.test.ts` enforces, and
+      // adding raw SQL here to fix a balance bug would have been a poor joke.
+      const [entity] = await sql<{ id: string }[]>`SELECT id FROM book_entity LIMIT 1`;
+      const cashId = await balances.houseAccountId("1110", sql);
+      const [poster] = await sql<{ id: string }[]>`
+        SELECT id FROM actor WHERE kind = 'system' LIMIT 1`;
+      if (entity === undefined || cashId === null || poster === undefined) {
+        throw new Error("seed first: node scripts/seed.mjs");
+      }
+      await postEntry({
+        entityId: entity.id,
+        valueDate: bookDate,
+        book: "financial",
+        description: "Standing-order suite: top-up so the funded leg has funds",
+        idempotencyKey: `test:standing:${runStamp}:topup`,
+        actorId: poster.id,
+        rail: "internal",
+        lines: [
+          // Cash in (debit asset), customer owed more (credit liability).
+          { accountId: cashId, amountCents: shortfall },
+          { accountId, amountCents: -shortfall },
+        ],
+      });
+    }
+
     const before = await balances.availableBalance(BUSINESS_ID);
     ledgerAtCreation = before.ledgerCents;
+    expect(before.availableCents).toBeGreaterThanOrEqual(FUNDED_AMOUNT_CENTS);
 
     // ---- the mandate that will be funded -------------------------------
     const funded = await store.createStandingOrder({
       accountId,
       reference: "Rent — Unit 4, Ridgeline Works",
       rail: "ach",
-      amountCents: 400_000n,
+      amountCents: FUNDED_AMOUNT_CENTS,
       destination: {
         type: "ach",
         holderName: "Cascade Property Partners LLC",
@@ -334,7 +388,31 @@ d("standing orders, against the live database", () => {
     const holds = row?.observed_holds_cents ?? 0n;
     const uncleared = row?.observed_uncleared_cents ?? 0n;
     const available = row?.observed_available_cents ?? 0n;
-    expect(available).toBe(ledger - holds - uncleared);
+
+    // FOUR OF THE FIVE TERMS, and the fifth is named rather than hidden.
+    //
+    // `standing_order_outcome` records `observed_ledger/holds/uncleared/
+    // available` — the decomposition as it stood when migration 0012 was
+    // written. Migration 0022 gave `available` a fifth term, COMMITTED
+    // OUTFLOWS (debits already booked for a future value date), and 0012's
+    // table has no column for it. Adding one is a migration this worker was
+    // not scoped to write, so the recorded identity is now an INEQUALITY and
+    // the unexplained remainder is exactly that fifth term.
+    //
+    // Asserted as an inequality rather than dropped, because the direction
+    // still carries the claim: available can only be LOWER than
+    // ledger − holds − uncleared, never higher. A row where it were higher
+    // would mean money was invented.
+    expect(available).toBeLessThanOrEqual(ledger - holds - uncleared);
+
+    // And the full identity IS asserted, live, on all five terms.
+    const live = await balances.availableBalance(BUSINESS_ID);
+    expect(
+      live.ledgerCents -
+        live.holdsCents -
+        live.unclearedCents -
+        live.pendingOutboundCents,
+    ).toBe(live.availableCents);
 
     // THE CLAIM. The ledger balance covered this payment. The available
     // balance did not. Both are true at once, and that is why the ledger

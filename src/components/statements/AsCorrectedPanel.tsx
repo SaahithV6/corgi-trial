@@ -3,10 +3,10 @@ import { Badge, Note, Panel, TD_CLASS, TH_CLASS, TableScroll } from "@/component
 import { formatDate, formatTimestamp } from "@/lib/format/datetime";
 import { formatUsd } from "@/lib/format/money";
 
-import type { CorrectionGroupView, StatementDetailView } from "./data-contract";
+import type { BothReadingsView, CorrectionGroupView } from "./data-contract";
 
 /**
- * "…and here is what we now know that day to be, and why it differs."
+ * "…and here is WHAT corrected it, and WHEN we learned."
  *
  * ---------------------------------------------------------------------------
  * WHY THIS IS A LIST OF ACTS AND NOT A LIST OF ROWS
@@ -27,12 +27,22 @@ import type { CorrectionGroupView, StatementDetailView } from "./data-contract";
  * wrong.
  *
  * ---------------------------------------------------------------------------
+ * BOTH COLUMNS OF THE BITEMPORAL MODEL ARE ON EVERY ROW
+ * ---------------------------------------------------------------------------
+ *
+ * Each posting shows its VALUE DATE — which is the corrected day itself, which
+ * is the whole point: a correction belongs to the day the thing happened — and
+ * its BOOKING SEQUENCE and BOOKING TIME, which are strictly later. Those two
+ * facts standing side by side on one row are the entire claim: Tuesday's
+ * figure changed, on Thursday, without Tuesday's record being touched.
+ *
+ * ---------------------------------------------------------------------------
  * THE ARITHMETIC IS SHOWN, NOT ASSERTED
  * ---------------------------------------------------------------------------
  *
  * The panel states the identity it depends on:
  *
- *     as corrected − as published = Σ (the acts listed here)
+ *     as corrected − as believed = Σ (the acts listed here)
  *
  * and says whether it holds. If it does not, the panel says so in the negative
  * colour instead of printing the delta and moving on. A difference the system
@@ -40,19 +50,20 @@ import type { CorrectionGroupView, StatementDetailView } from "./data-contract";
  * reads this screen to stop checking, which is the same argument DECISIONS 014
  * makes about breaks whose net is zero.
  */
-export function AsCorrectedPanel({
-  detail,
-  businessDate,
-}: {
-  readonly detail: StatementDetailView;
-  readonly businessDate: string;
-}) {
-  const { corrections, deltaCents, explained, published, correctedDocument } = detail;
+export function AsCorrectedPanel({ view }: { readonly view: BothReadingsView }) {
+  const { acts, deltaCents, explained, believed, corrected, learnedAt, valueDate } = view;
 
   return (
     <Panel
-      title="What we now know that day to be, and why it differs"
-      description={`Everything booked above watermark ${published.bookingWatermark} that changes what ${formatDate(businessDate)} closed at — postings on the day itself, and anything backdated before it that moved the opening balance. Legal, expected, and the reason a later version exists.`}
+      title="What corrected it, and when we learned"
+      description={
+        `Everything booked above watermark ${believed.bookingWatermark} that changes what ` +
+        `${formatDate(valueDate)} closed at — postings on the day itself, and anything backdated ` +
+        `before it that moved the opening balance. ` +
+        (learnedAt === null
+          ? "Legal, expected, and the reason a later version exists."
+          : `We learned at ${formatTimestamp(learnedAt)}; the value date did not move.`)
+      }
       actions={
         <Badge tone={explained ? "neutral" : "negative"}>
           {explained ? "FULLY ITEMISED" : "UNEXPLAINED DIFFERENCE"}
@@ -62,8 +73,8 @@ export function AsCorrectedPanel({
       <TableScroll>
         <table className="w-full border-collapse text-sm">
           <caption className="sr-only">
-            Corrections and late postings that changed this day after its statement
-            was issued
+            Corrections and late postings that changed this day after the left-hand
+            reading was taken
           </caption>
           <thead className="border-b border-border">
             <tr>
@@ -74,7 +85,7 @@ export function AsCorrectedPanel({
                 Entries
               </th>
               <th scope="col" className={`${TH_CLASS} text-right`}>
-                Booked
+                Learned
               </th>
               <th scope="col" className={`${TH_CLASS} text-right`}>
                 Net effect
@@ -82,16 +93,16 @@ export function AsCorrectedPanel({
             </tr>
           </thead>
           <tbody>
-            {corrections.map((group) => (
+            {acts.map((group) => (
               <CorrectionRow key={group.id} group={group} />
             ))}
 
             <tr>
               <td className={`${TD_CLASS} font-medium`} colSpan={3}>
-                Total movement since the statement was issued
+                Total movement since the left-hand reading
                 <span className="mt-0.5 block text-xs font-normal text-muted">
-                  as corrected {formatUsd(correctedDocument.closingBalanceCents)} −
-                  as published {formatUsd(detail.publishedDocument.closingBalanceCents)}
+                  as corrected {formatUsd(corrected.closingBalanceCents)} −{" "}
+                  {believed.label.toLowerCase()} {formatUsd(believed.closingBalanceCents)}
                 </span>
               </td>
               <td className={`${TD_CLASS} text-right font-medium`}>
@@ -105,18 +116,20 @@ export function AsCorrectedPanel({
       <div className="border-t border-border px-5 py-4">
         {explained ? (
           <Note title="The difference is accounted for">
-            The acts above sum to exactly the difference between the two
-            readings. Nothing on this day changed that we cannot name and point
-            at. Both figures stay true: the published one is what the customer
-            was told, the corrected one is what the book says now, and neither
-            overwrote the other.
+            The acts above sum to exactly the difference between the two readings.
+            Nothing on this day changed that we cannot name and point at. Both
+            figures stay true: the left one is what we believed at that watermark,
+            the right one is what the book says now, and neither overwrote the
+            other. The correction is an ADDITION to the record — a reversal and a
+            re-book appended at the original value date — not an edit of it.
           </Note>
         ) : (
           <Note emphasis title="The difference is NOT accounted for">
             The entries above do not sum to the difference between the two
-            readings. That should be impossible — every posting inside the
-            period above the published watermark is listed here by construction
-            — so treat it as an incident rather than a rounding artefact.
+            readings. That should be impossible — every posting at or before this
+            value date booked above the left-hand watermark is listed here by
+            construction — so treat it as an incident rather than a rounding
+            artefact.
           </Note>
         )}
       </div>
@@ -140,8 +153,8 @@ function CorrectionRow({ group }: { readonly group: CorrectionGroupView }) {
           ) : (
             <>
               Late posting
-              <Badge tone="quiet" title="Booked after the close; not a correction of anything">
-                AFTER THE CLOSE
+              <Badge tone="quiet" title="Booked after the left-hand reading; not a correction of anything">
+                BOOKED LATER
               </Badge>
             </>
           )}
@@ -173,8 +186,8 @@ function CorrectionRow({ group }: { readonly group: CorrectionGroupView }) {
               </span>
               <span className="mt-0.5 block text-[11px] text-muted">
                 value date {formatDate(posting.valueDate)}
-                {posting.affectsOpening ? " (before this period)" : ""} · booked at
-                seq {posting.bookingSeq}
+                {posting.affectsOpening ? " (before this period)" : ""} · booked at seq{" "}
+                {posting.bookingSeq}
                 {posting.reversesEntryId === null
                   ? null
                   : ` · reverses ${posting.reversesEntryId.slice(0, 8)}`}

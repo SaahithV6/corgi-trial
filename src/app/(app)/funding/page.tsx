@@ -36,6 +36,13 @@ export const dynamic = "force-dynamic";
  *                   NOT YET AVAILABLE: ledger up, available unchanged, and the
  *                   uncleared-credit hold itemised with its release date
  *
+ * `?business=<uuid>` picks the customer, the same lever `/accounts`, `/pots`,
+ * `/payouts` and `/disputes` already honour. It composes with `?state=`, it is
+ * matched against the businesses actually on the book, and it grants nothing:
+ * the KYB gate is read for whichever business is selected and re-read inside
+ * the write path, so pointing this screen at an unverified business shows the
+ * refusal and its code rather than a form.
+ *
  * The Suspense boundary makes the loading state honest: `FundingView` is an
  * async server component, the fallback is the real skeleton, and `?state=loading`
  * slows the read rather than faking the render. The `key` forces a fresh
@@ -53,7 +60,13 @@ export default async function FundingPage({
     <div className="space-y-6">
       <DemoStateBar view={view} />
 
-      <Suspense key={view.state} fallback={<FundingSkeleton />}>
+      {/*
+        The key carries the business as well as the state. Switching customer
+        must re-suspend, or React reuses the resolved boundary and shows the
+        previous business's balances under the new business's heading — which on
+        a financial console is not a cosmetic bug.
+      */}
+      <Suspense key={`${view.state}:${view.businessId ?? "default"}`} fallback={<FundingSkeleton />}>
         <FundingView view={view} />
       </Suspense>
     </div>

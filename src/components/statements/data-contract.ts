@@ -243,3 +243,135 @@ export interface StatementsDataSource {
 }
 
 export type { ErrorShape, Result };
+
+/* -------------------------------------------------------------------------- */
+/* BOTH TIME AXES — the shape the screen is actually built around              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Which booking watermark the LEFT-HAND column is read at.
+ *
+ * The right-hand column is always "everything we have learned"; the question
+ * the screen exists to answer is what we believed BEFORE that, and there are
+ * only ever three honest places to stand:
+ *
+ *   `published`  the watermark a document was issued against. The strongest
+ *                anchor there is, because a customer could be holding the
+ *                paper, and because the stored hash makes the reading
+ *                checkable by someone who does not trust us.
+ *   `close`      the watermark the business day was frozen at. Available on
+ *                any closed day, published or not.
+ *   `before`     the sequence immediately before the first correcting entry
+ *                for this day landed. Available on an OPEN day, which is where
+ *                a correction that arrived this morning actually lives — and
+ *                without it the screen could only tell the story a day late.
+ *   `now`        the same watermark as the right-hand column. Degenerate on
+ *                purpose: it is what a day with no corrections and no close
+ *                honestly offers, and the screen says the two readings are the
+ *                same reading rather than implying a difference exists.
+ */
+export type BelievedAnchor = "published" | "close" | "before" | "now";
+
+/**
+ * One selectable anchor, INCLUDING the ones this day does not have.
+ *
+ * Unavailable anchors are rendered, disabled, with the reason — because "no
+ * statement was ever published for this day" is a fact a reader needs and a
+ * missing chip does not convey. It is the same argument the breaks screen
+ * makes about a break whose net is zero: absence has to be shown, not implied.
+ */
+export type AnchorOptionView = {
+  readonly anchor: BelievedAnchor;
+  /** Short label, e.g. `As published`. Used as the left column's heading. */
+  readonly label: string;
+  readonly available: boolean;
+  /** `null` exactly when `available` is false. */
+  readonly bookingWatermark: number | null;
+  /** One sentence: what this anchor is, or why this day does not have it. */
+  readonly note: string;
+};
+
+/** One reading of one value date: a document, at a watermark, with its hash. */
+export type ReadingView = {
+  readonly label: string;
+  readonly bookingWatermark: number;
+  readonly closingBalanceCents: Cents;
+  readonly document: DocumentView;
+  /**
+   * sha256 over the canonical rendering, recomputed on THIS read.
+   *
+   * Present for both readings, not only the published one. The reproducibility
+   * claim is a property of `(period, watermark)`, not of the act of
+   * publishing: any reading pinned to a watermark reproduces forever, and
+   * showing the fingerprint of the unpublished one is how the screen says so
+   * without claiming a document was issued.
+   */
+  readonly contentHash: string;
+};
+
+/**
+ * The two readings of one value date, and everything between them.
+ *
+ * This is the type the screen is built around. `believed` and `corrected` are
+ * peers: neither is the correction of the other, they are answers to two
+ * different questions, and the screen renders them as two columns of equal
+ * weight with the difference stated between them.
+ */
+export type BothReadingsView = {
+  readonly valueDate: ValueDate;
+  /** `null` when the business day has not been closed. Not an error. */
+  readonly closedAt: Instant | null;
+  readonly closeWatermark: number | null;
+
+  readonly anchor: BelievedAnchor;
+  readonly anchors: readonly AnchorOptionView[];
+
+  readonly believed: ReadingView;
+  readonly corrected: ReadingView;
+
+  /** `corrected − believed`, signed from the account holder's point of view. */
+  readonly deltaCents: Cents;
+  readonly differs: boolean;
+  /** Do the acts below sum to exactly `deltaCents`? Rendered honestly if not. */
+  readonly explained: boolean;
+  readonly acts: readonly CorrectionGroupView[];
+  /** Booking time of the earliest act above the anchor: when we learned otherwise. */
+  readonly learnedAt: Instant | null;
+
+  /** The issued document at this anchor, when one was issued. `null` otherwise. */
+  readonly published: PublishedStatementView | null;
+  readonly reproduced: boolean;
+  readonly formatChanged: boolean;
+  readonly versions: readonly PublishedStatementView[];
+};
+
+/** The whole screen, in one read. */
+export type StatementsScreenView = {
+  readonly source: StatementSource;
+  readonly asOf: Instant;
+  readonly accounts: readonly AccountOption[];
+  readonly account: AccountOption | null;
+  readonly days: readonly DayOption[];
+  /** `null` only when there is no customer account to read at all. */
+  readonly readings: BothReadingsView | null;
+};
+
+export type StatementsScreenQuery = {
+  readonly accountId?: string | undefined;
+  readonly businessDate?: string | undefined;
+  /** Which published version anchors the `published` reading. Defaults to v1. */
+  readonly version?: number | undefined;
+  readonly anchor?: BelievedAnchor | undefined;
+  /**
+   * Open on a day that actually carries a correction, when the URL names none.
+   *
+   * What `?state=edge` means. It is a default-selection hint and nothing else:
+   * it cannot invent a correction, and when the book has none the screen says
+   * so rather than pretending.
+   */
+  readonly preferCorrected?: boolean | undefined;
+};
+
+export interface StatementsScreenSource {
+  load(query: StatementsScreenQuery): Promise<Result<StatementsScreenView, ErrorShape>>;
+}

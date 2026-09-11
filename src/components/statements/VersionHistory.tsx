@@ -41,7 +41,14 @@ export function VersionHistory({
   filter,
 }: {
   readonly versions: readonly PublishedStatementView[];
-  readonly selected: PublishedStatementView;
+  /**
+   * The version anchoring the left-hand reading, or `null` when the reading is
+   * anchored somewhere else entirely — at the day close, or at the instant
+   * before a correction. A day can have published versions AND be read at a
+   * watermark none of them was issued against; in that case no row is current
+   * and the table says so by highlighting nothing.
+   */
+  readonly selected: PublishedStatementView | null;
   readonly filter: StatementFilter;
 }) {
   const current = versions[versions.length - 1];
@@ -80,7 +87,7 @@ export function VersionHistory({
           </thead>
           <tbody>
             {versions.map((version) => {
-              const isSelected = version.statementId === selected.statementId;
+              const isSelected = selected !== null && version.statementId === selected.statementId;
               return (
                 <tr
                   key={version.statementId}

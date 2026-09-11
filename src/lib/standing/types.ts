@@ -205,8 +205,9 @@ export function decideFunding(
     shortfallCents: shortfall,
     reason: ledgerWouldHaveCovered
       ? "Refused: the ledger balance covers this payment but the available balance does not. " +
-        "The difference is money already committed to card authorisations or to credits that have " +
-        "not cleared, and neither is spendable. This occurrence is closed; the next one is unaffected."
+        "The difference is money already committed — to card authorisations, to credits that have " +
+        "not cleared, or to debits already booked for a future value date — and none of it is " +
+        "spendable. This occurrence is closed; the next one is unaffected."
       : "Refused: the available balance does not cover this payment. " +
         "This occurrence is closed and is not carried forward; the next one is unaffected.",
   };

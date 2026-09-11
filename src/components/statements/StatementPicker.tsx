@@ -7,7 +7,7 @@ import type { AccountOption, DayOption } from "./data-contract";
 import { statementHref, type StatementFilter } from "./view-state";
 
 /**
- * Pick a business, then pick a closed day.
+ * Pick a business, then pick a value date.
  *
  * Both are links, not a form: the view is entirely URL state, so a picker that
  * needed JavaScript to work would make the screen unshareable and untestable
@@ -27,6 +27,12 @@ import { statementHref, type StatementFilter } from "./view-state";
  * A closed day with no activity is still listed. "We closed and nothing
  * happened" and "we never closed" are different facts and only one of them is
  * a problem; hiding the first would leave an operator unable to tell them apart.
+ *
+ * A date that is NOT a closed day gets a chip too, marked `open`, whenever the
+ * URL selects one. The screen can read any value date on both axes — that is
+ * the point of deriving the readings rather than storing them — and a picker
+ * that could only express the closed ones would make the most demoable view on
+ * this screen reachable only by hand-editing the query string.
  */
 export function StatementPicker({
   accounts,
@@ -66,7 +72,23 @@ export function StatementPicker({
         )}
       </Group>
 
-      <Group label="Closed day">
+      <Group label="Value date">
+        {selectedDay !== null && !days.some((d) => d.businessDate === selectedDay) ? (
+          // The selected date is not a closed day. That is a legitimate view
+          // and the most interesting one during a debrief — a correction that
+          // landed this morning lives on a day nobody has signed off yet — so
+          // it is shown as a chip of its own rather than leaving the row
+          // looking as though nothing is selected.
+          <Chip
+            href={statementHref(filter, { businessDate: selectedDay, version: null })}
+            current
+            title="This business day has not been closed. Both readings still answer; no watermark has been frozen for it."
+          >
+            {formatDate(selectedDay)}
+            <Tag muted>open</Tag>
+          </Chip>
+        ) : null}
+
         {days.length === 0 ? (
           <span className="text-xs text-muted">
             No business day has been closed for this book yet.

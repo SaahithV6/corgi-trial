@@ -46,14 +46,14 @@ export function StatementDocument({
   highlightLate = false,
 }: {
   readonly document: DocumentView;
-  /** `null` for the as-corrected rendering: it is a query, not a document. */
+  /** `null` when nothing was issued at this watermark: a reading, not a document. */
   readonly published: PublishedStatementView | null;
   readonly reproduced?: boolean;
   readonly formatChanged?: boolean;
   readonly recomputedHash?: string;
   readonly title: string;
   readonly description: string;
-  /** Mark lines booked above the published watermark. Only meaningful as-corrected. */
+  /** Mark lines booked above the left-hand watermark. Only meaningful as-corrected. */
   readonly highlightLate?: boolean;
 }) {
   return (
@@ -145,8 +145,11 @@ export function StatementDocument({
                           </Badge>
                         ) : null}
                         {late ? (
-                          <Badge tone="negative" title="Booked after this day was closed">
-                            AFTER THE CLOSE
+                          <Badge
+                            tone="negative"
+                            title="Booked above the left-hand reading's watermark — after we had already answered for this day"
+                          >
+                            BOOKED LATER
                           </Badge>
                         ) : null}
                       </span>
@@ -192,10 +195,13 @@ export function StatementDocument({
 
       {published === null ? (
         <FooterNote>
-          A live query at the current watermark, not a published document. It has
-          no version and no hash because nothing has been issued at this
-          watermark — issuing it is what <code>reissueStatement</code> does, and
-          that is an operator action with an actor attached, not a render.
+          A reading at booking watermark {document.bookingWatermark}, not a
+          published document. It has no version and no <em>stored</em> hash
+          because nothing has been issued at this watermark — issuing it is what{" "}
+          <code>publishStatement</code> and <code>reissueStatement</code> do, and
+          those are operator actions with an actor attached, not a render. The
+          figures are no less reproducible for it: fix the watermark and the
+          rows below it cannot change.
         </FooterNote>
       ) : (
         <PublishedFooter

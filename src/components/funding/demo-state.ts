@@ -26,8 +26,23 @@ export const DEMO_STATES = ["default", "loading", "empty", "error", "edge"] as c
 
 export type DemoState = (typeof DEMO_STATES)[number];
 
+/**
+ * `?business=` PICKS THE CUSTOMER, exactly as it does on `/accounts`, `/pots`,
+ * `/payouts` and `/disputes`. It is the convention this console already had and
+ * this screen was the one route that ignored it.
+ *
+ * It is a REFERENCE and nothing more. The live source matches it against the
+ * list of businesses it has just read; an id that is not on that list falls
+ * back to the default rather than reaching a query, and a malformed one is
+ * discarded before it is ever cast to `uuid`. Selecting a business is not a
+ * permission: the KYB gate is read for whichever business is selected and is
+ * re-read inside the write path, so pointing this screen at a business that may
+ * not transact shows the refusal rather than granting anything.
+ */
 export type FundingView = {
   readonly state: DemoState;
+  /** Which business the screen is pointed at. `null` = take the default. */
+  readonly businessId: string | null;
 };
 
 /** `default` and `edge` read Neon; the rest are fixtures. */
@@ -61,15 +76,40 @@ function isDemoState(value: string | undefined): value is DemoState {
   return DEMO_STATES.some((state) => state === value);
 }
 
-/** Anything unrecognised falls back to the live screen, never to an error page. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** True when a string could be a business id. Guards every `::uuid` cast below it. */
+export function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_RE.test(value);
+}
+
+/**
+ * Anything unrecognised falls back to the live screen, never to an error page —
+ * and never to a business that is not a well-formed id.
+ */
 export function parseFundingView(
   searchParams: Record<string, string | string[] | undefined>,
 ): FundingView {
   const raw = first(searchParams["state"]);
-  return { state: isDemoState(raw) ? raw : "default" };
+  const rawBusiness = first(searchParams["business"]);
+  return {
+    state: isDemoState(raw) ? raw : "default",
+    businessId: isUuid(rawBusiness) ? rawBusiness : null,
+  };
 }
 
-/** `?state=edge`, or `""` for the live default. */
-export function demoQuery(state: DemoState): string {
-  return state === "default" ? "" : `?state=${state}`;
+/**
+ * `?state=edge&business=…`, or `""` for the live default.
+ *
+ * Stable key order so two URLs for the same view compare equal as text, and so
+ * the state bar's links carry the selected business forward instead of silently
+ * dropping the reader back onto somebody else's account.
+ */
+export function demoQuery(view: Partial<FundingView>): string {
+  const parts: string[] = [];
+  if (view.state !== undefined && view.state !== "default") parts.push(`state=${view.state}`);
+  if (view.businessId !== undefined && view.businessId !== null) {
+    parts.push(`business=${encodeURIComponent(view.businessId)}`);
+  }
+  return parts.length === 0 ? "" : `?${parts.join("&")}`;
 }

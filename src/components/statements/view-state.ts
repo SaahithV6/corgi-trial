@@ -14,6 +14,8 @@
  * need to check next year.
  */
 
+import type { BelievedAnchor } from "./data-contract";
+
 export const DEMO_STATES = ["default", "loading", "empty", "error", "edge"] as const;
 
 export type DemoState = (typeof DEMO_STATES)[number];
@@ -23,15 +25,15 @@ export const DEMO_STATE_LABELS: Record<DemoState, string> = {
   loading: "Loading",
   empty: "Empty",
   error: "Error",
-  edge: "Edge · corrected after publication",
+  edge: "Edge · the corrected day",
 };
 
 export const DEMO_STATE_HINTS: Record<DemoState, string> = {
-  default: "A closed day's published statement. Live from the ledger.",
+  default: "One value date, read as believed and as corrected. Live from the ledger.",
   loading: "Skeleton, held open by a genuinely slow read.",
-  empty: "A day that was closed with no statement issued yet. Nothing to show, nothing wrong.",
+  empty: "A day closed with no statement issued yet. Both readings still answer; no document exists.",
   error: "The statement query failed. Nothing moved; retry is live.",
-  edge: "Published, then corrected by a reversal and re-book at that day's value date. Both figures true at once.",
+  edge: "The corrected day itself: the most recent value date this book reversed and re-booked. Live when there is one.",
 };
 
 export type StatementFilter = {
@@ -49,6 +51,17 @@ export type StatementFilter = {
    * goes to zero and the corrections list empties.
    */
   readonly version: number | null;
+  /**
+   * Where the LEFT-HAND reading stands on the booking axis. `null` means
+   * "the strongest anchor this day has".
+   *
+   * URL state for the same reason the day is: the whole claim of this screen
+   * is "here is what we believed at a point in transaction time", and a claim
+   * like that has to be reachable by link if anybody is ever going to check
+   * it. `?as=published` and `?as=before` are two different questions about the
+   * same immutable rows.
+   */
+  readonly anchor: BelievedAnchor | null;
 };
 
 function first(value: string | string[] | undefined): string | undefined {
@@ -57,6 +70,17 @@ function first(value: string | string[] | undefined): string | undefined {
 
 function isDemoState(value: string | undefined): value is DemoState {
   return DEMO_STATES.some((s) => s === value);
+}
+
+export const BELIEVED_ANCHORS: readonly BelievedAnchor[] = [
+  "published",
+  "close",
+  "before",
+  "now",
+];
+
+function isAnchor(value: string | undefined): value is BelievedAnchor {
+  return BELIEVED_ANCHORS.some((a) => a === value);
 }
 
 /** `YYYY-MM-DD` and nothing else. Guards the `::date` cast in the query layer. */
@@ -78,6 +102,7 @@ export function parseStatementFilter(
   const rawAccount = first(searchParams["account"]);
   const rawDay = first(searchParams["day"]);
   const rawVersion = first(searchParams["v"]);
+  const rawAnchor = first(searchParams["as"]);
 
   const version = rawVersion === undefined ? Number.NaN : Number.parseInt(rawVersion, 10);
 
@@ -86,6 +111,7 @@ export function parseStatementFilter(
     accountId: rawAccount !== undefined && rawAccount !== "" ? rawAccount : null,
     businessDate: isBusinessDate(rawDay) ? rawDay : null,
     version: Number.isInteger(version) && version >= 1 ? version : null,
+    anchor: isAnchor(rawAnchor) ? rawAnchor : null,
   };
 }
 
@@ -109,6 +135,9 @@ export function statementQuery(filter: Partial<StatementFilter>): string {
   }
   if (filter.version !== undefined && filter.version !== null) {
     parts.push(`v=${String(filter.version)}`);
+  }
+  if (filter.anchor !== undefined && filter.anchor !== null) {
+    parts.push(`as=${encodeURIComponent(filter.anchor)}`);
   }
   return parts.length === 0 ? "" : `?${parts.join("&")}`;
 }

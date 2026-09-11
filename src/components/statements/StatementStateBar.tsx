@@ -18,12 +18,15 @@ import {
  * is a lie. Each entry is a plain link to the same route with a different
  * query string.
  *
- * `default` is the only state that reads the database. The other four are
- * fixtures even when a database is configured, so they can be shown in order
- * in front of a panel without closing a day or issuing a document — both of
- * which are permanent, because `book_day` and `statement` are append-only.
- * That constraint is exactly why a demo control for this screen has to be
- * fixture-backed: there is no undo.
+ * `default` and `edge` read the database. `edge` is live on purpose: the edge
+ * state IS the corrected day, and a corrected day rendered from typed-in
+ * numbers would be the one thing on this screen worth nothing — so it resolves
+ * to the most recent value date this book actually reversed and re-booked, and
+ * falls back to the fixture only when there is no database or no correction to
+ * find. `loading`, `empty` and `error` stay fixtures even when a database is
+ * configured, so they can be shown in order in front of a panel without
+ * closing a day or issuing a document — both of which are permanent, because
+ * `book_day` and `statement` are append-only. There is no undo.
  */
 export function StatementStateBar({ filter }: { readonly filter: StatementFilter }) {
   return (

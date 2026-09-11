@@ -379,6 +379,30 @@ export async function businessAvailability(
   return accountAvailability(accountId, snapshot, conn);
 }
 
+/**
+ * A HOUSE account by chart code — `business_id IS NULL`, one per code.
+ *
+ * A named reader, so that a caller wanting "the house cash leaf" does not write
+ * `SELECT id FROM account WHERE code = '1110'` of its own. That is the shape
+ * `src/lib/ledger/boundary.test.ts` exists to stop spreading, and the way to
+ * stop it spreading is to make the alternative shorter than the SQL.
+ *
+ * `null` rather than a throw: "this book has no such account" is an answer, and
+ * a seeded database and an empty one are both legitimate states to be in.
+ */
+export async function houseAccountId(
+  code: string,
+  conn: Sql,
+): Promise<string | null> {
+  const rows = await conn<{ id: string }[]>`
+    SELECT id FROM account
+     WHERE code = ${code}
+       AND business_id IS NULL
+     ORDER BY id
+     LIMIT 1`;
+  return rows[0]?.id ?? null;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The book as a whole                                                        */
 /* -------------------------------------------------------------------------- */

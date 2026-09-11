@@ -122,7 +122,35 @@ export type FundFormProps = {
   /** False on the fixture demo states, and when Plaid holds no credentials. */
   readonly live: boolean;
   readonly plaidConfigured: boolean;
+  /** The business `?business=` points at. Its account is preselected. */
+  readonly selectedBusinessId: string | null;
 };
+
+/**
+ * Which account the form opens on.
+ *
+ * THE URL WINS, and that is the whole point of this function. The select used
+ * to open on `accounts[0]`, which is the first row of an `ORDER BY legal_name`
+ * — so the form defaulted to whichever customer happened to sort first, no
+ * matter which one the reader had navigated to. That is selection by ordering,
+ * and it is one of the three ways a screen quietly becomes single-tenant.
+ *
+ * The fallbacks are ordered by what a person would actually want next: the
+ * selected business, then the first account that may transact, then the first
+ * account at all so the control is never empty. None of them is a permission —
+ * the server re-resolves the account and re-reads the gate on every POST.
+ */
+function initialAccountId(
+  accounts: readonly FundableAccountView[],
+  selectedBusinessId: string | null,
+): string {
+  const selected =
+    selectedBusinessId === null
+      ? undefined
+      : accounts.find((account) => account.businessId === selectedBusinessId);
+  const allowed = accounts.find((account) => account.gate.allowed);
+  return (selected ?? allowed ?? accounts[0])?.id ?? "";
+}
 
 export function FundForm({
   accounts,
@@ -131,10 +159,13 @@ export function FundForm({
   prefillAmount,
   live,
   plaidConfigured,
+  selectedBusinessId,
 }: FundFormProps) {
   const [state, formAction, pending] = useActionState(fundFromExternalBankAction, IDLE);
 
-  const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const [accountId, setAccountId] = useState(() =>
+    initialAccountId(accounts, selectedBusinessId),
+  );
   const [counterpartyClass, setCounterpartyClass] = useState<string>("self");
   const [valueDate, setValueDate] = useState(defaultValueDate);
 
@@ -146,6 +177,7 @@ export function FundForm({
   const referenceFieldId = useId();
 
   const policy = predictedPolicy(policies, counterpartyClass);
+  const chosen = accounts.find((account) => account.id === accountId);
   const submittable = live && plaidConfigured && accounts.length > 0;
 
   return (
@@ -165,9 +197,22 @@ export function FundForm({
             className={INPUT_CLASS}
           >
             {accounts.length === 0 ? <option value="">No account available</option> : null}
+            {/*
+              REFUSED ACCOUNTS ARE LISTED, LABELLED WITH THEIR CODE, exactly as
+              /payments lists them. Hiding a customer the gate refuses makes the
+              screen look as though that customer does not exist; naming the
+              refusal is the answer to "why can I not fund this one". The
+              permission is decided by canTransact() on the server, before
+              anything reaches Plaid — not by which options are in this list.
+            */}
             {accounts.map((account) => (
               <option key={account.id} value={account.id}>
-                {account.businessName} — available {account.balance.availableDisplay}
+                {account.businessName} —{" "}
+                {!account.gate.allowed
+                  ? account.gate.code
+                  : account.balance === null
+                    ? "balance unreadable"
+                    : `available ${account.balance.availableDisplay}`}
               </option>
             ))}
           </select>
@@ -297,12 +342,14 @@ export function FundForm({
         >
           {pending ? "Linking and posting…" : "Link a bank and fund"}
         </button>
-        <span className="text-xs text-muted">
-          {submittable
-            ? "Five real calls to sandbox.plaid.com, then one financial entry and one memo entry through postEntry(), in one transaction."
-            : plaidConfigured
+        <span className="max-w-prose text-xs leading-relaxed text-muted">
+          {!submittable
+            ? plaidConfigured
               ? FIXTURE_NOTE
-              : "Plaid holds no credentials in this deployment, so nothing can be linked. The button is disabled rather than failing halfway."}
+              : "Plaid holds no credentials in this deployment, so nothing can be linked. The button is disabled rather than failing halfway."
+            : chosen !== undefined && !chosen.gate.allowed
+              ? `${chosen.businessName} may not transact — ${chosen.gate.code}. Pressing this is refused with that code before anything is sent to Plaid: no Item is created and no entry is posted. Funding is transacting, and the gate has no inbound exemption.`
+              : "Five real calls to sandbox.plaid.com, then one financial entry and one memo entry through postEntry(), in one transaction."}
         </span>
       </div>
 

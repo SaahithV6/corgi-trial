@@ -12,6 +12,163 @@ Route: `/funding`. Code: `src/lib/rails/plaid/**`, `src/app/(app)/funding/**`,
 
 ---
 
+## 0. Any business, not the one this was built against
+
+This section was written after `/funding` was found to work for exactly one
+customer. It is first because it is the part of the screen most likely to be
+wrong again.
+
+### 0.1 The failure, and the measurement that found it
+
+**Symptom.** `node scripts/coreloop.mjs` leg 2 skipped, with zero checks held:
+
+```
+waiting on: /funding renders, but carries no fund form with
+            accountId/amount/valueDate/reference
+```
+
+The loop had stopped using Ridgeline Robotics. It now chooses its subject by
+asking the deployed `/onboarding` gate, and it had chosen **Kettle & Crumb
+Bakery LLC** (`1151e7b5-b75b-5f58-bdbf-68cd714178ce`, `2100` leaf
+`392043e2-1d7f-406f-b036-321b4775108b`), which had passed KYB through the real
+manual-review path and had its accounts opened by approval.
+
+**Three plausible causes, all wrong.** The obvious hypotheses were that the
+screen keyed off a linked Plaid Item only Ridgeline had, that it defaulted to a
+business chosen by ordering, or that it required prior funding history. All
+three were measured and none of them was it. `listDepositAccounts()` returns
+every open `2100` leaf and has no Item predicate, no history predicate and no
+per-business branch.
+
+**What it actually was.** `GET https://corgi-trial-psi.vercel.app/funding`
+returned **200 with one form on the page** — the error panel's retry button —
+and the heading *"The funding screen could not be drawn"*, code
+`FUNDING_PREFLIGHT_FAILED`, detail `(unknown)`. The `(unknown)` was the clue: the
+detail is read from `thrown.code`, and a Postgres error always carries one, so
+the thrown value was not a database error at all.
+
+Reproduced locally against the same Neon database, with the snapshot's own catch
+temporarily logging the value it swallows:
+
+```
+FUNDING_PREFLIGHT_DEBUG RangeError: Invalid time value
+    at DateTimeFormat.formatToParts (<anonymous>)
+    at bankingDateOf        (src/app/(app)/funding/live-source.ts:189)
+    at toUnclearedHoldView  (src/app/(app)/funding/live-source.ts:161)
+    at readAccount          (src/app/(app)/funding/live-source.ts:244)
+    at getSnapshot          (src/app/(app)/funding/live-source.ts:274)
+```
+
+And the rows behind it:
+
+```sql
+SELECT h.id, h.available_at::text, h.external_ref
+  FROM hold h JOIN account a ON a.id = h.account_id
+ WHERE h.kind = 'uncleared_credit' AND a.code = '2100';
+```
+
+```
+4abc7970-ad8c-44cc-89cb-8658f918a5a7 | infinity | dispute:2978c569-8f55-4890-98fb-bb16f150c558
+1ddcc2dc-00fb-4b82-bf76-1ffd86a0ac01 | infinity | dispute:ccbf1b9e-67f0-47b4-af8e-54640bbeebc9
+637fd155-5119-41cb-a9c6-70f3f5785dd5 | infinity | dispute:e5a07307-e1f4-45bd-b892-588b8bf6423b
+…nine rows in total, every one of them Ridgeline Robotics, Inc.
+```
+
+**The root cause.** `hold.available_at` is a `timestamptz`, and `timestamptz`
+has two values that are not instants: `infinity` and `-infinity`. Disputes write
+the first one deliberately — a provisional credit is an `uncleared_credit` hold
+released by a person deciding the case, never by a clock, and `infinity` is how
+"no release instant" is said in Postgres. The `postgres` driver parses it into a
+`Date` whose time value is `NaN`. Neither `=== null` nor a truthiness test sees
+that, so `Intl.DateTimeFormat.formatToParts()` ran on it and threw.
+
+**Why it took the whole screen.** The throw happened inside a `Promise.all` over
+every deposit account, inside the snapshot's single `try`. One unformattable row
+became `FUNDING_PREFLIGHT_FAILED` for the entire book. So: **nine rows belonging
+to Ridgeline removed the funding form from every customer, and the business that
+could not be funded was Kettle & Crumb.** Funding had not been built against
+Ridgeline; it had been *last exercised* before disputes existed, and the two
+screens had never been open on the same book.
+
+That is the shape of a generality bug worth naming: not a hardcoded id, but a
+read whose blast radius is the whole book when its subject is one customer.
+
+### 0.2 What changed
+
+1. **`infinity` is a value, not a crash.** `isInstant()` guards the one place a
+   hold's `Date` becomes text. A hold with no release instant carries
+   `neverReleases` and the table prints *"on a decision, not a clock"* with
+   `available_at = infinity` beneath it — rather than a date nobody computed.
+2. **One account's failure is one account's failure.** The `try` moved from the
+   snapshot into `readAccount`. A degraded account carries `readError`, its
+   `balance` and `unclearedHolds` are `null`, and the rest of the book still
+   draws. No zero is ever substituted for a figure no query produced.
+3. **`?business=<uuid>` is honoured**, the same lever `/accounts`, `/pots`,
+   `/payouts` and `/disputes` already had. It composes with `?state=`, the demo
+   state bar carries it forward, and the Suspense key includes it so switching
+   customer re-suspends instead of showing the previous business's balances.
+4. **The default is no longer ordering.** With no `?business=`, the screen
+   selects the first business that **may transact and has a deposit account** —
+   not `accounts[0]` of an `ORDER BY legal_name`, which is how the form used to
+   open on whichever fixture company sorted first.
+5. **The KYB gate is read and enforced.** Every business on the book gets
+   `transactGateForBusiness()` under both policies, printed exactly as
+   `/payments` prints them, and `fundFromExternalBankAction` calls
+   `transactGateForAccount()` **before any Plaid call**. Funding is transacting;
+   the brief's "unverified entities can look but not transact" has no inbound
+   exemption.
+6. **Linking is step one, with its own button.** `linkExternalBankAction` links
+   a real Item for any gate-allowed business and posts nothing. Having no bank
+   linked is now visibly the start of the leg rather than an unexplained
+   inability to take it.
+
+### 0.3 The gate table lists businesses, not accounts
+
+`/payments` reads its gate per deposit account. This screen reads it per
+**business**, because Silverline Freight Co.
+(`3593cbbb-cd74-5078-ab3c-c4c546910f95`) has never had an account opened and is
+therefore invisible to an account-shaped list — and "why can I not fund
+Silverline" is a question the screen has to be able to answer about a customer
+that has nothing yet. Measured on the live book:
+
+| Business | Status | Evidence | Deposit account | This deployment | If live evidence required |
+| --- | --- | --- | --- | --- | --- |
+| Holds Integration Fixture Co. | `pending` | `simulated` | opened | `KYB_PENDING` | `KYB_PENDING` |
+| Kettle & Crumb Bakery LLC | `approved` | `manual` | `392043e2-…` | **may be funded** | `KYB_EVIDENCE_MANUAL` |
+| Pots Integration Fixture Co. | `pending` | `simulated` | opened | `KYB_PENDING` | `KYB_PENDING` |
+| Ridgeline Robotics, Inc. | `approved` | `manual` | `a0c41a37-…` | **may be funded** | `KYB_EVIDENCE_MANUAL` |
+| Silverline Freight Co. | `needs_review` | `live` | **none opened** | `KYB_NEEDS_REVIEW` | `KYB_NEEDS_REVIEW` |
+
+The business list is read from `business` and `v_business_kyb`, never by joining
+`account` — `src/lib/ledger/boundary.test.ts` forbids any module outside
+`src/lib/ledger/**` from writing SQL against `account`, `journal_entry` or
+`journal_line`, and this file is not on its allowlist and is not going on it.
+The account half of the join is `listDepositAccounts()`, the ledger module's own
+named reader, and the two are matched in memory.
+
+### 0.4 The Plaid rate limit, and why nothing runs on render
+
+`/institutions/get` is rationed at ten calls per credential per window — measured
+today, and the reason the integration health probe caches its verdict. Linking
+creates real objects at Plaid, so:
+
+- **Nothing on this screen calls Plaid on render.** The only thing the snapshot
+  says about Plaid is whether both credentials are present, which is a fact
+  about this process. Every claim about Plaid's *behaviour* comes from a button
+  somebody pressed.
+- **Nothing polls.** There is no interval, no retry loop and no background
+  refresh anywhere under `src/app/(app)/funding/**`.
+- **A rate limit renders as a rate limit.** Both link paths surface Plaid's own
+  `error_code` — `RATE_LIMIT_EXCEEDED` included — together with every call
+  attempted, its HTTP status and Plaid's `request_id`. Nothing is smoothed into
+  a link that did not happen.
+
+Note that `linkExternalAccount()` does **not** call `/institutions/get` at all:
+its five calls are `/link/token/create`, `/sandbox/public_token/create`,
+`/item/public_token/exchange`, `/accounts/get` and `/auth/get`.
+
+---
+
 ## 1. What is live, in one paragraph
 
 Plaid is **live**. `/funding` links a real Plaid Item at a real institution over
@@ -412,7 +569,8 @@ change; the disagreement is recorded here rather than papered over.
 
 ## 8. The five states
 
-`/funding?state=loading|empty|error|edge`, plus the bare route.
+`/funding?state=loading|empty|error|edge`, plus the bare route — and
+`?business=<uuid>` orthogonally, on any of them.
 
 | State | Live? | What it is |
 | ----- | ----- | ---------- |
@@ -426,6 +584,12 @@ change; the disagreement is recorded here rather than papered over.
 the database — an `uncleared_credit` hold with a future `available_at` — and a
 fixture of it would demonstrate the arithmetic while proving nothing about it. If
 no such hold exists when you open it, it says so rather than drawing one.
+
+`?business=` is a sixth dimension rather than a sixth state: it selects the
+customer and every state honours it. `/funding?state=edge&business=<uuid>` is a
+URL that reproduces one customer's uncleared position exactly, and the state bar
+carries the selection across every link so switching states does not silently
+move the reader to somebody else's balances.
 
 ## 9. Reproducing it
 

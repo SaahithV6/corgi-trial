@@ -37,14 +37,18 @@ import "server-only";
 
 import type {
   BalanceView,
+  BusinessView,
   FundableAccountView,
   FundingDataSource,
   FundingSnapshot,
   PolicyView,
   ProviderView,
+  TransactGateView,
   UnclearedHoldView,
 } from "@/components/funding/data-contract";
 import { formatUsd } from "@/lib/format/money";
+import type { TransactDecision } from "@/lib/kyb";
+import { transactGateForBusiness } from "@/lib/kyb/wire";
 import {
   accountAvailability,
   type Availability,
@@ -147,9 +151,41 @@ export async function readBalanceCents(
  * The release date is derived from the instant in the BANKING timezone, not in
  * UTC: 09:00 in New York is 13:00Z in summer, and `toISOString().slice(0, 10)`
  * on a hold that releases at 20:00 ET would print tomorrow's date.
+ *
+ * ===========================================================================
+ * `available_at` CAN BE `infinity`, AND THAT USED TO TAKE THE WHOLE SCREEN DOWN
+ * ===========================================================================
+ *
+ * `hold.available_at` is a `timestamptz`, and `timestamptz` has two values that
+ * are not instants: `infinity` and `-infinity`. `src/lib/disputes/store.ts`
+ * writes the first one deliberately — a dispute's provisional credit is an
+ * `uncleared_credit` hold that is released by a person deciding the case, never
+ * by a clock, and "no release instant" is exactly what `infinity` means.
+ *
+ * `postgres` parses it into a `Date` whose time value is `NaN`. Neither
+ * `=== null` nor a truthiness check sees that, so both lines below used to run
+ * on it: `Intl.DateTimeFormat.formatToParts(invalid)` threw
+ * `RangeError: Invalid time value`, and `Date.prototype.toISOString` would have
+ * thrown the same. The throw was caught by `getSnapshot`'s own catch, which
+ * turned ONE unformattable row into `FUNDING_PREFLIGHT_FAILED` for the entire
+ * book — no balances, no policy table, and no form, for every customer.
+ *
+ * Measured 2026-09-10: nine such rows, all on Ridgeline Robotics, all
+ * `external_ref = dispute:<id>`, and the business that could not be funded
+ * because of them was Kettle & Crumb.
+ *
+ * So the guard is `Number.isFinite(at.getTime())` and it is applied ONCE, here,
+ * at the only place a `Date` from the hold table becomes text. A hold with no
+ * release instant is not an error and is not drawn as a date: it carries
+ * `neverReleases` and the table says what actually frees it.
  */
+function isInstant(at: Date): boolean {
+  return Number.isFinite(at.getTime());
+}
+
 function toUnclearedHoldView(row: HoldRow, bankingDateOf: (at: Date) => string): UnclearedHoldView {
   const parsed = parsePlaidExternalRef(row.externalRef);
+  const releasesOnAClock = row.availableAt !== null && isInstant(row.availableAt);
 
   return {
     holdId: row.holdId,
@@ -158,11 +194,15 @@ function toUnclearedHoldView(row: HoldRow, bankingDateOf: (at: Date) => string):
     itemId: parsed?.itemId ?? null,
     plaidAccountId: parsed?.accountId ?? null,
     amountDisplay: formatUsd(row.remainingCents),
-    releaseDate: row.availableAt === null ? null : bankingDateOf(row.availableAt),
-    availableAt: row.availableAt === null ? null : row.availableAt.toISOString(),
+    releaseDate: releasesOnAClock ? bankingDateOf(row.availableAt as Date) : null,
+    availableAt: releasesOnAClock ? (row.availableAt as Date).toISOString() : null,
+    neverReleases: row.availableAt !== null && !isInstant(row.availableAt),
     released: row.closed,
     closedReason: row.closedReason,
-    placedAt: row.placedAt.toISOString(),
+    // `placed_at` is `created_at`, which is `NOT NULL DEFAULT now()` and cannot
+    // be infinite — but it is the same class of value and is guarded the same
+    // way rather than left as the next thing to throw.
+    placedAt: isInstant(row.placedAt) ? row.placedAt.toISOString() : "(no placement instant)",
     policy: row.policy,
   };
 }
@@ -216,35 +256,195 @@ function orderUnclearedHolds(holds: readonly HoldRow[]): readonly HoldRow[] {
       if (a.remainingCents !== b.remainingCents) {
         return a.remainingCents > b.remainingCents ? -1 : 1;
       }
-      const at = a.availableAt?.getTime() ?? 0;
-      const bt = b.availableAt?.getTime() ?? 0;
-      if (at !== bt) return bt - at;
+      // `infinity` parses to a `Date` whose time value is `NaN`, and every
+      // comparison against `NaN` is false — so a naive `bt - at` returns `NaN`
+      // and hands `Array.prototype.sort` a comparator with no opinion, which is
+      // an unspecified order. A hold that never releases sorts LAST among equal
+      // amounts, deliberately: it is not the one whose release date a customer
+      // is ringing up about.
+      const at = a.availableAt === null || !isInstant(a.availableAt) ? null : a.availableAt.getTime();
+      const bt = b.availableAt === null || !isInstant(b.availableAt) ? null : b.availableAt.getTime();
+      if (at === null && bt !== null) return 1;
+      if (bt === null && at !== null) return -1;
+      if (at !== null && bt !== null && at !== bt) return bt - at;
       return a.holdId.localeCompare(b.holdId);
     });
 }
 
+/* -------------------------------------------------------------------------- */
+/* One account, and the blast radius of its failure                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ONE ACCOUNT'S FAILURE IS ONE ACCOUNT'S FAILURE.
+ *
+ * This used to be a bare `await` inside a `Promise.all` inside the snapshot's
+ * single `try`, which made the screen an all-or-nothing read over the entire
+ * book: every customer's balances and holds had to be formattable for any
+ * customer to see a form. That is the generality bug in one line, and it is the
+ * one that actually fired — see `toUnclearedHoldView` for the nine rows and the
+ * business they took down.
+ *
+ * The catch is HERE, per account, and it is deliberately narrow. It does not
+ * substitute a zero balance: a balance nobody could read is `null`, the row
+ * says so with the code, and `available` is never printed as a number this
+ * module invented. Whatever else this screen does, it does not put a figure on
+ * a page that no query produced.
+ */
 async function readAccount(
   row: { accountId: string; businessId: string; accountName: string; legalName: string; currency: string },
   snapshot: LedgerSnapshot,
   conn: Sql,
   bankingDateOf: (at: Date) => string,
+  gate: TransactGateView,
 ): Promise<FundableAccountView> {
-  const [availability, holds] = await Promise.all([
-    accountAvailability(row.accountId, snapshot, conn),
-    listHoldRows(row.accountId, snapshot, conn),
-  ]);
-
-  return {
+  const identity = {
     id: row.accountId,
     businessId: row.businessId,
     businessName: row.legalName,
     accountName: row.accountName,
     currency: row.currency,
-    balance: foldBalance(availability),
-    unclearedHolds: orderUnclearedHolds(holds).map((hold) =>
-      toUnclearedHoldView(hold, bankingDateOf),
-    ),
-  };
+    gate,
+  } as const;
+
+  try {
+    const [availability, holds] = await Promise.all([
+      accountAvailability(row.accountId, snapshot, conn),
+      listHoldRows(row.accountId, snapshot, conn),
+    ]);
+
+    return {
+      ...identity,
+      balance: foldBalance(availability),
+      unclearedHolds: orderUnclearedHolds(holds).map((hold) =>
+        toUnclearedHoldView(hold, bankingDateOf),
+      ),
+      readError: null,
+    };
+  } catch (thrown) {
+    return {
+      ...identity,
+      balance: null,
+      unclearedHolds: null,
+      readError: {
+        code: "ACCOUNT_READ_FAILED",
+        message:
+          `The balances and holds for ${row.legalName} could not be read, so no figure is shown for ` +
+          `this account rather than a zero standing in for one. Every other account on this book is ` +
+          `unaffected and still fundable. ${describeThrown(thrown)}`,
+      },
+    };
+  }
+}
+
+/** A thrown value, as one safe sentence. Never a connection string, never a row. */
+function describeThrown(thrown: unknown): string {
+  if (typeof thrown === "object" && thrown !== null && "code" in thrown) {
+    return `Postgres reported ${String((thrown as { code?: unknown }).code)}.`;
+  }
+  if (thrown instanceof Error) return `${thrown.name}: ${thrown.message}`;
+  return "The failure carried no code and no message.";
+}
+
+/* -------------------------------------------------------------------------- */
+/* The gate                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `canTransact()`'s answer, flattened. No judgement is added: a refusal's code
+ * and message travel verbatim, and the only sentence written here is the
+ * wording of an allowance, which `canTransact` does not supply.
+ *
+ * Deliberately the same shape and the same reasoning as
+ * `payments/live-source.ts`. Two screens asking the same question must not
+ * describe the answer in two different vocabularies, or an operator comparing
+ * them has to work out whether the difference is real.
+ */
+function toGateView(decision: TransactDecision): TransactGateView {
+  return decision.allowed
+    ? {
+        allowed: true,
+        code: null,
+        message:
+          decision.evidence === "live"
+            ? "Approved on live third-party evidence. This business may be funded from a linked external bank."
+            : "Approved, but on simulated or manual evidence: this deployment's policy allows it, and the label says exactly what it rests on.",
+        status: decision.status,
+        evidence: decision.evidence,
+      }
+    : {
+        allowed: false,
+        code: decision.code,
+        message: decision.message,
+        status: decision.status,
+        evidence: decision.evidence,
+      };
+}
+
+/**
+ * Every business on the book, with no join to `account`.
+ *
+ * TWO REASONS IT IS SHAPED THIS WAY. The first is honesty: a business with no
+ * deposit account — Silverline Freight Co. is one — is invisible to an
+ * account-shaped list, so a screen built on `listDepositAccounts()` alone can
+ * never answer "why can I not fund Silverline". It can now: the gate refuses it
+ * `KYB_NEEDS_REVIEW` and the row also says no account has been opened.
+ *
+ * The second is the ledger boundary. `src/lib/ledger/boundary.test.ts` forbids
+ * any module outside `src/lib/ledger/**` from writing SQL against `account`,
+ * `journal_entry` or `journal_line`, and this file is not on its allowlist and
+ * is not going on it. `business` and `v_business_kyb` are neither; the account
+ * side of the join is `listDepositAccounts()`, which is the ledger module's own
+ * named reader, and the two are matched in memory.
+ */
+async function listGatedBusinesses(
+  conn: Sql,
+  depositAccountByBusiness: ReadonlyMap<string, string>,
+): Promise<readonly BusinessView[]> {
+  const rows = await conn<{ id: string; legal_name: string; ein: string | null }[]>`
+    SELECT b.id, b.legal_name, b.ein
+      FROM business b
+     ORDER BY b.legal_name`;
+
+  return Promise.all(
+    rows.map(async (row): Promise<BusinessView> => {
+      // Both gates, exactly as `/payments` reads them: what this deployment
+      // does, and what a real-money deployment requiring live evidence would do.
+      const [now, strict] = await Promise.all([
+        transactGateForBusiness(row.id, { conn }),
+        transactGateForBusiness(row.id, { conn, policy: { requireLiveEvidence: true } }),
+      ]);
+      return {
+        id: row.id,
+        legalName: row.legal_name,
+        ein: row.ein,
+        depositAccountId: depositAccountByBusiness.get(row.id) ?? null,
+        gate: toGateView(now),
+        gateIfLiveRequired: toGateView(strict),
+      };
+    }),
+  );
+}
+
+/**
+ * Which business this view is pointed at.
+ *
+ * The reference from the query string is matched against the list that was
+ * just read; an id that is not on it falls back to the default rather than
+ * reaching a query. The DEFAULT is the first business that may transact AND has
+ * an account to fund — not simply the first row, because ordering by legal name
+ * would land the screen on a fixture company and make the product look as
+ * though funding only works for whoever happens to sort first. If no business
+ * can be funded, the first business is selected anyway, so the screen has a
+ * subject to explain the refusal about.
+ */
+function selectBusiness(
+  businesses: readonly BusinessView[],
+  requested: string | null,
+): string | null {
+  const asked = requested === null ? undefined : businesses.find((b) => b.id === requested);
+  const fundable = businesses.find((b) => b.gate.allowed && b.depositAccountId !== null);
+  return (asked ?? fundable ?? businesses[0])?.id ?? null;
 }
 
 function providerView(): ProviderView {
@@ -261,7 +461,7 @@ function providerView(): ProviderView {
 
 export function createLiveFundingSource(conn: Sql = sql): FundingDataSource {
   return {
-    async getSnapshot(): Promise<Result<FundingSnapshot, ErrorShape>> {
+    async getSnapshot(businessId: string | null): Promise<Result<FundingSnapshot, ErrorShape>> {
       try {
         const snapshot = await readSnapshot(conn);
         const bankingDateOf = bankingDateFormatter();
@@ -271,8 +471,32 @@ export function createLiveFundingSource(conn: Sql = sql): FundingDataSource {
           listAvailabilityPolicies(conn),
         ]);
 
+        // First account per business. The bare `2100` leaf is one per business
+        // by construction — pot sub-accounts carry a qualified `2100.<uuid>`
+        // code (migration 0015) and `listDepositAccounts` does not return them.
+        const depositAccountByBusiness = new Map<string, string>();
+        for (const row of accountRows) {
+          if (!depositAccountByBusiness.has(row.businessId)) {
+            depositAccountByBusiness.set(row.businessId, row.accountId);
+          }
+        }
+
+        const businesses = await listGatedBusinesses(conn, depositAccountByBusiness);
+        const gateByBusiness = new Map(businesses.map((b) => [b.id, b.gate]));
+
         const accounts = await Promise.all(
-          accountRows.map((row) => readAccount(row, snapshot, conn, bankingDateOf)),
+          accountRows.map((row) =>
+            readAccount(row, snapshot, conn, bankingDateOf, gateByBusiness.get(row.businessId) ?? {
+              // A 2100 account whose business row has vanished is a broken
+              // foreign key, not a permission. It is refused, with a code.
+              allowed: false,
+              code: "KYB_NOT_STARTED",
+              message:
+                "No business row backs this account, so there is no verification to read and nothing may be funded into it.",
+              status: null,
+              evidence: null,
+            }),
+          ),
         );
 
         const policies: readonly PolicyView[] = policyRows.map((policy) => ({
@@ -286,6 +510,8 @@ export function createLiveFundingSource(conn: Sql = sql): FundingDataSource {
 
         return ok({
           accounts,
+          businesses,
+          selectedBusinessId: selectBusiness(businesses, businessId),
           policies,
           // `book_date(now())` from the database, so the business day boundary
           // is the Fed/ACH one and there is one definition of it rather than two.
@@ -297,13 +523,16 @@ export function createLiveFundingSource(conn: Sql = sql): FundingDataSource {
         // A read failure, and the first thing the screen has to say is that it
         // is one. Nothing here writes: no Item was created, no entry was posted,
         // and a SELECT cannot fund an account.
-        const detail =
-          typeof thrown === "object" && thrown !== null && "code" in thrown
-            ? String((thrown as { code?: unknown }).code)
-            : "unknown";
+        // WHAT IS LEFT IN HERE, NOW THAT ONE ACCOUNT CANNOT REACH IT. The
+        // snapshot, the account list, the business list with its gates, and the
+        // policy table: four reads that are about the BOOK rather than about
+        // one customer, and if any of them fails there is genuinely no screen
+        // to draw. A single customer's balances failing is handled in
+        // `readAccount` and never arrives here — which is the difference
+        // between a screen that degrades and a screen that disappears.
         return fail(
           "FUNDING_PREFLIGHT_FAILED",
-          `The balances, holds and availability policy could not be read (${detail}), so the screen cannot be drawn honestly and the form is not drawn at all. Nothing was funded — this is a read, and a read cannot post an entry.`,
+          `The account list, the business list, the KYB gate or the funds_availability_policy table could not be read, so the screen cannot be drawn honestly and the form is not drawn at all. ${describeThrown(thrown)} Nothing was funded — this is a read, and a read cannot post an entry.`,
         );
       }
     },

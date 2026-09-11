@@ -16,7 +16,13 @@
 
 import { fail, ok } from "@/lib/result";
 
-import type { FundingDataSource, FundingSnapshot, PolicyView } from "./data-contract";
+import type {
+  BusinessView,
+  FundingDataSource,
+  FundingSnapshot,
+  PolicyView,
+  TransactGateView,
+} from "./data-contract";
 import type { DemoState } from "./demo-state";
 
 /** Fixed, so ages and screenshots are reproducible. */
@@ -92,13 +98,69 @@ const POLICIES: readonly PolicyView[] = [
  * uncleared, $0.00 available — because a fixture whose decomposition does not
  * add up teaches the reader that this screen's numbers do not have to.
  */
+const FIXTURE_BUSINESS_ID = "e274546d-6bdd-5266-b0fb-cc839a7811f9";
+
+const ALLOWED_GATE: TransactGateView = {
+  allowed: true,
+  code: null,
+  message:
+    "Approved, but on simulated or manual evidence: this deployment's policy allows it, and the label says exactly what it rests on.",
+  status: "approved",
+  evidence: "manual",
+};
+
+/**
+ * A refused business, in the fixture states too.
+ *
+ * The refusal is half of what this screen has to get right, so a fixture that
+ * only ever showed an allowed customer would leave the other half visible on
+ * the live screen alone. The code is one `canTransact()` really emits.
+ */
+const REFUSED_GATE: TransactGateView = {
+  allowed: false,
+  code: "KYB_NEEDS_REVIEW",
+  message: "Verification is with a reviewer. This business can be viewed, but not transacted on.",
+  status: "needs_review",
+  evidence: "live",
+};
+
+const FIXTURE_BUSINESSES: readonly BusinessView[] = [
+  {
+    id: FIXTURE_BUSINESS_ID,
+    legalName: "Ridgeline Robotics, Inc.",
+    ein: "000000000",
+    depositAccountId: "a0c41a37-2be1-5c30-bfe9-03455f048fac",
+    gate: ALLOWED_GATE,
+    gateIfLiveRequired: {
+      ...REFUSED_GATE,
+      code: "KYB_EVIDENCE_MANUAL",
+      message:
+        "Verification is approved on manual evidence, and this policy requires live third-party evidence.",
+      status: "approved",
+      evidence: "manual",
+    },
+  },
+  {
+    id: "3593cbbb-cd74-5078-ab3c-c4c546910f95",
+    legalName: "Silverline Freight Co.",
+    ein: "222221000",
+    // No account has ever been opened for this business, and that is a fact the
+    // screen states rather than an omission it hides.
+    depositAccountId: null,
+    gate: REFUSED_GATE,
+    gateIfLiveRequired: REFUSED_GATE,
+  },
+];
+
 const LOADING_ACCOUNTS: FundingSnapshot["accounts"] = [
   {
     id: "a0c41a37-2be1-5c30-bfe9-03455f048fac",
-    businessId: "e274546d-6bdd-5266-b0fb-cc839a7811f9",
+    businessId: FIXTURE_BUSINESS_ID,
     businessName: "Ridgeline Robotics, Inc.",
     accountName: "Ridgeline Robotics, Inc. — business current account",
     currency: "USD",
+    gate: ALLOWED_GATE,
+    readError: null,
     balance: {
       ledgerDisplay: "$2,500.00",
       availableDisplay: "$0.00",
@@ -117,6 +179,7 @@ const LOADING_ACCOUNTS: FundingSnapshot["accounts"] = [
         amountDisplay: "$2,500.00",
         releaseDate: "2026-09-11",
         availableAt: "2026-09-11T13:00:00.000Z",
+        neverReleases: false,
         released: false,
         closedReason: null,
         placedAt: DEMO_NOW,
@@ -137,9 +200,14 @@ const PREFLIGHT_FAILED = {
     "The balances, holds and availability policy could not be read, so the screen cannot be drawn honestly and the form is not drawn at all. Nothing was funded — this is a read, and a read cannot post an entry.",
 } as const;
 
-function snapshot(accounts: FundingSnapshot["accounts"]): FundingSnapshot {
+function snapshot(
+  accounts: FundingSnapshot["accounts"],
+  businesses: readonly BusinessView[] = FIXTURE_BUSINESSES,
+): FundingSnapshot {
   return {
     accounts,
+    businesses,
+    selectedBusinessId: businesses[0]?.id ?? null,
     policies: POLICIES,
     defaultValueDate: DEMO_VALUE_DATE,
     provider: {
@@ -164,13 +232,28 @@ export function createFixtureSource(
   state: Exclude<DemoState, "default" | "edge">,
 ): FundingDataSource {
   return {
-    async getSnapshot() {
+    // The `?business=` reference is accepted and ignored, on purpose. These
+    // three states answer a question about the SCREEN — is the skeleton right,
+    // does the error branch draw, what does an empty book look like — and none
+    // of them is about a particular customer. Honouring the selection here
+    // would mean inventing fixture balances for whatever uuid was typed.
+    async getSnapshot(_businessId: string | null) {
+      void _businessId;
       switch (state) {
         case "loading":
           await new Promise((resolve) => setTimeout(resolve, DEMO_LOADING_MS));
           return ok(snapshot(LOADING_ACCOUNTS));
         case "empty":
-          return ok(snapshot([]));
+          // An empty book means no account was ever opened — so the businesses
+          // carry no deposit account either. A fixture whose two halves
+          // disagreed would be teaching the reader that this screen's halves
+          // are allowed to.
+          return ok(
+            snapshot(
+              [],
+              FIXTURE_BUSINESSES.map((business) => ({ ...business, depositAccountId: null })),
+            ),
+          );
         case "error":
           return fail(PREFLIGHT_FAILED.code, PREFLIGHT_FAILED.message);
       }

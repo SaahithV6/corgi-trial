@@ -266,7 +266,14 @@ overdraft behind a cosmetic floor loses money.
 `src/lib/ledger/**` writes SQL against `journal_entry`, `journal_line` or
 `account`.
 
-Measured now: **235 references across 50 files.** Every one is allowlisted
+Measured at the heading timestamp: **235 references across 50 files.** The
+baseline is a timestamp, not a law of nature — five other workers are live in
+this repo, and an increase after it is new debt the ratchet is there to catch.
+It caught one during this very change: the standing-orders suite needed the
+house cash leaf to fund its own precondition and reached for
+`SELECT id FROM account WHERE code = '1110'`. That is now
+`houseAccountId('1110')` in `src/lib/ledger/`, which is the first payment
+against the list rather than the first exception to it. Every one is allowlisted
 **with its owning module named**, and the test is a ratchet:
 
 * a file not on the list may have **no** references
@@ -315,6 +322,13 @@ cannot get longer while nobody is looking.
   test does not scan it. **It has not been updated to the new definition**, so
   its `available` column still reads `ledger(every line) − card holds −
   uncleared`. Its assertions are all *deltas*, which is why it still holds.
+* `standing_order_outcome` (migration 0012) records four of the five terms:
+  `observed_ledger/holds/uncleared/available`. There is no column for committed
+  outflows, and adding one is a migration this worker was not scoped to write,
+  so the recorded identity is now an inequality — `available <= ledger − holds −
+  uncleared`. `standing.integration.test.ts` asserts it as one, names the
+  missing term, and asserts the full five-term identity live instead. **A
+  `0023` adding `observed_pending_outbound_cents` is the fix.**
 * `listPostingRows()` still excludes future-dated entries from the activity
   table. The committed outflows that now reduce `available` are therefore not
   yet listed among the postings that explain it. The screens name the figure;

@@ -118,6 +118,21 @@ export type UnclearedHoldView = {
   readonly releaseDate: ValueDate | null;
   /** The instant it becomes spendable. Null on a card hold. */
   readonly availableAt: Instant | null;
+  /**
+   * TRUE WHEN `available_at` IS `infinity`, AND THAT IS A REAL VALUE.
+   *
+   * A dispute's provisional credit is an `uncleared_credit` hold with no
+   * release instant at all: it is withheld until the dispute is decided by a
+   * person, never by a clock, and `infinity` is how that is said in Postgres.
+   *
+   * This flag exists because the absence of it cost this screen entirely.
+   * `postgres` parses `infinity::timestamptz` into an `Invalid Date`, the
+   * banking-date formatter threw `RangeError: Invalid time value` on it, the
+   * throw was caught by the snapshot's own catch, and every business on the
+   * book got `FUNDING_PREFLIGHT_FAILED` and no form — because nine rows
+   * belonging to ONE customer could not be formatted. See `docs/FUNDING.md`.
+   */
+  readonly neverReleases: boolean;
   readonly released: boolean;
   /** Which limb of `closed(E)` fired, when it has. */
   readonly closedReason: string | null;
@@ -126,19 +141,82 @@ export type UnclearedHoldView = {
 };
 
 /* -------------------------------------------------------------------------- */
+/* The gate                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `canTransact()`'s answer, flattened — the same shape `/payments` carries, on
+ * purpose, so the two screens describe the same decision in the same words.
+ *
+ * FUNDING IS TRANSACTING. Money arriving is money moving: it raises a customer
+ * liability, it can be returned, and an entity that has not passed its check
+ * must not be able to park a balance with us any more than it can send one.
+ * The brief's rule — "unverified entities can look but not transact" — has no
+ * inbound exemption, so this screen reads the identical gate and prints the
+ * identical code.
+ *
+ * It is a PREVIEW, not the control. The control is the same read taken again
+ * inside `fundFromExternalBankAction`, before a single byte goes to Plaid.
+ */
+export type TransactGateView = {
+  readonly allowed: boolean;
+  /** The refusal code verbatim — `KYB_NEEDS_REVIEW`, `KYB_PENDING`, … */
+  readonly code: string | null;
+  readonly message: string;
+  readonly status: string | null;
+  readonly evidence: string | null;
+};
+
+/**
+ * One business on the book, whether or not it can be funded.
+ *
+ * EVERY business is carried, including one with no deposit account — which is
+ * the whole reason this type exists rather than the account list standing in
+ * for it. Silverline Freight Co. is `needs_review` and has never had an account
+ * opened, so an account-shaped list cannot say anything about it at all, and a
+ * screen that cannot say why a business is missing is a screen that looks
+ * broken every time somebody asks about one.
+ */
+export type BusinessView = {
+  readonly id: string;
+  readonly legalName: string;
+  readonly ein: string | null;
+  /** The deposit account an inbound credit would land in, when one is open. */
+  readonly depositAccountId: string | null;
+  readonly gate: TransactGateView;
+  /** The same gate under the stricter policy a real-money deployment would run. */
+  readonly gateIfLiveRequired: TransactGateView;
+};
+
+/* -------------------------------------------------------------------------- */
 /* Accounts                                                                   */
 /* -------------------------------------------------------------------------- */
 
-/** One customer deposit account an inbound credit could land in. */
+/**
+ * One customer deposit account an inbound credit could land in.
+ *
+ * `balance` and `unclearedHolds` are NULLABLE, and the null is the lesson this
+ * screen learned the expensive way. They used to be unconditional, which meant
+ * the read for every account had to succeed for any account to render — so one
+ * unformattable hold on one customer took the form away from all four. An
+ * account that cannot be read now carries its `readError` and the rest of the
+ * book still draws. A degraded row says which account and why; it never shows
+ * `$0.00` for a balance nobody managed to read.
+ */
 export type FundableAccountView = {
   readonly id: string;
   readonly businessId: string;
   readonly businessName: string;
   readonly accountName: string;
   readonly currency: string;
-  readonly balance: BalanceView;
-  /** Uncleared-credit holds on this account, newest first. */
-  readonly unclearedHolds: readonly UnclearedHoldView[];
+  /** Null when this one account's read failed. Never a zero standing in for one. */
+  readonly balance: BalanceView | null;
+  /** Uncleared-credit holds on this account, largest first. Null when unread. */
+  readonly unclearedHolds: readonly UnclearedHoldView[] | null;
+  /** Why this account could not be read, when it could not. */
+  readonly readError: ErrorShape | null;
+  /** May this business move money? Read for every account, before anything. */
+  readonly gate: TransactGateView;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -169,6 +247,13 @@ export type ProviderView = {
 
 export type FundingSnapshot = {
   readonly accounts: readonly FundableAccountView[];
+  /** Every business on the book, gated, whether or not it holds an account. */
+  readonly businesses: readonly BusinessView[];
+  /**
+   * The business this view is pointed at, after `?business=` has been matched
+   * against `businesses`. Null only when the book holds no business at all.
+   */
+  readonly selectedBusinessId: string | null;
   /** Every version of every rail's availability policy, for the policy table. */
   readonly policies: readonly PolicyView[];
   /** Today in the banking timezone. The form's default value date. */
@@ -178,6 +263,11 @@ export type FundingSnapshot = {
 };
 
 export interface FundingDataSource {
-  /** Everything the screen needs to be drawn honestly. One snapshot, one instant. */
-  getSnapshot(): Promise<Result<FundingSnapshot, ErrorShape>>;
+  /**
+   * Everything the screen needs to be drawn honestly. One snapshot, one instant.
+   *
+   * `businessId` is the raw `?business=` reference. The source matches it
+   * against the list it reads; it is never trusted for anything but selection.
+   */
+  getSnapshot(businessId: string | null): Promise<Result<FundingSnapshot, ErrorShape>>;
 }

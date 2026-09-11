@@ -55,6 +55,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { formatUsd } from "@/lib/format/money";
+import { transactGateForAccount, transactGateForBusiness } from "@/lib/kyb/wire";
 import { sql } from "@/lib/ledger/db";
 import { findDepositAccount } from "@/lib/ledger/queries";
 import { rootLogger } from "@/lib/log";
@@ -330,6 +331,33 @@ export async function fundFromExternalBankAction(
     );
   }
 
+  // THE KYB GATE, AND IT IS BEFORE PLAID RATHER THAN AFTER IT.
+  //
+  // The brief's rule is "unverified entities can look but not transact", and it
+  // has no inbound exemption. Funding raises a customer liability, the credit
+  // can be returned for days afterwards, and an entity nobody has verified must
+  // not be able to park a balance with us any more than it can send one.
+  //
+  // This is the SAME call `/payments` previews and the same call
+  // `requestPayment()` makes inside its own transaction —
+  // `transactGateForAccount()`, resolved from the account, handed straight to
+  // `canTransact()`. The refusal carries `canTransact`'s code verbatim
+  // (KYB_NEEDS_REVIEW, KYB_PENDING, KYB_REJECTED, KYB_NOT_STARTED,
+  // KYB_STATE_UNREADABLE), because a second vocabulary for the same decision is
+  // how two screens end up disagreeing about whether a customer is allowed.
+  //
+  // It runs BEFORE the Plaid calls, not after, for two reasons: a refused
+  // business must not cause a real Item to be created at a real institution,
+  // and Plaid's sandbox is rate limited, so a gate that spent five calls before
+  // saying no would be a gate that costs more than the operation it refused.
+  const gate = await transactGateForAccount(account.accountId, { conn: sql });
+  if (!gate.allowed) {
+    return refused(
+      gate.code,
+      `${gate.message} ${account.legalName} cannot be funded from an external bank until that is resolved. Nothing was sent to Plaid — no Item was created — and no journal entry exists. This is the identical gate /payments reads and requestPayment() enforces inside its own transaction; there is no inbound path around it.`,
+    );
+  }
+
   // THE DOUBLE-CLICK GUARD, and it is a guard rather than the guarantee.
   //
   // Idempotency on this path is three unique indexes, and every one of their
@@ -521,6 +549,203 @@ function toBalanceView(balance: BalanceCents): BalanceSnapshotView {
     cardHoldsDisplay: formatUsd(balance.holdsCents),
     unclearedDisplay: formatUsd(balance.unclearedCents),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Step one of the leg: link a bank, and only link a bank                     */
+/* -------------------------------------------------------------------------- */
+
+/** One depository account on a freshly linked Item, as the screen prints it. */
+export type LinkedAccountView = {
+  readonly plaidAccountId: string;
+  readonly name: string;
+  readonly officialName: string | null;
+  readonly mask: string | null;
+  readonly subtype: string | null;
+  /** Public bank routing data. Safe to print; the account number never is. */
+  readonly routingNumber: string;
+  readonly balanceDisplay: string | null;
+};
+
+export type LinkResultView = {
+  readonly status: "idle" | "ok" | "refused";
+  readonly code: string | null;
+  readonly message: string;
+  readonly businessId: string | null;
+  readonly businessName: string | null;
+  readonly itemId: string | null;
+  readonly institutionId: string | null;
+  readonly institutionName: string | null;
+  readonly linkToken: string | null;
+  readonly linkTokenExpiresAt: string | null;
+  readonly accounts: readonly LinkedAccountView[] | null;
+  readonly calls: readonly CallView[] | null;
+};
+
+const linkSchema = z.object({
+  businessId: z
+    .string()
+    .trim()
+    .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, {
+      error: "choose the business to link a bank for",
+    }),
+});
+
+function refusedLink(code: string, message: string, calls: readonly CallView[] | null = null): LinkResultView {
+  return {
+    status: "refused",
+    code,
+    message,
+    businessId: null,
+    businessName: null,
+    itemId: null,
+    institutionId: null,
+    institutionName: null,
+    linkToken: null,
+    linkTokenExpiresAt: null,
+    accounts: null,
+    calls,
+  };
+}
+
+/**
+ * LINK AN EXTERNAL BANK, AND POST NOTHING.
+ *
+ * ============================================================================
+ * WHY THIS IS A SEPARATE BUTTON FROM "FUND"
+ * ============================================================================
+ *
+ * Because "fund it from a linked external bank" is two steps and a business
+ * that has never linked one has to be able to take the first. A screen that
+ * could only link a bank as a side effect of moving money would be a screen
+ * where having no bank linked is a PRECONDITION of funding rather than the
+ * opening move of it — and the reader has no way to tell the two apart until
+ * they try it with a customer who has never linked anything.
+ *
+ * So this action does exactly the first half: five real HTTP requests to
+ * `sandbox.plaid.com`, a real Item at a real institution, and that Item's real
+ * depository accounts with the real ACH routing numbers `/auth/get` returned.
+ * It posts no journal entry, opens no hold and moves no balance. Whatever it
+ * prints, it observed.
+ *
+ * ============================================================================
+ * IT IS AN EXPLICIT ACTION, AND THAT IS A RATE-LIMIT DECISION AS WELL AS A
+ * DESIGN ONE
+ * ============================================================================
+ *
+ * Nothing on this screen calls Plaid on render. Linking creates real objects at
+ * a provider that rations its sandbox — `/institutions/get` is ten calls per
+ * credential per window, which is why the integration health probe caches its
+ * verdict — so a page that linked on render, or polled for a link, would burn
+ * quota on readers who never pressed anything. Every Plaid call this screen
+ * makes is behind a button a person pressed, and every one of them is printed
+ * with its status code and Plaid's own `request_id`.
+ *
+ * If Plaid refuses — rate limit included — that is what is rendered, with
+ * Plaid's own error code. It is never smoothed into a link that did not happen.
+ *
+ * ============================================================================
+ * THE ITEM IS NOT PERSISTED, AND SAYING SO IS THE POINT
+ * ============================================================================
+ *
+ * There is no `plaid_item` table in this schema and adding one needs a
+ * migration this worker does not own, so the `access_token` is used for the two
+ * reads inside this action and dropped. The durable record of a linkage is the
+ * `external_ref` on the money rows a FUNDING run writes —
+ * `plaid:<item>:<account>:<reference>` — which is genuinely immutable and
+ * genuinely means an Item that has never funded anything is not stored at all.
+ *
+ * The honest consequence, stated rather than hidden: pressing this button and
+ * then pressing "fund" links TWO Items, and the deposit is booked against the
+ * second. That is why the fund form remains one press end to end. This button
+ * exists to prove the step is available to any business — and to show what
+ * comes back — not to be a prerequisite for the next one.
+ */
+export async function linkExternalBankAction(
+  _previous: LinkResultView,
+  formData: FormData,
+): Promise<LinkResultView> {
+  const parsed = linkSchema.safeParse({ businessId: formData.get("businessId") ?? "" });
+  if (!parsed.success) {
+    return refusedLink(
+      "INVALID_FORM",
+      "No business was named, so nothing was sent to Plaid and no Item was created.",
+    );
+  }
+
+  const businessId = parsed.data.businessId;
+
+  // The same gate, before the same provider, for the same reason as funding: a
+  // business that may not transact must not cause an Item to be created in its
+  // name at a real institution.
+  const gate = await transactGateForBusiness(businessId, { conn: sql });
+  if (!gate.allowed) {
+    return refusedLink(
+      gate.code,
+      `${gate.message} No bank can be linked for this business until that is resolved — nothing was sent to Plaid and no Item was created.`,
+    );
+  }
+
+  const client = new PlaidClient();
+  if (!client.configured) {
+    return refusedLink(
+      "PLAID_NOT_CONFIGURED",
+      "PLAID_CLIENT_ID and PLAID_SECRET are not both set in this deployment, so no Plaid call can be made and no Item exists. There is no simulator behind this slot: an unconfigured Plaid is a missing capability, not a fallback.",
+    );
+  }
+
+  const webhook = plaidWebhookUrl();
+  const log = rootLogger.child({ screen: "funding", step: "link" });
+
+  try {
+    const link = await linkExternalAccount({
+      clientUserId: businessId,
+      institutionId: SANDBOX_INSTITUTION_ID,
+      ...(webhook === null ? {} : { webhook }),
+      client,
+    });
+    const calls = toCallViews(link.calls);
+
+    log.info("funding.linked", { businessId, itemId: link.item.item_id });
+
+    return {
+      status: "ok",
+      code: "LINKED",
+      message:
+        link.fundable.length === 0
+          ? "The Item linked, and not one of its accounts is a depository account Plaid returned ACH numbers for. There is nothing on it to fund from. Nothing was posted."
+          : "Linked. A real Plaid Item now exists at a real institution and the accounts below are the ones Plaid returned ACH routing numbers for. NOTHING WAS POSTED — no journal entry, no hold, no balance moved. Funding is the next press.",
+      businessId,
+      businessName: null,
+      itemId: link.item.item_id,
+      institutionId: link.item.institution_id ?? null,
+      institutionName: link.item.institution_name ?? null,
+      linkToken: link.linkToken?.token ?? null,
+      linkTokenExpiresAt: link.linkToken?.expiresAt ?? null,
+      accounts: link.fundable.map((account) => ({
+        plaidAccountId: account.accountId,
+        name: account.accountName,
+        officialName: account.officialName,
+        mask: account.accountMask,
+        subtype: account.subtype,
+        routingNumber: account.routingNumber,
+        balanceDisplay: account.balanceDisplay,
+      })),
+      calls,
+    };
+  } catch (thrown) {
+    const body = plaidErrorBody(thrown);
+    const code = body?.error_code ?? "PLAID_LINK_FAILED";
+    log.warn("funding.link_failed", { code, businessId });
+    return refusedLink(
+      code,
+      body === null
+        ? `Plaid could not be reached, so no Item was created and nothing was posted. ${
+            thrown instanceof Error ? thrown.message : "unknown transport failure"
+          }`
+        : `${body.error_message} ${PLAID_ITEM_ERROR_COPY[body.error_code] ?? ""} No Item exists and nothing was posted — this is Plaid's own code, rendered as it came back rather than smoothed into a link that did not happen.`.trim(),
+    );
+  }
 }
 
 /* -------------------------------------------------------------------------- */
