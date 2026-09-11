@@ -177,23 +177,40 @@ class AchRailAdapter implements ObservingRail, OriginatingRail<AchInstruction> {
 const INCREASE_SUPPORT: RailSupport = {
   originate: {
     supported: true,
-    proof: 'unexercised',
-    evidence: 'POST /ach_transfers, both directions by sign. Shape from docs; a key exists now but this call has never been sent — the one transfer in the sandbox carries no Idempotency-Key, so it did not come from here.',
+    proof: 'measured',
+    // The old evidence string described a DIFFERENT transfer. It said "the one
+    // transfer in the sandbox carries no Idempotency-Key, so it did not come
+    // from here" — true of sandbox_ach_transfer_s2iljuavdzp2p68rh7v7 ($742.19,
+    // key null), and there are two now. `createAchTransfer` is the only code in
+    // this repo that sends an Idempotency-Key to /ach_transfers.
+    evidence:
+      'POST /ach_transfers, measured: sandbox_ach_transfer_x5vdo5m7b6k924sszlms, $6,000.00, Idempotency-Key test:approvals:1789097931095:gate — a released payment instruction from the maker-checker suite.',
   },
   observe: {
     supported: true,
-    proof: 'unexercised',
-    evidence: 'Event body is a pointer; parseEvent reads the transfer back. Two real deliveries arrived and were dead-lettered — no consumer is registered for increase — so this has still never run against one.',
+    proof: 'measured',
+    // The only one of the four that was genuinely unrun. Earned to the same
+    // standard the wire row was: parseEvent is run against the EXACT SIGNED
+    // BYTES of five real deliveries read out of webhook_inbox.raw_body, not a
+    // fixture anybody typed — which is also what guards the old
+    // startsWith('ach_transfer_') regression, since every sandbox id the
+    // provider sends carries the `sandbox_` prefix that bug could not see.
+    evidence:
+      'parseEvent run against the raw signed bytes of 5 real ach_transfer.* deliveries; all resolve to one verdict (the body is a pointer, so order is harmless), the return reads 600000n / R01, and the adapter agrees with what the consumer independently booked. increase/observe.integration.test.ts.',
   },
   settle: {
     supported: true,
-    proof: 'unexercised',
-    evidence: 'submitted + settlement.settled_at is promoted to settled. The trap is handled; the handling is untested against the provider.',
+    proof: 'measured',
+    evidence:
+      'submitted + settlement.settled_at promoted to settled, on the book: ach:settled:sandbox_ach_transfer_x5vdo5m7b6k924sszlms, DR 2300 600000 / CR 1110 -600000.',
   },
   reverse: {
     supported: true,
-    proof: 'unexercised',
-    evidence: 'R-code table covers R01-R29 as a second movement carrying its own amount. Only R01/R02/R03 are even documented-confident.',
+    proof: 'measured',
+    // R01 is measured; R02-R29 remain table-driven and unexercised, which the
+    // string says rather than letting one earned code promote its neighbours.
+    evidence:
+      'R01 insufficient_fund measured end to end: ach:return:sandbox_ach_transfer_x5vdo5m7b6k924sszlms:644288470109390, DR 1110 600000 / CR 2100 -600000, posted at return.created_at with the settlement left standing. R02-R29 are table-driven and unexercised.',
   },
   probe: {
     supported: true,

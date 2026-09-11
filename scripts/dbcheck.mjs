@@ -598,6 +598,81 @@ for (const [view, what, query, totalQuery] of REACH) {
   }
 }
 
+// ---- 8b. THE CLOSURE CENSUS — a guard stating its own domain out loud ---
+//
+// `v_hold_closure_not_terminal` used to choose its population by matching
+// English against `hold_closure.reason`: five string literals, 126 of 228
+// rows admitted, and migration 0032's own twelve closures excluded by the
+// WORDING of their message rather than by anyone's intent. Migration 0040
+// replaced the discriminator with a CHECK-constrained `source` column and
+// pointed the view at it, and `v_hold_closure_census` derives "is this row
+// in the guard" from the SAME column the guard filters on — so the reach
+// figure and the guard cannot drift apart the way they did.
+//
+// `defect_shape` is the column that matters. It counts rows the guard does
+// NOT range over that carry its shape anyway: a standing, unreversed
+// closure over an authorisation the fold still calls open. "Outside the
+// guard" is a legitimate answer; "outside the guard and therefore nobody
+// looked" is the failure this build keeps rediscovering, and this column is
+// the difference between the two.
+try {
+  const census = await sql.unsafe(`
+    SELECT source, hold_kind, in_guard, closures, defect_shape, defect_shape_cents::text AS cents
+      FROM v_hold_closure_census ORDER BY in_guard DESC, closures DESC`);
+  const inGuard = census.filter((r) => r.in_guard).reduce((a, r) => a + r.closures, 0);
+  const total = census.reduce((a, r) => a + r.closures, 0);
+  console.log(`\n  v_hold_closure_not_terminal — ranges over ${inGuard} of ${total} closures, BY DECLARED WRITER`);
+  for (const r of census) {
+    const shape = r.defect_shape > 0 ? `  <- ${r.defect_shape} of these carry the guard's defect shape (${usd(r.cents)})` : "";
+    console.log(
+      `      ${r.in_guard ? "IN " : "out"}  ${String(r.source).padEnd(18)} ${String(r.closures).padStart(4)}` +
+      ` closure(s) on ${r.hold_kind} holds${shape}`,
+    );
+  }
+  console.log(
+    "      out = a repair, an operator override, a dispute, a rail's availability sweep or a\n" +
+    "            test fixture: none of them claims the hold model's terminal predicate licensed\n" +
+    "            the row, which is the only thing this guard asserts. Every one is counted here.",
+  );
+} catch (e) {
+  console.log(`  ????? v_hold_closure_census could not be read: ${String(e.message).split("\n")[0].slice(0, 60)}`);
+}
+
+// ---- 8c. EVERY CARD-AUTH CLOSURE DECLARES ITS WRITER --------------------
+//
+// The rule that keeps 8b honest, enforced HERE rather than by a trigger.
+//
+// A card-auth closure written without a `source` would be NULL, fall
+// outside `v_hold_closure_not_terminal`, and reproduce 0028's defect in a
+// new field — so the rule has to be real. It is not a BEFORE INSERT trigger
+// because a migration lands on the database the instant it runs while the
+// deployed build is whatever was last pushed (0056: the repository had the
+// fix and the box did not, for eight hours). In that window a trigger would
+// refuse a CORRECT closure written by a deployed `apply.ts` that cannot know
+// about a column which did not exist when it was built, and the customer's
+// card hold would sit on their money until the deploy caught up.
+//
+// Refusing a correct write to enforce a LABEL on it is the wrong trade.
+// Turning CI red on the first offending row is the same rule, collected a
+// few minutes later, with nobody's money held to make the point.
+const undeclared = await sql`
+  SELECT count(*)::int AS n
+    FROM hold_closure hc JOIN hold h ON h.id = hc.hold_id
+   WHERE h.kind = 'card_auth' AND hc.source IS NULL`;
+if ((undeclared[0]?.n ?? 0) === 0) {
+  ok(
+    "every card-auth closure declares its writer",
+    "hold_closure.source is non-NULL on every closure the invariant's population is drawn from",
+  );
+} else {
+  bad(
+    "every card-auth closure declares its writer",
+    `${undeclared[0].n} card-auth closure(s) carry source IS NULL — they are outside ` +
+      "v_hold_closure_not_terminal and nothing says why. Add the arm to the writer, not to a reason string.",
+  );
+}
+
+
 // ---- 9. MAKE IT FAIL ON PURPOSE ---------------------------------------
 //
 // `node scripts/dbcheck.mjs --prove`
@@ -609,10 +684,33 @@ for (const [view, what, query, totalQuery] of REACH) {
 // that could not fail (0026's own) shipped with a paragraph explaining why
 // it could. Prose is not a measurement. This runs the demonstrations.
 //
+// IT USED TO RUN TWO OF THEM. `v_refused_auth_hold` and
+// `v_wire_availability_drift` had provers; the other nineteen views on the
+// list above were trusted on the strength of a sentence in a migration, and
+// three of those sentences have since turned out to be wrong — 0012's
+// (unsatisfiable), 0026's (excluded the bug), 0028's (could only see 55% of
+// its table). A rule that is executed for two cases out of twenty-one is
+// not a rule, it is a habit with two witnesses.
+//
+// SO EVERY INVARIANT VIEW NOW HAS A PROOF, AND COVERAGE IS COMPUTED RATHER
+// THAN CLAIMED: the driver walks the same arrays the section above checks,
+// and a view with no proof registered FAILS here by name. Nobody can add an
+// invariant and forget this file; the tally says so on the next run.
+//
 // Every proof below runs inside `sql.begin()` and ends by THROWING, so the
 // transaction rolls back. The money tables are append-only and this role
 // holds no DELETE, so a proof that leaked would be permanent — the throw is
-// the teardown, and it is unconditional rather than in a `finally`.
+// the teardown, and it is unconditional rather than in a `finally`. Each
+// proof then RE-READS its view outside the transaction and asserts the count
+// is back where it started, because "it rolled back" is itself a claim.
+//
+// WHERE A PROOF NEEDS A TRIGGER DISABLED, IT SAYS SO IN THE OUTPUT. That is
+// not an apology. A view whose violating state cannot be written through the
+// live path at all is a view standing behind a constraint that already
+// refuses the bug, and the pair — constraint refuses, view would catch it
+// anyway — is the composition worth printing. Those proofs run on the OWNER
+// connection, because `corgi_app` cannot disable a trigger (0001 §13) and
+// that is the whole reason the privilege layer holds.
 //
 // Not run by default: `scripts/compliance.mjs` spawns this script as part
 // of AF3 against the live database, and a prover that writes on every
@@ -620,11 +718,29 @@ for (const [view, what, query, totalQuery] of REACH) {
 if (process.argv.includes("--prove")) {
   console.log("\nMADE TO FAIL ON PURPOSE — each in a transaction that is rolled back\n");
 
+  /**
+   * The OWNER connection, opened once and only if a proof needs it.
+   *
+   * `corgi_app` cannot disable a trigger; that is layer 1 working, not a
+   * limitation to route around. A proof that needs one runs as the owner and
+   * prints the fact. If no owner URL is configured the proof FAILS — a check
+   * that cannot be performed is unknown, and unknown is never a pass.
+   */
+  let ownerSql = null;
+  let ownerTried = false;
+  function owner() {
+    if (ownerTried) return ownerSql;
+    ownerTried = true;
+    const url = process.env.DIRECT_URL || process.env.DATABASE_URL;
+    if (url) ownerSql = postgres(url, { max: 1, onnotice: () => {} });
+    return ownerSql;
+  }
+
   /** Run `body` in a transaction that cannot commit. Returns its value. */
-  async function inRollback(body) {
+  async function inRollback(conn, body) {
     let captured;
     try {
-      await sql.begin(async (tx) => {
+      await conn.begin(async (tx) => {
         captured = await body(tx);
         throw new Error("__dbcheck_rollback__");
       });
@@ -634,86 +750,862 @@ if (process.argv.includes("--prove")) {
     return captured;
   }
 
-  /** `before -> after` on one view, with the delta named. */
-  const delta = (name, before, after, how) => {
-    if (after > before) ok(`${name} CAN fail`, `${before} -> ${after} after ${how}`);
-    else bad(`${name} CAN fail`, `${before} -> ${after} after ${how} — the guard did not move`);
-  };
+  /** First row of a statement, or undefined. */
+  const one = async (tx, q) => (await tx.unsafe(q))[0];
 
-  // ---- 9a. v_refused_auth_hold sees a REFUSAL --------------------------
+  /** The system actor every posting in this book is attributed to. */
+  const ACTOR = `(SELECT id FROM actor WHERE kind='system' AND display_name='ledger-poster' LIMIT 1)`;
+
+  // =====================================================================
+  // THE PROOFS
+  // =====================================================================
   //
-  // A new event of a kind that feeds A(E), on an authorisation whose hold is
-  // withholding money right now, with the network's verdict recorded beside
-  // it as a refusal. This is the shape of the bug 050 found and 0026 fixed.
-  try {
-    const proof = await inRollback(async (tx) => {
-      const [target] = await tx.unsafe(`
-        SELECT ca.id AS auth_id
-          FROM v_hold_state hs
-          JOIN card_authorization ca ON ca.hold_id = hs.hold_id
-         WHERE hs.active_hold_cents > 0
-         ORDER BY hs.hold_id LIMIT 1`);
-      if (!target) return null;
-      const [before] = await tx.unsafe(
-        `SELECT count(*)::int AS n FROM v_refused_auth_hold WHERE verdict = 'refused'`);
-      const [ev] = await tx.unsafe(`
-        INSERT INTO card_auth_event (auth_id, kind, amount_cents, is_final, value_date, provider_event_id)
-        VALUES ('${target.auth_id}'::uuid, 'authorization', 1, false, current_date,
-                'dbcheck-prove-refused-' || gen_random_uuid()::text)
-        RETURNING id`);
-      await tx.unsafe(`
-        INSERT INTO card_auth_event_result (event_id, result, provider_step, source)
-        VALUES ('${ev.id}'::uuid, 'DECLINED', 'AUTHORIZATION', 'retained_payload')`);
-      const [after] = await tx.unsafe(
-        `SELECT count(*)::int AS n FROM v_refused_auth_hold WHERE verdict = 'refused'`);
-      return { before: before.n, after: after.n };
-    });
-    if (proof === null) bad("v_refused_auth_hold(refused) CAN fail", "no hold is withholding money to prove it on");
-    else delta("v_refused_auth_hold(refused)", proof.before, proof.after,
-      "a DECLINED verdict on a live hold's authorisation");
-  } catch (e) {
-    bad("v_refused_auth_hold(refused) CAN fail", String(e.message).split("\n")[0].slice(0, 80));
+  // One entry per invariant view. `run` builds the violating state and
+  // returns either nothing (it worked) or a STRING saying why it could not
+  // be built — which is a failure, printed by name, never a silent skip.
+  //
+  //   view     the invariant being violated
+  //   how      the sentence printed beside the delta
+  //   as       "app" (corgi_app, the role the product runs as) or "owner"
+  //   disable  triggers switched off for the transaction, printed out loud
+  //   expect   the exact delta, or "increase" with the reason in `note`
+  //   note     printed under the delta
+  const PROOFS = [
+    // ---- the journal ------------------------------------------------
+    {
+      view: "v_entry_unbalanced",
+      how: "one extra line appended to a balanced entry",
+      as: "app",
+      note:
+        "the entry is unbalanced INSIDE the transaction and could never commit: " +
+        "`journal_line_balanced` is a DEFERRABLE INITIALLY DEFERRED constraint trigger " +
+        "that fires at COMMIT. The view is the second line of defence, and this is what " +
+        "it would see if the first ever failed — proved below by forcing the check early.",
+      async run(tx) {
+        const e = await one(tx, `
+          SELECT l.entry_id FROM journal_line l
+            JOIN journal_entry je ON je.id = l.entry_id
+           GROUP BY l.entry_id, je.booking_seq ORDER BY je.booking_seq DESC LIMIT 1`);
+        if (!e) return "this book has no journal entry to append a line to";
+        await tx.unsafe(`
+          INSERT INTO journal_line (entry_id, ordinal, account_id, amount_cents, currency, value_date, booking_seq)
+          SELECT l.entry_id, max(l.ordinal) + 1, (array_agg(l.account_id ORDER BY l.ordinal))[1], 1, 'USD',
+                 min(l.value_date), min(l.booking_seq)
+            FROM journal_line l WHERE l.entry_id = '${e.entry_id}'::uuid GROUP BY l.entry_id`);
+        return undefined;
+      },
+      /** The other half: the deferred constraint refuses the same state. */
+      async andAlso(tx) {
+        try {
+          await tx.unsafe("SET CONSTRAINTS journal_line_balanced IMMEDIATE");
+          return { refused: false, message: "the database ALLOWED the unbalanced entry" };
+        } catch (err) {
+          return { refused: true, message: String(err.message).split("\n")[0] };
+        }
+      },
+    },
+    {
+      view: "v_line_denorm_drift",
+      how: "a line whose value_date is a day ahead of the entry it belongs to",
+      as: "app",
+      note:
+        "two lines are appended, +1 and -1, so the ENTRY still balances and only the " +
+        "denormalised clock drifts — this guard and v_entry_unbalanced are proved " +
+        "independent rather than by one write that trips both",
+      async run(tx) {
+        const e = await one(tx, `
+          SELECT l.entry_id FROM journal_line l JOIN journal_entry je ON je.id = l.entry_id
+           GROUP BY l.entry_id, je.booking_seq ORDER BY je.booking_seq DESC LIMIT 1`);
+        if (!e) return "this book has no journal entry to append a line to";
+        await tx.unsafe(`
+          INSERT INTO journal_line (entry_id, ordinal, account_id, amount_cents, currency, value_date, booking_seq)
+          SELECT l.entry_id, max(l.ordinal) + 1, (array_agg(l.account_id ORDER BY l.ordinal))[1], 1, 'USD',
+                 min(l.value_date) + 1, min(l.booking_seq)
+            FROM journal_line l WHERE l.entry_id = '${e.entry_id}'::uuid GROUP BY l.entry_id`);
+        await tx.unsafe(`
+          INSERT INTO journal_line (entry_id, ordinal, account_id, amount_cents, currency, value_date, booking_seq)
+          SELECT l.entry_id, max(l.ordinal) + 1, (array_agg(l.account_id ORDER BY l.ordinal))[1], -1, 'USD',
+                 min(l.value_date), min(l.booking_seq)
+            FROM journal_line l WHERE l.entry_id = '${e.entry_id}'::uuid GROUP BY l.entry_id`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_book_not_zero",
+      how: "one unbalanced line, which takes an entity's whole book off zero",
+      as: "app",
+      async run(tx) {
+        const e = await one(tx, `
+          SELECT l.entry_id FROM journal_line l JOIN journal_entry je ON je.id = l.entry_id
+           GROUP BY l.entry_id, je.booking_seq ORDER BY je.booking_seq DESC LIMIT 1`);
+        if (!e) return "this book has no journal entry to append a line to";
+        await tx.unsafe(`
+          INSERT INTO journal_line (entry_id, ordinal, account_id, amount_cents, currency, value_date, booking_seq)
+          SELECT l.entry_id, max(l.ordinal) + 1, (array_agg(l.account_id ORDER BY l.ordinal))[1], 1, 'USD',
+                 min(l.value_date), min(l.booking_seq)
+            FROM journal_line l WHERE l.entry_id = '${e.entry_id}'::uuid GROUP BY l.entry_id`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_deposit_control_drift",
+      how: "customer money booked to the HOUSE 2100 root, where no business can report it",
+      as: "app",
+      note:
+        "the deposits subtree counts every 2100 account; the reported side counts only " +
+        "the ones with a business_id. A line on the house root is inside the control " +
+        "total and outside every customer's balance — the classic control-account break",
+      async run(tx) {
+        const root = await one(tx, `SELECT id FROM account WHERE code='2100' AND business_id IS NULL LIMIT 1`);
+        if (!root) return "there is no house 2100 root account on this chart";
+        const e = await one(tx, `
+          SELECT l.entry_id FROM journal_line l JOIN journal_entry je ON je.id = l.entry_id
+           WHERE je.book = 'financial'
+           GROUP BY l.entry_id, je.booking_seq ORDER BY je.booking_seq DESC LIMIT 1`);
+        if (!e) return "this book has no financial entry to append a line to";
+        await tx.unsafe(`
+          INSERT INTO journal_line (entry_id, ordinal, account_id, amount_cents, currency, value_date, booking_seq)
+          SELECT l.entry_id, max(l.ordinal) + 1, '${root.id}'::uuid, 1, 'USD',
+                 min(l.value_date), min(l.booking_seq)
+            FROM journal_line l WHERE l.entry_id = '${e.entry_id}'::uuid GROUP BY l.entry_id`);
+        return undefined;
+      },
+    },
+
+    // ---- the hold model ----------------------------------------------
+    {
+      view: "v_hold_drift",
+      how: "an incremental authorisation the memo book was never told about",
+      as: "app",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ca.id AS auth_id
+            FROM v_hold_state hs
+            JOIN v_card_auth_hold ch ON ch.hold_id = hs.hold_id
+            JOIN card_authorization ca ON ca.hold_id = hs.hold_id
+           WHERE NOT hs.is_released AND hs.memo_balance_cents = ch.target_hold_cents
+           ORDER BY hs.hold_id LIMIT 1`);
+        if (!t) return "no live card hold to raise an authorisation against";
+        await tx.unsafe(`
+          INSERT INTO card_auth_event (auth_id, kind, amount_cents, is_final, value_date, provider_event_id)
+          VALUES ('${t.auth_id}'::uuid, 'incremental_authorization', 1, false, current_date,
+                  'dbcheck-prove-holddrift-' || gen_random_uuid()::text)`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_hold_release_drift",
+      how: "an operator closure over a hold whose memo book is still carrying money",
+      as: "app",
+      note: "this is the crash the 7b integration test simulates, left unrepaired",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT hs.hold_id FROM v_hold_state hs
+           WHERE NOT hs.is_released AND hs.memo_balance_cents <> 0
+           ORDER BY hs.hold_id LIMIT 1`);
+        if (!t) return "no live hold is carrying memo money to close over";
+        await tx.unsafe(`
+          INSERT INTO hold_closure (hold_id, reason, actor_id, source)
+          VALUES ('${t.hold_id}'::uuid,
+                  'dbcheck --prove: an operator release with the memo book left standing',
+                  ${ACTOR}, 'operator')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_hold_closure_not_terminal",
+      how: "a posting-path closure over an authorisation the fold still calls OPEN",
+      as: "app",
+      note:
+        "the closure declares source='posting_path' (migration 0040). The same row " +
+        "written with source='repair' or 'test_harness' does NOT move this guard, " +
+        "which is the whole point of the column — see the second proof below",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ch.hold_id FROM v_card_auth_hold ch
+           WHERE NOT ch.is_closed
+             AND NOT EXISTS (SELECT 1 FROM hold_closure hc WHERE hc.hold_id = ch.hold_id)
+           ORDER BY ch.hold_id LIMIT 1`);
+        if (!t) return "every open card authorisation on this book is already closed or already has a closure row";
+        await tx.unsafe(`
+          INSERT INTO hold_closure (hold_id, reason, actor_id, source)
+          VALUES ('${t.hold_id}'::uuid,
+                  'dbcheck --prove: a permanent closure on a reversible condition',
+                  ${ACTOR}, 'posting_path')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_hold_closure_not_terminal",
+      label: "v_hold_closure_not_terminal(repair is OUT)",
+      how: "the SAME row again, declared source='repair'",
+      as: "app",
+      expect: 0,
+      note:
+        "0 is the pass here. A repair closes a hold the fold calls open ON PURPOSE — " +
+        "0026 and 0032 did it 52 times, because the fold's input had lost the network's " +
+        "refusal. Before 0040 the population was chosen by matching English against " +
+        "hold_closure.reason, so which side of the guard a row landed on depended on its " +
+        "WORDING. This proof is the column doing its job in the negative direction.",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ch.hold_id FROM v_card_auth_hold ch
+           WHERE NOT ch.is_closed
+             AND NOT EXISTS (SELECT 1 FROM hold_closure hc WHERE hc.hold_id = ch.hold_id)
+           ORDER BY ch.hold_id LIMIT 1`);
+        if (!t) return "every open card authorisation on this book already has a closure row";
+        await tx.unsafe(`
+          INSERT INTO hold_closure (hold_id, reason, actor_id, source)
+          VALUES ('${t.hold_id}'::uuid,
+                  'dbcheck --prove: a repair closing a hold that was never owed',
+                  ${ACTOR}, 'repair')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_hold_expiry_drift",
+      how: "a hold and its authorisation given expiry instants one second apart",
+      as: "app",
+      note:
+        "ledger_availability() reads hold.expires_at and v_card_auth_hold reads " +
+        "card_authorization.expires_at. ensureAuthorization() writes one value into both; " +
+        "nothing in the schema says it must. Nine fixture rows on this book already differ " +
+        "by 135-158 ms, which is why this view is a standing failure above",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT h.account_id, h.memo_account_id, ca.card_id
+            FROM hold h JOIN card_authorization ca ON ca.hold_id = h.id
+           WHERE h.kind = 'card_auth' ORDER BY h.id LIMIT 1`);
+        if (!seed) return "this book has no card authorisation to model the proof on";
+        const hold = await one(tx, `
+          INSERT INTO hold (account_id, memo_account_id, kind, external_ref, value_date, expires_at)
+          VALUES ('${seed.account_id}'::uuid, '${seed.memo_account_id}'::uuid, 'card_auth',
+                  'dbcheck-prove-expiry-' || gen_random_uuid()::text, current_date,
+                  now() + interval '7 days')
+          RETURNING id`);
+        await tx.unsafe(`
+          INSERT INTO card_authorization (provider, provider_auth_id, card_id, account_id, hold_id, origin, expires_at)
+          VALUES ('lithic', 'dbcheck-prove-expiry-' || gen_random_uuid()::text,
+                  '${seed.card_id}'::uuid, '${seed.account_id}'::uuid, '${hold.id}'::uuid,
+                  'authorization', now() + interval '7 days 1 second')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_balance_definition_drift",
+      how: "a card hold whose OWN clock has run out while the authorisation's has not",
+      as: "app",
+      note:
+        "the same asymmetry v_hold_expiry_drift names, turned into money: " +
+        "ledger_availability() drops the hold on hold.expires_at, v_hold_state keeps it " +
+        "because v_card_auth_hold reads the authorisation. The customer's available " +
+        "balance and the hold model then disagree about the same dollars",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT h.account_id, h.memo_account_id, e.entity_id, e.id AS entry_id
+            FROM hold h
+            JOIN journal_entry e ON e.hold_id = h.id AND e.book = 'memo'
+           WHERE h.kind = 'card_auth'
+           ORDER BY e.booking_seq LIMIT 1`);
+        if (!seed) return "this book has no card-hold memo entry to model the proof on";
+        const hold = await one(tx, `
+          INSERT INTO hold (account_id, memo_account_id, kind, external_ref, value_date, expires_at)
+          VALUES ('${seed.account_id}'::uuid, '${seed.memo_account_id}'::uuid, 'card_auth',
+                  'dbcheck-prove-balancedef-' || gen_random_uuid()::text, current_date,
+                  now() - interval '1 hour')
+          RETURNING id`);
+        // The memo entry goes through `ledger_append()` — the same single write
+        // path everything else uses — with the seed entry's own lines, so an
+        // entry that does not balance is refused by the ledger, not by this script.
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'memo'::account_book, 'original'::entry_type,
+            'dbcheck --prove: a hold the two definitions of available disagree about',
+            'dbcheck-prove-balancedef:' || '${hold.id}', ${ACTOR},
+            (SELECT jsonb_agg(jsonb_build_object(
+                      'account_id', l.account_id,
+                      'amount_cents', l.amount_cents::text,
+                      'currency', l.currency,
+                      'memo', 'dbcheck --prove') ORDER BY l.ordinal)
+               FROM journal_line l WHERE l.entry_id = '${seed.entry_id}'::uuid),
+            NULL, NULL, NULL, '${hold.id}'::uuid, NULL, NULL)`);
+        return undefined;
+      },
+    },
+
+    // ---- the card verdict, which reaches outside the fold --------------
+    {
+      view: "v_refused_auth_hold",
+      label: "v_refused_auth_hold(refused)",
+      how: "a DECLINED verdict on a live hold's authorisation",
+      as: "app",
+      count: `SELECT count(*)::int AS n FROM v_refused_auth_hold WHERE verdict = 'refused'`,
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ca.id AS auth_id FROM v_hold_state hs
+            JOIN card_authorization ca ON ca.hold_id = hs.hold_id
+           WHERE hs.active_hold_cents > 0 ORDER BY hs.hold_id LIMIT 1`);
+        if (!t) return "no hold is withholding money to prove it on";
+        const ev = await one(tx, `
+          INSERT INTO card_auth_event (auth_id, kind, amount_cents, is_final, value_date, provider_event_id)
+          VALUES ('${t.auth_id}'::uuid, 'authorization', 1, false, current_date,
+                  'dbcheck-prove-refused-' || gen_random_uuid()::text)
+          RETURNING id`);
+        await tx.unsafe(`
+          INSERT INTO card_auth_event_result (event_id, result, provider_step, source)
+          VALUES ('${ev.id}'::uuid, 'DECLINED', 'AUTHORIZATION', 'retained_payload')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_refused_auth_hold",
+      label: "v_refused_auth_hold(unanswered)",
+      how: "an authorisation event on a live hold with NO verdict recorded",
+      as: "app",
+      count: `SELECT count(*)::int AS n FROM v_refused_auth_hold WHERE verdict = 'unanswered'`,
+      note:
+        "THE ONE THE OLD DEFINITION COULD NOT EXPRESS. Under 0026's INNER JOIN and " +
+        "`r.result IS NOT NULL` this moved the count by exactly zero, for ever — while " +
+        "98 of 130 authorisation events on live holds carried no verdict at all",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ca.id AS auth_id FROM v_hold_state hs
+            JOIN card_authorization ca ON ca.hold_id = hs.hold_id
+           WHERE hs.active_hold_cents > 0 ORDER BY hs.hold_id LIMIT 1`);
+        if (!t) return "no hold is withholding money to prove it on";
+        await tx.unsafe(`
+          INSERT INTO card_auth_event (auth_id, kind, amount_cents, is_final, value_date, provider_event_id)
+          VALUES ('${t.auth_id}'::uuid, 'authorization', 1, false, current_date,
+                  'dbcheck-prove-unanswered-' || gen_random_uuid()::text)`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_wire_availability_drift",
+      how: "a wire credit whose money becomes spendable an hour after it was booked",
+      as: "app",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT h.account_id, h.memo_account_id, e.entity_id, e.id AS entry_id
+            FROM hold h
+            JOIN journal_entry e ON e.hold_id = h.id AND e.book = 'memo' AND e.rail = 'wire'
+           WHERE h.kind = 'uncleared_credit'
+           ORDER BY e.booking_seq LIMIT 1`);
+        if (!seed) return "no wire credit on this book to model the proof on";
+        const hold = await one(tx, `
+          INSERT INTO hold (account_id, memo_account_id, kind, external_ref, value_date, available_at)
+          VALUES ('${seed.account_id}'::uuid, '${seed.memo_account_id}'::uuid, 'uncleared_credit',
+                  'dbcheck-prove-wire-' || gen_random_uuid()::text, current_date,
+                  now() + interval '1 hour')
+          RETURNING id`);
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'memo'::account_book, 'original'::entry_type,
+            'dbcheck --prove: a wire credit that is NOT immediately spendable',
+            'dbcheck-prove-wire:' || '${hold.id}', ${ACTOR},
+            (SELECT jsonb_agg(jsonb_build_object(
+                      'account_id', l.account_id,
+                      'amount_cents', l.amount_cents::text,
+                      'currency', l.currency,
+                      'memo', 'dbcheck --prove') ORDER BY l.ordinal)
+               FROM journal_line l WHERE l.entry_id = '${seed.entry_id}'::uuid),
+            'wire'::rail, NULL, NULL, '${hold.id}'::uuid, NULL, NULL)`);
+        return undefined;
+      },
+    },
+
+    // ---- fees and interest ---------------------------------------------
+    {
+      view: "v_accrual_month_drift",
+      how: "a COMPLETE month of daily shares that do not sum to the monthly fee",
+      as: "owner",
+      disable: [["accrual_posting", "accrual_posting_lifecycle"]],
+      note:
+        "this guard has an EMPTY POPULATION on this book — zero complete accrual months — " +
+        "so the proof has to build the month before it can break it: a whole February, " +
+        "every day decided, with each day's share computed for a 31-day month. " +
+        "Green because there is nothing to be green about is not the same as green",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT s.account_id, s.product::text AS product FROM accrual_schedule s LIMIT 1`);
+        if (!seed) return "this book has no accrual schedule to copy a product from";
+        const entry = await one(tx, `SELECT id FROM journal_entry WHERE book='financial' ORDER BY booking_seq DESC LIMIT 1`);
+        if (!entry) return "this book has no financial entry for the postings to cite";
+        const sched = await one(tx, `
+          INSERT INTO accrual_schedule (account_id, product, plan_name, monthly_cents,
+                                        start_date, end_date, created_by, schedule_key)
+          VALUES ('${seed.account_id}'::uuid, '${seed.product}', 'dbcheck --prove', 2901,
+                  '2019-02-01'::date, '2019-02-28'::date, ${ACTOR},
+                  'dbcheck-prove-accrual-' || gen_random_uuid()::text)
+          RETURNING id`);
+        await tx.unsafe(`
+          INSERT INTO accrual_day (schedule_id, accrual_date, claimed_by)
+          SELECT '${sched.id}'::uuid, d::date, 'dbcheck --prove'
+            FROM generate_series('2019-02-01'::date, '2019-02-28'::date, interval '1 day') d`);
+        // days_in_month is a COLUMN, and the arithmetic CHECK holds it to its own
+        // value rather than to the calendar — so a month priced as 31 days and
+        // claimed for 28 satisfies every constraint and still loses $2.79.
+        await tx.unsafe(`
+          INSERT INTO accrual_posting (accrual_day_id, disposition, monthly_cents, days_in_month,
+                                       day_of_month, base_share_cents, residual_pennies,
+                                       residual_applied, amount_cents, cumulative_cents,
+                                       entry_id, decided_by_run)
+          SELECT ad.id, 'posted', 2901, 31, EXTRACT(DAY FROM ad.accrual_date)::int,
+                 accrual_base_share(2901, 31), accrual_residual_pennies(2901, 31),
+                 (EXTRACT(DAY FROM ad.accrual_date)::int <= accrual_residual_pennies(2901, 31)),
+                 accrual_daily_share(2901, 31, EXTRACT(DAY FROM ad.accrual_date)::int),
+                 accrual_cumulative_through(2901, 31, EXTRACT(DAY FROM ad.accrual_date)::int),
+                 '${entry.id}'::uuid, 'dbcheck --prove'
+            FROM accrual_day ad WHERE ad.schedule_id = '${sched.id}'::uuid`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_accrual_ledger_drift",
+      how: "an accrual day posted against an entry that belongs to a different day",
+      as: "owner",
+      disable: [["accrual_posting", "accrual_posting_lifecycle"]],
+      note:
+        "the lifecycle trigger already refuses a posting that cites an entry it did not " +
+        "key — it derives `accrual:<schedule>:<date>` and compares — so this state is " +
+        "unreachable through the product and the view is the second line behind it",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT s.account_id, s.product::text AS product FROM accrual_schedule s LIMIT 1`);
+        if (!seed) return "this book has no accrual schedule to copy a product from";
+        const entry = await one(tx, `
+          SELECT id FROM journal_entry WHERE book='financial' AND value_date <> '2019-03-05'::date
+           ORDER BY booking_seq DESC LIMIT 1`);
+        if (!entry) return "this book has no financial entry for the posting to mis-cite";
+        const sched = await one(tx, `
+          INSERT INTO accrual_schedule (account_id, product, plan_name, monthly_cents,
+                                        start_date, end_date, created_by, schedule_key)
+          VALUES ('${seed.account_id}'::uuid, '${seed.product}', 'dbcheck --prove', 3100,
+                  '2019-03-01'::date, '2019-03-31'::date, ${ACTOR},
+                  'dbcheck-prove-accrual-day-' || gen_random_uuid()::text)
+          RETURNING id`);
+        const day = await one(tx, `
+          INSERT INTO accrual_day (schedule_id, accrual_date, claimed_by)
+          VALUES ('${sched.id}'::uuid, '2019-03-05'::date, 'dbcheck --prove')
+          RETURNING id`);
+        await tx.unsafe(`
+          INSERT INTO accrual_posting (accrual_day_id, disposition, monthly_cents, days_in_month,
+                                       day_of_month, base_share_cents, residual_pennies,
+                                       residual_applied, amount_cents, cumulative_cents,
+                                       entry_id, decided_by_run)
+          VALUES ('${day.id}'::uuid, 'posted', 3100, 31, 5,
+                  accrual_base_share(3100, 31), accrual_residual_pennies(3100, 31),
+                  (5 <= accrual_residual_pennies(3100, 31)),
+                  accrual_daily_share(3100, 31, 5), accrual_cumulative_through(3100, 31, 5),
+                  '${entry.id}'::uuid, 'dbcheck --prove')`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_interest_ledger_drift",
+      how: "an interest posting made to cite an entry belonging to a different day",
+      as: "owner",
+      disable: [["interest_posting", "interest_posting_lifecycle"]],
+      note:
+        "0024 recorded this delta as 0 -> 1 with the trigger disabled; this runs it. " +
+        "The trigger is the reason the state cannot be reached through the product, " +
+        "and the view is what would see it if it ever were",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT ip.interest_day_id, d.schedule_id,
+                 to_char(max(d2.accrual_date) + 1, 'YYYY-MM-DD') AS free_date
+            FROM interest_posting ip
+            JOIN interest_day d ON d.id = ip.interest_day_id
+            JOIN interest_day d2 ON d2.schedule_id = d.schedule_id
+           WHERE ip.disposition = 'posted'
+           GROUP BY ip.interest_day_id, d.schedule_id, d.accrual_date
+           ORDER BY d.accrual_date LIMIT 1`);
+        if (!seed) return "this book has no posted interest day to model the proof on";
+        // A day INSIDE the enrolment window — interest_day_window refuses anything
+        // else — but one nothing has claimed, so the posting below is genuinely a
+        // new day citing an old day's entry.
+        const day = await one(tx, `
+          INSERT INTO interest_day (schedule_id, accrual_date, claimed_by)
+          VALUES ('${seed.schedule_id}'::uuid, '${seed.free_date}'::date, 'dbcheck --prove')
+          RETURNING id`);
+        // Every numeric field is copied from a REAL posting, so the arithmetic
+        // CHECK passes untouched. The only lie is which day the entry belongs to.
+        await tx.unsafe(`
+          INSERT INTO interest_posting (interest_day_id, disposition, side, policy_id,
+                                        basis_balance_cents, observed_booking_seq, rate_bps,
+                                        day_count, numerator, denominator, whole_cents,
+                                        remainder_units, rounding, amount_cents, entry_id,
+                                        decided_by_run)
+          SELECT '${day.id}'::uuid, ip.disposition, ip.side, ip.policy_id,
+                 ip.basis_balance_cents, ip.observed_booking_seq, ip.rate_bps,
+                 ip.day_count, ip.numerator, ip.denominator, ip.whole_cents,
+                 ip.remainder_units, ip.rounding, ip.amount_cents, ip.entry_id,
+                 'dbcheck --prove'
+            FROM interest_posting ip WHERE ip.interest_day_id = '${seed.interest_day_id}'::uuid`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_interest_rate_drift",
+      how: "a rate row backdated behind interest_rate_policy_forward_only",
+      as: "owner",
+      disable: [["interest_rate_policy", "interest_rate_policy_forward_only"]],
+      expect: "increase",
+      note:
+        "the delta is not 1 and should not be: ONE backdated rate row re-prices EVERY " +
+        "posting on that tier from that day forward, which is exactly the harm the " +
+        "forward-only trigger exists to prevent. 0024 measured 0 -> 5",
+      async run(tx) {
+        // A date the tier has no policy row for yet, so the INSERT is a genuine
+        // BACKDATE rather than a unique-key collision with the real rate card.
+        const tier = await one(tx, `
+          SELECT s.rate_tier, to_char(d.accrual_date, 'YYYY-MM-DD') AS oldest
+            FROM interest_posting ip
+            JOIN interest_day d ON d.id = ip.interest_day_id
+            JOIN interest_schedule s ON s.id = d.schedule_id
+           WHERE NOT EXISTS (SELECT 1 FROM interest_rate_policy p
+                              WHERE p.tier = s.rate_tier AND p.effective_from = d.accrual_date)
+           ORDER BY d.accrual_date LIMIT 1`);
+        if (!tier) return "this book has no interest posting to re-price";
+        await tx.unsafe(`
+          INSERT INTO interest_rate_policy (tier, effective_from, credit_rate_bps,
+                                            overdraft_rate_bps, day_count_denominator, note, created_by)
+          VALUES ('${tier.rate_tier}', '${tier.oldest}'::date, 77, 1234, 365,
+                  'dbcheck --prove: a backdated re-rate slipped past the trigger', ${ACTOR})`);
+        return undefined;
+      },
+    },
+
+    // ---- standing orders, disputes, team -------------------------------
+    {
+      view: "v_standing_order_double_fire",
+      how: "a second instruction for one occurrence, under a different spelling of the derived key",
+      as: "app",
+      note:
+        "NOBODY HAD EVER SEEN THIS VIEW RETURN A ROW. Until 0023 it joined " +
+        "payment_instruction on a UNIQUE column and asked for count > 1, so no state of " +
+        "the database could satisfy it, and its emptiness was quoted as proof in a test, " +
+        "a document and compliance.mjs. 0023 repointed it at the mandate's KEYSPACE — " +
+        "which is the question the unique index does not answer — and this is the first " +
+        "time the repaired body has been made to fire",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT o.standing_order_id, pi.id AS pi_id
+            FROM standing_order_occurrence o
+            JOIN payment_instruction pi ON pi.idempotency_key = o.idempotency_key
+           ORDER BY o.claimed_at DESC LIMIT 1`);
+        if (!seed) return "no standing-order occurrence has fired an instruction yet";
+        await tx.unsafe(`
+          INSERT INTO payment_instruction
+            (account_id, rail, amount_cents, currency, counterparty, value_date,
+             requested_by, policy_id, idempotency_key, content_hash)
+          SELECT p.account_id, p.rail, p.amount_cents, p.currency, p.counterparty, p.value_date,
+                 p.requested_by, p.policy_id,
+                 'standing:' || '${seed.standing_order_id}' || ':'
+                   || to_char(p.value_date, 'YYYY-M-D') || '#retry-after-a-restart',
+                 p.content_hash
+            FROM payment_instruction p WHERE p.id = '${seed.pi_id}'::uuid`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_dispute_ledger_double_count",
+      how: "two dispute events of different kinds citing one journal entry",
+      as: "owner",
+      disable: [["dispute_event", "dispute_event_lifecycle"]],
+      expect: "increase",
+      note:
+        "the delta is one row per LINE of the entry, not one row overall: the episode " +
+        "screen would count that entry's money twice for every line it carries. The " +
+        "lifecycle trigger refuses a second event of a kind the dispute has already " +
+        "passed, which is why this one needs the owner connection — the double count " +
+        "is unreachable through the product, and the view is what would see it anyway",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT de.dispute_id, de.entry_id, de.kind::text AS kind, de.actor_id
+            FROM dispute_event de
+           WHERE de.entry_id IS NOT NULL ORDER BY de.occurred_at LIMIT 1`);
+        if (!seed) return "this book has no dispute event citing a journal entry";
+        const other = await one(tx, `
+          SELECT k::text AS kind FROM unnest(enum_range(NULL::dispute_event_kind)) k
+           WHERE k::text <> '${seed.kind}'
+             AND NOT EXISTS (SELECT 1 FROM dispute_event d2
+                              WHERE d2.dispute_id = '${seed.dispute_id}'::uuid
+                                AND d2.entry_id = '${seed.entry_id}'::uuid
+                                AND d2.kind = k)
+           LIMIT 1`);
+        if (!other) return "no second dispute event kind is available for this dispute";
+        await tx.unsafe(`
+          INSERT INTO dispute_event (dispute_id, kind, actor_id, value_date, entry_id, detail)
+          SELECT '${seed.dispute_id}'::uuid, '${other.kind}', '${seed.actor_id}'::uuid,
+                 e.value_date, e.id, 'dbcheck --prove: one entry, counted twice'
+            FROM journal_entry e WHERE e.id = '${seed.entry_id}'::uuid`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_approved_auth_for_dead_member",
+      how: "a card authorisation approved for a member whose version says removed",
+      as: "owner",
+      disable: [["team_member_version", "team_member_version_chain"]],
+      note:
+        "the removed-member VERSION is what has to be manufactured, and the chain " +
+        "trigger refuses to append one out of band — so this proof is also evidence " +
+        "that 0033's version chain is doing its job",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT tmv.id, tmv.member_id, tmv.version, tmv.role
+            FROM team_member_version tmv
+           WHERE tmv.state = 'active'
+           ORDER BY tmv.created_at DESC LIMIT 1`);
+        if (!seed) return "this book has no team member version to model the proof on";
+        const dead = await one(tx, `
+          INSERT INTO team_member_version (member_id, version, effective_from, state, role, note, created_by)
+          VALUES ('${seed.member_id}'::uuid,
+                  (SELECT max(version) + 1 FROM team_member_version WHERE member_id = '${seed.member_id}'::uuid),
+                  now(), 'removed', '${seed.role}',
+                  'dbcheck --prove: the member is gone', ${ACTOR})
+          RETURNING id`);
+        const card = await one(tx, `SELECT id, provider_card_token FROM card LIMIT 1`);
+        if (!card) return "this book has no card to attach the decision to";
+        await tx.unsafe(`
+          INSERT INTO card_auth_decision
+            (provider, provider_auth_token, provider_card_token, card_id, amount_cents,
+             request_status, outcome, result_code, rule, reason, decision_latency_us,
+             source, member_id, member_version_id)
+          VALUES ('lithic', 'dbcheck-prove-' || gen_random_uuid()::text,
+                  '${card.provider_card_token}', '${card.id}'::uuid, 100,
+                  'AUTHORIZATION', 'approve', 'APPROVED', 'dbcheck --prove',
+                  'an approval for a member who no longer exists', 1, 'harness',
+                  '${seed.member_id}'::uuid, '${dead.id}'::uuid)`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_member_approval_without_right",
+      how: "an approval filed by a member whose role at the time could not approve",
+      as: "owner",
+      disable: [
+        ["payment_instruction_event", "payment_instruction_event_maker_checker"],
+        ["payment_instruction_event", "payment_instruction_event_team"],
+      ],
+      note:
+        "TWO triggers have to be switched off to write this row, and that is the finding, " +
+        "not the workaround: 0001's maker-checker and 0033's team check COMPOSE rather " +
+        "than overlap, so the state this view reports is unreachable through the product",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT pi.id AS instruction_id, tm.actor_id, tm.id AS member_id, tmv.version, tmv.role
+            FROM payment_instruction pi
+            JOIN account acct ON acct.id = pi.account_id
+            JOIN team_member tm ON tm.business_id = acct.business_id
+            JOIN LATERAL (SELECT v.version, v.role FROM team_member_version v
+                           WHERE v.member_id = tm.id ORDER BY v.version DESC LIMIT 1) tmv ON true
+           WHERE NOT EXISTS (SELECT 1 FROM payment_instruction_event e
+                              WHERE e.instruction_id = pi.id AND e.kind = 'approved'
+                                AND e.actor_id = tm.actor_id)
+           ORDER BY pi.requested_at DESC LIMIT 1`);
+        if (!seed) return "no payment instruction with an unused team member to approve it";
+        await tx.unsafe(`ALTER TABLE team_member_version DISABLE TRIGGER team_member_version_chain`);
+        await tx.unsafe(`
+          INSERT INTO team_member_version (member_id, version, effective_from, state, role, note, created_by)
+          VALUES ('${seed.member_id}'::uuid,
+                  (SELECT max(version) + 1 FROM team_member_version WHERE member_id = '${seed.member_id}'::uuid),
+                  now() - interval '1 year', 'active', 'viewer',
+                  'dbcheck --prove: a viewer, who cannot approve', ${ACTOR})`);
+        await tx.unsafe(`
+          INSERT INTO payment_instruction_event (instruction_id, kind, actor_id, value_date, reason)
+          SELECT pi.id, 'approved', '${seed.actor_id}'::uuid, pi.value_date,
+                 'dbcheck --prove: approved by someone who held no right to'
+            FROM payment_instruction pi WHERE pi.id = '${seed.instruction_id}'::uuid`);
+        return undefined;
+      },
+    },
+
+    // ---- interchange: the first guards about whether an entry SHOULD exist
+    {
+      view: "v_interchange_unreversed",
+      how: "the network takes a settlement back and the interchange is left standing",
+      as: "app",
+      expect: "increase",
+      note:
+        "the reversal is appended through ledger_append() into the settlement's own " +
+        "correction group, which is what the product does — the omission is the second " +
+        "half, the unbooking that never happens",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ip.id, ip.settlement_entry_id
+            FROM interchange_posting ip
+            JOIN v_interchange_settlement_net n ON n.interchange_posting_id = ip.id
+           WHERE NOT EXISTS (SELECT 1 FROM journal_entry r
+                              WHERE r.reverses_entry_id = ip.settlement_entry_id)
+           ORDER BY ip.value_date DESC LIMIT 1`);
+        if (!t) return "every priced settlement on this book has already been reversed";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            se.entity_id, se.value_date, se.book, 'reversal'::entry_type,
+            'dbcheck --prove: settlement taken back, interchange left standing',
+            'dbcheck-prove-ic:' || gen_random_uuid()::text, ${ACTOR},
+            (SELECT jsonb_agg(jsonb_build_object(
+                      'account_id', l.account_id,
+                      'amount_cents', (-l.amount_cents)::text,
+                      'currency', l.currency,
+                      'memo', 'dbcheck --prove') ORDER BY l.ordinal)
+               FROM journal_line l WHERE l.entry_id = se.id),
+            se.rail, NULL, NULL, NULL, se.id, se.correction_group_id)
+            FROM journal_entry se WHERE se.id = '${t.settlement_entry_id}'::uuid`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_interchange_drift",
+      how: "the same reversal, asked the harder question: what is the interchange now WORTH",
+      as: "app",
+      expect: "increase",
+      note:
+        "v_interchange_unreversed asks whether the repair happened; this one asks whether " +
+        "the amount is right, and reads journal_entry and journal_line only — never " +
+        "interchange_reversal, because a bookkeeping table can be written without the " +
+        "money moving and can be lost while the money is perfectly correct",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ip.id, ip.settlement_entry_id
+            FROM interchange_posting ip
+            JOIN v_interchange_settlement_net n ON n.interchange_posting_id = ip.id
+           WHERE NOT EXISTS (SELECT 1 FROM journal_entry r
+                              WHERE r.reverses_entry_id = ip.settlement_entry_id)
+           ORDER BY ip.value_date DESC LIMIT 1`);
+        if (!t) return "every priced settlement on this book has already been reversed";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            se.entity_id, se.value_date, se.book, 'reversal'::entry_type,
+            'dbcheck --prove: settlement taken back, interchange never re-priced',
+            'dbcheck-prove-icd:' || gen_random_uuid()::text, ${ACTOR},
+            (SELECT jsonb_agg(jsonb_build_object(
+                      'account_id', l.account_id,
+                      'amount_cents', (-l.amount_cents)::text,
+                      'currency', l.currency,
+                      'memo', 'dbcheck --prove') ORDER BY l.ordinal)
+               FROM journal_line l WHERE l.entry_id = se.id),
+            se.rail, NULL, NULL, NULL, se.id, se.correction_group_id)
+            FROM journal_entry se WHERE se.id = '${t.settlement_entry_id}'::uuid`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_interchange_rate_drift",
+      how: "a rate row backdated behind interchange_rate_policy_forward_only",
+      as: "owner",
+      disable: [["interchange_rate_policy", "interchange_rate_policy_forward_only"]],
+      expect: "increase",
+      note: "one backdated row re-prices every settlement in that category from that day on",
+      async run(tx) {
+        const t = await one(tx, `
+          SELECT ip.category, ip.presentment::text AS presentment,
+                 to_char(min(ip.value_date), 'YYYY-MM-DD') AS oldest
+            FROM interchange_posting ip
+           GROUP BY ip.category, ip.presentment ORDER BY count(*) DESC LIMIT 1`);
+        if (!t) return "this book has no priced settlement to re-rate";
+        await tx.unsafe(`
+          INSERT INTO interchange_rate_policy
+            (category, presentment, effective_from, rate_bps, fixed_cents, note, created_by)
+          VALUES ('${t.category}', '${t.presentment}', '${t.oldest}'::date, 77, 1,
+                  'dbcheck --prove: a backdated re-rate slipped past the trigger', ${ACTOR})`);
+        return undefined;
+      },
+    },
+  ];
+
+  // ---- the driver -----------------------------------------------------
+  //
+  // COVERAGE IS COMPUTED, NOT CLAIMED. It walks the invariant arrays this
+  // script already checks, so a view added above without a proof here is a
+  // named FAILURE on the next run rather than a quiet gap. That is the same
+  // mistake this whole section exists to stop being possible.
+  const ALL_VIEWS = [...INVARIANT_VIEWS, ...INVARIANT_VIEWS_0031, ...INVARIANT_VIEWS_0040];
+  const proven = new Set();
+
+  for (const [view] of ALL_VIEWS) {
+    const specs = PROOFS.filter((p) => p.view === view);
+    if (specs.length === 0) {
+      bad(`${view} CAN fail`, "NO PROOF IS REGISTERED FOR THIS VIEW — it is trusted, not tested");
+      continue;
+    }
+    for (const spec of specs) await runProof(spec);
+    proven.add(view);
   }
 
-  // ---- 9b. v_refused_auth_hold sees a MISSING verdict ------------------
-  //
-  // THE ONE THE OLD DEFINITION COULD NOT EXPRESS. Identical to 9a except
-  // that no verdict is recorded at all — which under 0026's INNER JOIN and
-  // `IS NOT NULL` moved the count by exactly zero, for ever.
-  try {
-    const proof = await inRollback(async (tx) => {
-      const [target] = await tx.unsafe(`
-        SELECT ca.id AS auth_id
-          FROM v_hold_state hs
-          JOIN card_authorization ca ON ca.hold_id = hs.hold_id
-         WHERE hs.active_hold_cents > 0
-         ORDER BY hs.hold_id LIMIT 1`);
-      if (!target) return null;
-      const [before] = await tx.unsafe(
-        `SELECT count(*)::int AS n FROM v_refused_auth_hold WHERE verdict = 'unanswered'`);
-      await tx.unsafe(`
-        INSERT INTO card_auth_event (auth_id, kind, amount_cents, is_final, value_date, provider_event_id)
-        VALUES ('${target.auth_id}'::uuid, 'authorization', 1, false, current_date,
-                'dbcheck-prove-unanswered-' || gen_random_uuid()::text)`);
-      const [after] = await tx.unsafe(
-        `SELECT count(*)::int AS n FROM v_refused_auth_hold WHERE verdict = 'unanswered'`);
-      return { before: before.n, after: after.n };
-    });
-    if (proof === null) bad("v_refused_auth_hold(unanswered) CAN fail", "no hold is withholding money to prove it on");
-    else delta("v_refused_auth_hold(unanswered)", proof.before, proof.after,
-      "an authorisation event on a live hold with NO verdict recorded");
-  } catch (e) {
-    bad("v_refused_auth_hold(unanswered) CAN fail", String(e.message).split("\n")[0].slice(0, 80));
+  async function runProof(spec) {
+    const label = `${spec.label ?? spec.view} CAN fail`;
+    const countQ = spec.count ?? `SELECT count(*)::int AS n FROM ${spec.view}`;
+    const conn = spec.as === "owner" ? owner() : sql;
+    if (conn === null) {
+      bad(label, "no owner connection configured (DIRECT_URL/DATABASE_URL) — a proof that cannot be performed is not a pass");
+      return;
+    }
+
+    let out;
+    try {
+      out = await inRollback(conn, async (tx) => {
+        const [b] = await tx.unsafe(countQ);
+        for (const [table, trigger] of spec.disable ?? []) {
+          await tx.unsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+        }
+        const blocked = await spec.run(tx);
+        if (blocked) return { blocked };
+        const [a] = await tx.unsafe(countQ);
+        const extra = spec.andAlso ? await spec.andAlso(tx) : null;
+        return { before: b.n, after: a.n, extra };
+      });
+    } catch (e) {
+      bad(label, String(e.message).split("\n")[0].slice(0, 110));
+      return;
+    }
+
+    if (out?.blocked) {
+      bad(label, `could not build the violating state: ${out.blocked}`);
+      return;
+    }
+
+    const want = spec.expect ?? 1;
+    const moved = out.after - out.before;
+    const okDelta =
+      want === "increase" ? moved > 0 : want === 0 ? moved === 0 : moved === want;
+
+    // The rollback is a claim too. Read the view again, on the APP connection,
+    // outside every transaction this proof opened.
+    const [post] = await sql.unsafe(countQ);
+    const cleanedUp = post.n === out.before;
+
+    if (okDelta && cleanedUp) {
+      ok(label, `${out.before} -> ${out.after} after ${spec.how}`);
+    } else if (!okDelta) {
+      bad(label, `${out.before} -> ${out.after} after ${spec.how} — expected ${want === "increase" ? "an increase" : `+${want}`}`);
+    } else {
+      bad(label, `the rollback did NOT clean up: the view now reads ${post.n}, not ${out.before}`);
+    }
+
+    for (const [table, trigger] of spec.disable ?? []) {
+      console.log(`        trigger disabled for the proof, on the OWNER connection: ${table}.${trigger}`);
+      console.log(`        ^ the product cannot reach this state at all; the view is the second line`);
+    }
+    if (spec.note) for (const line of wrap(spec.note, 84)) console.log(`        ${line}`);
+    if (out.extra) {
+      console.log(
+        out.extra.refused
+          ? `        and the deferred constraint refuses it too: ${out.extra.message.slice(0, 76)}`
+          : `        BUT the deferred constraint did NOT refuse it: ${out.extra.message}`,
+      );
+    }
   }
 
-  // ---- 9c. the 0026 ingest trigger still refuses the bug ---------------
+  // ---- 9z. the other half of 0026's guarantee ---------------------------
   //
-  // The other half of the guarantee: the view reports the state, and the
-  // trigger makes the state unwritable through the live ingest path. A
-  // refusal filed under a kind that feeds the hold arithmetic must be
-  // REFUSED at INSERT, not reported later.
+  // Not a view proof: the trigger that makes the state unwritable through the
+  // live ingest path. A refusal filed under a kind that feeds the hold
+  // arithmetic must be REFUSED at INSERT, not reported later.
   try {
-    const refused = await inRollback(async (tx) => {
+    const refused = await inRollback(sql, async (tx) => {
       const [target] = await tx.unsafe(`SELECT id FROM card_authorization ORDER BY id LIMIT 1`);
       if (!target) return null;
       const [ev] = await tx.unsafe(`
@@ -737,67 +1629,28 @@ if (process.argv.includes("--prove")) {
     bad("ingest cannot file a refusal as an authorisation", String(e.message).split("\n")[0].slice(0, 80));
   }
 
-  // ---- 9d. v_wire_availability_drift ------------------------------------
-  //
-  // 0025's claim is that a wire credit is spendable the instant it is
-  // booked. The violation is a wire credit whose hold releases LATER than
-  // the entry that created it, so the proof builds exactly that: a new
-  // uncleared-credit hold on a real account with `available_at` an hour in
-  // the future, and a wire-rail memo entry against it through
-  // `ledger_append()` — the same single write path everything else uses.
-  try {
-    const proof = await inRollback(async (tx) => {
-      const [seed] = await tx.unsafe(`
-        SELECT h.account_id, h.memo_account_id, e.entity_id, l.amount_cents, l.currency, l.account_id AS line_account
-          FROM hold h
-          JOIN journal_entry e ON e.hold_id = h.id AND e.book = 'memo' AND e.rail = 'wire'
-          JOIN journal_line l ON l.entry_id = e.id AND l.account_id = h.memo_account_id
-         WHERE h.kind = 'uncleared_credit'
-         ORDER BY e.booking_seq LIMIT 1`);
-      if (!seed) return null;
-      const [actor] = await tx.unsafe(
-        `SELECT id FROM actor WHERE kind = 'system' AND display_name = 'ledger-poster' LIMIT 1`);
-      if (!actor) return null;
-      const [before] = await tx.unsafe(`SELECT count(*)::int AS n FROM v_wire_availability_drift`);
-      const [hold] = await tx.unsafe(`
-        INSERT INTO hold (account_id, memo_account_id, kind, external_ref, value_date, available_at)
-        VALUES ('${seed.account_id}'::uuid, '${seed.memo_account_id}'::uuid, 'uncleared_credit',
-                'dbcheck-prove-wire-' || gen_random_uuid()::text, current_date, now() + interval '1 hour')
-        RETURNING id`);
-      // The contra side is the same pair of accounts the real wire memo
-      // entry used, read off the seed rather than chosen here: an entry
-      // that does not balance is refused by the ledger, not by this script.
-      const lines = await tx.unsafe(`
-        SELECT jsonb_agg(jsonb_build_object(
-                 'account_id', l.account_id,
-                 'amount_cents', l.amount_cents::text,
-                 'currency', l.currency,
-                 'memo', 'dbcheck --prove') ORDER BY l.ordinal) AS lines
-          FROM journal_line l
-          JOIN journal_entry e ON e.id = l.entry_id
-         WHERE e.hold_id IS NOT NULL AND e.book = 'memo' AND e.rail = 'wire'
-           AND e.id = (SELECT e2.id FROM journal_entry e2
-                        WHERE e2.book = 'memo' AND e2.rail = 'wire'
-                        ORDER BY e2.booking_seq LIMIT 1)`);
-      await tx.unsafe(`
-        SELECT ledger_append(
-          '${seed.entity_id}'::uuid, current_date, 'memo'::account_book, 'original'::entry_type,
-          'dbcheck --prove: a wire credit that is NOT immediately spendable',
-          'dbcheck-prove-wire:' || '${hold.id}', '${actor.id}'::uuid,
-          '${JSON.stringify(lines[0].lines).replace(/'/g, "''")}'::jsonb,
-          'wire'::rail, NULL, NULL, '${hold.id}'::uuid, NULL, NULL)`);
-      const [after] = await tx.unsafe(`SELECT count(*)::int AS n FROM v_wire_availability_drift`);
-      return { before: before.n, after: after.n };
-    });
-    if (proof === null) bad("v_wire_availability_drift CAN fail", "no wire credit on this book to model the proof on");
-    else delta("v_wire_availability_drift", proof.before, proof.after,
-      "a wire credit whose money becomes spendable an hour after it was booked");
-  } catch (e) {
-    bad("v_wire_availability_drift CAN fail", String(e.message).split("\n")[0].slice(0, 100));
-  }
+  console.log(
+    `\n  --prove covered ${proven.size} of ${ALL_VIEWS.length} invariant views` +
+      ` (${PROOFS.length} proofs, ${PROOFS.filter((p) => p.as === "owner").length} of them needing a trigger` +
+      ` disabled on the owner connection)\n`,
+  );
+
+  if (ownerSql) await ownerSql.end();
 } else {
-  console.log("\n  (run with --prove to make the card-hold and wire invariants FAIL on purpose,");
-  console.log("   in transactions that are rolled back — a guard nobody has seen fail is a claim)\n");
+  console.log("\n  (run with --prove to make EVERY invariant view FAIL on purpose, each in a");
+  console.log("   transaction that is rolled back — a guard nobody has seen fail is a claim)\n");
+}
+
+/** Soft-wrap a note so the proof's reasoning stays readable in a terminal. */
+function wrap(text, width) {
+  const out = [];
+  let line = "";
+  for (const word of String(text).split(/\s+/)) {
+    if (line.length + word.length + 1 > width) { out.push(line); line = word; }
+    else line = line ? `${line} ${word}` : word;
+  }
+  if (line) out.push(line);
+  return out;
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed\n`);

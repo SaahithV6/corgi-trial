@@ -110,7 +110,7 @@ an operation turns the suite red until the table is regenerated.
 
 | Rail | Provider | Evidence | originate | observe | settle | reverse | probe |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Increase ACH | `increase.ach` | live | ~ | ~ | ~ | ~ | + |
+| Increase ACH | `increase.ach` | live | + | + | + | + | + |
 | ACH simulator | `achsim.ach` | simulated | + | + | + | + | + |
 | Lithic card issuing | `lithic.card` | live | - | + | + | + | + |
 | Plaid account linking | `plaid` | live | - | - | - | - | + |

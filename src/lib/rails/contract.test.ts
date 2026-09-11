@@ -228,18 +228,34 @@ describe('what the contract says a rail is', () => {
       rail: new AchSimRail({ engine: achRig().engine }),
       env: {},
     });
-    // ONE operation has met Increase, and exactly one. `probe` is `measured`
-    // — GET /accounts?limit=1 answered 200 on 2026-09-11, re-runnable from
-    // ../increase/probe.integration.test.ts. The other four are still
-    // `unexercised`: reading /accounts proves a credential authenticates and
-    // proves nothing at all about POST /ach_transfers, the settlement
-    // promotion, or an R01's shape. A probe that promoted its neighbours would
-    // be liveness by presence with a round trip painted on it.
+    // ALL FIVE have now met Increase, and this pin was the tripwire that made
+    // sure the declaration could not be corrected without the table being
+    // regenerated. It fired. Here is what earned each:
+    //
+    //   probe      GET /accounts?limit=1 -> 200
+    //   originate  sandbox_ach_transfer_x5vdo5m7b6k924sszlms, $6,000.00,
+    //              Idempotency-Key test:approvals:… — and createAchTransfer is
+    //              the only code here that sends one to /ach_transfers
+    //   settle     ach:settled:…x5vdo5m7b6k924sszlms on the book
+    //   reverse    ach:return:…:644288470109390, R01 insufficient_fund, posted
+    //              at return.created_at with the settlement left standing
+    //   observe    parseEvent run against the RAW SIGNED BYTES of five real
+    //              deliveries, agreeing with what the consumer booked
+    //
+    // The earlier comment here argued that a probe must not promote its
+    // neighbours — "liveness by presence with a round trip painted on it" —
+    // and that argument still holds completely. These four were not promoted
+    // by the probe. Each was run. The `~` glyphs were not over-claiming; they
+    // were UNDER-claiming, and the evidence string on `originate` described a
+    // different transfer entirely (s2iljuavdzp2p68rh7v7, key null).
+    //
+    // R02-R29 remain table-driven and unexercised, and `reverse`'s evidence
+    // string says so rather than letting one earned R-code cover twenty-eight.
     for (const op of RAIL_OPERATIONS) {
       const entry = increase.supports[op];
       expect(entry.supported).toBe(true);
       if (entry.supported) {
-        expect(entry.proof).toBe(op === 'probe' ? 'measured' : 'unexercised');
+        expect(entry.proof).toBe('measured');
       }
     }
 
