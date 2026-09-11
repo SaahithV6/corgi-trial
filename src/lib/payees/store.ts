@@ -277,6 +277,131 @@ export async function loadBookEntries(
   }));
 }
 
+/* -------------------------------------------------------------------------- */
+/* Reads the OPERATOR's half of the loop needs                                */
+/* -------------------------------------------------------------------------- */
+
+export type BusinessOption = {
+  readonly id: string;
+  readonly legalName: string;
+  /** How many payees this business already has. Context, never a gate. */
+  readonly payeeCount: number;
+};
+
+/**
+ * The businesses a payee can be added to.
+ *
+ * A payee belongs to a business, not to an account — the same supplier is paid
+ * from whichever account has the money — so the add form has to ask, and it
+ * asks with a list rather than a uuid field. The count is on the row because
+ * "first payee on this book" is the one case where the twin probe has nothing
+ * to compare against, and the form says so before somebody reads a clean check
+ * as a strong one.
+ */
+export async function loadBusinessOptions(conn: Sql = sql): Promise<readonly BusinessOption[]> {
+  const rows = await conn<{ id: string; legal_name: string; payee_count: string }[]>`
+    SELECT b.id, b.legal_name,
+           (SELECT count(*) FROM payee p WHERE p.business_id = b.id)::text AS payee_count
+      FROM business b
+     ORDER BY b.legal_name`;
+  return rows.map((r) => ({
+    id: r.id,
+    legalName: r.legal_name,
+    payeeCount: Number.parseInt(r.payee_count, 10),
+  }));
+}
+
+/**
+ * One check, by id, with the findings it recorded.
+ *
+ * WHY AN ACKNOWLEDGEMENT FORM NEEDS THIS AND CANNOT USE WHAT THE BROWSER SENT.
+ *
+ * The signature has to name what was signed for, and the browser's copy of
+ * "what was signed for" is a claim. If a re-check lands between the page
+ * render and the submit, the warning on screen is not the warning standing
+ * against the payee any more, and a signature composed from the stale copy
+ * would be a truthful sentence attached to the wrong check. So the action
+ * re-reads the verification here and refuses when the submitted set of codes
+ * is not the set this row actually carries.
+ *
+ * `detail` is jsonb we wrote, which is exactly the reason to re-validate it on
+ * the way out rather than cast it — `screen.ts` takes the same position.
+ */
+export type StoredVerification = {
+  readonly verificationId: string;
+  readonly payeeId: string;
+  readonly outcome: PayeeOutcome;
+  readonly checkedAt: string;
+  readonly displayName: string;
+  readonly holderName: string;
+  readonly findings: readonly {
+    readonly code: string;
+    readonly severity: "block" | "warn" | "note";
+    readonly title: string;
+    readonly detail: string;
+  }[];
+};
+
+export async function loadVerification(
+  verificationId: string,
+  conn: Sql = sql,
+): Promise<StoredVerification | null> {
+  const rows = await conn<
+    {
+      id: string;
+      payee_id: string;
+      outcome: PayeeOutcome;
+      checked_at: Date;
+      display_name: string;
+      holder_name: string;
+      detail: unknown;
+    }[]
+  >`
+    SELECT v.id, v.payee_id, v.outcome::text AS outcome, v.checked_at,
+           p.display_name, p.holder_name, v.detail
+      FROM payee_verification v
+      JOIN payee p ON p.id = v.payee_id
+     WHERE v.id = ${verificationId}::uuid`;
+  const row = rows[0];
+  if (row === undefined) return null;
+
+  const findings: {
+    code: string;
+    severity: "block" | "warn" | "note";
+    title: string;
+    detail: string;
+  }[] = [];
+  const raw =
+    typeof row.detail === "object" && row.detail !== null
+      ? (row.detail as { findings?: unknown }).findings
+      : undefined;
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item !== "object" || item === null) continue;
+      const record = item as Record<string, unknown>;
+      const code = record["code"];
+      const severity = record["severity"];
+      const title = record["title"];
+      const detail = record["detail"];
+      if (typeof code !== "string" || typeof title !== "string" || typeof detail !== "string") {
+        continue;
+      }
+      if (severity !== "block" && severity !== "warn" && severity !== "note") continue;
+      findings.push({ code, severity, title, detail });
+    }
+  }
+
+  return {
+    verificationId: row.id,
+    payeeId: row.payee_id,
+    outcome: row.outcome,
+    checkedAt: row.checked_at.toISOString(),
+    displayName: row.display_name,
+    holderName: row.holder_name,
+    findings,
+  };
+}
+
 export type RefusalRow = {
   readonly id: string;
   readonly businessId: string;

@@ -73,6 +73,7 @@ function toRow(entry: PayeeBookEntry): PayeeRow {
     archived: entry.archived,
     archivedAt: entry.archivedAt,
     archivalReason: entry.archivalReason,
+    verificationId: entry.verificationId,
     checkedAt: entry.checkedAt,
     checkedByName: entry.checkedByName,
     outcome: entry.outcome,

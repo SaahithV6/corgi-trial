@@ -354,7 +354,8 @@ export async function gatePaymentOnPayee(
           "Same supplier, different bank is what a redirected invoice looks like from the " +
           "inside, and a wire cannot be recalled once it is received. Confirm the change " +
           "through a channel you already had — not one from the message that asked for it — " +
-          "and add the new details on /payees. Nothing was written and no payment was raised.",
+          `and add the new details on ${ADD_PAYEE_HREF}. Nothing was written and no payment was ` +
+          "raised.",
       };
     }
 
@@ -362,12 +363,20 @@ export async function gatePaymentOnPayee(
     // at this bank — the same rule the ACH branch applies below.
     const payee = atThisBank[0];
     if (payee === undefined) return notOnBook(input.destination.holderName, last4);
-    return unsignedWarning(payee.displayName, payee.outcome, payee.acknowledged);
+    return unsignedWarning(
+      payee.payeeId,
+      payee.holderName,
+      payee.displayName,
+      payee.outcome,
+      payee.acknowledged,
+    );
   }
 
   // ---- 4. ACH: a standing warning nobody has signed for -------------------
   let rows: readonly {
+    payee_id: string;
     display_name: string;
+    holder_name: string;
     outcome: string | null;
     acknowledged: boolean;
     freshness: string;
@@ -375,13 +384,16 @@ export async function gatePaymentOnPayee(
   try {
     rows = await conn<
       {
+        payee_id: string;
         display_name: string;
+        holder_name: string;
         outcome: string | null;
         acknowledged: boolean;
         freshness: string;
       }[]
     >`
-      SELECT v.display_name, v.outcome::text AS outcome, v.acknowledged, v.freshness
+      SELECT v.payee_id, v.display_name, v.holder_name, v.outcome::text AS outcome,
+             v.acknowledged, v.freshness
         FROM v_payee_book v
        WHERE v.business_id = ${businessId}::uuid
          AND v.routing_number = ${routingNumber}
@@ -399,8 +411,49 @@ export async function gatePaymentOnPayee(
   // why that allowance stops at the wire rail's edge.
   if (found === undefined) return null;
 
-  return unsignedWarning(found.display_name, found.outcome, found.acknowledged);
+  return unsignedWarning(
+    found.payee_id,
+    found.holder_name,
+    found.display_name,
+    found.outcome,
+    found.acknowledged,
+  );
 }
+
+/* -------------------------------------------------------------------------- */
+/* WHERE THE REMEDY IS — the refusals carry the URL that clears them          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The console route that fixes each of these refusals, spelled out in the
+ * refusal.
+ *
+ * A REFUSAL THAT NAMES AN ACTION THE CONSOLE DOES NOT OFFER IS A CONTROL
+ * PEOPLE ROUTE AROUND. `PAYEE_WARNING_UNACKNOWLEDGED` used to end with "open
+ * the payee, read what the check found, and record why it is right to pay this
+ * account" — three verbs, no address, and until the confirmation form existed
+ * there was nowhere on the deployed console to perform any of them. The
+ * message was correct and unusable, which is the same failure §5e records
+ * about naming the wrong noun.
+ *
+ * So the remedy is a URL, built here, from the payee id the gate already has
+ * in its hand. `/payments` renders a refusal's `message` as text, so this is
+ * deliberately a path a person can read and type rather than markup: the
+ * refusal has to survive being pasted into a ticket, an email and a terminal,
+ * and a path does that where an anchor tag does not.
+ *
+ * One function so the route is named ONCE on this side of the system.
+ * `payeeHref()` in `src/components/payees/view-state.ts` names it for the
+ * screen, and `payees.integration.test.ts` asserts the gate's message carries
+ * the id — so a rename that misses one of them fails rather than shipping a
+ * refusal that points at nothing.
+ */
+export function signWarningHref(payeeId: string): string {
+  return `/payees?payee=${payeeId}&sign=1`;
+}
+
+/** Where a beneficiary nobody has confirmed gets added. */
+export const ADD_PAYEE_HREF = "/payees?add=1";
 
 /**
  * A wire beneficiary nobody has confirmed.
@@ -420,8 +473,8 @@ function notOnBook(holderName: string, last4: string): PayeeGateRefusal {
       "instruction — an urgent payment to a real-sounding beneficiary at a real bank — so " +
       "this rail will not address one nobody has checked. ACH deliberately allows it, because " +
       "an ACH entry is recallable for two banking days and a wire is not. Add the beneficiary " +
-      "on /payees, let the routing number be checked, then raise the payment. Nothing was " +
-      "written and no payment was raised.",
+      `on ${ADD_PAYEE_HREF} — the form computes the check digit in front of you and records the ` +
+      "answer as a row — then raise the payment. Nothing was written and no payment was raised.",
   };
 }
 
@@ -431,20 +484,50 @@ function notOnBook(holderName: string, last4: string): PayeeGateRefusal {
  * One function so the two branches cannot drift into two policies. Note what
  * it is and is not: not a block on the warning — that is overridable by
  * anybody in one step — but a refusal to let the override be IMPLICIT.
+ *
+ * ─── IT NAMES THE BENEFICIARY, AND THEN THE BOOK'S LABEL ───────────────────
+ *
+ * It used to name `payee.display_name` and nothing else, and that is the wrong
+ * noun. `display_name` is the label somebody filed the payee under — a folder
+ * name, often shared by a dozen accounts ("Green coffee supplier") and on this
+ * book sometimes a fixture string. `holder_name` is the beneficiary: the name
+ * on the account, the name the payer typed into the payment, and the name on
+ * the invoice they are looking at.
+ *
+ * Measured on the deployed system on 2026-09-11: a wire to
+ * `Northwind Industrial LLC` ••0000 came back as
+ *
+ *     The last check on "Northwind (wire) wire-1789107730307" raised a warning…
+ *
+ * — a string the payer had never seen, could not search for, and could not tie
+ * to the payment in front of them. The refusal was correct and unusable. Both
+ * names are printed now: the beneficiary first, because that is what the payer
+ * recognises, and the book label second, because that is what they will have
+ * to find on `/payees` to sign it off.
  */
 function unsignedWarning(
+  payeeId: string,
+  beneficiaryName: string,
   displayName: string,
   outcome: string | null,
   acknowledged: boolean,
 ): PayeeGateRefusal | null {
   if (outcome !== "warned" || acknowledged) return null;
+  const filedAs =
+    displayName.trim() === beneficiaryName.trim()
+      ? ""
+      : `, filed on your payee book as "${displayName}",`;
   return {
     code: "PAYEE_WARNING_UNACKNOWLEDGED",
     message:
-      `The last check on "${displayName}" raised a warning that nobody has signed ` +
-      "for. Open the payee, read what the check found, and record why it is right to pay " +
-      "this account. The payment can then be raised — the warning does not stop it, but " +
-      "somebody has to put their name to it.",
+      `The last check on "${beneficiaryName}"${filedAs} raised a warning that nobody has ` +
+      "signed for. Open " +
+      signWarningHref(payeeId) +
+      " — it shows that payee, what the check found, and the form that records why it is right " +
+      "to pay this account. The signature names the findings it answers and goes on the check " +
+      "itself, which is append-only, so it cannot later be edited into something else. The " +
+      "payment can then be raised: the warning does not stop it, but somebody has to put their " +
+      "name to it.",
   };
 }
 

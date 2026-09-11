@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { runAccrual } from "@/lib/accrual/accrue";
+import { runInterestAdjustments } from "@/lib/accrual/interest-adjust";
 import { accrualRunInputSchema } from "@/lib/accrual/types";
 import { authoriseScheduled, REFUSAL_HEADERS, unauthorisedBody } from "@/app/api/cron/_auth";
 import { env } from "@/lib/env";
@@ -50,6 +51,39 @@ export const dynamic = "force-dynamic";
  * Postgres before the row is stored. The worst an authenticated caller can do
  * with this parameter is accrue a day that was going to be accrued anyway,
  * slightly early.
+ *
+ * ─── THE TWO LEGS DO NOT PRICE THE SAME WINDOW, AND THAT IS THE FIX ─────────
+ *
+ * `bookDate` reaches BOTH legs of the tick and they treat it differently. That
+ * asymmetry is deliberate and it is the repair for the defect docs/ACCRUAL.md
+ * §20 records, so it belongs here rather than only in the library.
+ *
+ * THE FEE LEG PRICES THE BOOK DATE, INCLUDING TODAY. A platform fee is `F`,
+ * `N` and `d` — a price, a calendar and an ordinal. It reads no balance, so an
+ * open business date cannot make it wrong, and holding a correct number back
+ * would buy nothing and delay the customer's statement.
+ *
+ * THE INTEREST LEG STOPS AT `book_date(now()) - 1`. Its basis is defined as
+ * the settled balance at the END of a business date (§16) and a date that has
+ * not ended does not have one. Until this route's default was fixed, the tick
+ * priced whatever the balance happened to be at the instant it ran — and
+ * `interest_day` is UNIQUE (schedule_id, accrual_date), so the first tick to
+ * touch an open date froze a mid-day figure as that date's closing basis for
+ * ever. On 2026-09-11 that paid one account 498¢ of CREDIT interest for a day
+ * it closed $858,941.45 OVERDRAWN.
+ *
+ * A caller that asks for today is therefore HELD, NOT REFUSED:
+ * `interestPricingHorizon()` prices every closed date the book owes, the
+ * response carries `interest.pricedThrough` and `interest.openDateHeld`, and
+ * today is taken by the first tick after midnight. Nothing is lost — a day
+ * accrues whether or not the job runs, and the entry carries the date it
+ * accrued FOR. Migration 0049 then refuses the posting in Postgres, so the
+ * horizon being deleted from this codebase would not bring the defect back.
+ *
+ * A CONSEQUENCE WORTH EXPECTING: `v_interest_gap` normally shows one pair per
+ * enrolment — today's — until midnight. That is the horizon, not a stalled
+ * tick. Anything OLDER than today persisting still means the tick is not
+ * running.
  *
  * ─── THE SCHEDULE VERCEL ACTUALLY RUNS ──────────────────────────────────────
  *
@@ -133,10 +167,47 @@ async function run(req: Request): Promise<NextResponse> {
       ...(options.value.limit === undefined ? {} : { limit: options.value.limit }),
       runId: `accrual-${requestId}`,
     });
+
+    // THE CORRECTION RUNS ON THE SAME TICK, AND AFTER IT.
+    //
+    // `runInterestAdjustments()` existed and NOTHING CALLED IT — a correction
+    // that only runs when somebody remembers is not a correction. Five days
+    // are queued: interest priced mid-day, before the date closed, one of them
+    // paying 498c of income to an account that closed $858,941.45 OVERDRAWN.
+    // Wrong amount, wrong side, and `interest_day`'s uniqueness makes the
+    // original permanent.
+    //
+    // AFTER the tick, deliberately. The tick prices yesterday; the adjuster
+    // re-prices a day that has closed. Running the adjuster first would let it
+    // consider a day this very tick is about to decide, and the whole defect
+    // being repaired is a price taken before the facts were in.
+    //
+    // It is safe to call on every tick and usually does nothing: the path
+    // refuses in TypeScript, in `assert_interest_adjustment()` and in a CHECK
+    // constraint until `adjusted_on_book_date > accrual_date`. Today all five
+    // report HELD. The first tick after midnight ET corrects them.
+    //
+    // A failure here must not fail the accrual tick that already succeeded —
+    // the postings above are committed and a 500 would invite a retry that
+    // re-runs a job whose work is done. Reported in the body instead.
+    let adjustments: unknown;
+    try {
+      // The report already narrows its money to decimal strings —
+      // reversedCents, creditRebookedCents and overdraftRebookedCents — so it
+      // survives JSON.stringify as it stands. The two re-booked figures are
+      // kept SEPARATE on purpose: a correction can cross sides, and netting
+      // them into one number would hide the case that matters most, where
+      // income becomes expense.
+      adjustments = await runInterestAdjustments({ runId: `interest-adj-${requestId}` });
+    } catch (e) {
+      adjustments = { failed: e instanceof Error ? e.message : "unknown" };
+    }
+
     return NextResponse.json(
       {
         requestId,
         ...result,
+        adjustments,
         // bigint does not survive JSON.stringify, and money is bigint cents
         // everywhere below this line. Narrowed here, at the edge, as decimal
         // strings — never as numbers, which is how a cent goes missing.

@@ -495,6 +495,13 @@ run("the payment gate — the one line that goes in requestPayment()", () => {
       destination: destination({ holderName, accountNumberLast4: "3434" }),
     });
     expect(before?.code).toBe("PAYEE_WARNING_UNACKNOWLEDGED");
+    // IT NAMES THE BENEFICIARY, not only the book's folder label. The refusal
+    // used to quote `display_name` alone — on this book "Green coffee
+    // supplier", shared by a dozen accounts — so a payer looking at an invoice
+    // for a named company was told a warning existed on a string they had
+    // never seen and could not search for.
+    expect(before?.message).toContain(holderName);
+    expect(before?.message).toContain(candidate("Gatefirst").displayName);
 
     // A signature, and the same payment goes through. The warning was never
     // the block; the implicit override was.
@@ -926,5 +933,145 @@ run("with the live Increase directory", () => {
     // a warning that fires on everything is a warning nobody reads.
     expect(entry?.outcome).toBe("verified");
     expect(checkRoutingNumber("011401533").valid).toBe(true);
+  });
+});
+
+/* ========================================================================== */
+/* Fail-closed, against a REAL Postgres read failure rather than a stub.      */
+/* ========================================================================== */
+
+/**
+ * WHY THIS EXISTS BESIDE THE `exploding()` TESTS ABOVE.
+ *
+ * Those tests hand the gate a connection object that rejects. That proves the
+ * CONTROL FLOW — a throw becomes a refusal, not a pass — and it is the right
+ * shape for the unit-level claim. What it cannot prove is that the thing a
+ * real database does on a real failure actually travels that path: a stub
+ * rejects with `Error`, and postgres.js rejects with a `PostgresError`
+ * carrying a SQLSTATE, through a driver layer with its own error handling, on
+ * a connection whose transaction is now aborted.
+ *
+ * docs/PAYEES.md §5b and §5d claim these two functions fail closed against a
+ * database this transaction cannot read. This makes that read genuinely fail:
+ * `SET LOCAL statement_timeout = '1ms'` inside a real transaction on the live
+ * book, so `loadBookEntries()` and the standing-warning SELECT come back as
+ * 57014 `query_canceled` from Postgres itself.
+ *
+ * The assertion that matters is NOT that an error came back. It is that
+ * `check` is `null` — no check was reported — and that nothing was written.
+ * Under the pre-2026-09-11 `catch(() => [])` the code returns a `PayeeCheck`
+ * describing a twin probe that never ran, which is the defect; run against
+ * this test it fails on `check`, which is how the test was proved to detect
+ * it.
+ */
+run("fail-closed against a REAL postgres read failure", () => {
+  let accountId: string;
+
+  beforeAll(async () => {
+    const account = await mainDepositAccountId(RIDGELINE, sql);
+    if (account === null) throw new Error("the seeded Ridgeline deposit account is missing");
+    accountId = account;
+  });
+
+  /**
+   * Run `body` on a live transaction that Postgres will not read from, then
+   * throw the transaction away.
+   *
+   * The failure is produced by ABORTING THE TRANSACTION — one statement that
+   * divides by zero, swallowed — after which Postgres answers every further
+   * statement on this connection with 25P02, `current_transaction_is_aborted`,
+   * until a rollback. That is deterministic, it is the driver's own
+   * `PostgresError` with a SQLSTATE rather than a stub's `Error`, and it is
+   * precisely the condition §5b argues about: not "the payee service is down
+   * while payments are healthy" but THIS TRANSACTION CANNOT READ — the one
+   * that is two statements away from INSERTing the instruction.
+   *
+   * A `statement_timeout` was tried first and is the wrong tool: the payee
+   * book is one index scan and it sometimes beats the clock, which makes the
+   * test flaky in the direction of passing.
+   */
+  async function withUnreadableBook<T>(body: (tx: typeof sql) => Promise<T>): Promise<T> {
+    let captured: T | undefined;
+    await sql
+      .begin(async (tx) => {
+        await tx`SELECT 1 / 0`.catch(() => undefined);
+        captured = await body(tx as unknown as typeof sql);
+        // The transaction is aborted by now; roll it back explicitly rather
+        // than letting the driver try to COMMIT an aborted transaction.
+        throw new Error("__ROLLBACK__");
+      })
+      .catch((thrown: unknown) => {
+        if (!(thrown instanceof Error) || thrown.message !== "__ROLLBACK__") throw thrown;
+      });
+    if (captured === undefined) throw new Error("the body did not return");
+    return captured;
+  }
+
+  it("confirmPayee: PAYEE_BOOK_UNREADABLE, no check reported, and no row anywhere", async () => {
+    const key = `${RUN_ID}-pg-timeout`;
+    const holder = candidate("Pgtimeout").holderName;
+
+    const result = await withUnreadableBook((tx) =>
+      gate.confirmPayee(
+        { candidate: candidate("Pgtimeout", { accountNumberLast4: "4417" }), payeeKey: key, actorId: ALEX },
+        tx,
+      ),
+    );
+
+    expect(result.refusal?.code).toBe("PAYEE_BOOK_UNREADABLE");
+    expect(result.saved).toBe(null);
+    // THE ONE THAT CATCHES THE OLD BUG. `null` means no check happened, which
+    // is a different fact from a check that found nothing. The fail-open shape
+    // returns a populated `PayeeCheck` here.
+    expect(result.check).toBe(null);
+    expect(result.refusal?.message).toContain("twin probe");
+    // The error's CLASS, never the driver's text — this string is rendered.
+    expect(result.refusal?.message).toContain("PostgresError");
+    expect(result.refusal?.message).not.toMatch(/statement timeout|canceling statement/i);
+
+    // Counted on a FRESH connection, outside the aborted transaction.
+    const [payees] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM payee WHERE payee_key = ${key}`;
+    const [verifications] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n
+        FROM payee_verification v JOIN payee p ON p.id = v.payee_id
+       WHERE p.holder_name = ${holder}`;
+    const [refusals] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM payee_candidate_refusal WHERE holder_name = ${holder}`;
+    expect(payees?.n).toBe(0);
+    expect(verifications?.n).toBe(0);
+    expect(refusals?.n).toBe(0);
+  });
+
+  /**
+   * WHICH LEG THIS REACHES, NAMED. An aborted transaction fails the FIRST read
+   * the gate makes, which is `readAccountIdentity()` — whose business this
+   * account is. So this proves the account-identity leg against a real
+   * `PostgresError`; the payee-book leg one statement later is proved by the
+   * `exploding()` tests above, which are the only way to let one read succeed
+   * and the next one fail. Both legs return the same code on purpose, and the
+   * message says which one did not complete, because "invalid request" is not
+   * something an operator can act on.
+   */
+  it("gatePaymentOnPayee: PAYEE_STANDING_CHECK_UNAVAILABLE on a real read that does not complete", async () => {
+    const refusal = await withUnreadableBook((tx) =>
+      gate.gatePaymentOnPayee(
+        {
+          accountId,
+          destination: {
+            type: "ach",
+            holderName: "Anybody At All",
+            routingNumber: "011401533",
+            accountNumberLast4: "4417",
+            accountType: "checking",
+          } satisfies PaymentDestination,
+        },
+        tx,
+      ),
+    );
+    expect(refusal?.code).toBe("PAYEE_STANDING_CHECK_UNAVAILABLE");
+    expect(refusal?.message).toContain("the account's business could not be read");
+    expect(refusal?.message).toContain("Nothing was written");
+    expect(refusal?.message).toContain("PostgresError");
   });
 });

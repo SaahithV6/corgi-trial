@@ -783,3 +783,82 @@ suite("the guards that moved into the database", () => {
     }
   });
 });
+
+/* ========================================================================== */
+/* The episode screen's balance table claims only what it can prove.          */
+/* ========================================================================== */
+
+/**
+ * THE MEASUREMENT THAT NEARLY MADE THE HEADLINE CLAIM FALSE.
+ *
+ * `/disputes?state=edge` prints three rows — before the claim, credit granted,
+ * case resolved — and captions them "available does not move at all, because
+ * the hold withheld exactly what the credit added". The three figures come
+ * from `positionAt()`, which answers for the WHOLE ACCOUNT at a booking
+ * watermark.
+ *
+ * That caption is true only while nothing else touches the customer between
+ * the watermarks. On 2026-09-11, working case DSP-20260911-8U46YC live on the
+ * shared book, something did: an unrelated $225.00 card authorisation released
+ * between watermark 5678 and watermark 5762, and the published available
+ * column read $65,774.03 / $65,774.03 / $65,999.03 under a caption that said
+ * it had not moved. Nothing was mis-posted; the screen was making a claim
+ * about a number that other work can move.
+ *
+ * The fix is that the claim is now carried by three further columns — this
+ * case's OWN contribution to ledger, holds and available, folded out of this
+ * dispute's own journal lines. Those cannot be perturbed by anything else on
+ * the book, which is what makes them evidence.
+ *
+ * This test asserts the invariant on EVERY clawed-back case the committed book
+ * carries, through `loadDisputesView()` — the function the deployed page calls
+ * — rather than on one pinned uuid. TO SEE IT FAIL: make `caseContributionAt`
+ * in `screen.ts` return the account-wide position (drop the per-line filter),
+ * and every case with concurrent traffic around it goes red.
+ */
+suite("the episode balance table", () => {
+  it("carries THIS CASE'S own contribution, and its available column is nought", async () => {
+    const { loadDisputesView } = await import("./screen");
+
+    const recovered = (await disputes.listDisputeStates({ businessId, limit: 50 }, conn)).filter(
+      (s) => s.status === "closed_lost_recovered",
+    );
+    // Not a skip: the seeded book carries these, and a book with none of them
+    // has not exercised the feature this file is about.
+    expect(recovered.length).toBeGreaterThan(0);
+
+    let sawTheHold = false;
+    for (const state of recovered) {
+      const view = await loadDisputesView({
+        businessId: null,
+        disputeId: state.id,
+        edge: true,
+      });
+      expect(view.ok).toBe(true);
+      if (!view.ok) continue;
+      const episode = view.value.episode;
+      expect(episode).not.toBeNull();
+      if (episode === null) continue;
+
+      expect(episode.balances).toHaveLength(3);
+      for (const row of episode.balances) {
+        // The whole claim, on numbers nothing else on the book can move:
+        // the hold withheld exactly what the credit added, at every watermark.
+        expect(row.caseAvailableCents).toBe(0);
+        expect(row.caseLedgerCents).toBe(row.caseHoldsCents);
+      }
+
+      const [before, granted, resolved] = episode.balances;
+      expect(before?.caseLedgerCents).toBe(0);
+      // The middle watermark is the grant's own memo posting, so the case is
+      // carrying its full advance there and holding all of it.
+      expect(granted?.caseLedgerCents).toBe(episode.amountCents);
+      expect(granted?.caseHoldsCents).toBe(episode.amountCents);
+      // Recovered: the advance came back off the customer and the hold closed.
+      expect(resolved?.caseLedgerCents).toBe(0);
+      expect(resolved?.caseHoldsCents).toBe(0);
+      if ((granted?.caseHoldsCents ?? 0) > 0) sawTheHold = true;
+    }
+    expect(sawTheHold).toBe(true);
+  });
+});

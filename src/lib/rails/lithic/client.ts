@@ -530,6 +530,66 @@ export async function getTransaction(
   );
 }
 
+/**
+ * `getTransaction`, but tolerant of the provider's read-after-write delay.
+ *
+ * `POST /v1/simulate/authorize` answers `201 {token}` BEFORE the transaction is
+ * readable, and everything keyed on that token — this endpoint and
+ * `/v1/simulate/clearing` alike — answers **404 until it is**. The token is
+ * valid the whole time; the caller is simply early.
+ *
+ * Measured on the sandbox, six trials each, polling every 200ms from the
+ * authorize response:
+ *
+ *   AUTHORISATION APPROVED    969  1166  1177  1184  1450  1759 ms   mean 1284
+ *   AUTHORISATION DECLINED    781   788   829   875  1047  1051 ms   mean  895
+ *
+ * An approved authorisation takes ~390ms longer to surface, because it has a
+ * pending transaction and a hold to create. `simulateLimiter` paces the next
+ * call to ~1100-1200ms, which is past the far tail of the declined
+ * distribution and through the MIDDLE of the approved one — so this race was
+ * always present and the declined era was simply on the safe side of it. It
+ * became visible the day the spend cap was raised and authorisations started
+ * approving, which looked like a regression and was a distribution shift.
+ *
+ * This lives here so the next call site does not have to know any of that.
+ *
+ * Two deliberate properties:
+ *
+ *   - It retries ONLY on 404. Any other status rethrows immediately, because a
+ *     401 or a 500 is not a delay and waiting on one hides it.
+ *   - It fails HARD at the deadline rather than returning null. A token still
+ *     dark after 30s is a different fault from a slow one, and a longer wait
+ *     must not paper over it — the throw quotes the measurement above so
+ *     whoever reads it knows what normal looks like.
+ */
+export async function getTransactionWhenVisible(
+  transactionToken: string,
+  options: LithicRequestOptions & { timeoutMs?: number; pollMs?: number } = {},
+): Promise<Transaction> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const pollMs = options.pollMs ?? 250;
+  const startedAt = Date.now();
+  for (;;) {
+    try {
+      return await getTransaction(transactionToken, options);
+    } catch (error) {
+      const notYetVisible = error instanceof LithicApiError && error.status === 404;
+      if (!notYetVisible) throw error;
+      const waited = Date.now() - startedAt;
+      if (waited >= timeoutMs) {
+        throw new Error(
+          `transaction ${transactionToken} was still not readable after ${waited}ms. ` +
+            `Lithic makes a simulated authorisation visible in roughly 0.8-1.8s ` +
+            `(approved runs ~390ms behind declined), so this is not the ordinary ` +
+            `read-after-write delay and should not be waited out further.`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+}
+
 /** `GET /v1/transactions`. List rows may omit `events[]`; re-read by token for the lifecycle. */
 export async function listTransactions(
   query: ListTransactionsQuery = {},

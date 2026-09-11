@@ -81,9 +81,30 @@ export type IdentityView = {
  * a pot reduces what can be spent.
  */
 export type AvailabilityView = {
+  /**
+   * The main leaf's balance AS OF THE BOOK DATE — `value_date <= today`.
+   *
+   * NOT the same number as `IdentityView.mainCents`, which is the all-time sum
+   * over that account and therefore includes entries value-dated in the
+   * future. Both are correct and they are different questions; the screen must
+   * label them apart, because it prints them six lines from each other. On
+   * 2026-09-11 Ridgeline's were $58,388.31 here and $86,152.21 there, the
+   * $27,763.90 between them being standing-order debits value-dated into 2027.
+   */
   readonly ledgerCents: Cents;
   readonly holdsCents: Cents;
   readonly unclearedCents: Cents;
+  /**
+   * Debits already booked for a FUTURE value date: committed out, no hold row.
+   *
+   * The fourth term of `availableBalance()`. It was missing from this contract
+   * and therefore from the subtraction the screen printed, which read
+   * `$58,388.31 − $635.00 − $19,701.18 = $35,552.13` — an identity that is
+   * short by exactly this number ($2,500.00 that day) and that a customer
+   * checking it by hand would have found wrong. `decideMove()`'s refusal
+   * sentence has always named all four; the panel now does too.
+   */
+  readonly pendingOutboundCents: Cents;
   readonly availableCents: Cents;
 };
 

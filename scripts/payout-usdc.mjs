@@ -606,8 +606,36 @@ if (outcome.kind !== "confirmed") {
     kv("gas burned", `${outcome.receipt.gasCostWei} wei`);
     console.log("\nThe transaction was mined and FAILED. The gas is gone; no USDC moved.");
   } else if (outcome.kind === "reorged") {
+    // ── A REORG VERDICT IS NOT PROOF THE MONEY STAYED PUT ────────────────────
+    //
+    // Seen twice on Base Sepolia, both times on the happy path: the node
+    // answers `eth_getTransactionReceipt` at the tip with a `blockHash` of 64
+    // zeroes — a preconfirmation, not a reorg — and the adapter's canonicality
+    // re-check compares that against the block's real hash, finds them
+    // different and says `reorged`. Refusing to post is the RIGHT call there:
+    // this script does not get to decide what is canonical, and a posting made
+    // on a receipt it could not trust would be worse than no posting.
+    //
+    // What is wrong is leaving the operator here. The transfer was broadcast.
+    // It may well have confirmed — in both observed cases it had — and the
+    // ledger does not know, which is a reconciliation break with no handle on
+    // it. So print the handle: the hash, the block to check, and the exact
+    // recovery command. A human reads the chain and decides; nothing here
+    // posts on its own.
     kv("detail", outcome.detail);
-    console.log("\nThe block that carried this transfer is no longer canonical. Nothing posted.");
+    console.log(
+      "\nThe receipt could not be confirmed canonical, so NOTHING WAS POSTED — this script does\n" +
+        "not get to overrule that check. But the transfer WAS broadcast and may still have\n" +
+        "confirmed: a node serving a receipt with a zero block hash at the tip is a\n" +
+        "preconfirmation, not a reorg, and it looks exactly like this.\n" +
+        "\nRead the chain before deciding anything:\n" +
+        `  curl -sS -X POST "$BASE_SEPOLIA_RPC_URL" -H 'content-type: application/json' \\\n` +
+        `    -d '{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["${outcome.txHash}"]}'\n` +
+        "\nIf it comes back with status 0x1 and a block that resolves, the money has left and the\n" +
+        "ledger has to be told. Recover it — the gate does not run on --settle, because on a\n" +
+        "recovery the value has already gone:\n" +
+        `  node scripts/payout-usdc.mjs${QUOTE === null ? "" : ` --quote ${QUOTE}`} --settle ${outcome.txHash} --amount ${usdcArg(AMOUNT_UNITS)}`,
+    );
   } else if (outcome.kind === "unconfirmed") {
     kv("waited", `${outcome.waitedMs} ms`);
     console.log(`\nStill in the mempool. The hash above is valid — re-run with:\n  node scripts/payout-usdc.mjs${QUOTE === null ? "" : ` --quote ${QUOTE}`} --settle ${outcome.txHash}`);

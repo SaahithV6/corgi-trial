@@ -81,7 +81,7 @@ export function EpisodePanel({ episode }: { readonly episode: EpisodeView }) {
       {/* ---- the balances ------------------------------------------------ */}
       <Panel
         title="The customer's balance across the whole episode"
-        description="Each row is two sums over journal_line at a booking watermark (booking_seq <= N). Nothing here is stored; the subtraction is printed so it can be checked by eye."
+        description="Each row is sums over journal_line at a booking watermark (booking_seq <= N). Nothing here is stored; both subtractions are printed so they can be checked by eye. The first three columns are the WHOLE ACCOUNT and move for every reason the account moves; the last three are this case's own contribution to them, and they are where the claim lives."
       >
         <TableScroll>
           <table className="w-full border-collapse text-sm">
@@ -90,6 +90,9 @@ export function EpisodePanel({ episode }: { readonly episode: EpisodeView }) {
                 <th className={TH_CLASS}>step</th>
                 <th className={`${TH_CLASS} text-right`}>booking seq</th>
                 <th className={`${TH_CLASS} text-right`}>ledger</th>
+                <th className={`${TH_CLASS} text-right`}>− holds</th>
+                <th className={`${TH_CLASS} text-right`}>= available</th>
+                <th className={`${TH_CLASS} text-right`}>this case: ledger</th>
                 <th className={`${TH_CLASS} text-right`}>− holds</th>
                 <th className={`${TH_CLASS} text-right`}>= available</th>
               </tr>
@@ -105,8 +108,17 @@ export function EpisodePanel({ episode }: { readonly episode: EpisodeView }) {
                   <td className={`${TD_CLASS} text-right`}>
                     <Money cents={b.holdsCents} />
                   </td>
-                  <td className={`${TD_CLASS} text-right font-semibold`}>
+                  <td className={`${TD_CLASS} text-right`}>
                     <Money cents={b.availableCents} />
+                  </td>
+                  <td className={`${TD_CLASS} text-right`}>
+                    <Money cents={b.caseLedgerCents} />
+                  </td>
+                  <td className={`${TD_CLASS} text-right`}>
+                    <Money cents={b.caseHoldsCents} />
+                  </td>
+                  <td className={`${TD_CLASS} text-right font-semibold`}>
+                    <Money cents={b.caseAvailableCents} />
                   </td>
                 </tr>
               ))}
@@ -117,16 +129,31 @@ export function EpisodePanel({ episode }: { readonly episode: EpisodeView }) {
         <div className="px-5 pb-4">
           <Note title="Read the last column down">
             <p>
-              The ledger balance rises by the credit and falls again by the
-              clawback, because both of those are real money on real days and the
-              customer&rsquo;s statement has to show each of them. Available does
-              not move at all, because the hold withheld exactly what the credit
-              added, from the moment it was granted until the case closed.
+              This case&rsquo;s ledger contribution rises by the credit and falls
+              again by the clawback, because both of those are real money on real
+              days and the customer&rsquo;s statement has to show each of them.
+              Its contribution to <em>available</em> is nought on every row,
+              because the hold withheld exactly what the credit added, from the
+              moment it was granted until the case closed.
             </p>
             <p className="mt-2">
-              That is the reason the clawback is safe. A provisional credit that
-              inflated available balance would let the customer spend money we
-              may have to take back, and taking it back would overdraw somebody
+              <strong>Why the last three columns exist, and not just the first
+              three.</strong> The account-wide columns are what the customer sees,
+              so they are shown — but they are the whole account, and everything
+              else that happened to this business in between lands in them. On a
+              quiet book they read flat and it is tempting to publish that as the
+              proof; on a busy one they do not. Measured here on 2026-09-11: an
+              unrelated card authorisation for $225.00 released between the grant
+              and the clawback, and the account-wide available column moved by
+              exactly that, under a caption claiming it had not moved at all. A
+              number that can be perturbed by something else is not evidence about
+              this case, so the invariant is stated over this case&rsquo;s own
+              journal lines, which nothing else on the book can touch.
+            </p>
+            <p className="mt-2">
+              That nought is the reason the clawback is safe. A provisional credit
+              that inflated available balance would let the customer spend money
+              we may have to take back, and taking it back would overdraw somebody
               who did nothing wrong. This is a US <em>business</em> account, so
               Regulation E&rsquo;s &ldquo;full use of the funds&rdquo; rule does
               not apply and the availability decision is ours to make; we make it

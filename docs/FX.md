@@ -10,9 +10,9 @@ quote the customer accepts first."*
 | Code | `src/lib/fx/**`, `src/components/payouts/**`, `src/app/(app)/payouts/**` |
 | Rate source | `frankfurter.dev` — **live**, measured, no key, no signup |
 | Off-ramp partner | **none.** The last mile is not built, and §7 says so at length |
-| Journal entries written | **zero.** A quote is not a transaction; §6 |
+| Journal entries written | **zero by a quote or an acceptance** — a quote is not a transaction (§6). A *settlement* posts one five-line entry, since §11 |
 | Refusal code for an unquoted payout | `FX_QUOTE_NOT_ACCEPTED` |
-| Rows in `fx_quote_settlement` | **8 — one real, seven test fixtures, each labelled as one.** §12 |
+| Rows in `fx_quote_settlement` | **9 — two real, seven test fixtures, each labelled as one.** §12, §13 |
 
 ---
 
@@ -1033,3 +1033,223 @@ psql "$APP_DATABASE_URL" -c \
           count(*) FILTER (WHERE NOT is_fixture) AS real
      FROM v_fx_quote_settlement"        -- 7 and 1
 ```
+
+---
+
+## 13. Re-verified live on 2026-09-11, and the three things it found
+
+*This section is a record of an end-to-end verification run against the live
+Neon book and Base Sepolia, done from scratch rather than by reading §11. §11
+stands; nothing in it was contradicted. What follows is a second real payout,
+its real ids, and the three defects the run turned up.*
+
+### The rate source, measured twice — and it moved between them
+
+```
+13:57:46Z  HTTP/2 200  0.46 s
+{"amount":1.0,"base":"USD","date":"2026-09-10",
+ "rates":{"BRL":5.1247,"INR":95.44,"JPY":154.18,"MXN":16.9435,"PHP":62.576}}
+
+14:00:21Z  {"amount":1.0,"base":"USD","date":"2026-09-11","rates":{"MXN":16.9771}}
+```
+
+**The ECB published the 2026-09-11 fix in the middle of this run.** That is
+worth more than any assertion in the suite: the same URL, three minutes apart,
+returned a different date and a different rate, so the source is answering
+rather than serving a cache of a figure someone typed. It also means the payout
+below is not a rate-move rehearsal — **the market genuinely moved between the
+quote and the settlement**, and the customer got the rate they accepted anyway.
+
+One thing the headers say that this document did not:
+
+```
+deprecation: @1779103800
+link: <https://api.frankfurter.dev/v2/rates>; rel="successor-version"
+```
+
+`/v1` is announcing its own succession. It answers 200 today. `frankfurterUrl()`
+in `rate.ts` is the one place the URL is built, which is exactly the property
+that makes moving to `/v2` a one-line change — but it is a change somebody has
+to make, and it is named here rather than discovered when a 410 arrives.
+
+### The payout, end to end
+
+| | |
+| --- | --- |
+| quote | `FXQ-3BHA0ZKW` |
+| mid, live for 2026-09-10 | 16.9435 MXN/USD, HTTP 200 |
+| customer rate, mid less 50bp | 16.8587825 |
+| sells / fee / net | $3.00 / $1.01 / $1.99 |
+| delivers | 33.54 MXN (floor residual 8,977 / 10,000 of a centavo) |
+| accepted | 2026-09-11T13:59:30.987Z, 283s to spare, by `ledger-poster` |
+| **mid at settlement** | **16.9771** — the ECB's 2026-09-11 fix, published mid-run |
+| costs | 1.979521 USDC |
+| tx | `0x92b308ab099f1cab79e9f54e9c58940ddc2e98e1b7bc8a1389261aac082fd58d` |
+| block | 46683447, `0x4b915ea989f036f16e4653fc0e54fd3319c7abae329bc57ff86d3e36250c25a8`, status `0x1`, 2026-09-11T13:59:42Z |
+| entry | `8bd5066d-e710-418c-837d-e5e75f90773c`, value date 2026-09-11, booking_seq 5568 |
+
+Read back off a node, not off our own output — `eth_getTransactionReceipt`
+returns one `Transfer` log, `0x…1e3481` = **1,979,521 minor units** to
+`0x…dEaD`, and `eth_getBlockByNumber(0x2c85537)` returns the same block hash the
+receipt claims, so the block is canonical.
+
+```
+CR 4300                        1 USD   FX quote settlement variance
+CR 4200                      101 USD   Fee income
+DR 2100/e274546d…            300 USD   Ridgeline Robotics, Inc. — business current account
+CR 1140                      197 USD   USDC omnibus wallet — Base Sepolia
+CR 2900                        1 USD   Rounding residual clearing
+   balance                     0
+```
+
+197.9521 cents left the wallet: **197 to 1140, 9,521 / 10,000 of a cent to
+2900** under **§12.6**, `settlement_cost_cents` 198, variance +1 cent to 4300.
+The 2900 line's own memo carries the clause and the fraction:
+
+> sub-cent conversion residual on FXQ-3BHA0ZKW · tx 0x92b308ab… : 9521 of 10000
+> USDC units of a cent, carried here rather than truncated or netted into 4300
+> (DESIGN §12.6)
+
+and the entry description carries both clocks and both rates:
+
+> Cross-border payout FXQ-3BHA0ZKW — 33.54 MXN to Off-ramp partner — testnet
+> demo **at an accepted rate of 16.8587825 MXN/USD (mid 16.9435 less 50bp),
+> accepted 2026-09-11T13:59:30.987Z, settled against a mid of 16.9771** (trial
+> demo payout) — base.usdc block 46683447, gas 269058000000 wei
+
+### The refusals, each against a row raised for it
+
+| Attempt | Code | Exit | Signed? |
+| --- | --- | --- | --- |
+| `--quote` omitted | `FX_QUOTE_REQUIRED` | 1 | nothing — the gate runs before the chain is even read |
+| `FXQ-3BHA0ZKW` while still an open offer | `FX_QUOTE_NOT_ACCEPTED` | 1 | nothing |
+| `FXQ-KZ7FR1CM`, a 5-second offer, **accepting** it after it lapsed | `FX_QUOTE_EXPIRED` (trigger, SQLSTATE 55006) | 1 | nothing written |
+| `FXQ-KZ7FR1CM`, **sending** against that never-accepted offer | `FX_QUOTE_NOT_ACCEPTED` | 1 | nothing |
+| `FXQ-QGXRRK3D`, accepted 13:58:56.829Z on a 60s window, attempted 14:00:55Z | `FX_QUOTE_COMMITMENT_LAPSED` | 1 | nothing |
+| `FXQ-3BHA0ZKW` a second time | `FX_QUOTE_ALREADY_SETTLED` | 1 | nothing |
+
+In every refusal the script exits before the `chain, before` section prints,
+which is the observable form of "the wallet key was never used".
+
+### Finding 1 — the reorg false negative is not a one-off, and it cost a run
+
+**The happy path did not complete in one command.** `--quote FXQ-3BHA0ZKW`
+cleared the gate, signed, broadcast, and then reported:
+
+```
+kind    REORGED
+detail  receipt claims block 46683447 0x0000…0000, chain now has no such block
+```
+
+Base Sepolia answered `eth_getTransactionReceipt` at the tip with a `blockHash`
+of sixty-four zeroes — **a preconfirmation, not a reorg** — and the adapter's
+canonicality re-check compared that placeholder against the block's real hash,
+found them different, and correctly refused to post. Forty seconds later the
+same node returned the same receipt with `blockHash`
+`0x4b915ea9…250c25a8`, and `eth_getBlockByNumber` confirmed that block is
+canonical. §11 records this happening once and treats it as an accident of one
+run. It is not: **it is the ordinary outcome of reading a receipt at the tip of
+a chain with preconfirmations**, and on this corridor it is closer to the rule
+than the exception.
+
+Refusing to post was right and is not being changed — a script does not get to
+overrule the canonicality check. What was wrong is where it left the operator:
+1.979521 USDC had left the wallet, the ledger did not know, and the output said
+only *"Nothing posted."* with no handle on the break it had just created. The
+`unconfirmed` branch prints a `--settle` recovery command; the `reorged` branch
+printed none, which is the branch that most needs one.
+
+`scripts/payout-usdc.mjs` now prints, on `reorged`, the `curl` that reads the
+receipt back and the exact recovery line, with the amount filled in. The
+posting still requires a human to look at the chain first. **This is the one
+place this feature is not a single command**, and the honest statement of it is:
+the gate, the pricing, the send and the posting all work; the *receipt reader*
+is racing a preconfirmation, and the fix belongs in
+`src/lib/rails/stablecoin/adapter.ts` — treat a zero `blockHash` as "not yet
+final, keep waiting" rather than as a reorg — which is a directory this work
+does not own.
+
+The recovery itself worked exactly as designed:
+
+```
+node scripts/payout-usdc.mjs --quote FXQ-3BHA0ZKW \
+  --settle 0x92b308ab… --amount 1.979521
+  gate   NOT RUN — --settle
+```
+
+and because the settlement window was the default 86,400 seconds rather than
+the 60 that bit §11, `fx_quote_settlement`'s trigger accepted the row, the
+quote is `settled`, and there is no break to explain.
+
+### Finding 2 — the screen was still saying the variance is unposted
+
+On the deployed console, the settled quote's Settlement panel read:
+
+> The variance above is recorded and **not posted**. There is no account in the
+> chart for an FX settlement variance … `unposted`
+
+and the commitment panel read *"It does not post to the journal today, because
+the chart has no account for it."* Both were written before §11 and **both were
+false the moment `4300` was added** — the ledger above shows the variance
+posted, and `fx_quote_settlement.entry_id` has pointed at a journal entry since
+the first real payout.
+
+This is the §12 error with the sign reversed. §12 was a database telling the
+truth in front of a screen that did not say so; this is a ledger doing the right
+thing in front of a screen asserting it did not. Both hand a reader a claim
+nobody made.
+
+Fixed by **deriving the paragraph instead of asserting it**:
+`fx_quote_settlement.entry_id` is already on `v_fx_quote`, so it is carried
+through `QuoteFacts.entryId` to `QuoteView.settlementEntryId`, and
+`QuoteDetail` prints either the posted entry id with the account it landed in,
+or — when there genuinely is no entry — that this settlement has none, which is
+expected on a screen fixture and a break on a live row. There is no longer a
+sentence about the journal that a change to the journal can falsify.
+
+### Finding 3 — the error state was the one screen that did not disclose the off-ramp
+
+`PayoutsView` carries a comment saying the two limitations are shown *"at the
+top, on every state"*. The error branch returned before the note that carries
+them, so `/payouts?state=error` rendered a page headed **Cross-border payouts**
+with nothing anywhere on it saying the last mile does not exist. The other four
+states — default, loading, empty, edge — all carried it, and still do.
+
+The paragraph is now one component rendered in both branches. An unreadable
+quote book is not a reason to stop disclosing what the product is.
+
+### What is still true, and unfixed
+
+**The quote is still not in `payment_instruction.content_hash`.**
+`src/lib/approvals/hash.ts` hashes `corgi.payment.v1` over *(account, rail,
+amount, currency, destination, value date)* and nothing else. So on a
+cross-border payout above threshold the second human still approves an amount
+and a beneficiary but **not the rate**. §11.1 is unchanged and its fix —
+an `fx_quote_id` column on `payment_instruction`, folded into the preimage and
+the version tag bumped to `corgi.payment.v2` — is still a change in
+`src/lib/approvals/**`, which this work does not own.
+
+**There is still no off-ramp**, and no hedge, and acceptance still places no
+memo hold. §6, §7 and §11.2 are unchanged.
+
+### The book, after this run
+
+Nine settlements: **seven fixtures, two real.** Both real ones carry a hash that
+resolves on Base Sepolia and a journal entry that exists; all seven fixtures are
+marked in `fx_quote_fixture` and labelled on the hash on `/payouts`. §12's
+regression test — *"every settlement not marked has a plausible hash and an
+entry that actually exists"* — passes on nine rows rather than eight.
+
+```
+$ RUN_DB_TESTS=1 RUN_LIVE_TESTS=1 pnpm test src/lib/fx
+  Test Files  5 passed (5)       Tests  99 passed (99)
+$ node scripts/dbcheck.mjs              38 passed, 4 failed   (the four are deliberate)
+$ node scripts/dbcheck.mjs --prove      26 of 26 invariant views, 33 proofs
+$ pnpm typecheck && pnpm lint --max-warnings=0 && pnpm test && pnpm build
+  Tests  2547 passed | 431 skipped
+```
+
+**The three fixes above are in the tree and are not on the deployed URL.** The
+deployment is commit `0fa057d`; everything in §13 that describes the *database*,
+the *chain* and the *CLI* was observed against the live system, and the two
+screen fixes are source changes awaiting a deploy this work did not make.

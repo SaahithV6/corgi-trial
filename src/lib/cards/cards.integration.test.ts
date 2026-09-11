@@ -30,6 +30,7 @@
  */
 import { beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
+import { randomUUID } from "node:crypto";
 
 import { parseAsaRequest } from "./asa";
 import { decide } from "./decide";
@@ -95,6 +96,19 @@ async function provision(): Promise<void> {
       SELECT id FROM actor WHERE kind = 'human' ORDER BY display_name LIMIT 1
     `;
     actorId = actor?.id ?? "";
+  } finally {
+    await owner.end();
+  }
+}
+
+/** How many decision rows one provider auth token has, in the harness lane. */
+async function decisionRowCount(authToken: string): Promise<string> {
+  const owner = postgres(process.env["DIRECT_URL"] as string, { max: 1, onnotice: () => {} });
+  try {
+    const [row] = await owner<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM card_auth_decision
+       WHERE provider_auth_token = ${authToken} AND source = 'harness'`;
+    return row?.n ?? "0";
   } finally {
     await owner.end();
   }
@@ -362,6 +376,57 @@ d("card controls against the live database", () => {
     const verdict = decide(request, lookup);
     expect(verdict.outcome).toBe("decline");
     expect(verdict.rule).toBe("control_store_unavailable");
+  });
+
+  it("8 — a missed append deadline records ONE row, not two", async () => {
+    // THE REGRESSION. On 2026-09-11T14:09:08Z a real Lithic delivery
+    // (transaction 8025729c-f3a8-4aa1-bfd5-b42405e16f9a) produced TWO rows in
+    // `card_auth_decision` with one webhook id and one 600,390 us latency: the
+    // insert lost the 400 ms race, `withDeadline()` does not cancel the loser,
+    // and the route read that null as "not written" and inserted again.
+    //
+    // On a DECLINE that is a lie in an append-only table. On an APPROVE it is
+    // worse — the velocity sum is SUM(amount_cents) over approvals, so one
+    // $200 authorisation would have eaten $400 of the cardholder's day.
+    //
+    // The token is unique to this run, so the count below is this test's alone.
+    const authToken = randomUUID();
+    const request = parseAsaRequest(
+      asaPayload({ cardToken: CARD_TOKEN, token: authToken, amountCents: 700, mcc: "5812" }),
+    );
+    const lookup = await store.readControlsAndSpend({
+      provider: PROVIDER,
+      providerCardToken: CARD_TOKEN,
+      source: "harness",
+    });
+    const verdict = decide(request, lookup);
+    const params = {
+      provider: PROVIDER,
+      request,
+      lookup,
+      verdict,
+      latencyUs: 4242,
+      source: "harness" as const,
+      requestId: authToken,
+    };
+
+    // 1 ms against a network round trip: the caller gives up, the INSERT does
+    // not. This is exactly the state the route is in when it logs
+    // `asa.decision_not_recorded`.
+    const pending = store.startDecisionAppend(params);
+    expect(await store.awaitDecisionAppend(pending, 1)).toBeNull();
+
+    // The route now awaits THE SAME promise rather than issuing a second
+    // insert. It comes back with the row the deadline could not wait for.
+    const late = await pending;
+    expect(late).not.toBeNull();
+
+    // And the belt-and-braces path — used only when the original genuinely
+    // rejected — refuses to write a second row for the same delivery.
+    const again = await store.reappendDecisionIfMissing(params);
+    expect(again.status).toBe("already_recorded");
+
+    expect(await decisionRowCount(authToken)).toBe("1");
   });
 
   it("7 — the whole hot path stays well inside the provider's budget", async () => {

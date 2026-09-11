@@ -61,7 +61,12 @@ import {
 import { AsaParseError, asaResponseBody, parseAsaRequest, verifyAsaSignature } from "@/lib/cards/asa";
 import { decide } from "@/lib/cards/decide";
 import { asaSecrets } from "@/lib/cards/provider";
-import { appendDecision, readControlsAndSpend } from "@/lib/cards/store";
+import {
+  awaitDecisionAppend,
+  readControlsAndSpend,
+  reappendDecisionIfMissing,
+  startDecisionAppend,
+} from "@/lib/cards/store";
 import { logger, requestIdFrom } from "@/lib/log";
 import { toHeaderLookup } from "@/lib/webhooks/rawbody";
 
@@ -188,7 +193,25 @@ export async function POST(request: Request): Promise<Response> {
     source: "provider" as const,
     requestId: signature.webhookId ?? requestId,
   };
-  const decisionId = await appendDecision(appendParams);
+  //
+  //    THE DEADLINE STOPS US WAITING; IT DOES NOT STOP THE INSERT.
+  //    `withDeadline()` races, it does not cancel, so a null here means "not
+  //    known to be written" and NOT "not written". Re-issuing the insert on
+  //    that null is how one authorisation became two rows in the decision log
+  //    on 2026-09-11T14:09:08Z: transaction
+  //    8025729c-f3a8-4aa1-bfd5-b42405e16f9a appears twice with one Lithic
+  //    webhook id and one 600,390 µs latency, because the first insert lost
+  //    the 400 ms race and then committed 355 ms later anyway. On a DECLINE
+  //    that is a lie in an append-only table; on an APPROVE it would have been
+  //    worse, because the velocity sum is SUM(amount_cents) over approvals and
+  //    a $200 authorisation recorded twice eats $400 of the cardholder's day.
+  //
+  //    So `after()` awaits THE SAME PROMISE rather than starting another one,
+  //    and only re-appends if that promise genuinely rejected — through a
+  //    `WHERE NOT EXISTS` guard, for the case where it committed and lost its
+  //    connection before `RETURNING` came back.
+  const pending = startDecisionAppend(appendParams);
+  const decisionId = await awaitDecisionAppend(pending, DECISION_APPEND_BUDGET_MS);
   if (decisionId === null) {
     log.error("asa.decision_not_recorded", {
       authRef: asaRequest.providerAuthToken,
@@ -196,8 +219,24 @@ export async function POST(request: Request): Promise<Response> {
       outcome: verdict.outcome,
     });
     after(async () => {
-      const retried = await appendDecision(appendParams, DECISION_APPEND_BUDGET_MS * 4);
-      if (retried === null) log.error("asa.decision_lost", { authRef: asaRequest.providerAuthToken });
+      const late = await pending;
+      if (late !== null) {
+        log.warn("asa.decision_recorded_late", {
+          authRef: asaRequest.providerAuthToken,
+          decisionId: late,
+        });
+        return;
+      }
+      const retried = await reappendDecisionIfMissing(appendParams, DECISION_APPEND_BUDGET_MS * 4);
+      if (retried.status === "failed") {
+        log.error("asa.decision_lost", { authRef: asaRequest.providerAuthToken });
+      } else {
+        log.warn("asa.decision_recorded_late", {
+          authRef: asaRequest.providerAuthToken,
+          decisionId: retried.status === "appended" ? retried.id : null,
+          reappend: retried.status,
+        });
+      }
     });
   }
 

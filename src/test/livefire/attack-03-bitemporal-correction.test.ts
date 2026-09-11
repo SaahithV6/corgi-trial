@@ -113,6 +113,43 @@
  * that failed, not wider.
  * ============================================================================
  *
+ * ============================================================================
+ * AND THEN PART B BROKE ON A TOKEN THAT WAS NOT A TRANSACTION YET.
+ *
+ * The second failure of this file was not about the ledger at all. Part B threw
+ * `LithicApiError: Transaction was not found` out of `simulateClearing`, before
+ * any assertion ran, in 1 of 4 consecutive runs — and it started on the day the
+ * Lithic sandbox account's daily spend cap was raised from $5,000 to $500,000
+ * and authorisations stopped declining.
+ *
+ * That correlation is real and it is not the obvious explanation. A declined
+ * authorisation is NOT unclearable, and the token is not invalid: the exact
+ * transaction a failing run could not clear —
+ * `19676a84-1748-4bb5-8d34-0d6089469ae4` — reads `PENDING / APPROVED` on
+ * `GET /v1/transactions` today. It existed. The clearing was early.
+ *
+ * `/v1/simulate/authorize` answers `201 {token}` before the transaction is
+ * readable, and everything keyed on that token answers 404 until it is. The
+ * delay depends on the verdict, MEASURED here 2026-09-11, six trials each,
+ * polling `GET /v1/transactions/{token}` every 200ms from the authorize
+ * response:
+ *
+ *   APPROVED   969  1166  1177  1184  1450  1759 ms   (mean 1284)
+ *   DECLINED   781   788   829   875  1047  1051 ms   (mean  895)
+ *
+ * `simulateLimiter` admits one request per second counting STARTS, so the
+ * clearing reaches Lithic at about t+1100-1200ms. Past the declined tail;
+ * through the middle of the approved one. The race was always there — the
+ * declined era was simply always on the safe side of it, and raising the cap
+ * moved the distribution, not the code.
+ *
+ * The repair is a wait on the PROVIDER, not on the ledger and not on anything
+ * this attack asserts: `waitForProviderVisibility` polls until Lithic can see
+ * its own transaction, and a token still 404 after 30s fails hard with the
+ * measurement quoted, because that would be a different fault. The same read
+ * now supplies the network's verdict, which part B reports rather than assumes.
+ * ============================================================================
+ *
  * ISOLATION. Money tables are append-only, so there is no teardown. This
  * attack opens its OWN business (deterministic id, idempotent, owner role) and
  * mints its own Lithic card and its own transactions, so nothing it measures
@@ -216,6 +253,9 @@ async function simulateReturnReversal(
 /** What the real renderer returns, and one of its lines. Named, not re-declared. */
 type StatementDoc = Awaited<ReturnType<typeof StatementRead.renderStatement>>;
 type StatementRow = StatementDoc["lines"][number];
+
+/** Lithic's own transaction object, as the adapter returns it. */
+type ProviderTransaction = Awaited<ReturnType<typeof LithicClient.getTransaction>>;
 
 interface EntryRow {
   id: string;
@@ -498,6 +538,80 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     }
   }
 
+  /**
+   * Wait until Lithic can see the transaction it has just issued us a token
+   * for, and say how long that took.
+   *
+   * ------------------------------------------------------------------------
+   * WHY THIS EXISTS. `/v1/simulate/authorize` answers `201 {token}` BEFORE the
+   * transaction is readable, and every other endpoint keyed on that token —
+   * `/v1/simulate/clearing` included — answers `404 "Transaction was not
+   * found"` until it is. Part B used to POST the clearing straight after the
+   * authorisation and failed, intermittently, on that 404 as a thrown
+   * `LithicApiError` before a single assertion ran.
+   *
+   * MEASURED against this sandbox on 2026-09-11, on the card this attack
+   * already owns, by polling `GET /v1/transactions/{token}` every 200ms from
+   * the instant the authorize call returned:
+   *
+   *   AUTHORISATION APPROVED  ($0.01)   visible after  969 / 1166 / 1177 /
+   *                                     1184 / 1450 / 1759 ms   (mean 1284)
+   *   AUTHORISATION DECLINED  (over the card's TRANSACTION limit)
+   *                                     visible after  781 / 788 / 829 /
+   *                                      875 / 1047 / 1051 ms   (mean  895)
+   *
+   * `simulateLimiter` is 1 request per 1000ms with a 50ms safety margin and it
+   * counts request STARTS, so the clearing that follows an authorisation is
+   * admitted at roughly t+1050ms and reaches Lithic at t+1100-1200ms. Against
+   * the declined distribution that is past the far tail and the call always
+   * landed; against the approved one it straddles the middle, which is exactly
+   * why this test turned intermittent — 1 failure in 4 consecutive runs — on
+   * the day the sandbox account's daily spend cap was raised from $5,000 to
+   * $500,000 and authorisations stopped declining. The clearing did not start
+   * failing because the authorisation was approved; it started failing because
+   * an APPROVED authorisation takes ~390ms longer to become readable, and the
+   * fixed 1-second gap had been sitting on the wrong side of the tail.
+   *
+   * PROOF THAT THE 404 IS A VISIBILITY DELAY AND NOT A BAD TOKEN: the
+   * transaction the failing run could not clear —
+   * `19676a84-1748-4bb5-8d34-0d6089469ae4`, issued 14:09:03Z — reads
+   * `PENDING / APPROVED / AUTHORIZATION:APPROVED:5000` on
+   * `GET /v1/transactions` afterwards. It existed. We were early.
+   *
+   * So this is a wait on the PROVIDER, not a loosened assertion: nothing below
+   * is relaxed, and a token that is still 404 after the budget is a hard
+   * failure with the measurement quoted, because that would be a different
+   * fault from the one measured here.
+   * ------------------------------------------------------------------------
+   */
+  async function waitForProviderVisibility(
+    token: string,
+    budgetMs: number,
+  ): Promise<{ txn: ProviderTransaction; afterMs: number; reads: number }> {
+    const startedAt = Date.now();
+    let reads = 0;
+    for (;;) {
+      reads += 1;
+      try {
+        const txn = await lithic.getTransaction(token);
+        return { txn, afterMs: Date.now() - startedAt, reads };
+      } catch (thrown) {
+        const status = (thrown as { status?: unknown }).status;
+        if (status !== 404) throw thrown;
+        if (Date.now() - startedAt >= budgetMs) {
+          throw new Error(
+            `Lithic issued transaction token ${token} and then answered 404 "Transaction was not found" ` +
+              `for ${Date.now() - startedAt}ms across ${reads} reads of GET /v1/transactions/${token}. ` +
+              `The visibility delay measured in this sandbox is 781-1759ms, so this is not that: the token ` +
+              `itself is bad, or the sandbox has lost the transaction, and neither is something a longer ` +
+              `wait should paper over.`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+  }
+
   /** Why a wait gave up, in the words of the rows that did arrive. */
   async function diagnose(txnToken: string, drainStatus: string): Promise<string> {
     const filed = await sql<
@@ -751,6 +865,38 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     const txn = auth.token;
     expect(txn, "Lithic returned no transaction token for the authorisation").toBeTruthy();
     if (txn === undefined || txn === "") return;
+
+    // ---- WAIT FOR THE PROVIDER TO SEE ITS OWN TRANSACTION ----------------
+    //
+    // A token is not a transaction yet. See `waitForProviderVisibility` for
+    // the measurement, and for why clearing straight after the authorisation
+    // was a coin-flip against an APPROVED authorisation and was not against a
+    // declined one.
+    const seen = await waitForProviderVisibility(txn, 30_000);
+    const authEvent = (seen.txn.events ?? []).find((e) => e.type === "AUTHORIZATION");
+    const verdict: string = authEvent?.result ?? seen.txn.result;
+    const verdictDetail = (authEvent?.detailed_results ?? []).join(", ");
+
+    // WHAT THE NETWORK ACTUALLY SAID, read from the provider before anything
+    // is asserted — and said FIRST when it was not an approval, so that this
+    // attack can never read as having exercised a fuel-pump authorisation it
+    // did not get. The correction claim below is unaffected either way: a
+    // clearing lands whatever the authorisation's verdict was, and it is the
+    // clearing that gets reversed. Nothing here is weakened for a decline;
+    // one sentence is added to the evidence.
+    if (verdict !== "APPROVED") {
+      record(
+        "evidence",
+        `PART B — THE $50 FUEL-PUMP AUTHORISATION WAS NOT APPROVED. Lithic answered ` +
+          `AUTHORIZATION ${AUTH_CENTS} result ${verdict}` +
+          (verdictDetail === "" ? "" : ` [${verdictDetail}]`) +
+          ` on transaction ${txn}, so the published sentence's FIRST half — "simulate a $50 fuel-pump ` +
+          `auth" — was not exercised on this run and no hold was placed. Everything asserted below is ` +
+          `about the $73.40 CLEARING and its backdated reversal, which are unaffected by the verdict: ` +
+          `a clearing posts the money whether or not the authorisation that preceded it was approved. ` +
+          `See README §2b for the account-level cap that produces this.`,
+      );
+    }
 
     await lithic.simulateClearing({ token: txn, amountCents: Number(SETTLED_CENTS) });
 
@@ -1025,7 +1171,10 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     record(
       "evidence",
       `PART B — ONE STEP SYNTHESISED, NAMED. Measured on ${isolation}. Real Lithic transaction ${txn} on card ${cardToken}: ` +
-        `/v1/simulate/authorize 201 ($50.00 fuel pump, MCC 5542) then /v1/simulate/clearing 201 ($73.40) posted entry ${clearing.id} (${clearing.idempotency_key}) at settlement day ${settlementDay} from webhook inbox row ${clearing.inbox_id}. ` +
+        `/v1/simulate/authorize 201 ($50.00 fuel pump, MCC 5542) -> AUTHORIZATION ${verdict}` +
+        (verdictDetail === "" ? "" : ` [${verdictDetail}]`) +
+        `; the provider could not see its own transaction for ${seen.afterMs}ms (${seen.reads} read(s) of GET /v1/transactions/${txn} before it answered 200) and clearing inside that window is what used to fail this test with 404 "Transaction was not found". ` +
+        `Then /v1/simulate/clearing 201 ($73.40) posted entry ${clearing.id} (${clearing.idempotency_key}) at settlement day ${settlementDay} from webhook inbox row ${clearing.inbox_id}. ` +
         `Lithic CANNOT reverse it: POST /v1/simulate/return_reversal {token: ${txn}} -> ${refusal.detail}. ` +
         `SYNTHESISED: one CORRECTION_CREDIT step (token ${correctionToken}, created ${correctionCreated} — the next day), appended to the REAL transaction beside its real events. ` +
         `NOT synthesised: the signature (HMAC-SHA256 over "${webhookId}.<ts>.<body>" with LITHIC_WEBHOOK_SECRET), the transport (POST ${BASE_URL}/api/webhooks/lithic -> HTTP ${delivered.status}), verification (a one-character signature change -> HTTP ${tampered.status} ${tamperedBody.error?.code}), the inbox row ${String(deliveredBody["inboxId"])}, the drain, the rail_event_semantics lookup, or the posting. ` +

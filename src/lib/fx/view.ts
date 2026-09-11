@@ -106,6 +106,29 @@ export interface QuoteFacts {
   readonly varianceCents: bigint | null;
 
   /**
+   * `fx_quote_settlement.entry_id` — the journal entry this settlement posted.
+   *
+   * It is here because the screen used to assert, in words, that the variance
+   * was NOT posted and that the chart had no account for it. That was true
+   * when it was written and it stopped being true the moment `4300 FX quote
+   * settlement variance` was added and `postFxSettlement()` started writing
+   * the five-line entry. A screen that keeps saying "unposted" over a
+   * settlement that has an entry id is telling a reader the opposite of what
+   * the ledger did, which is the same class of error as an unlabelled
+   * fixture — a claim nobody made but everybody heard.
+   *
+   * So the paragraph is now DERIVED from this field rather than hard-coded.
+   * `entry_id` is a foreign key into `journal_entry`, so non-null means the
+   * entry exists; there is no second source of truth to drift from.
+   *
+   * OPTIONAL for the same reason `isFixture` is: `QuoteRecord` off
+   * `v_fx_quote` always carries it, and `src/components/payouts/fixtures.ts`
+   * — a SCREEN fixture, which corresponds to no row anywhere — does not and
+   * should not. Absent means null, which reads as "nothing posted".
+   */
+  readonly entryId?: string | null;
+
+  /**
    * `fx_quote_fixture` (0041): this row was written by a test, not by a
    * customer.
    *
@@ -308,6 +331,7 @@ export function quoteView(facts: QuoteFacts, now: string): QuoteView {
       facts.settlementCostCents === null ? null : formatUsd(facts.settlementCostCents),
     varianceLabel: facts.varianceCents === null ? null : signedUsd(facts.varianceCents),
     varianceIsLoss: facts.varianceCents === null ? null : facts.varianceCents < 0n,
+    settlementEntryId: facts.entryId ?? null,
 
     position: null,
   };

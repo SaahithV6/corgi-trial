@@ -172,12 +172,36 @@ export async function settleTransaction(
   const timeoutMs = req.receiptTimeoutMs ?? DEFAULT_RECEIPT_TIMEOUT_MS;
   const startedAt = Date.now();
 
+  /**
+   * A receipt whose `blockHash` is all zeroes is a PRECONFIRMATION, not a
+   * receipt: the node is saying "I have accepted this and have not put it in a
+   * block yet". Base Sepolia serves them at the tip.
+   *
+   * Treating one as a receipt is what turned a healthy payout into a false
+   * `reorged` — the canonicality check below compares `header.hash` against
+   * `receipt.blockHash`, a zero hash can never match a real block, and the
+   * adapter concluded the block had been reorganised out. It then correctly
+   * refused to post, so 1.98 USDC left the wallet with the ledger unaware, and
+   * the recovery needed a second command.
+   *
+   * Refusing to post was right. Calling it a reorg was not: a reorg means
+   * "this was mined and then un-mined", which is a real and alarming fact, and
+   * "not mined yet" is the ordinary case that resolves by waiting. Reporting
+   * the second as the first spends an operator's attention on nothing and
+   * hides the one time it is true.
+   */
+  const isPreconfirmation = (r: { blockHash: string } | null): boolean =>
+    r !== null && /^0x0+$/.test(r.blockHash);
+
   let receipt = await rpc.getTransactionReceipt(txHash);
-  while (receipt === null) {
+  while (receipt === null || isPreconfirmation(receipt)) {
     // "Gone" is checked BEFORE "still waiting", because the two are different
     // facts and only one of them is safe to retry. A transaction the node has
     // forgotten moved nothing; a transaction still in the mempool may yet.
-    if (!(await rpc.transactionExists(txHash))) {
+    // Only ask "is it gone?" when there is no receipt at all. A
+    // preconfirmation is the node telling us it has the transaction, so the
+    // mempool question is already answered and asking again would race it.
+    if (receipt === null && !(await rpc.transactionExists(txHash))) {
       // Evicted from the mempool, or replaced. Not an error — a stated
       // outcome that still carries the hash.
       return { ...base(req, options.provider), kind: "dropped", txHash };

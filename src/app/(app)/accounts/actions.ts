@@ -22,9 +22,21 @@
  * function `/api/drain` and the webhook route's `after()` call — running it
  * from here is a nudge on the existing pipeline, not a second one.
  *
- * The one row these actions do write is `card`, through `registerCard()`, which
- * is a binding from a provider token to a customer's 2100/9100 pair. It is
- * idempotent on `(provider, provider_card_token)`.
+ * These actions write exactly two rows, both on the issue-card path and
+ * neither of them money:
+ *
+ *   `card`                   through `registerCard()` — the binding from a
+ *                            provider token to a customer's 2100/9100 pair.
+ *                            Idempotent on `(provider, provider_card_token)`.
+ *   `card_control_version`   through `applyDefaultControls()` — version 1, the
+ *                            program default, so a newly-issued card's first
+ *                            authorisation is judged against something. One
+ *                            INSERT guarded by `WHERE NOT EXISTS` in the same
+ *                            statement; it never throws and never blocks the
+ *                            issuance. See `src/lib/cards/defaults.ts`.
+ *
+ * Neither is on the real-time authorisation path, which reads and answers and
+ * writes only its own decision row.
  *
  * ============================================================================
  * A SERVER ACTION IS A PUBLIC POST ENDPOINT
@@ -70,6 +82,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { currentActor } from "@/lib/approvals/session";
+import { applyDefaultControls } from "@/lib/cards/defaults";
 import { availableBalance } from "@/lib/ledger/balances";
 import { sql } from "@/lib/ledger/db";
 import { findBusiness, readAccountIdentity } from "@/lib/ledger/queries";
@@ -319,8 +332,9 @@ export async function issueCardAction(
     );
   }
 
+  let binding;
   try {
-    await registerCard(
+    binding = await registerCard(
       {
         provider: PROVIDER,
         providerCardToken: card.token,
@@ -346,7 +360,36 @@ export async function issueCardAction(
     );
   }
 
-  log.info("accounts.issueCard.ok", { cardToken: card.token, lastFour: card.last_four });
+  // The card is now real at Lithic and bound here. Give it version 1 of the
+  // program default so its first authorisation is JUDGED rather than waved
+  // through by `no_controls_configured` — the rule that produced 38 of this
+  // book's 51 provider-lane approvals before today, each one citing no control
+  // version at all. The figures and the long argument are in
+  // `src/lib/cards/defaults.ts`; the short version is that the default is a
+  // per-transaction ceiling set EQUAL to the `spend_limit` two lines of this
+  // function already declare to Lithic, so the set of authorisations it newly
+  // declines is empty.
+  //
+  // IT DOES NOT REFUSE THE ISSUANCE. A card that exists at the provider, is
+  // registered here and missed its default behaves exactly as every card
+  // issued before today behaved. Turning that into a failed issuance would
+  // strand a real card at Lithic with nothing bound to it, which is strictly
+  // worse than a card the coverage panel shows as uncontrolled and an operator
+  // fixes with one press of Save.
+  const defaults = await applyDefaultControls({ cardId: binding.cardId });
+  if (defaults.kind === "failed") {
+    log.error("accounts.issueCard.default_controls_failed", {
+      cardToken: card.token,
+      cardId: binding.cardId,
+      error: defaults.detail,
+    });
+  }
+
+  log.info("accounts.issueCard.ok", {
+    cardToken: card.token,
+    lastFour: card.last_four,
+    defaultControls: defaults.kind,
+  });
   revalidatePath("/accounts");
 
   return {
@@ -360,6 +403,15 @@ export async function issueCardAction(
       { label: "Expires", value: `${card.exp_month}/${card.exp_year}`, mono: true },
       { label: "State", value: card.state },
       { label: "Spend limit", value: "$5,000.00 per transaction" },
+      {
+        label: "Card controls",
+        value:
+          defaults.kind === "applied"
+            ? "version 1 · program default · $5,000.00 per transaction, no daily or monthly limit, no blocked categories"
+            : defaults.kind === "already_controlled"
+              ? "already under a control version — left alone"
+              : "NOT APPLIED — this card will be approved by no_controls_configured until somebody sets one below",
+      },
     ],
     balances: null,
     holdId: null,

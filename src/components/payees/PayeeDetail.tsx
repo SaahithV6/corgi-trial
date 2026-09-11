@@ -3,6 +3,8 @@ import { formatTimestamp } from "@/lib/format/datetime";
 
 import type { PayeeRow } from "./data-contract";
 import { FindingList } from "./FindingList";
+import { RecheckForm } from "./RecheckForm";
+import { SignWarningForm } from "./SignWarningForm";
 import {
   DirectoryBadge,
   EvidenceBadge,
@@ -31,8 +33,35 @@ import {
  *      it is honest about where the other name came from, and it never draws a
  *      tick it has not earned.
  */
-export function PayeeDetail({ row }: { readonly row: PayeeRow }) {
+export function PayeeDetail({
+  row,
+  /**
+   * Whether the operator actions are live on this render.
+   *
+   * FALSE ON EVERY FIXTURE STATE, and that is not caution for its own sake: a
+   * demo state is a picture of a book that does not exist, and a Re-check
+   * button under it would either do nothing (a dead control, which teaches a
+   * viewer that this screen's buttons are decorative) or write a real row
+   * against a fixture id (which is worse). The actions appear on the live
+   * state, where the ids are real.
+   */
+  writable = false,
+  /**
+   * Open the signature form without waiting to be scrolled to.
+   *
+   * Set by `?sign=1`, which is the URL the payment gate's
+   * `PAYEE_WARNING_UNACKNOWLEDGED` refusal now carries. The operator arrives
+   * from a refused payment and the thing that clears it is the first thing
+   * under their cursor.
+   */
+  signRequested = false,
+}: {
+  readonly row: PayeeRow;
+  readonly writable?: boolean;
+  readonly signRequested?: boolean;
+}) {
   const unsigned = row.outcome === "warned" && !row.acknowledged;
+  const canSign = writable && unsigned && row.verificationId !== null;
 
   return (
     <div className="space-y-6">
@@ -81,6 +110,13 @@ export function PayeeDetail({ row }: { readonly row: PayeeRow }) {
                 override be implicit. Names legitimately differ; who decided this one was fine is
                 a fact worth keeping.
               </p>
+              {canSign ? null : (
+                <p className="mt-2">
+                  {row.verificationId === null
+                    ? "There is no check on file for this payee, so there is nothing for a signature to attach itself to. Re-check it first."
+                    : "The signature form is on the live screen. This is a demo fixture, and a button here would either do nothing or write a row against an id that does not exist."}
+                </p>
+              )}
             </Note>
           </div>
         ) : null}
@@ -249,6 +285,36 @@ export function PayeeDetail({ row }: { readonly row: PayeeRow }) {
           {FRESHNESS_HINT[row.freshness]}
         </p>
       </Panel>
+
+      {canSign && row.verificationId !== null ? (
+        <Panel
+          id="sign"
+          title="Sign for this warning"
+          as="h3"
+          description="A named human, an instant, and a sentence naming what it answers. Append-only: it cannot be edited or withdrawn, and it is attached to this check rather than to the payee."
+          actions={signRequested ? <span className="text-[11px] text-muted">← from a refused payment</span> : undefined}
+        >
+          <div className="px-5 py-4">
+            <SignWarningForm
+              verificationId={row.verificationId}
+              findings={row.findings.filter((finding) => finding.severity === "warn")}
+              beneficiaryName={row.holderName}
+            />
+          </div>
+        </Panel>
+      ) : null}
+
+      {writable && !row.archived ? (
+        <Panel
+          title="Check it again"
+          as="h3"
+          description="Freshness here is derived from when a check ran, not stamped on the payee. The only way to make a check current is to run another one and append it."
+        >
+          <div className="px-5 py-4">
+            <RecheckForm payeeId={row.payeeId} acknowledged={row.acknowledged} />
+          </div>
+        </Panel>
+      ) : null}
     </div>
   );
 }

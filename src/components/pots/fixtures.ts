@@ -60,6 +60,10 @@ const EMPTY_VIEW: PotsView = {
     ledgerCents: 3_424_763,
     holdsCents: 36_000,
     unclearedCents: 1_375_300,
+    // Zero, and the subtraction still has to balance: 3_424_763 − 36_000
+    // − 1_375_300 − 0 = 2_013_463. A fixture whose arithmetic does not add up
+    // teaches a reader the wrong sum.
+    pendingOutboundCents: 0,
     availableCents: 2_013_463,
   },
   movements: [],

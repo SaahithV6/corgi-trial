@@ -103,35 +103,79 @@ database: available down by exactly 5000, ledger unchanged, the whole of the
 drop attributable to card-auth holds, and the financial trial balance unmoved
 because a hold is memo-only.
 
-**Today it proves the other half of that sentence**, because Lithic refuses the
-authorisation — see §2b, which covers attacks 1, 2 and 7 together.
+**It proves the published sentence again.** For part of 2026-09-11 it proved
+the other half instead, because Lithic refused every authorisation — see §2b,
+which covers attacks 1, 2 and 7 together and is kept because the branch is
+still in the code and still correct.
 
 ### 2 — the over-capture
 
-Authorise $50.00, clear $73.40. Two tests, because the attack names two things
-and only one of them holds today:
+Authorise $50.00, clear $73.40. Three tests, because the attack names two
+things and only one of them holds, and because the reason for that is a
+measurement rather than an opinion (DECISIONS 049):
 
 * **the money claim** — the hold's memo entries are the opening delta and its
   exact negation and nothing else (one release posting), the ledger posts
   exactly 7340 in exactly one financial entry, the hold stops withholding
   anything, and `available == ledger − holds − uncleared` exactly, in integers,
   with no floor. This passes.
+* **the measurement** — Lithic approves an `authorization_advice` to $90.00
+  AFTER the $73.40 over-capture, and then really captures the $16.60 remainder.
+  So over-capture is not terminal and the closure row must not be written. This
+  passes, and if Lithic ever refuses the advice it **skips loudly**, which is
+  the trigger to reopen the decision below.
 * **the bookkeeping claim** — exactly one `hold_closure` row. This SKIPS, and
   the skip is a real finding rather than a missing feature. See §4.
 
-### 2b — what attacks 1, 2 and 7 prove while the sandbox declines everything
+The first two need an approved authorisation and skipped through the declined
+era (§2b). They pass again, which means the file's SKIP is now the third test
+and only the third test — the meaning the scoreboard line has always claimed
+for it. **A skip whose reason has quietly changed is worse than a failure**, so
+it is re-read against DECISIONS 049 whenever the provider's behaviour moves.
+
+### 2b — what attacks 1, 2 and 7 prove when the sandbox declines everything
+
+**READ THE TENSE. This section described the live state of the suite for most
+of 2026-09-11 and no longer does.** A human raised the account's daily spend
+cap from $5,000 to $500,000 (reported as roughly 12:00Z; what is measured is
+the limit, below, not the moment) and authorisations now approve, so the branch
+below is not being taken on any current run. It is kept, in full, for two
+reasons: the branch is still in the code and will be taken again the moment the
+account's daily velocity is exhausted, and the argument it records — that a
+refusal is a pass
+on a smaller, loudly labelled claim rather than a red — is the rule the rest of
+this file is written under.
+
+**What is true now.** `GET /v1/accounts/{token}` reads
+`spend_limit.daily = 50000000` ($500,000.00) against the earlier
+`500000` ($5,000.00), the account is `ACTIVE`, and every attack in this suite
+reads `AUTHORIZATION 5000 result APPROVED` from the provider. Attack 1 asserts
+the published drop of 5000 again; attack 2's money test and its measurement
+test both pass, so its SKIP is now exactly and only the `hold_closure` claim of
+§4 and nothing else; attack 7's recovery half asserts the memo posting again.
+Attack 3's part B reports the verdict it read, so a future decline shows up in
+its evidence instead of passing unremarked.
+
+**And it cost something on the way in, which §2c is about.** Approvals are
+slower to become visible at the provider than declines, and attack 3 had a
+1-second gap sitting on the wrong side of that tail.
+
+---
+
+*What follows is the record of the declined era, unedited.*
 
 Attacks 1 and 2 read the network's verdict from the provider before asserting
-anything (migration 0026), and both currently read
+anything (migration 0026), and both then read
 `AUTHORIZATION 5000 result DECLINED [ACCOUNT_DAILY_SPEND_LIMIT_EXCEEDED]`. The
-Lithic sandbox account's rolling 24-hour cap is exhausted —
+Lithic sandbox account's rolling 24-hour cap was exhausted —
 `available_spend_limit.daily = 0` against `spend_limit.daily = 500000`, with
-`spend_velocity.daily = 760210` — so **no authorisation can be approved at any
-amount**, which a prior run established directly by sending a one-cent
-authorisation and watching it decline. The only routes out are raising the limit
+`spend_velocity.daily = 760210` — so **no authorisation could be approved at any
+amount**, which a run established directly by sending a one-cent
+authorisation and watching it decline. The only routes out were raising the limit
 (`PATCH /v1/accounts/{token}`, deliberately blocked by the permission
 classifier) or standing up a second provider account. Both are a human's
-decision, not a thing a test may tune around.
+decision, not a thing a test may tune around — and it was a human raising the
+limit that ended it.
 
 **A refusal is a PASS, on a smaller claim, loudly labelled.** Both files used to
 `throw` on it, on the argument that "the demo could not be performed" is a red
@@ -241,6 +285,72 @@ watermarks are. It was left alone in this pass because the defect being repaired
 was the absolute assertion, and widening the change to re-home two more attacks
 on a deployed, green tree is a separate decision.
 
+### 2c — a token is not a transaction yet, and approvals are slower than declines
+
+**Raising the spend cap took the core loop from 6/7 to 7/7 and turned attack 3
+red.** Part B threw `LithicApiError: Transaction was not found` out of
+`simulateClearing`, before a single assertion ran, in 1 of 4 consecutive runs.
+It is written up here rather than only in attack 3 because it is a property of
+the sandbox that any attack can hit, and because the obvious reading of it was
+wrong.
+
+The obvious reading was that a *declined* authorisation produces a transaction
+the clearing endpoint will not accept, and that approvals had changed what part
+B was reversing. It is neither. **The 404 is a read-after-write delay and the
+token is valid**: the exact transaction a failing run could not clear,
+`19676a84-1748-4bb5-8d34-0d6089469ae4`, reads `PENDING / APPROVED /
+AUTHORIZATION:APPROVED:5000` on `GET /v1/transactions` afterwards. It existed.
+The clearing was early.
+
+`/v1/simulate/authorize` answers `201 {token}` before the transaction is
+readable, and every endpoint keyed on that token — `GET /v1/transactions/{token}`
+and `/v1/simulate/clearing` alike — answers 404 until it is. MEASURED against
+this sandbox on 2026-09-11, six trials each, polling every 200ms from the
+authorize response, on a card this suite already owns:
+
+```
+AUTHORISATION APPROVED    969  1166  1177  1184  1450  1759 ms   mean 1284
+AUTHORISATION DECLINED    781   788   829   875  1047  1051 ms   mean  895
+```
+
+`simulateLimiter` is one request per 1000ms plus a 50ms safety margin and it
+counts request STARTS, so a clearing issued straight after an authorisation
+reaches Lithic at roughly t+1100–1200ms. That is past the far tail of the
+declined distribution and through the middle of the approved one. **The race
+was always there. The declined era was simply always on the safe side of it,
+and raising the cap moved the distribution rather than the code.** A green that
+depended on the provider declining was never evidence about the correction —
+the same sentence this file already had to write about interchange timing, one
+layer further out.
+
+The repair is a wait on the PROVIDER and nothing else:
+`waitForProviderVisibility` in attack 3 and `readWhenVisible` in attack 2 poll
+`GET /v1/transactions/{token}` until it answers, and a token still 404 after
+30s fails hard with the measurement quoted, because that would be a different
+fault and a longer wait must not paper over it. No assertion moved. Attack 3's
+part B evidence now reports the delay it actually waited out, and the same read
+supplies the network's verdict, so a decline is reported instead of passing
+unremarked.
+
+Attack 2 had the same race latent: its measurement test waited a flat 1500ms
+and then read the transaction, which is 241ms of margin against the worst
+approved reading taken and none against a slower one. It had not failed yet. It
+was one bad sample away, and a test that has not failed yet is not a test that
+works.
+
+Two call sites were checked and left alone, because they poll the LEDGER for
+the authorisation before touching the provider again and so cannot be early:
+attack 4 (`src/test/livefire/attack-04-settlement-before-authorisation.test.ts`)
+and `src/lib/interchange/interchange.integration.test.ts`. Part A of attack 3 is
+safe for the same reason. `simulateClearingAction` in the console works from a
+transaction the database already has.
+
+**The durable version of this belongs in `src/lib/rails/lithic/client.ts`** — a
+`getTransactionWhenVisible`, or a documented 404-retry on the simulate calls
+keyed on a token, so that the next call site does not have to know. That is a
+`src/lib/**` change and was not made here; it is recorded so that it is a
+decision rather than an omission.
+
 ### 3 — the backdated correction
 
 Two parts, both driven from the PROVIDER end. Part A is entirely Lithic's: a
@@ -253,6 +363,12 @@ refuses (`400 Return reversal is not supported for debit transactions`), so one
 is: the signature, the transport, the verification, the inbox, the drain and
 the posting are all production. A negative control proves the signature is
 being checked.
+
+Part B waits for Lithic to be able to see its own transaction before it clears
+it, and reports both the delay it waited out and the network's verdict on the
+authorisation — see §2c for the measurement, and for the run in which clearing
+too early failed this attack for the provider's indexing rather than for
+anything the ledger did.
 
 Both parts then read the statement for settlement day at two booking
 watermarks, through `renderStatement()` — the real renderer, the one
@@ -406,9 +522,10 @@ signed, and then HELD — not POSTed — for the window.
 
 The recovery half reads the network's verdict before it asserts any money, and
 **while the sandbox declines everything it proves the smaller, named claim** —
-see §2b, which now covers attacks 1, 2 and 7 together, and `docs/HOLDS.md` §9.9
-for the measurement. The dark-window half does not depend on the verdict and is
-asserted and recorded in full either way.
+see §2b, which covers attacks 1, 2 and 7 together, and `docs/HOLDS.md` §9.9 for
+the measurement. Since the cap was raised the verdict reads APPROVED and the
+memo posting is required again; the branch remains. The dark-window half does
+not depend on the verdict and is asserted and recorded in full either way.
 
 The window is `LIVEFIRE_OUTAGE_SECONDS`, 20s by default. The published attack
 says five minutes; five minutes of a rehearsal suite is five minutes nobody
@@ -529,6 +646,26 @@ Only then is the row count read, and it is 1.
 ```
 node scripts/livefire.mjs
 ```
+
+**Last full reading, started 2026-09-11T14:22:34Z, against
+`https://corgi-trial-psi.vercel.app`:**
+
+```
+  1  $50 fuel-pump auth: AVAILABLE drops 5000, LEDGER does not move          PASS
+  2  $73.40 capture: hold released exactly once, available not clamped       SKIP
+  3  Backdated reversal: corrected figure AND as-believed, both at once      PASS
+  4  Settlement before its authorisation ends exactly where in-order does    PASS
+  5  Self-approval refused by the DATABASE (SQLSTATE 42501)                  PASS
+  6  Row deleted from tonight's scheme file -> in_ledger_not_file break      PASS
+  7  Issuing-provider webhook outage degrades visibly, invents no money      PASS
+  8  Dedupe against a genuinely signed provider replay: twice is one         PASS
+
+  PASS 7    FAIL 0    SKIP 1    of 8 attacks    303s
+```
+
+Attack 3 was additionally run alone five times after the §2c repair and passed
+five times; it had failed 1 in 4 before it. The SKIP is §4's, and only §4's —
+checked, not assumed (§2).
 
 Needs, from `.env`: `APP_DATABASE_URL` (the restricted `corgi_app` role — the
 suite proves immutability by attempting an UPDATE, which only means something as

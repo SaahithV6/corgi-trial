@@ -949,3 +949,630 @@ than implying the tile is proof of something.
   demonstrated but not used.
 - **No nav entry and no cron entry**, inherited from §10 and unchanged: the
   interest leg rides the same `/api/cron/accrual` that nothing schedules yet.
+
+---
+
+# Part three — §20: the day that was priced before it closed
+
+> Added 2026-09-11 after an audit of this document against the live book. It
+> reports one defect that was real and unrepairable, the fix that stops it
+> recurring, and two claims above that were true when written and are false now.
+> Nothing in Parts one and two has been edited; a document that quietly
+> rewrites its own history is the same failure as a ledger that does.
+
+## 20.1 What was wrong
+
+**"Interest computed at end of day" was not true. It was computed whenever the
+tick ran, including in the middle of an open business date — and the index that
+makes the tick exactly-once is the same index that makes that permanent.**
+
+§16 defines the basis as *"the settled ledger balance at the end of the business
+date"*. `runAccrual()` refused a `bookDate` in the future (§9) and allowed
+`bookDate = today`, which was also the default the cron used. A date that has
+not ended does not have an end-of-day balance, so what the tick actually priced
+was *the balance at the instant it ran*.
+
+`interest_day` is `UNIQUE (schedule_id, accrual_date)`. That is §5's whole
+guarantee — and it means the first tick to touch an open date freezes a mid-day
+figure as that date's end-of-day basis for ever. §19 already records that there
+is no *interest adjustment* product, so there is no repair path either.
+
+## 20.2 The measurement, on this book, with the ids
+
+Every one of the five enrolments had **2026-09-11** priced at a watermark
+early in that same business date. What the day actually closed at, at watermark
+5568, is the second column:
+
+| business | priced on, at wm | the same date, at the live watermark | posted |
+| --- | ---: | ---: | ---: |
+| Hold Fuzzer Fixture Co. | $499,854.26 @ 2266 | $534,030.87 | 1712¢ credit |
+| **Holds Integration Fixture Co.** | **$145,315.17 @ 2265** | **−$858,941.45** | **498¢ credit** |
+| Kettle & Crumb Bakery LLC | $31,656.67 @ 2263 | $45,866.63 | 108¢ credit |
+| Pots Integration Fixture Co. | $25,000.06 @ 2262 | $25,000.92 | 86¢ credit |
+| Ridgeline Robotics, Inc. | $33,843.03 @ 2264 | $58,638.31 | 116¢ credit |
+
+Pots Integration's 86¢ of movement is the day's own interest entry landing
+after the watermark it was priced at, which is by construction. The other four
+are real money that arrived after the tick. One of them **changed sign**.
+
+Entry `47ad3ebe-1b69-4c6d-9c9a-bdb25d0fbf0a`, value date 2026-09-11, seq 2266,
+key `interest:d2db66df-5837-4a97-892b-4cefa7b76cca:2026-09-11`, two lines:
+
+```
+5400 Interest expense — credit balances              +498   debit
+2100/Holds Integration Fixture Co.                   −498   credit
+```
+
+Its line memo reads *"we pay 1.25% a year on a credit balance: $145,315.17 …"*
+The account closed that business date **$858,941.45 overdrawn**. At the 1800 bps
+overdraft rate on the same card the day was worth roughly **$423.53 charged to
+`4400`**, in the other direction. Both the amount and the side are wrong, the
+posting is immutable, and the claim is already made.
+
+## 20.3 Two statements in Parts one and two that are now false
+
+- **§12 and the screen: "`v_overdrawn_accounts` returns 0".** It returns **1**,
+  for $858,941.45, as of 2026-09-11. The screen re-asked the question on every
+  render — which is why it changed by itself — but its two branches were
+  "overdraft interest is live" and "nothing has ever been in debit", and the
+  book is in neither state. `OverdraftMeasurement` now has a third branch for
+  the state it is actually in: **an account is overdrawn and `4400` has no rows,
+  and here is why.** The "Charged on overdrafts" tile no longer says "no deposit
+  account has been in debit" while one is.
+- **§12's bound: "0 (deposit leaf, value date) pairs in debit on any date in the
+  45-day window".** It is 1 — 2026-09-11, the same account. Re-measured, not
+  inherited.
+
+## 20.4 The fix
+
+`interestPricingHorizon(bookDate)` in `src/lib/accrual/interest-store.ts`. The
+interest leg's window now ends at **`book_date(now()) - 1`**, in book time. A
+caller that asks for today is **held, not refused**: the tick prices every
+closed date it owes, reports `pricedThrough` and `openDateHeld` on the run
+report, and takes today on the first tick after midnight. Nothing is lost — the
+day accrued whether or not the job ran, and the entry carries the date it
+accrued *for*.
+
+**The fee leg is deliberately not held back.** A platform fee is `F`, `N` and
+`d`: a price, a calendar and an ordinal. It reads no balance, so an open day
+cannot make it wrong, and delaying a correct number buys nothing.
+
+Consequences, stated rather than discovered:
+
+- `v_interest_gap` will normally show one pair per enrolment — today's — until
+  midnight. That is the horizon, not a stalled tick, and the screen's note says
+  so. Anything **older** than today persisting still means the tick is not
+  running.
+- The newest interest date on `/accruals` is yesterday's, by design.
+- The five rows of 20.2 stay exactly as they are. `readInterestInvariants()`
+  counts them (`pricedBeforeClose`, `pricedBeforeCloseCents` — 5 and $25.20) and
+  the screen prints the count with the reason, because an append-only ledger
+  cannot un-say something and the honest alternative to a repair is a label.
+
+`src/lib/accrual/interest.integration.test.ts` asserts the horizon in both
+directions and asserts a tick asked for today names no day later than
+yesterday. It was "made to fail" the hard way: by the five rows above, on the
+live book, before the guard existed.
+
+## 20.5 What is still weaker than it reads
+
+- **`v_accrual_month_drift` has never had a population.** It is gated on
+  `month_complete`, which is `days_decided = days_in_month`, and no
+  (schedule, month) pair on this book has ever been complete: every fee
+  schedule started 2026-09-01 and September is not over, and the two
+  probe/partial schedules can never be complete for their month by
+  construction. `scripts/dbcheck.mjs` says so in as many words — *"0 COMPLETE
+  accrual months: green because there is nothing to be green about"* — and
+  `--prove` constructs a complete month to show the view can fail. So the guard
+  is provable and currently vacuous, and §2's "`v_accrual_month_drift` is empty
+  or the feature is broken" should be read as "will be, from the first complete
+  month".
+- **§4's sub-cent example says "the month still sums to exactly 20¢".** That is
+  a property of the rule. On the book the probe schedule ran two days of a
+  31-day August and accrued 1¢; the other 29 days were never claimed, so
+  nothing sums to 20¢ and `v_accrual_month_drift` cannot see it either. True of
+  the arithmetic, not of the rows.
+- **A backdated correction still does not re-price a day already priced** (§16,
+  §19). The horizon fixes the *forward* case — pricing a day too early — and
+  does nothing about the *backward* one, which needs the interest adjustment
+  §19 names.
+- **`/api/cron/accrual`'s own comments** still describe the tick as pricing
+  "the book date" without the horizon. The route is outside this document's
+  edit surface; the behaviour is in `interest.ts` and is what runs.
+
+## 20.6 The tick that was run to check all of this, with its ids
+
+A real enrolment, a real tick, a real replay — because everything on the book
+was already caught up and a tick with nothing to do proves nothing.
+
+Schedule `fcaa98c2-d87b-446b-87df-84d9aab443f8`, Kettle & Crumb Bakery LLC
+(`392043e2-…`), Business Standard, **$25.00 a month, from 2026-09-10**, key
+`audit:2026-09-11:kettle:platform_fee`. September has 30 days, so
+
+```
+F = 2500      N = 30
+q = 2500 div 30 = 83          r = 2500 mod 30 = 2500 − 2490 = 10
+d = 10:  10 <= 10  ->  83 + 1 = 84c     cum = 83*10 + min(10,10) = 840
+d = 11:  11 >  10  ->  83     = 83c     cum = 83*11 + min(11,10) = 923
+```
+
+| tick | bookDate | considered | posted | cents | entry |
+| --- | --- | ---: | ---: | ---: | --- |
+| A | 2026-09-10 | 1 | 1 | 84 | `2beff7da-9ebe-4c59-95f2-17c6bde12993` seq 5670 |
+| B | 2026-09-10 | 0 | 0 | 0 | replay |
+| C | 2026-09-10 | 0 | 0 | 0 | replay, concurrent with B |
+| E | 2026-09-11 | 1 | 1 | 83 | `aeb0d32d-fc68-4f67-b9bd-f8b03925693b` seq 5671 |
+
+Tick A ran on 2026-09-11 and posted an entry dated 2026-09-10: value date and
+booking sequence are different columns, and this is the row that shows it.
+The line memo is the arithmetic, verbatim from the journal:
+
+> *"$25.00 ÷ 30 days = 83¢ per day, with 10¢ left over. day 10 is one of the
+> first 10, so it carries one of those pennies: 83¢ + 1¢ = 84¢."*
+
+`accrual_posting` stores `monthly_cents 2500, days_in_month 30, day_of_month 10,
+base_share_cents 83, residual_pennies 10, residual_applied true, amount_cents 84,
+cumulative_cents 840`, and `accrual_posting_arithmetic` re-derived all seven
+before the row would store.
+
+**Three separate refusals, asked directly of the database:**
+
+```
+replay of the same key through postEntry()
+    -> the ORIGINAL entry id 2beff7da-…, journal_entry count 4712 -> 4712
+
+INSERT INTO accrual_day (…, idempotency_key, …)
+    -> cannot insert a non-DEFAULT value into column "idempotency_key"
+
+INSERT INTO accrual_day (schedule, 2026-09-10) a second time
+    -> duplicate key value violates unique constraint "accrual_day_once"
+```
+
+**And the rate card, §15, asked three ways in rolled-back transactions:**
+
+```
+'standard' effective 2026-09-08  -> tier standard already has a rate effective 2026-09-09;
+                                    a rate change is a LATER row, never an earlier or equal one
+'standard' effective 2026-09-11  -> tier standard has already accrued through 2026-09-11;
+                                    a rate effective 2026-09-11 would retroactively re-price
+                                    days already on the ledger
+'standard' effective 2026-09-01  -> (the first clause again)
+```
+
+Every Kettle posting still resolves the card effective on its **own** accrual
+date — 150 bps for 09-07 and 09-08, 125 bps from 09-09 — so 2026-09-09's 7¢ is
+still 7¢:
+
+```
+B = 200316c   R = 125 bps   Y = 365
+N = 200316 × 125 = 25,039,500          D = 10000 × 365 = 3,650,000
+q = 6   r = 25,039,500 − 21,900,000 = 3,139,500
+2r = 6,279,000  >  3,650,000   ->  UP  ->  7c        entry fd6589a5-8b22-49a4-9f2c-53b5becb9503
+```
+
+and the day before it, on a balance 8¢ HIGHER, is 8¢ — because the rate changed,
+not the balance:
+
+```
+B = 200308c   R = 150 bps
+N = 30,046,200      q = 8      r = 846,200
+2r = 1,692,400  <  3,650,000   ->  DOWN ->  8c       entry c4798e18-f946-424d-ac38-303383310bc9
+```
+
+`v_accrual_month_drift`, `v_accrual_ledger_drift`, `v_interest_ledger_drift` and
+`v_interest_rate_drift` were **0 rows** before and after, `node
+scripts/dbcheck.mjs` read **38 passed / 4 failed** (the four deliberate ones),
+and `--prove` covered **26 of 26**.
+
+---
+
+# Part four — §21: what was done about the five days
+
+> Added 2026-09-11, after §20. §20 reported the defect, shipped the horizon and
+> said the five rows "stay exactly as they are" because a correction "cannot be
+> expressed in the existing model". The first half of that is still true and the
+> second half was giving up too early. This section is the correction, its
+> argument, and the one thing the calendar will not let it do today.
+
+## 21.1 The question, stated so the answer is not obvious
+
+Five posted interest days were priced on a balance that was not their own
+business date's closing balance. `interest_day` is `UNIQUE (schedule_id,
+accrual_date)`, so none of them can be priced again. Three answers were on the
+table:
+
+| | What it says | Verdict |
+| --- | --- | --- |
+| **A. Leave them, make them legible** | A marker recording the priced-at and closed-at watermarks, so the book carries its own correction | **Half of the answer. Not all of it.** |
+| **B. Correct by append** | Reverse the wrong postings and re-book what the closed balance earned or owed, at the original value date | **The answer — and it cannot be done today** |
+| **C. Loosen the index** | Let a second `interest_day` re-price the date | **Refused, §21.3** |
+
+**A is not an alternative to B; it is the first half of B.** A correction needs
+a population, and a population that is a `WHERE` clause inside a repair script
+is a population nobody else can see — 0048's rule. So the marker is built first
+and the repair ranges over it, and that is why both exist rather than either.
+
+## 21.2 Why leaving them labelled is not enough, even though §16 seems to allow it
+
+§16 says a correction backdated into a day already priced does **not** re-price
+that day: *"the posting stands, the row records exactly which watermark it was
+priced at."* Read quickly, that exempts these five.
+
+It does not, and the distinction is the whole of this section. §16's argument is
+**bitemporal**: the figure was correct *on the information available at the end
+of the business date it priced*, and a later-learned fact does not make a past
+belief wrong. That is a real and defensible product rule.
+
+**These five rows are not that.** Their recorded watermark is not "what we had
+learned by the end of 2026-09-11". It is *what we had learned at 00:21 on
+2026-09-11*, with twenty-three hours of that business date still to happen. The
+posting did not price a closed day on old information; it priced a day that had
+not happened yet. §16's defence covers a stale belief about a finished day. It
+does not cover a guess about an unfinished one.
+
+So the difference between the two is not the amount. It is that one is a
+*decision the ledger is entitled to stand behind* and the other is a *wrong
+input*, and an append-only ledger has exactly one remedy for a wrong input.
+
+The amount happens to make the point anyway. Entry
+`47ad3ebe-1b69-4c6d-9c9a-bdb25d0fbf0a` pays Holds Integration Fixture Co. 498¢
+of **credit** interest out of `5400` for a business date that account closed
+**$858,941.45 overdrawn**. At the 1800 bps overdraft rate on the same card, that
+date is worth **$423.59 charged to `4400`** at booking watermark 5859 — the
+other side of the book. (That figure is still moving; §21.6.)
+
+A customer was paid, for a day on which they owed. A label on that is a label on
+a wrong payment, not a correction of one.
+
+## 21.3 Why the correction is not a second `interest_day`, and what it is instead
+
+The obvious shape is a second claim on the same (enrolment, date) with a later
+watermark. **That is the one thing that must not happen.** `interest_day_once`
+is not an obstacle in front of the correction; it is the exactly-once guarantee
+the entire tick rests on, and it is the property that *made this defect
+detectable*. A model that permits a second claim to fix a bad first one permits
+a second claim, full stop — and then "the tick priced this day twice" and "an
+operator repaired this day" are the same row shape.
+
+> **A correction that cannot be expressed in the existing model is a reason to
+> think harder, not to reach around the model.**
+
+Thinking harder gives this: **the adjustment is not the same kind of fact as the
+day.** `interest_day` claims *"this enrolment's 11 September has been decided"*
+— and that claim is true, and stays true. It **was** decided. Wrongly. The
+adjustment claims something else entirely: *"the decision recorded for that day
+priced a balance that was not that date's closing balance, and at watermark W
+the date was worth this instead."*
+
+Two different sentences about one day. Two claim spaces. `interest_day`'s
+uniqueness is untouched, and `interest_adjustment` (`db/migrations/0049_interest_basis_watermark.sql`
+§3) is exactly-once in its own right on `(interest_day_id, repriced_at_seq)`,
+with the generated key §19 named without building:
+
+```
+interest-adj:<enrolment>:<date>:<watermark>
+```
+
+**The money is the journal's own correction machinery and not a second one.**
+0001 already has `entry_type` (`original`, `reversal`, `rebook`),
+`reverses_entry_id`, `correction_group_id`, a unique index making an entry
+reversible at most once, and `assert_reversal_is_exact()` forcing a reversal to
+carry the **original's value date** and be its exact arithmetic negation account
+by account. That is the brief's bitemporal correction test, already enforced.
+`interest_adjustment` moves no money; it records why those entries exist and
+holds the corrected decision to the same arithmetic as the wrong one.
+
+**A reversal plus a re-book, not one netting entry.** A single net entry for
+Holds Integration would be arithmetically equivalent and would hide the two
+facts a reader needs: 498¢ of credit interest paid and taken back, and ~$423.59
+of overdraft interest charged. Those land on **different accounts**, `5400` and
+`4400`. A netted entry would have to pick one, which is the error `4300`'s own
+note forbids — netting variance into an account makes a spread look like a
+price.
+
+## 21.4 The order of operations, which is the whole of the arithmetic
+
+The corrected basis must be *"what the date closed at as if the wrong entry had
+never happened"*. Naively that needs hand arithmetic — read the balance, subtract
+the wrong entry's effect — and hand arithmetic outside `ledger_settled_cents()`
+is a fifth private definition of the balance, which is the drift 0022 spent a
+pass undoing.
+
+It is not needed. **Post the reversal first, then read the watermark.**
+
+```
+   original  (wrong)      seq 2266    value date D
+   reversal               seq W-1     value date D     exact negation, by trigger
+   read watermark W                                    both are inside it
+   basis := ledger_settled_cents(account, D, W)        they CANCEL, account by account
+   re-book                seq W+1     value date D     outside its own basis
+```
+
+Because `assert_reversal_is_exact()` guarantees the negation, the pair sums to
+zero on every account, so the balance the ledger's own function returns at `W`
+**is** the closing balance with the wrong entry removed. No subtraction is
+written anywhere. And the re-book is booked *after* `W` is read, so it is
+outside its own basis — precisely the arrangement `basisAt()` makes for an
+ordinary day, for the same reason.
+
+`repriced_at_seq` is stored and the trigger refuses any row where it is *below*
+the reversal's booking sequence, because a basis read before the reversal still
+carries the money it is replacing.
+
+## 21.5 The correction stores no balance, and the guard is why
+
+The first draft of `interest_adjustment` copied `interest_posting`'s shape:
+basis, numerator, denominator, quotient, remainder, rounding, amount, with all
+eight relations re-derived in a `CHECK`. It was written, applied to this
+database, and removed, because `scripts/dbcheck.mjs` failed on it immediately:
+
+```
+FAIL  no stored balance column — interest_adjustment.basis_balance_cents
+      42 passed, 5 failed
+```
+
+Check 5's exemption list is *"a `(table, column)` **pair**, never a pattern"*
+(§16.1), and the one interest exemption it grants is paid for by check 5b
+recomputing every stored basis from the journal. **A second table claiming the
+same exemption needs a second 5b, and a new money table whose first act is to
+widen the ledger's own anti-drift check is the wrong trade.** The guard was
+right and the first design was wrong; 0049 was rolled back — zero rows were at
+stake — and re-applied without it.
+
+So the adjustment stores **`repriced_at_seq` and nothing else about the
+balance** — and nothing derived from it either, not even the numerator, which is
+the balance times the rate wearing a hat. The basis is
+
+```
+ledger_settled_cents(account, accrual_date, repriced_at_seq)
+```
+
+frozen for all time because `booking_seq` is monotonic and the journal is
+append-only. **That is §16.1's own reproducibility argument arriving at the
+stronger conclusion: if the number re-derives from immutable rows, do not keep a
+copy of it.**
+
+The price is that the eight relations cannot be a `CHECK` here — a `CHECK` may
+not read another table and the operand lives in the journal. They are re-derived
+by `assert_interest_adjustment()` at insert, and then asked **again of the live
+book on every read** by `v_interest_adjustment` and `v_interest_adjustment_drift`.
+A `CHECK` fires once; a drift view re-asks for ever.
+
+## 21.6 The one thing the calendar will not allow today
+
+**All five mispriced days are value-dated 2026-09-11, which is today.**
+
+The re-book prices the balance the date actually closed at. That date has not
+closed. Any figure read now is a mid-day figure — *which is the defect, committed
+a second time, deliberately, by the repair*. This is not a theoretical worry:
+
+| business | at watermark 5568 | at watermark 5859, hours later |
+| --- | ---: | ---: |
+| Hold Fuzzer Fixture Co. | $534,030.87 | **$527,828.87** |
+| Kettle & Crumb Bakery LLC | $45,866.63 | **$45,301.36** |
+| Ridgeline Robotics, Inc. | $58,638.31 | **$58,346.31** |
+| Holds Integration Fixture Co. | −$858,941.45 | −$858,941.45 |
+| Pots Integration Fixture Co. | $25,000.92 | $25,000.92 |
+
+Three of the five had already moved, in both directions, within one afternoon. A
+correction computed from any of those numbers is a second wrong number with a
+better story.
+
+So **the rule the fix enforces is applied to the fix itself**:
+
+- `interest_adjustment_after_close` — `CHECK (adjusted_on_book_date >
+  accrual_date)`, a real constraint over two columns of the adjustment's own
+  row, with `adjusted_on_book_date` assigned by the trigger and not by the
+  caller.
+- `assert_interest_adjustment()` raises the same refusal with a sentence.
+- `adjustOneMispricedDay()` asks in TypeScript first, so the operator gets the
+  sentence and no reversal is posted for a correction that cannot complete.
+- `v_interest_mispriced_uncorrected` is gated on `accrual_date <
+  book_date(now())`, so the queue is **empty until midnight**.
+
+`scripts/repair-0049-mispriced-interest.mjs` run at 11:00 on 2026-09-11 prints
+all five, marks every one `HELD — the date has not closed`, flags the one where
+`** SIDE FLIPS **`, and posts nothing. **The first run after 00:00
+America/New_York corrects all five at value date 2026-09-11.**
+
+**That zero is not health, and the code says so in as many words.** §20.5 made
+the same point about `v_accrual_month_drift` — *"green because there is nothing
+to be green about"* — and the same honesty is owed here: the queue is empty
+because of the calendar, not because the work is done.
+
+## 21.7 The defect, made unrepresentable — three layers, only one a convention
+
+| | Layer | What survives without it |
+| --- | --- | --- |
+| 1 | `interestPricingHorizon()` — the interest leg's window ends at `book_date(now()) − 1`; a tick asked for today is **held**, reports `pricedThrough` and `openDateHeld`, and takes today after midnight | delete it and layers 2 and 3 still hold |
+| 2 | **`assert_interest_posting()` refuses a posting whose day has not closed**, and assigns `interest_posting.basis_book_date` itself | the product cannot express the defect at all |
+| 3 | `v_interest_priced_before_close` — the question asked of the whole book on every read, with the priced-at figures beside the recomputed closed-at ones | it would report a sixth |
+
+**`basis_book_date` is the column §20 asked for.** `observed_booking_seq` already
+records *where in the ledger* the basis was read; what it could not say is
+*whether the date had ended when it was read* — a watermark is a position in a
+total order, not a wall clock, and `2266` does not visibly mean "00:21 on the
+morning of the day being priced". It is **nullable on purpose**: rows written
+before 0049 get `NULL` rather than a backfilled `book_date(now())`, because that
+value would be a fabrication about a past event — 0047 §1's rule. The marker view
+answers the question for those rows from `interest_day.claimed_at` in book time
+instead, with `COALESCE` and not a filter: a predicate that excluded the rows
+written before the guard existed would hide precisely the rows the guard was
+written for.
+
+**Why the guard is on the POSTING and not on the CLAIM.** Two reasons, and the
+second decided it:
+
+1. The posting is where the **basis** is. A claim is a date and a schedule; it
+   prices nothing. The sentence that must be unrepresentable — *"a basis read
+   from an open day"* — is about the posting row.
+2. `scripts/dbcheck.mjs --prove` reaches the `v_interest_ledger_drift` failure
+   state by inserting an `interest_day` for `max(accrual_date) + 1` — **tomorrow,
+   on this book** — with `interest_posting_lifecycle` deliberately disabled. A
+   guard on the claim would have refused that insert and silently removed a
+   prover, leaving `--prove` a check short with nothing saying so. A guard on the
+   posting sits inside the trigger the prover already turns off, on purpose, for
+   a reason it already states. **The guard keeps its teeth against the product
+   and takes none away from the proof.**
+
+**The fee leg is deliberately ungated, and that asymmetry is the point.** A
+platform fee is `F`, `N` and `d` — a price, a calendar and an ordinal. It reads
+no balance, so an open day cannot make it wrong, and delaying a correct number
+buys nothing. The leg that reads a balance waits for the balance to exist; the
+leg that does not, does not. Both are in one tick, `/api/cron/accrual`, and the
+route now says so in its own comments (§20.5's last open item).
+
+## 21.8 Proof, on this database, with the ids
+
+**The horizon, asked directly.**
+
+```
+interestPricingHorizon('2026-09-11')  ->  { horizon: '2026-09-10', openDateHeld: true  }
+interestPricingHorizon('2026-09-10')  ->  { horizon: '2026-09-10', openDateHeld: false }
+interestPricingHorizon('2026-09-12')  ->  { horizon: '2026-09-10', openDateHeld: true  }
+```
+
+**The fee leg, unheld, on the live book.** Tick `audit-tick-e` ran at 10:13
+America/New_York on 2026-09-11 with `bookDate = 2026-09-11` and claimed an
+`accrual_day` for **2026-09-11**, posting 83¢ —
+`aeb0d32d-fc68-4f67-b9bd-f8b03925693b`, key `accrual:fcaa98c2-…:2026-09-11`,
+value date 2026-09-11, seq 5671. So the fee leg does price an open date, today,
+through the same `bookDate` the interest leg holds back.
+
+That entry is evidence for the fee half only: every `interest_day` for
+2026-09-11 was *already* claimed by 00:21, so that tick's interest leg would
+have found nothing to do with or without the horizon. The interest half is
+carried by the three direct calls above, by `listInterestDue()` being handed the
+horizon rather than the book date, by the integration suite's assertion that a
+tick asked for today names no day later than yesterday, and — the layer that
+does not depend on any of them — by the database refusal below.
+
+**Layer 2, made to fail, in rolled-back transactions on a real enrolment:**
+
+```
+price 2026-09-11 (today)      -> REFUSED  "refusing to price 2026-09-11 on 2026-09-11: the
+                                           basis is the settled balance at the END of a
+                                           business date, and 2026-09-11 has not closed…"
+price 2026-09-12 (tomorrow)   -> REFUSED  same refusal
+price 2026-09-10 (closed)     -> ACCEPTED  basis_book_date 2026-09-11
+```
+
+The third line is the one that matters as much as the first two: a guard that
+refuses everything is also "working".
+
+**The repair, end to end, against the live database, rolled back.** Everything
+on this book was already caught up and a repair with nothing to do proves
+nothing — so a day with the *exact shape of the five*, including the sign flip,
+was constructed inside one transaction on the `Live Fire — attack 3` fixture
+leaf and the production module was run against it:
+
+```
+  priced   $4,006.00 @wm 5859   ->    14c credit        (a true answer to the wrong question)
+  closes  -$895,993.86          ->  44186c overdraft    date_has_closed true
+  v_interest_mispriced_uncorrected sees it: YES
+
+  adjustOneMispricedDay()  ->  adjusted
+     reversal  d6e742d2-3d4a-4eb0-a6c4-cc08d3dbd224
+     rebook    e43dbdf2-f14c-4464-b303-e8fbda7c0f5e
+     claim     3bef402b-…   interest-adj:768e8c22-…:2026-09-10:5920
+     14c credit -> 44186c overdraft on -$895,994.00 @wm 5920
+
+  the correction group, as the journal holds it:
+     2026-09-10  original  5400              14
+     2026-09-10  original  2100/fixture     -14
+     2026-09-10  reversal  5400             -14
+     2026-09-10  reversal  2100/fixture      14
+     2026-09-10  rebook    4400          -44186
+     2026-09-10  rebook    2100/fixture   44186
+
+  replay  ->  replayed, "this day has already been adjusted; nothing posted"
+              interest_adjustment rows for this day: 1
+
+  v_interest_adjustment_drift 0   v_interest_ledger_drift 0   v_interest_rate_drift 0
+  v_book_not_zero 0   v_entry_unbalanced 0   still queued 0
+```
+
+Three entry types, one correction group, **all six lines at the original value
+date**, and the side crossing `5400` → `4400`. Then `ROLLBACK`: the book's
+watermark was 5859 before and 5859 after, and `interest_adjustment` holds zero
+rows.
+
+**`v_interest_adjustment_drift`, made to fail** in the same transaction:
+`0 → 1` after a row one cent out was written with
+`interest_adjustment_lifecycle` disabled on the owner connection. It is a view
+and not a `dbcheck` line because `scripts/dbcheck.mjs` is outside 0049's edit
+surface; `scripts/repair-0049-mispriced-interest.mjs` asserts it on every run
+and exits non-zero if it is not empty.
+
+**Two bugs the proof found that no amount of reading would have.**
+
+- `reverseAndRebook(args, tx)` throws `tx.begin is not a function`. postgres.js
+  3.4 puts `begin` on the pool only; a transaction scope gets `savepoint`. The
+  alternatives were to run the reversal in its own transaction — a crash between
+  it and the re-book leaves a day whose interest has been taken back and not
+  replaced, a *third* wrong number — or to stop calling the one correction
+  primitive in this system and write a second negation. Neither. The same shim
+  `src/lib/ledger/ledger.integration.test.ts` already carries, with the same
+  note, now lives in `interest-adjust.ts`.
+- The `interest_adjustment` design that failed `dbcheck`, §21.5.
+
+**`scripts/dbcheck.mjs`** reads **42 passed / 4 failed** — the same four
+deliberate ones — and **`--prove` covers 30 of 30 invariant views (37 proofs)**,
+unchanged by 0049.
+
+## 21.9 The screen, and the claim it used to make
+
+§12 and the deployed tile said *"no deposit account has been in debit"* while
+`v_overdrawn_accounts` returned one row at $858,941.45. `OverdraftMeasurement`'s
+third branch is now the one that renders, verified by rendering
+`InterestSection` against the live read rather than by reading the JSX:
+
+```
+INVARIANTS  {"ledgerDrift":0,"rateDrift":0,"unresolved":0,"gap":0,
+             "overdrawnAccounts":1,"overdrawnDaysInWindow":1,"overdrawnCents":85894145,
+             "pricedBeforeClose":5,"pricedBeforeCloseCents":2520,
+             "mispricedUncorrected":0,"adjustments":0,"adjustmentDrift":0}
+
+tile   "Charged on overdrafts  $0.00 — nothing yet, and 1 account is overdrawn
+        right now; read the measurement below"
+panel  "An account IS overdrawn — and 4400 still has no rows. Both, with the reason."
+```
+
+The string *"no deposit account has been in debit"* does not appear in the
+rendered output. The panel now also says what is being done: the correction is
+by append, the queue holds `mispricedUncorrected`, `interest_adjustment` holds
+`adjustments`, and the queue is zero **because the dates have not closed**, not
+because there is nothing to do.
+
+## 21.10 What is still open
+
+- **The five days are not yet corrected.** They are marked, queued, and the path
+  is proven — on a constructed day with their exact shape, not on them. The run
+  after midnight America/New_York is what finishes it, and until then this
+  section is a plan with a proof rather than a completed repair. Saying that is
+  better than implying otherwise.
+- **`v_interest_mispriced_uncorrected` is not in `scripts/dbcheck.mjs`.** Partly
+  because that file is outside this change's edit surface, and partly because it
+  is a **work queue, not an invariant** — a queue that fails the build the moment
+  a real defect is found trains people to silence it. When the five are corrected
+  and it is structurally empty, it can be listed, and it will have been made to
+  fail by the book rather than by a fixture.
+- **`v_interest_adjustment_drift` is not in `INVARIANT_VIEWS` either**, for the
+  edit-surface reason alone. It is an invariant, it has been made to fail, and it
+  belongs there in the pass that can write that file.
+- **The adjustment path has no vitest integration test.** It cannot live in the
+  app-role suite: constructing a day with the defect's shape needs
+  `interest_posting_lifecycle` disabled, which requires the owner connection. The
+  proof is `scripts/repair-0049-mispriced-interest.mjs` plus the rolled-back
+  owner-connection run recorded in §21.8.
+- **The backward case is still open.** §16 and §19's real subject — a correction
+  backdated into a day that was priced correctly at the end of that day — is
+  untouched. 0049 fixes the *forward* case, pricing a day too early. A genuine
+  re-price after a backdated correction would be a second `interest_adjustment`
+  at a later watermark, which the table permits by design and which no code path
+  yet creates.
+- **No cron entry still.** `/api/cron/accrual` is authenticated and nothing
+  schedules it, inherited from §10 and §19 and unchanged. The horizon makes this
+  worse in one specific way worth naming: a tick that runs once a day now prices
+  *yesterday*, so a day of interest is at most two ticks behind the book rather
+  than one.

@@ -404,6 +404,12 @@ export async function readInterestInvariants(conn: Sql = sql): Promise<InterestI
       gap: bigint;
       overdrawn_accounts: bigint;
       overdrawn_days_in_window: bigint;
+      overdrawn_cents: bigint;
+      priced_before_close: bigint;
+      priced_before_close_cents: bigint;
+      mispriced_uncorrected: bigint;
+      adjustments: bigint;
+      adjustment_drift: bigint;
     }[]
   >`
     WITH win AS (
@@ -422,7 +428,38 @@ export async function readInterestInvariants(conn: Sql = sql): Promise<InterestI
            (SELECT count(*) FROM win
              WHERE ledger_settled_cents(
                      win.account_id, win.value_date, ${watermark.toString()}::bigint) < 0)
-                                                          AS overdrawn_days_in_window`;
+                                                          AS overdrawn_days_in_window,
+           (SELECT COALESCE(sum(overdraft_cents), 0)::bigint
+              FROM v_overdrawn_accounts)                  AS overdrawn_cents,
+           -- PRICED WHILE THE DAY WAS STILL OPEN. The claim's own timestamp,
+           -- read in BOOK time, against the date it claimed: a day claimed on
+           -- or before itself was priced on a balance that was not that date's
+           -- closing balance, and UNIQUE (schedule, accrual_date) means it can
+           -- never be priced again.
+           (SELECT count(*)
+              FROM interest_day d
+              JOIN interest_posting p ON p.interest_day_id = d.id
+             WHERE p.disposition = 'posted'
+               AND (d.claimed_at AT TIME ZONE 'America/New_York')::date <= d.accrual_date)
+                                                          AS priced_before_close,
+           (SELECT COALESCE(sum(p.amount_cents), 0)::bigint
+              FROM interest_day d
+              JOIN interest_posting p ON p.interest_day_id = d.id
+             WHERE p.disposition = 'posted'
+               AND (d.claimed_at AT TIME ZONE 'America/New_York')::date <= d.accrual_date)
+                                                          AS priced_before_close_cents,
+           -- 0049. THE QUEUE, not an invariant: of those days, the ones whose
+           -- date has now CLOSED, whose closed figure differs from what was
+           -- posted, and which nothing has corrected. Zero while the mispriced
+           -- dates are still open — the calendar, not health.
+           (SELECT count(*) FROM v_interest_mispriced_uncorrected)
+                                                          AS mispriced_uncorrected,
+           (SELECT count(*) FROM interest_adjustment)     AS adjustments,
+           -- MUST be 0. Check 5b's question, asked of interest_adjustment:
+           -- every stored decision must still re-derive from the journal at
+           -- its own watermark and the card effective on its own date.
+           (SELECT count(*) FROM v_interest_adjustment_drift)
+                                                          AS adjustment_drift`;
 
   if (row === undefined) throw new Error("interest: the invariant query returned no row");
   return {
@@ -432,6 +469,12 @@ export async function readInterestInvariants(conn: Sql = sql): Promise<InterestI
     gap: Number(row.gap),
     overdrawnAccounts: Number(row.overdrawn_accounts),
     overdrawnDaysInWindow: Number(row.overdrawn_days_in_window),
+    overdrawnCents: Number(row.overdrawn_cents),
+    pricedBeforeClose: Number(row.priced_before_close),
+    pricedBeforeCloseCents: Number(row.priced_before_close_cents),
+    mispricedUncorrected: Number(row.mispriced_uncorrected),
+    adjustments: Number(row.adjustments),
+    adjustmentDrift: Number(row.adjustment_drift),
   };
 }
 
@@ -449,12 +492,75 @@ export type DueInterestDay = {
 };
 
 /**
+ * THE LAST BUSINESS DATE THAT HAS ACTUALLY ENDED.
+ *
+ * ===========================================================================
+ * WHY THE INTEREST LEG MAY NOT PRICE THE CURRENT BOOK DATE
+ * ===========================================================================
+ *
+ * The basis is defined — in docs/ACCRUAL.md §16 and in `basisAt()` below — as
+ * "the settled ledger balance at the END of the business date". A date that
+ * has not ended does not have one. What the tick can read while the date is
+ * open is the balance AT THE MOMENT THE TICK RAN, which is a different number
+ * and is not the one the product promises.
+ *
+ * That would be a small sin if the day could be re-priced later. It cannot.
+ * `interest_day` is UNIQUE (schedule_id, accrual_date) — the property that
+ * makes the tick exactly-once — so the first tick to touch an open date
+ * FREEZES a mid-day balance as that date's end-of-day basis, for ever, and
+ * the only repair available on an append-only ledger is an interest
+ * adjustment (a reversal plus a re-book) which this system does not have
+ * (§19).
+ *
+ * MEASURED, NOT THEORISED. On 2026-09-11 the tick priced that same date at
+ * booking watermark 2265, when `Holds Integration Fixture Co.` stood at
+ * +$145,315.17, and paid it 498¢ of CREDIT interest on `5400`. Three thousand
+ * entries later the same account closed 2026-09-11 at −$858,941.45 — the
+ * first debit balance this book has ever had — and the day that should have
+ * priced on `4400 Interest income — overdraft` can never be taken again. All
+ * five enrolments were priced that way on that date: four by a material
+ * amount, one with the sign reversed.
+ *
+ * So the horizon is `book_date(now()) - 1`, in book time (America/New_York),
+ * and a caller that asks for today is held rather than refused: the tick
+ * prices every closed date it owes, reports `openDateHeld`, and takes today
+ * on the first tick after midnight. Nothing is lost — a fee or an interest
+ * day is owed whether or not the job ran, and the entry carries the date it
+ * accrued FOR, not the date the job ran.
+ *
+ * THE FEE LEG IS DELIBERATELY NOT HELD BACK. A platform fee is `F`, `N` and
+ * `d` — a price, a calendar and an ordinal. It does not read a balance, so
+ * there is nothing about it that an open day can make wrong, and holding it
+ * would delay a correct number for no reason.
+ */
+export async function interestPricingHorizon(
+  bookDate: string,
+  conn: Sql = sql,
+): Promise<{ readonly horizon: string; readonly openDateHeld: boolean }> {
+  const [row] = await conn<{ last_closed: string }[]>`
+    SELECT (book_date(now()) - 1)::text AS last_closed`;
+  const lastClosed = row?.last_closed;
+  if (lastClosed === undefined) {
+    throw new Error("interest: the database would not say what the last closed book date is");
+  }
+  // String comparison is safe and exact on ISO `YYYY-MM-DD`, which is what
+  // both sides are: no Date object, no timezone, no arithmetic.
+  return bookDate <= lastClosed
+    ? { horizon: bookDate, openDateHeld: false }
+    : { horizon: lastClosed, openDateHeld: true };
+}
+
+/**
  * Every (enrolment, date) pair owed and not yet claimed, oldest first.
  *
  * `store.ts`'s `listDue()` exactly, against `interest_due_dates()`. Oldest
  * first so that a tick which hits the limit leaves the NEWEST days undone —
- * those are the ones the next tick will certainly see, because today is always
- * in the window and a month-old date is about to fall out of it.
+ * those are the ones the next tick will certainly see, because a month-old
+ * date is about to fall out of the window and a recent one is not.
+ *
+ * `bookDate` here is the PRICING HORIZON, not the run's book date: the caller
+ * passes what `interestPricingHorizon()` returned, so the open date is already
+ * out of the window. See that function for why.
  */
 export async function listInterestDue(
   bookDate: string,

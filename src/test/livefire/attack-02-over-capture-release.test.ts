@@ -205,6 +205,58 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
   });
 
   /**
+   * Read a transaction Lithic has only just issued a token for, waiting out the
+   * window in which it answers 404 for it.
+   *
+   * ------------------------------------------------------------------------
+   * NOT A COSMETIC RETRY. `/v1/simulate/authorize` answers `201 {token}` before
+   * the transaction is readable, and every endpoint keyed on that token — this
+   * read and `/v1/simulate/clearing` alike — answers `404 "Transaction was not
+   * found"` until it is. MEASURED against this sandbox 2026-09-11, six trials
+   * each, polling every 200ms from the authorize response:
+   *
+   *   AUTHORISATION APPROVED   969 1166 1177 1184 1450 1759 ms  (mean 1284)
+   *   AUTHORISATION DECLINED   781  788  829  875 1047 1051 ms  (mean  895)
+   *
+   * The measurement below used `pace()` — a flat 1500ms — and then read the
+   * transaction, which leaves 241ms of margin against the worst approved
+   * reading taken and none at all against a slower one. Attack 3 lost this same
+   * race for real, intermittently, once the account's daily spend cap was
+   * raised and authorisations started being APPROVED (which is ~390ms slower to
+   * become visible than a decline); this file had not failed yet and was one
+   * bad sample from it. See attack 3's header for the full measurement.
+   *
+   * Nothing is asserted differently. The wait is on the provider being able to
+   * answer at all, and a token still 404 after the budget fails hard rather
+   * than being waited out for ever, because that is a different fault.
+   * ------------------------------------------------------------------------
+   */
+  async function readWhenVisible(
+    token: string,
+    budgetMs = 30_000,
+  ): Promise<Awaited<ReturnType<typeof LithicClient.getTransaction>>> {
+    const startedAt = Date.now();
+    let reads = 0;
+    for (;;) {
+      reads += 1;
+      try {
+        return await lithic.getTransaction(token);
+      } catch (thrown) {
+        const status = (thrown as { status?: unknown }).status;
+        if (status !== 404) throw thrown;
+        if (Date.now() - startedAt >= budgetMs) {
+          throw new Error(
+            `Lithic issued transaction token ${token} and then answered 404 "Transaction was not ` +
+              `found" for ${Date.now() - startedAt}ms across ${reads} reads. The visibility delay ` +
+              `measured in this sandbox is 781-1759ms, so this is not that.`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+  }
+
+  /**
    * `POST /v1/simulate/authorization_advice` — the sandbox's incremental
    * authorisation. It is NOT on the rail client, because nothing in the
    * application sends one: an incremental is something the network tells US
@@ -568,7 +620,12 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     // authorisation still go UP?" presupposes one. A refusal leaves the
     // question unasked rather than answered wrongly, which is exactly what a
     // skip means in this suite, and a skip is never counted as a pass.
-    const opened = await lithic.getTransaction(token);
+    //
+    // Read through `readWhenVisible`: `pace()` alone is not enough margin
+    // against an approved authorisation's visibility delay, and a 404 here
+    // would fail this attack for the provider's indexing rather than for
+    // anything the attack is about.
+    const opened = await readWhenVisible(token);
     const openedEvent = (opened.events ?? []).find((e) => e.type === "AUTHORIZATION");
     const openedVerdict: string = openedEvent?.result ?? opened.result;
     if (openedVerdict !== "APPROVED") {

@@ -324,6 +324,14 @@ const INTEREST: InterestPanelView = {
     // nothing has been, so the fixture must not imply otherwise either.
     overdrawnAccounts: 0,
     overdrawnDaysInWindow: 0,
+    overdrawnCents: 0,
+    // A fixture must not imply a clean book either: this is the DEMO state,
+    // and on the live book these are not zero. See docs/ACCRUAL.md §20.
+    pricedBeforeClose: 0,
+    pricedBeforeCloseCents: 0,
+    mispricedUncorrected: 0,
+    adjustments: 0,
+    adjustmentDrift: 0,
   },
   selected: null,
 };

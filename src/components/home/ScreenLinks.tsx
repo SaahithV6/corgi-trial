@@ -29,6 +29,54 @@ export interface Screen {
 }
 
 export const SCREENS: readonly Screen[] = [
+  // ==========================================================================
+  // THE CUSTOMER'S FIVE. Everything below them is a STAFF tool — every business
+  // on the book in one table, chart-of-accounts codes, invariant row counts —
+  // and the brief this build is answering opens with the customer: "Customers
+  // hold a balance, send and receive payments, and get a card for each person
+  // on the team." These five are that person's view. They come first because a
+  // stranger opening this page should meet the product before the console.
+  // ==========================================================================
+  {
+    href: "/client",
+    title: "Your balance",
+    summary:
+      "One business, their own money: what they have, what they can spend right now, and why those differ.",
+    why: "Available is read from ledger_availability() \u2014 the same function the staff console reads, and the fifth caller of the ONE definition migration 0022 exists to enforce. The page restates the subtraction rather than performing it, so it cannot disagree with /accounts. Open ?state=edge: a real business whose available balance is NEGATIVE while its ledger balance is positive, because a credit has landed and not cleared. Correct, live, and never clamped at zero.",
+    external: false,
+  },
+  {
+    href: "/client/activity",
+    title: "Your activity",
+    summary:
+      "Their transactions in plain language \u2014 \u201cauthorised $50, settled $73.40\u201d rather than four journal lines.",
+    why: "The authorised figure is a fold over the card authorisation's event set in the memo book; the settled figure is a journal line. They are joined on the provider reference BOTH sides already carry, never on amount and date \u2014 two $73.40 payments on one day are not one payment. Where the two clocks differ the row prints both, in words.",
+    external: false,
+  },
+  {
+    href: "/client/cards",
+    title: "Your cards",
+    summary:
+      "The card for each person on the team, what it can and cannot do, and why a declined authorisation was declined.",
+    why: "The decline sentence is card_auth_decision.reason, verbatim \u2014 written inside the issuer's 6000 ms deadline by the function that made the decision. There is no rule-to-sentence table in the UI, because a second copy would drift from the one a dispute is answered from. A limit of none and a limit of zero are rendered as different sentences.",
+    external: false,
+  },
+  {
+    href: "/client/pay",
+    title: "Send a payment",
+    summary:
+      "The customer's side of money out, on the existing path: the same server action the console posts to.",
+    why: "It imports raisePaymentAction from the staff console and does not copy it, so the KYB gate, the payee confirmation, the pinned policy version, the content hash and the idempotency key all apply unchanged. The account is not a field: it is resolved on the server from the business this page is scoped to.",
+    external: false,
+  },
+  {
+    href: "/client/approvals",
+    title: "Approvals",
+    summary:
+      "Maker-checker as the customer meets it \u2014 and a refusal that reads as a sentence rather than a SQLSTATE.",
+    why: "It answers for ONE payment by reference and refuses to list a queue, because listQueue() is platform-wide and filtering it in TypeScript would make tenant isolation a step instead of a predicate. The missing reader is named on the page and in docs/CLIENT.md. Switch role in the header to see the same payment from both sides of the rule.",
+    external: false,
+  },
   {
     href: "/onboarding",
     title: "Onboarding",
@@ -162,6 +210,14 @@ export const SCREENS: readonly Screen[] = [
     summary:
       "The people at a business, what each may do, and a card for each of them.",
     why: "The brief's first paragraph asks for a card per person on the team. Maker-checker stops being two demo personas here: the initiator and the approver are members, and `initiator_id <> approver_id` is enforced by the database rather than by a screen.",
+    external: false,
+  },
+  {
+    href: "/dashboard",
+    title: "Triage",
+    summary:
+      "The screen an operator opens at the start of a shift: what is red, what is waiting on a person, what the machine did.",
+    why: "Four invariants are red ON PURPOSE. This is the only screen that tells a decided red from a new one \u2014 with the argument and the citation beside the count \u2014 and every number drills through to the row that produced it. A red that is not on the register reads \u201cnothing here explains this\u201d rather than being absorbed.",
     external: false,
   },
   {

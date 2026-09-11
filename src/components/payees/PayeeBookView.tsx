@@ -1,7 +1,10 @@
+import Link from "next/link";
+
 import { formatTimestamp } from "@/lib/format/datetime";
 import { isErr } from "@/lib/result";
-import { Badge, MetaList, Note, Panel } from "@/components/ui/primitives";
+import { Badge, FOCUS_RING, MetaList, Note, Panel } from "@/components/ui/primitives";
 
+import { AddPayeeForm, type BusinessChoice } from "./AddPayeeForm";
 import type { PayeeDataSource } from "./data-contract";
 import { PayeeDetail } from "./PayeeDetail";
 import { PayeeErrorPanel } from "./PayeeErrorPanel";
@@ -9,7 +12,7 @@ import { PayeeSkeleton } from "./PayeeSkeleton";
 import { PayeeTable } from "./PayeeTable";
 import { RefusalTable } from "./RefusalTable";
 import { SummaryTiles } from "./SummaryTiles";
-import type { PayeeFilter } from "./view-state";
+import { payeeHref, type PayeeFilter } from "./view-state";
 
 export { PayeeSkeleton };
 
@@ -30,10 +33,22 @@ export { PayeeSkeleton };
 export async function PayeeBookView({
   source,
   filter,
+  /**
+   * The businesses a payee can be added to, resolved by the page.
+   *
+   * EMPTY ON EVERY FIXTURE STATE, which is what turns the operator actions
+   * off. The rule this screen has always followed is that a demo state writes
+   * nothing and calls nobody; a form that posted against fixture ids would
+   * break it, and a form that posted against REAL ids from a screen labelled
+   * FIXTURE DATA would break it worse.
+   */
+  businesses = [],
 }: {
   readonly source: PayeeDataSource;
   readonly filter: PayeeFilter;
+  readonly businesses?: readonly BusinessChoice[];
 }) {
+  const writable = businesses.length > 0;
   const result = await source.load(
     filter.payeeId === null ? {} : { payeeId: filter.payeeId },
   );
@@ -126,8 +141,32 @@ export async function PayeeBookView({
             the payment — a warning is overridable, by anybody, in one step. It is a refusal to
             let the override be implicit.
           </p>
+          <p className="mt-2">
+            Open one below. The signature form names the findings it answers, and the row it
+            writes cannot be edited or withdrawn. A refused payment links straight to it:{" "}
+            <code>/payees?payee=&lt;id&gt;&amp;sign=1</code> is the URL{" "}
+            <code>PAYEE_WARNING_UNACKNOWLEDGED</code> now carries.
+          </p>
         </Note>
       ) : null}
+
+      {writable ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <Link
+            href={payeeHref({ state: filter.state, add: !filter.add })}
+            className={`rounded border border-border-strong px-3 py-1.5 text-sm font-medium ${FOCUS_RING}`}
+          >
+            {filter.add ? "Close the add form" : "Add a payee"}
+          </Link>
+          <p className="text-[11px] leading-relaxed text-muted">
+            Adding a beneficiary runs the check and writes a row either way — a payee and its
+            first verification, or a refusal carrying the digits as typed. Nothing here writes a
+            journal line; a payee is not a payment.
+          </p>
+        </div>
+      ) : null}
+
+      {writable && filter.add ? <AddPayeeForm businesses={businesses} /> : null}
 
       <SummaryTiles rows={view.rows} refusals={view.refusals} />
 
@@ -138,7 +177,9 @@ export async function PayeeBookView({
         <PayeeTable rows={view.rows} filter={filter} />
       </Panel>
 
-      {selected === null ? null : <PayeeDetail row={selected} />}
+      {selected === null ? null : (
+        <PayeeDetail row={selected} writable={writable} signRequested={filter.sign} />
+      )}
 
       <Panel
         title="Refused before they became payees"

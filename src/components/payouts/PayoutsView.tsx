@@ -37,10 +37,20 @@ export async function PayoutsView({
   });
 
   if (isErr(result)) {
+    // The limitation below is rendered HERE TOO, and that is the point of
+    // hoisting it into its own component. The comment further down says the
+    // two limitations are shown "on every state"; this branch returns before
+    // the note that carries them, so until now the error state was the one
+    // screen where a reader saw the words "cross-border payout" and nothing
+    // saying the last mile does not exist. An unreadable quote book is not a
+    // reason to stop disclosing what the product is.
     return (
       <div className="space-y-6">
         <Header />
         <PayoutErrorPanel error={result.error} />
+        <Note title="What is real on this screen, and what is not">
+          <OffRampLimitation />
+        </Note>
       </div>
     );
   }
@@ -97,13 +107,9 @@ export async function PayoutsView({
           built-in fallback table answers, every quote it prices is marked{" "}
           <strong>SIMULATED</strong>, and it is never dressed up as a market rate.
         </p>
-        <p className="mt-2">
-          <strong>There is no off-ramp partner, and the last mile is not built.</strong> The USDC
-          leg is real and confirms on Base Sepolia. The step after it — somebody in Mexico handing
-          the beneficiary pesos — needs a licensed partner this build does not have. So the
-          delivery amount on every quote is a <em>commitment</em>, priced and recorded honestly,
-          and nothing on this screen claims a peso has ever moved.
-        </p>
+        <div className="mt-2">
+          <OffRampLimitation />
+        </div>
         <p className="mt-2">
           <strong>The ledger stays in USD cents throughout.</strong> A quote is not a second
           currency in the books: no journal line is written by anything on this page, the only
@@ -210,6 +216,25 @@ export async function PayoutsView({
         )}
       </Panel>
     </div>
+  );
+}
+
+/**
+ * The limitation that has to survive every state of this screen.
+ *
+ * One component rather than one paragraph in one branch, because it is
+ * rendered in two places — the normal note and the error state — and two
+ * copies of a disclosure is two places for one of them to go stale.
+ */
+function OffRampLimitation() {
+  return (
+    <p>
+      <strong>There is no off-ramp partner, and the last mile is not built.</strong> The USDC leg
+      is real and confirms on Base Sepolia. The step after it — somebody in Mexico handing the
+      beneficiary pesos — needs a licensed partner this build does not have. So the delivery
+      amount on every quote is a <em>commitment</em>, priced and recorded honestly, and nothing on
+      this screen claims a peso has ever moved.
+    </p>
   );
 }
 

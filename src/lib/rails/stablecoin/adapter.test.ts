@@ -232,6 +232,51 @@ describe("failure is an outcome, and it keeps the hash", () => {
     expect(outcome.txHash).toMatch(/^0x[0-9a-f]{64}$/);
   });
 
+  it("does not call a PRECONFIRMATION a reorg — it waits, then confirms", async () => {
+    // Base Sepolia serves a receipt with an all-zero blockHash at the tip: the
+    // node saying "I have this and it is not in a block yet". The canonicality
+    // check compares header.hash against receipt.blockHash, and a zero hash can
+    // never match a real block — so the adapter used to conclude the block had
+    // been reorganised out.
+    //
+    // It then correctly refused to post, which meant 1.98 USDC left the wallet
+    // with the ledger unaware and recovery needing a second command. Refusing
+    // was right; calling it a reorg was not. A reorg means "mined, then
+    // un-mined" — a real and alarming fact — and this is the ordinary case
+    // that resolves by waiting. Reporting the second as the first spends an
+    // operator's attention on nothing and hides the one time it is true.
+    let calls = 0;
+    const { rpc } = scripted({
+      eth_getTransactionReceipt: () => {
+        calls += 1;
+        // First read: a preconfirmation. Second: the real thing.
+        return calls === 1
+          ? {
+              status: "0x1",
+              blockNumber: "0x2c7d741",
+              blockHash: `0x${"0".repeat(64)}`,
+              gasUsed: "0xaf2b",
+              effectiveGasPrice: "0x5b8d80",
+            }
+          : {
+              status: "0x1",
+              blockNumber: "0x2c7d741",
+              blockHash: BLOCK_HASH,
+              gasUsed: "0xaf2b",
+              effectiveGasPrice: "0x5b8d80",
+            };
+      },
+    });
+    // The shared `request()` sets receiptTimeoutMs: 0 so most cases resolve in
+    // one pass. This one MUST be allowed to poll — waiting is the behaviour
+    // under test — so it gets a real budget, one poll interval plus slack.
+    const outcome = await sendUsdcPayout(rpc, request({ receiptTimeoutMs: 5_000 }));
+    expect(outcome.kind).toBe("confirmed");
+    // It really did have to wait: a single read would have been the bug, and
+    // `unconfirmed` here would mean it never re-read at all.
+    expect(calls).toBeGreaterThan(1);
+  });
+
   it("reports a receipt whose block is no longer canonical as reorged", async () => {
     const { rpc } = scripted({
       eth_getBlockByNumber: (params) =>

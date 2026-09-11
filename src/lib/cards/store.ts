@@ -305,29 +305,9 @@ export type AppendDecisionParams = {
   readonly requestId: string | null;
 };
 
-/**
- * Record one decision. Append-only; there is no other verb available.
- *
- * Returns the row id, or null if the insert failed. A NULL RETURN IS NOT
- * SWALLOWED BY THE CALLER — the route logs it at `error` and re-tries the
- * append in `after()`. The response still goes out either way, because the
- * cardholder's purchase must not fail because our audit trail was slow.
- *
- * `inputs` is passed through `sql.json`. Money inside it is already decimal
- * strings (see `cents()` in `./decide.ts`); jsonb would happily store a
- * `numeric`, but every reader between here and a screen is JavaScript, and
- * `JSON.parse` turns 9007199254740993 into 9007199254740992.
- */
-export async function appendDecision(
-  params: AppendDecisionParams,
-  budgetMs: number = DECISION_APPEND_BUDGET_MS,
-): Promise<string | null> {
+/** The columns of the decision row, computed once so both inserts agree. */
+function decisionColumns(params: AppendDecisionParams) {
   const { request, verdict, lookup } = params;
-  const cardId = lookup.status === "read" ? lookup.cardId : null;
-  const controlVersionId =
-    lookup.status === "read" && lookup.controls !== null
-      ? lookup.controls.controlVersionId
-      : null;
   // Denormalised at the instant of the decision, not joined later. A card's
   // member cannot change — `card_member` has the card as its PRIMARY KEY and no
   // UPDATE — so the join would give the same answer forever; but the per-person
@@ -336,7 +316,131 @@ export async function appendDecision(
   // exactly as `control_version_id` pins the card's, so raising somebody's
   // limit tomorrow cannot make today's decline look wrong.
   const member = lookup.status === "read" ? (lookup.member ?? null) : null;
+  return {
+    provider: params.provider,
+    providerAuthToken: request.providerAuthToken,
+    providerCardToken: request.card.token,
+    cardId: lookup.status === "read" ? lookup.cardId : null,
+    controlVersionId:
+      lookup.status === "read" && lookup.controls !== null
+        ? lookup.controls.controlVersionId
+        : null,
+    memberId: member?.memberId ?? null,
+    memberVersionId: member?.memberVersionId ?? null,
+    amountCents: request.amountCents,
+    mcc: request.mcc,
+    merchantDescriptor: request.merchantDescriptor,
+    requestStatus: request.requestStatus,
+    outcome: verdict.outcome,
+    result: verdict.result,
+    rule: verdict.rule,
+    reason: verdict.reason,
+    inputs: verdict.inputs,
+    latencyUs: params.latencyUs,
+    source: params.source,
+    requestId: params.requestId,
+  } as const;
+}
 
+/**
+ * START the append and hand back the promise. ONE statement, NO deadline, and
+ * it never rejects: it resolves to the row id, or to `null` if the insert
+ * genuinely failed.
+ *
+ * THE DEADLINE IS THE CALLER'S WILLINGNESS TO WAIT, NOT THE STATEMENT'S, and
+ * separating the two is the whole reason this function exists rather than
+ * being folded into `appendDecision()`.
+ *
+ * MEASURED, 2026-09-11T14:09:08Z, on the deployed responder, with a real
+ * Lithic delivery: `appendDecision()` raced the insert against a 400 ms budget,
+ * LOST the race, and returned null — and `withDeadline()` does not cancel the
+ * loser, so the insert went on and committed 355 ms later. The route read that
+ * null as "not written" and re-issued the insert from `after()`. One
+ * authorisation, one decision, TWO ROWS: `8025729c-f3a8-4aa1-bfd5-b42405e16f9a`
+ * appears twice with the same `request_id` and the same 600,390 µs latency.
+ *
+ * That is not a duplicate delivery — the append-only argument in
+ * `docs/CARD-CONTROLS.md` §6 says a second DELIVERY is a second decision and
+ * deserves its own row, and it does. This was one delivery recorded twice,
+ * which is a lie in an append-only table and, on an APPROVE, would have eaten
+ * its limit twice: the velocity sum is `SUM(amount_cents)` over approvals, so a
+ * $200 authorisation recorded twice consumes $400 of the cardholder's day.
+ *
+ * So the retry path awaits THIS promise rather than starting another one.
+ *
+ * `inputs` is passed through `sql.json`. Money inside it is already decimal
+ * strings (see `cents()` in `./decide.ts`); jsonb would happily store a
+ * `numeric`, but every reader between here and a screen is JavaScript, and
+ * `JSON.parse` turns 9007199254740993 into 9007199254740992.
+ */
+export function startDecisionAppend(params: AppendDecisionParams): Promise<string | null> {
+  const c = decisionColumns(params);
+  return sql<{ id: string }[]>`
+    INSERT INTO card_auth_decision (
+      provider, provider_auth_token, provider_card_token,
+      card_id, control_version_id, member_id, member_version_id,
+      amount_cents, mcc, merchant_descriptor, request_status,
+      outcome, result_code, rule, reason, inputs,
+      decision_latency_us, source, request_id
+    ) VALUES (
+      ${c.provider}, ${c.providerAuthToken}, ${c.providerCardToken},
+      ${c.cardId}, ${c.controlVersionId}, ${c.memberId}, ${c.memberVersionId},
+      ${c.amountCents}, ${c.mcc}, ${c.merchantDescriptor}, ${c.requestStatus},
+      ${c.outcome}, ${c.result}, ${c.rule}, ${c.reason},
+      ${sql.json(c.inputs as Parameters<typeof sql.json>[0])},
+      ${c.latencyUs}, ${c.source}, ${c.requestId}
+    )
+    RETURNING id
+  `.then(
+    (rows) => rows[0]?.id ?? null,
+    () => null,
+  );
+}
+
+/**
+ * Wait for an append that is already in flight, up to a budget.
+ *
+ * `null` means **"not known to be written"** and NOT "definitely not written",
+ * and the difference is the bug above. The only caller that may act on a null
+ * is one that has the original promise and can wait for its real answer.
+ */
+export async function awaitDecisionAppend(
+  pending: Promise<string | null>,
+  budgetMs: number = DECISION_APPEND_BUDGET_MS,
+): Promise<string | null> {
+  try {
+    return await withDeadline(pending, budgetMs, "decision append");
+  } catch {
+    return null;
+  }
+}
+
+/** What a re-append did. Three outcomes, because two would conflate them. */
+export type ReappendOutcome =
+  | { readonly status: "appended"; readonly id: string }
+  | { readonly status: "already_recorded" }
+  | { readonly status: "failed" };
+
+/**
+ * The LAST-RESORT re-append, for the case where the original insert genuinely
+ * rejected. Off the hot path, in `after()`, after the response has gone out.
+ *
+ * Guarded by `WHERE NOT EXISTS`, so a first insert that committed and then lost
+ * its connection before `RETURNING` came back cannot be recorded twice. One
+ * statement, still — the guard is a subquery, not a round trip — and the hot
+ * path's insert is left exactly as it was, unguarded, because on the hot path
+ * there is by definition nothing yet to collide with.
+ *
+ * The guard keys on `(provider, provider_auth_token, source, request_id)`.
+ * `request_id` is Lithic's own `webhook-id`, which is per MESSAGE: a genuine
+ * second DELIVERY carries a different one and still gets its own row, exactly
+ * as §6 argues it should.
+ */
+export async function reappendDecisionIfMissing(
+  params: AppendDecisionParams,
+  budgetMs: number = DECISION_APPEND_BUDGET_MS * 4,
+): Promise<ReappendOutcome> {
+  const c = decisionColumns(params);
   try {
     const rows = await withDeadline(
       sql<{ id: string }[]>`
@@ -346,25 +450,49 @@ export async function appendDecision(
           amount_cents, mcc, merchant_descriptor, request_status,
           outcome, result_code, rule, reason, inputs,
           decision_latency_us, source, request_id
-        ) VALUES (
-          ${params.provider}, ${request.providerAuthToken}, ${request.card.token},
-          ${cardId}, ${controlVersionId},
-          ${member?.memberId ?? null}, ${member?.memberVersionId ?? null},
-          ${request.amountCents}, ${request.mcc}, ${request.merchantDescriptor},
-          ${request.requestStatus},
-          ${verdict.outcome}, ${verdict.result}, ${verdict.rule}, ${verdict.reason},
-          ${sql.json(verdict.inputs as Parameters<typeof sql.json>[0])},
-          ${params.latencyUs}, ${params.source}, ${params.requestId}
         )
+        SELECT ${c.provider}, ${c.providerAuthToken}, ${c.providerCardToken},
+               ${c.cardId}, ${c.controlVersionId}, ${c.memberId}, ${c.memberVersionId},
+               ${c.amountCents}, ${c.mcc}, ${c.merchantDescriptor}, ${c.requestStatus},
+               ${c.outcome}, ${c.result}, ${c.rule}, ${c.reason},
+               ${sql.json(c.inputs as Parameters<typeof sql.json>[0])},
+               ${c.latencyUs}, ${c.source}, ${c.requestId}
+         WHERE NOT EXISTS (
+           SELECT 1 FROM card_auth_decision d
+            WHERE d.provider = ${c.provider}
+              AND d.provider_auth_token = ${c.providerAuthToken}
+              AND d.source = ${c.source}
+              AND d.request_id IS NOT DISTINCT FROM ${c.requestId}
+         )
         RETURNING id
       `,
       budgetMs,
-      "decision append",
+      "decision re-append",
     );
-    return rows[0]?.id ?? null;
+    // NO ROW BACK IS NOT A FAILURE. It means the guard fired: the decision IS
+    // recorded, by the very insert this one was covering for. Three outcomes,
+    // not two, because "nothing was written" and "nothing NEEDED to be
+    // written" are opposite facts and a caller that logs `decision_lost` for
+    // both would raise an alarm about a row that is sitting right there.
+    const id = rows[0]?.id;
+    return id === undefined ? { status: "already_recorded" } : { status: "appended", id };
   } catch {
-    return null;
+    return { status: "failed" };
   }
+}
+
+/**
+ * Record one decision, start to finish. Append-only; there is no other verb.
+ *
+ * The one-shot form, for the harness, the console and the tests. The ASA route
+ * does NOT use it: it needs the in-flight promise so that a missed deadline
+ * does not become a second row. See `startDecisionAppend()`.
+ */
+export async function appendDecision(
+  params: AppendDecisionParams,
+  budgetMs: number = DECISION_APPEND_BUDGET_MS,
+): Promise<string | null> {
+  return awaitDecisionAppend(startDecisionAppend(params), budgetMs);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -583,11 +711,40 @@ type DecisionRow = {
 /**
  * The decision history, newest first.
  *
- * `businessId` filters to one customer's cards; a decision on an unregistered
- * card token belongs to no business and is therefore invisible here, which is
- * correct — it is in the table, and `/api/health` and the SQL both find it,
- * but a customer's screen should not show authorisations on somebody else's
- * card.
+ * `businessId` filters to one customer's cards. A decision on a card token
+ * this book has never registered belongs to no business and is invisible here,
+ * which is correct: it is in the table, and the SQL still finds it, but a
+ * customer's screen should not show authorisations on somebody else's card.
+ *
+ * ─── WHY THE SECOND JOIN TO `card` EXISTS ───────────────────────────────────
+ *
+ * `v_card_auth_decision.business_id` comes from `LEFT JOIN card ON c.id =
+ * d.card_id`, so it is NULL whenever `card_id` is NULL — and `card_id` is NULL
+ * on exactly the row that matters most: a **fail-closed decline**. When the
+ * control read misses its deadline the lookup has no card id to record, so
+ * rule `control_store_unavailable` writes `card_id = NULL` even though the
+ * `provider_card_token` on the row is one of this customer's own cards.
+ *
+ * The effect, found on 2026-09-11 by looking at the deployed screen rather
+ * than at the query: the decline for transaction
+ * `8025729c-f3a8-4aa1-bfd5-b42405e16f9a` — Noor Haddad's card, Ridgeline
+ * Robotics — rendered on NOBODY's console. Which quietly falsified the fourth
+ * argument for failing closed in `docs/CARD-CONTROLS.md` §5: *"it is auditable
+ * either way… the customer who was declined can be found, told and made
+ * whole"*. Not if the only screen that lists decisions cannot show the row.
+ *
+ * So the business is resolved from the TOKEN when the id is missing.
+ * `card_provider_key UNIQUE (provider, provider_card_token)` makes that join
+ * one-to-one, and it is deliberately restricted to `d.card_id IS NULL` so the
+ * ordinary path still goes through the view exactly as before.
+ *
+ * This does NOT make `card_not_under_control` visible, and that asymmetry is
+ * the point: there is no `card` row for that token at all, so `ct` is NULL and
+ * the row stays out of every customer's screen. "We could not read the
+ * controls for YOUR card" and "that is not a card of yours" get different
+ * answers here for the same reason `decide()` gives them opposite defaults.
+ *
+ * Off the hot path. The ASA route never calls this.
  */
 export async function listDecisions(params: {
   readonly businessId: string;
@@ -595,7 +752,10 @@ export async function listDecisions(params: {
 }): Promise<readonly DecisionRecord[]> {
   const rows = await sql<DecisionRow[]>`
     SELECT d.id, d.decided_at, d.provider, d.provider_auth_token, d.provider_card_token,
-           d.card_id, d.last_four, d.nickname, d.control_version,
+           COALESCE(d.card_id, ct.id)           AS card_id,
+           COALESCE(d.last_four, ct.last_four)  AS last_four,
+           COALESCE(d.nickname, ct.nickname)    AS nickname,
+           d.control_version,
            d.amount_cents, d.mcc, d.merchant_descriptor, d.request_status,
            d.outcome, d.result_code, d.rule, d.reason, d.inputs,
            d.decision_latency_us, d.source,
@@ -615,7 +775,11 @@ export async function listDecisions(params: {
       LEFT JOIN team_member tm        ON tm.id = base.member_id
       LEFT JOIN actor ma              ON ma.id = tm.actor_id
       LEFT JOIN team_member_version mv ON mv.id = base.member_version_id
-     WHERE d.business_id = ${params.businessId}
+      -- The fail-closed row's owner, resolved by token because the id is NULL.
+      LEFT JOIN card ct ON d.card_id IS NULL
+                       AND ct.provider = d.provider
+                       AND ct.provider_card_token = d.provider_card_token
+     WHERE COALESCE(d.business_id, ct.business_id) = ${params.businessId}
      ORDER BY d.decided_at DESC
      LIMIT ${params.limit ?? 25}
   `;

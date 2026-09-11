@@ -458,6 +458,45 @@ export type InterestInvariants = {
    * same as a feature that is not firing this minute.
    */
   readonly overdrawnDaysInWindow: number;
+  /**
+   * How much is overdrawn right now, in cents, summed across
+   * `v_overdrawn_accounts`. The count alone reads as a boolean and a boolean
+   * is not a measurement.
+   */
+  readonly overdrawnCents: number;
+  /**
+   * Posted `interest_day` rows CLAIMED ON OR BEFORE THEIR OWN ACCRUAL DATE —
+   * i.e. priced while the business date was still open, on a balance that was
+   * not that date's closing balance.
+   *
+   * MUST be 0 going forward: `interestPricingHorizon()` holds the open date
+   * back. It is not 0 on this book, because five rows were written before that
+   * guard existed and `interest_day` is UNIQUE (schedule, date), so they can
+   * never be taken again. docs/ACCRUAL.md §20.
+   */
+  readonly pricedBeforeClose: number;
+  /** What those rows moved, in cents — the size of what cannot be taken back. */
+  readonly pricedBeforeCloseCents: number;
+  /**
+   * `v_interest_mispriced_uncorrected` — of those rows, the ones whose date
+   * HAS now closed, whose closed figure genuinely differs from what was
+   * posted, and which no `interest_adjustment` has corrected. THE WORK QUEUE,
+   * not an invariant.
+   *
+   * Zero while the mispriced dates are still open, which is not health: it is
+   * the calendar. It goes non-empty by itself at midnight and back to zero
+   * when `scripts/repair-0049-mispriced-interest.mjs --apply` has run.
+   */
+  readonly mispricedUncorrected: number;
+  /** `interest_adjustment` rows: days corrected by a reversal and a re-book. */
+  readonly adjustments: number;
+  /**
+   * `v_interest_adjustment_drift` — an adjustment whose stored decision no
+   * longer re-derives from `ledger_settled_cents()` at its own watermark, or
+   * from the rate card effective on its own accrual date. MUST be 0. It is
+   * dbcheck check 5b's question asked of `interest_adjustment`.
+   */
+  readonly adjustmentDrift: number;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -514,6 +553,20 @@ export type InterestRunReport = {
   readonly creditInterestCents: string;
   /** Interest CHARGED on overdrafts this tick, in cents, as a decimal string. */
   readonly overdraftInterestCents: string;
+  /**
+   * The LAST BUSINESS DATE THIS TICK WAS ALLOWED TO PRICE, which is never the
+   * open one. See `interestPricingHorizon()`: interest is priced on the
+   * settled balance at the END of a business date, and a date that has not
+   * ended has no such balance. `null` when the horizon is before every
+   * enrolment and there was nothing this tick could have looked at.
+   */
+  readonly pricedThrough: string | null;
+  /**
+   * `true` when the caller asked for a date the horizon refused — i.e. the
+   * current book date. Not an error: the tick reports it and prices up to the
+   * last closed date instead, and the next tick takes the day once it closes.
+   */
+  readonly openDateHeld: boolean;
   readonly days: readonly InterestDayReport[];
 };
 
@@ -526,5 +579,7 @@ export const NO_INTEREST: InterestRunReport = {
   replayed: 0,
   creditInterestCents: "0",
   overdraftInterestCents: "0",
+  pricedThrough: null,
+  openDateHeld: false,
   days: [],
 };

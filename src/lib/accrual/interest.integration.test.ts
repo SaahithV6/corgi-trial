@@ -184,6 +184,27 @@ async function twoConsecutiveDates(): Promise<{ yesterday: string; today: string
   return row;
 }
 
+/**
+ * Three, because the interest leg will not price the OPEN date.
+ *
+ * `today` is the date a tick is asked for and the date it must NOT price;
+ * `yesterday` is the newest date it may price; `dayBefore` is the one a
+ * catch-up run takes first. Asked of the database in book time, never of the
+ * process clock.
+ */
+async function threeConsecutiveDates(): Promise<{
+  dayBefore: string;
+  yesterday: string;
+  today: string;
+}> {
+  const [row] = await sql<{ dayBefore: string; yesterday: string; today: string }[]>`
+    SELECT (book_date(now()) - 2)::text AS "dayBefore",
+           (book_date(now()) - 1)::text AS yesterday,
+            book_date(now())::text      AS today`;
+  if (row === undefined) throw new Error("the database did not answer what day it is");
+  return row;
+}
+
 type PostingRow = {
   interest_day_id: string;
   accrual_date: string;
@@ -222,19 +243,27 @@ async function postingsOn(dates: readonly string[]): Promise<PostingRow[]> {
 
 d("daily interest, live", () => {
   it("accrues two consecutive business dates and dates each entry at the day it accrued for", async () => {
-    const { yesterday, today } = await twoConsecutiveDates();
+    const { dayBefore, yesterday, today } = await threeConsecutiveDates();
 
-    // Run one: everything owed up to and including yesterday. On a first run
-    // this is a catch-up from the enrolment date, which is exactly the case
-    // where value date and booking date must differ.
-    const first = await runAccrual({ bookDate: yesterday, runId: "interest-itest-a" });
-    expect(first.bookDate).toBe(yesterday);
+    // Run one: everything owed up to and including the day before yesterday.
+    // On a first run this is a catch-up from the enrolment date, which is
+    // exactly the case where value date and booking date must differ.
+    const first = await runAccrual({ bookDate: dayBefore, runId: "interest-itest-a" });
+    expect(first.bookDate).toBe(dayBefore);
+    expect(first.interest.pricedThrough).toBe(dayBefore);
+    expect(first.interest.openDateHeld).toBe(false);
 
-    // Run two: today. Strictly the days run one could not have taken.
+    // Run two: today. Strictly the days run one could not have taken — and
+    // TODAY IS NOT ONE OF THEM. The tick is asked for the open date and prices
+    // through the last CLOSED one instead, because the basis is the balance at
+    // the END of a business date and today has not got one yet. See
+    // `interestPricingHorizon()`.
     const second = await runAccrual({ bookDate: today, runId: "interest-itest-b" });
     expect(second.bookDate).toBe(today);
+    expect(second.interest.pricedThrough).toBe(yesterday);
+    expect(second.interest.openDateHeld).toBe(true);
     for (const day of second.interest.days) {
-      expect(day.accrualDate <= today).toBe(true);
+      expect(day.accrualDate <= yesterday).toBe(true);
     }
 
     // ASSERTED OF THE LEDGER, NOT OF THE RUN. On a first run these two ticks
@@ -242,9 +271,9 @@ d("daily interest, live", () => {
     // days are already accrued — which is the exactly-once property and not a
     // reason for this test to have nothing to check. So the claim is about
     // what the book now holds.
-    const rows = await postingsOn([yesterday, today]);
+    const rows = await postingsOn([dayBefore, yesterday]);
+    expect(rows.map((r) => r.accrual_date)).toContain(dayBefore);
     expect(rows.map((r) => r.accrual_date)).toContain(yesterday);
-    expect(rows.map((r) => r.accrual_date)).toContain(today);
 
     // Whatever THIS pair of ticks posted is correct: every entry it named
     // carries its accrual date as its value date and its own derived key.
@@ -270,6 +299,55 @@ d("daily interest, live", () => {
        WHERE ip.disposition = 'posted'
          AND dd.accrual_date < (ip.decided_at AT TIME ZONE 'America/New_York')::date`;
     expect(Number(late?.n ?? 0)).toBeGreaterThan(0);
+  });
+
+  /**
+   * THE OPEN BUSINESS DATE IS NOT PRICED, AND THIS IS NOT A HYPOTHETICAL.
+   *
+   * It was made to fail against this very database before the guard existed —
+   * not in a rolled-back transaction, but for real and irreversibly, which is
+   * why the guard is here. On 2026-09-11 a tick priced 2026-09-11 at booking
+   * watermark 2265, when `Holds Integration Fixture Co.` stood at
+   * +$145,315.17, and paid it 498¢ of CREDIT interest (entry
+   * 47ad3ebe-1b69-4c6d-9c9a-bdb25d0fbf0a, `5400`). By the close of that same
+   * business date the account stood at −$858,941.45 — the first debit balance
+   * this book has ever carried — and the day owed roughly $423 of OVERDRAFT
+   * interest on `4400` instead. All five enrolments were priced mid-day; four
+   * moved materially and one reversed its sign.
+   *
+   * `interest_day` is UNIQUE (schedule_id, accrual_date), so none of it can be
+   * taken again: the property that makes the tick exactly-once is the same
+   * property that makes a mid-day guess permanent. Those five rows are still
+   * on the book and are named in docs/ACCRUAL.md §20.
+   */
+  it("refuses to price the business date that has not closed yet", async () => {
+    const { yesterday, today } = await twoConsecutiveDates();
+    const { interestPricingHorizon } = await import("./interest-store");
+
+    // The horizon itself, both ways round, so neither branch is vacuous.
+    expect(await interestPricingHorizon(today)).toEqual({
+      horizon: yesterday,
+      openDateHeld: true,
+    });
+    expect(await interestPricingHorizon(yesterday)).toEqual({
+      horizon: yesterday,
+      openDateHeld: false,
+    });
+
+    // And at the level a caller sees: a tick asked for today reports what it
+    // was allowed to price, and names no day later than that.
+    const run = await runAccrual({ bookDate: today, runId: "interest-itest-openday" });
+    expect(run.interest.openDateHeld).toBe(true);
+    expect(run.interest.pricedThrough).toBe(yesterday);
+    for (const day of run.interest.days) {
+      expect(day.accrualDate).not.toBe(today);
+      expect(day.accrualDate <= yesterday).toBe(true);
+    }
+
+    // The FEE leg is deliberately not held back: a platform fee is a price, a
+    // calendar and an ordinal, and reads no balance, so an open day cannot
+    // make it wrong.
+    expect(run.bookDate).toBe(today);
   });
 
   it("posts exactly once when two ticks race for the same day", async () => {

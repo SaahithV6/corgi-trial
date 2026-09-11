@@ -751,6 +751,61 @@ a twin needs an existing record to be a twin of. The `catch` conflated that
 answer with "the database did not answer", which are the two things this has to
 tell apart.
 
+### 5e. THE FOURTH ONE: the refusal named a noun the payer had never seen
+
+Found 2026-09-11 by firing the gate against the deployed system rather than
+against a fixture, which is how this one could only have been found.
+
+`PAYEE_WARNING_UNACKNOWLEDGED` quoted `payee.display_name` and nothing else.
+That is the wrong noun. `display_name` is the label somebody filed the payee
+under — a folder name, shared across a dozen accounts on this very book
+("Green coffee supplier"), and on the rows the wire suite writes it is a
+generated fixture string. `holder_name` is the **beneficiary**: the name on the
+account, the name the payer typed into the payment, the name on the invoice in
+front of them.
+
+Measured, on `POST /api/v1/payments` against the deployed URL, for a wire to
+`Northwind Industrial LLC` ••0000:
+
+```
+422 PAYEE_WARNING_UNACKNOWLEDGED
+The last check on "Northwind (wire) wire-1789107730307" raised a warning that
+nobody has signed for. Open the payee, read what the check found, …
+```
+
+The refusal was **correct and unusable**. The payer asked about *Northwind
+Industrial LLC* and was told a warning stands on a string they have never seen,
+cannot search for, and cannot tie to the payment in front of them — on the one
+message whose whole job is to send a person to a specific record and get a
+signature out of them. A control nobody can act on is a control that gets
+routed around.
+
+**Fixed in source, NOT YET ON THE DEPLOYED URL.** The deployment is commit
+`0fa057d` and still emits the message above; the quoted 422 is what
+`corgi-trial-psi.vercel.app` returns today. What follows is what the code in
+this repository produces, asserted in `payees.integration.test.ts` against the
+live book — the test fails if the beneficiary name is absent.
+
+`unsignedWarning()` names both, beneficiary first:
+
+```
+The last check on "Northwind Industrial LLC", filed on your payee book as
+"Northwind (wire) wire-1789107730307", raised a warning that nobody has signed
+for. Open /payees?payee=<id>&sign=1 — it shows that payee, what the check found,
+and the form that records why it is right to pay this account. …
+```
+
+(The second sentence arrived with §6a. This section fixed the NOUN — it named a
+label the payer had never seen; §6a.6 fixed the VERB, because *"open the payee,
+read what the check found, and record why"* was three verbs and no address, and
+the console performed none of them.)
+
+The book label is kept because it is what they will have to find on `/payees`;
+it is second because it is not what they recognise. When the two are the same
+string the clause is omitted rather than printed twice. The ACH branch had to
+grow `v.holder_name` in its SELECT to say it; the wire branch already had it and
+was throwing it away.
+
 ### The intermediate case, and why it is not an exception
 
 The payment gate refuses a payment to a payee whose standing warning **nobody
@@ -870,46 +925,320 @@ shape one layer up and additionally recorded a permanent `verified` row for a
 check that could not complete; §5d. In both, the case that still proceeds is
 named exactly, because a bare `catch` over everything is what produced them.
 
-### The screen
+### The screen — BOTH HALVES, AS OF 2026-09-11
 
-`src/components/payees/**` is complete and unwired, because `src/app/**` is off
-limits. Two files stand it up:
+Until today this section said *"two halves, and only one of them is reachable
+from the deployed console"*. That was true and it was the top of the cut list:
+`confirmPayee()` had **no caller in `src/app/**`**, `ConfirmationStep.tsx` had
+**no importer**, and `/payees` was read-only. The gate in front of the money was
+real and enforcing, and its central refusal —
+`PAYEE_WARNING_UNACKNOWLEDGED` — told an operator to *"open the payee, read
+what the check found, and record why it is right to pay this account"* on a
+console that offered no way to do any of those three things. The refusal was
+correct and the loop was open. **A control whose remedy is unreachable is a
+control people route around.**
 
-```tsx
-// src/app/(app)/payees/page.tsx
-import { Suspense } from "react";
-import { PayeeBookView, PayeeSkeleton } from "@/components/payees/PayeeBookView";
-import { PayeeStateBar } from "@/components/payees/PayeeStateBar";
-import { fixtureSource } from "@/components/payees/fixtures";
-import { parsePayeeFilter } from "@/components/payees/view-state";
-import { livePayeeSource } from "@/lib/payees/screen";
+Both halves are wired now. §6a is the operator's half.
 
-export default async function PayeesPage({ searchParams }: { searchParams: Promise<…> }) {
-  const filter = parsePayeeFilter(await searchParams);
-  const source = filter.state === "default" ? livePayeeSource() : fixtureSource(filter.state);
-  return (
-    <>
-      <PayeeStateBar filter={filter} />
-      <Suspense fallback={<PayeeSkeleton />}>
-        <PayeeBookView source={source} filter={filter} />
-      </Suspense>
-    </>
-  );
-}
+**THE READ HALF, unchanged.** `PayeesPage` → `livePayeeSource()` →
+`v_payee_book`. Every payee, its most recent check, its findings in words, its
+freshness band, who signed for a warning and what they wrote, and the
+`payee_candidate_refusal` table — the caught typos, which are the product.
+**Rendering still runs no checks and writes no rows**, which is what makes "last
+checked two days ago" a fact rather than an artefact of who last opened the
+page. Running a check is an operator action with an actor attached and a row at
+the end of it; a render is not one.
+
+**THE FIVE DEMO STATES STILL WRITE NOTHING.** default, loading, empty, error and
+**edge (warned, unsigned)**, all off the query string. The edge state is the one
+the whole feature exists for: a payee whose last check warned and whose warning
+nobody has signed for. Four of the five are fixtures, and the operator actions
+are **absent** on them rather than disabled — a form over a fixture would either
+do nothing, which teaches a viewer that this screen's buttons are decorative, or
+write a real row against an id that does not exist, which is worse.
+`PayeesPage` only fetches the business list on the live state, and an empty list
+is what turns the write controls off.
+
+---
+
+## 6a. The operator's half: add, re-check, sign
+
+Three server actions in `src/app/(app)/payees/actions.ts`, three forms under
+`src/components/payees/**`, and **no new route** — everything is on `/payees`,
+behind query-string flags (`?add=1`, `?payee=<id>&sign=1`). That is deliberate:
+`/payees/new` would be a second page carrying a form whose whole purpose is to
+be read NEXT TO the book it writes into. The twin probe's answer is only legible
+beside the payee it is a twin of.
+
+### 6a.1 THE CHECK DIGIT, SHOWN AS ARITHMETIC
+
+`src/lib/payees/explain.ts`, rendered by `AbaWorking.tsx`. Pure, client-safe,
+no I/O, no clock. The add form recomputes it on every keystroke in the browser;
+the server recomputes it from the string that was actually posted; and
+`payee_routing_number_possible` — a CHECK constraint — has the last word. Three
+evaluations of one rule, and the browser's is the only one nothing depends on.
+
+It shows the **working**, not a verdict: each digit, the weight its position
+carries, the product, the three group subtotals, the total, and the remainder.
+
+```
+position   d1  d2  d3  d4  d5  d6  d7  d8  d9
+digit       0   1   1   4   0   1   5   3   3
+weight     ×3  ×7  ×1  ×3  ×7  ×1  ×3  ×7  ×1
+product     0   7   1  12   0   1  15  21   3
+
+3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9)
+= 3(0+4+5) + 7(1+0+3) + (1+1+3)
+= 27 + 28 + 5
+= 60   ≡ 0 (mod 10)
 ```
 
-Plus a nav entry to `/payees` in the app shell. The five demo states — default,
-loading, empty, error, and **edge (warned, unsigned)** — are all reachable from
-the query string and none of them writes a row.
+**Why the working and not the answer.** This is the one leg that BLOCKS and the
+only one with no provider behind it. A block that says "invalid routing number"
+is an assertion of authority, and a person who believes they typed it correctly
+has no way to tell whether the software is right or merely fussy — the next
+thing they do is look for somebody who can turn it off. A block that shows the
+sum missing zero by *n* is a claim they can check against the letterhead in ten
+seconds. Then the wall is obviously arithmetic and not policy, which is the
+whole reason this feature is allowed to have exactly one wall in it.
 
-`ConfirmationStep` is the panel that goes between naming a destination and
-sending: it is presentational and pure, renders a decision `verifyPayee()`
-already made, and therefore cannot disagree with the row that gets written.
+**The nine single-digit repairs stay unlisted.** `explain.ts` filters
+`abaNearMisses()` to transpositions only, exactly as `verify.ts` and `gate.ts`
+do, and `explain.test.ts` asserts both halves of that: the transposition IS
+named, and every one of the nine substitutions is NOT offered. §1's proof is
+what makes it a product decision rather than an oversight — every weight is
+invertible mod 10, so every invalid routing number has exactly nine, always, and
+"did you mean one of these nine?" is "it is wrong" retyped in nine parts.
+
+**And the blind spot is on the screen, on the number it applies to.** On a
+routing number that PASSES, the panel lists the adjacent swaps this arithmetic
+could not have caught — `101500001` says out loud that it is indistinguishable
+from `101050001`, because the swapped digits differ by exactly five. A
+limitation the operator can see is a limitation; one only the author knows about
+is a trap. `transpositionIsDetectable()` already existed for exactly this and
+had no caller.
+
+### 6a.2 THE FULL ACCOUNT NUMBER IS NEVER SENT TO THE SERVER
+
+The form asks for the account number **twice**, because re-entry is the only
+defence the United States leaves against an account-number typo: no check digit,
+no length rule, no character rule. The two typings are compared **in the
+browser** by `accountNumberEntryAgrees()` — the library's own function, not a
+copy — and **only the last four digits are posted**.
+
+That is the right side of the trade. `payee` stores four digits and never more,
+for the same reason `payment_instruction.counterparty` does. Sending the whole
+number to a server that would immediately discard it would put it in a request
+body, in a platform's action log, and in whatever captures an exception on the
+way — to buy nothing, because the value is stored at neither end.
+
+And **the re-entry check is not a control**, which is exactly why it is allowed
+to live in the browser. `verify.ts` says so already: two different strings are a
+contradiction in the FORM, not a fact about a bank, which is why it is
+deliberately not a `PayeeFinding` and not part of the block/warn ladder. A POST
+assembled by hand skips it and meets every check that matters unchanged.
+
+### 6a.3 THE SIGNATURE NAMES WHAT IT ANSWERED
+
+`src/lib/payees/acknowledge.ts` (server) and `acknowledge-text.ts` (pure, so the
+form can show the operator the exact text before it is written — composing a
+sentence on somebody's behalf and then putting their name to it is only
+acceptable if they read it first).
+
+A sentence on its own answers the wrong question. Six months from now the row
+reads
+
+```
+Priya Raman · 2026-09-11 · "Checked with the supplier, this is fine."
+```
+
+and nobody can tell whether Priya was waving through *a name that did not match*
+or *a beneficiary at a different bank from the one already on the book*. Those
+are different acts. The first is routine. The second is the exact shape of a
+redirected invoice, and it is the only account-number finding a book of
+last-four digits can produce. A signature that cannot distinguish them is a
+signature for "a warning", which is the checkbox this feature exists not to be.
+
+So the stored `reason` is composed — the operator's own words first, then the
+findings by code and by title:
+
+```
+Northwind opened a second account for the industrial division in August.
+Confirmed on the finance line from the 2025 master agreement, not the number in
+the remittance email; spoke to K. Ozuna who read back the last four. — signed
+for 1 finding on this check: TWIN_WITH_DIFFERENT_DETAILS ("You already pay
+someone by this name at a different account").
+```
+
+**Every warn-level finding is a separate checkbox and all of them are
+required.** A signature answering one of two warnings, with the payment then
+proceeding, is the implicit override the gate exists to refuse.
+
+**And the set is RE-READ from `payee_verification`, never taken from the form.**
+The browser posts the codes it displayed; that is a CLAIM about what was on
+screen, and between the render and the submit a re-check can land — re-checking
+is the normal thing to do, see 6a.4 — at which point the warning on screen is
+not the warning standing against the payee. `signWarning()` loads the row by id
+and refuses unless the posted set is EXACTLY its warn set:
+**`PAYEE_WARNING_MOVED`**, nothing written, recoverable in one step by
+reloading. Not a subset and not a superset: a signature naming a finding the
+check did not make is a false statement in an append-only table.
+
+The other refusals it makes, all values with codes, all in front of guarantees
+rather than instead of them:
+
+| Code | When |
+| --- | --- |
+| `ACKNOWLEDGEMENT_NEEDS_A_REASON` | Under 12 characters. Not a serious barrier and not meant to be one — it stops "ok" without pretending a length threshold can tell a considered reason from a padded one |
+| `PAYEE_CHECK_NOT_WARNED` | The check came back `verified`. Signing a clean check is noise in an audit trail; signing a block is a contradiction. `assert_payee_acknowledgement_answers_a_warning()` refuses it at the row as well |
+| `PAYEE_CHECK_HAS_NO_WARNINGS` | Recorded as `warned` but carrying no warn-level finding, so a signature would have nothing to name |
+| `PAYEE_CHECK_UNREADABLE` | The check could not be read. Nothing written — a signature against a check nobody could read would name findings nobody verified were on it |
+
+### 6a.4 RE-CHECK APPENDS, AND IS NOT AN EDIT
+
+`src/lib/payees/recheck.ts`. **There are no fields on this form**, and that is
+the design rather than a saving. The beneficiary's details come out of the row,
+so a re-check can mean *"the same details, checked again today"* and mean it
+exactly. A form that re-keyed the bank details in order to re-check them would
+make every re-check an opportunity to change them — an unnoticed edit wearing
+the word "verify". Changing a beneficiary's bank details is **adding a payee**,
+and it goes through the arithmetic and the twin probe as new details, which is
+what raises `TWIN_WITH_DIFFERENT_DETAILS` and puts a person in front of it.
+
+It exists because freshness here is DERIVED. `v_payee_book` reads the age of the
+newest verification against `now()`; there is no `is_verified` column to
+re-stamp, and there could not be, because the thing that re-stamps a flag is the
+thing that eventually does not. **Running another check and appending it is the
+only operation that can move a payee out of `stale`** — without it the bands
+were a label nobody could act on.
+
+Three consequences, each asserted in `operator.integration.test.ts`:
+
+* The previous check keeps its findings and keeps whoever signed for them. Two
+  rows, two actors, nothing updated.
+* **A signature does not survive a re-check**, because it is attached to the
+  check it answered. A re-check that warns again is a new warning with nobody's
+  name against it, and the payment gate refuses until somebody signs again. An
+  acknowledgement from June says nothing about what was found this morning.
+* An **archived** payee is refused (`PAYEE_ARCHIVED`) and nothing is written.
+  Appending a fresh check to a withdrawn beneficiary would leave a
+  current-looking row on a payee nobody intends to pay, and a later reader would
+  take that as permission.
+
+### 6a.5 FAIL-CLOSED IS UNCHANGED, AND CARRIED THROUGH THE FORM
+
+`ConfirmPayeeResult.check` is nullable because `null` means *no check happened*,
+which is a different thing from a `PayeeCheck` with no findings. **That
+nullability is carried all the way to the screen rather than flattened on the
+way**: `ConfirmResult.receipt` is `null` for the §5d path, the panel is not
+rendered at all, and the operator is shown `PAYEE_BOOK_UNREADABLE` with the leg
+that did not run. `RecheckResult.check` has the same shape and the same rule.
+
+The actions add no new `catch`. Every refusal below the form is a value that
+`confirmPayee()`, `recheckPayee()` or `signWarning()` returned.
+
+### 6a.6 THE REFUSAL NOW CARRIES THE REMEDY'S ADDRESS
+
+`unsignedWarning()` in `gate.ts` builds the URL from the payee id it already had
+in its hand:
+
+```
+Open /payees?payee=3b2decf5-1f19-4664-9852-4e108a2dd3de&sign=1 — it shows that
+payee, what the check found, and the form that records why it is right to pay
+this account.
+```
+
+`signWarningHref()` names the route ONCE on the library side (`payeeHref()`
+names it for the screen), and `operator.integration.test.ts` asserts the gate's
+message contains it — so a rename that misses one of them fails rather than
+shipping a refusal that points at nothing. `PAYEE_WIRE_PAYEE_NOT_ON_BOOK` and
+`PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED` carry `/payees?add=1` for the same
+reason.
+
+It is a **path and not an anchor tag** on purpose: `/payments` renders a
+refusal's `message` as text, and the message has to survive being pasted into a
+ticket, an email and a terminal.
+
+§5e fixed the noun in this message; this fixes the verb. *"Open the payee, read
+what the check found, and record why"* is three verbs and no address, and until
+today the console performed none of them.
+
+### 6a.7 WHAT THE PROVIDERS DO, AND WHICH ONE DELIBERATELY DOES NOT RUN
+
+**Increase's routing directory is LIVE on every add and every re-check.** It is
+constructed even with no key, because it degrades to `unavailable` with a
+reason rather than throwing — and `unavailable` is truthful where `not_checked`
+would be a lie. Those are two of the four values `DirectoryStatus` has and the
+pair this feature is most careful about.
+
+**Plaid's `/identity/match` is NOT wired to this form**, and the reason is a
+fact about the schema rather than a shortcut. It takes an ACCESS TOKEN — it
+answers *"does this name match the account whose own holder linked it to us"* —
+and `src/lib/rails/plaid/adapter.ts` says plainly that there is nowhere in this
+schema to persist one. So there is no linked account to offer in a dropdown, and
+the alternative, a form field asking an operator to paste a bearer token, would
+be worse than not having the leg. Manufacturing a sandbox Item purely to run a
+name match against an unrelated payee would be a fabricated check, which is
+worse again.
+
+The honest consequence is already on the screen: `name_source` comes back
+`payer_asserted`, `labels.tsx` refuses to draw that in the positive tone however
+high the score is, and the panel says *"both names here were entered by your own
+team"*.
+
+### 6a.8 WHAT THE FORM WILL NOT LET YOU ADD
+
+**ACH and wire only.** They are the two rails addressed by a nine-digit ABA, so
+they are the two rails this form has anything to check. USDC is addressed by a
+chain address with its own EIP-55 checksum and an internal transfer never leaves
+this book; putting either behind this panel would be a confirmation step that
+confirms nothing, wearing the same frame as one that does.
+
+The wire branch labels the field **wire routing number** and says why: a bank's
+wire ABA is a different number from its ACH ABA (`021000021` against
+`011401533` on the seeded Plaid item) and substituting one for the other is an
+R13 days later. §5a is the same distinction, one layer down.
+
+**The payee key is derived from a source reference** — a supplier record, an
+invoice, a ticket — scoped to the business, exactly as `requestPayment()`
+derives its idempotency key. Keying the same supplier twice returns the payee
+that already exists and writes no second payee; the UNIQUE index decides, not an
+`if`. It DOES append today's check, because refusing to record a check on the
+grounds that the payee is old would be backwards.
+
+### 6a.9 AND THE ASYMMETRY IS UNTOUCHED
+
+Nothing in this section changes the wire/ACH decision in §5c, the block/warn
+line in §5, or the fail-closed behaviour in §5b and §5d. The `/payees` form does
+not create wire beneficiaries by a different route: it writes the same `payee`
+row that `loadWireBeneficiaries()` reads, so a wire added here is a wire the
+gate and `resolveWireBeneficiary()` will both recognise, and one added anywhere
+else is not.
 
 ---
 
 ## 7. What is not built, and what week two is
 
+
+* ~~**THE CONFIRMATION FORM.**~~ **BUILT 2026-09-11 — see §6a.** It was the top
+  of this list for the right reason and it is struck out rather than deleted,
+  because the shape of the gap is more useful than the fix: every leg underneath
+  it was built, tested and append-only, and none of it was reachable by a
+  person. Add, re-check and sign now exist as three server actions and three
+  forms on `/payees`; `ConfirmationStep` has an importer; and
+  `PAYEE_WARNING_UNACKNOWLEDGED` carries the URL that clears it.
+* **ARCHIVING FROM THE CONSOLE.** `archivePayee()` still has no button — the
+  same shape as the gap above, one size smaller. It is append-only and tested
+  (`operator.integration.test.ts` archives a payee in order to prove a re-check
+  refuses one), so what is missing is a form and a confirmation. It is below
+  the three that were built because withdrawing a beneficiary is not what an
+  unsigned warning sends somebody to `/payees` to do.
+* **A BOOK YOU CAN SEARCH.** `/payees` renders every payee on every business,
+  newest first, and this book is 380-odd rows of integration-test detritus. The
+  drill-through (`?payee=<id>`) is what the gate's refusal uses and it works;
+  browsing does not scale, and the fix is a business filter and a name search on
+  `v_payee_book`, not pagination alone — a payments clerk arrives knowing the
+  supplier's name.
 * **ACH prenotification.** The real answer to "is this account number right".
   `POST /ach_prenotifications` on Increase, reachable with our key today. It
   writes a zero-dollar entry to the rail; the RDFI may answer days later with a
@@ -950,7 +1279,18 @@ RUN_DB_TESTS=1 pnpm test src/lib/payees
 RUN_DB_TESTS=1 RUN_LIVE_TESTS=1 pnpm test src/lib/payees
 ```
 
-150 tests. The ones worth reading first:
+**191 tests, and 184 pass with `RUN_DB_TESTS=1`** — measured 2026-09-11 against
+the live Neon book. The 7 skipped are the ones that call Increase and Plaid for
+real; `RUN_LIVE_TESTS=1` runs those too. Without any flag the suite is 126
+passed / 45 skipped, because everything that needs a database skips rather than
+fails: CI holds no credentials on purpose.
+
+(It was 171 tests before §6a. The 20 new ones are `explain.test.ts` — the
+working, and the nine repairs it refuses to offer — and
+`operator.integration.test.ts` — add, re-check, sign, and the refusals between
+them.)
+
+The ones worth reading first:
 
 * `aba.test.ts` → **EXHAUSTIVE: what the check digit catches** — the four
   sweeps that produce every number in §1.
@@ -962,5 +1302,311 @@ RUN_DB_TESTS=1 RUN_LIVE_TESTS=1 pnpm test src/lib/payees
   routing number directly at the table; TypeScript and Postgres agreeing on 305
   numbers; and *a full confirmation writes no journal entry and no journal
   line*, counted before and after.
+* `explain.test.ts` → **the transposition IS named and the nine substitutions
+  are NOT**, asserted against `abaNearMisses()` itself so the count is proved
+  rather than assumed; and `101500001` saying out loud that it is
+  indistinguishable from `101050001`.
+* `operator.integration.test.ts` → **a re-check appends and never edits**; **a
+  signature that does not name every warning is refused and writes nothing**;
+  and the whole loop in one test — the gate refuses, the message carries
+  `signWarningHref(payeeId)`, the signature lands, the gate returns `null`, and
+  a re-check re-opens it.
 
-`node scripts/dbcheck.mjs` → **14/14** with migration 0016 applied.
+`node scripts/dbcheck.mjs` reads **42 passed, 4 failed** across the whole book as
+of 2026-09-11. None of the four is a payee view — they are the deliberate
+red-on-arrival card/hold findings this repository publishes rather than hides.
+No payee table has an invariant view of its own, by design: the payee book is
+evidence, not money, and the constraints that police it
+(`payee_routing_number_possible`, `payee_verification_block_is_arithmetic`, the
+REVOKEs and `ledger_row_is_immutable()`) refuse at write time rather than being
+reported after the fact.
+
+---
+
+## 9. What was actually fired, on the deployed system, on 2026-09-11
+
+Every line below is a real HTTP call to `https://corgi-trial-psi.vercel.app`
+with the published demo token, scoped to Ridgeline Robotics, Inc.
+(`e274546d-6bdd-5266-b0fb-cc839a7811f9`). The quoted text is what the API
+returned, not a paraphrase. **Nothing that was refused wrote a
+`payment_instruction` row** — checked afterwards by idempotency key, which is
+what makes "the refusal arrives before two humans approve" a fact rather than a
+design intention.
+
+### Leg 1 — the check digit, computed rather than trusted
+
+`3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9) ≡ 0 (mod 10)`, evaluated and **printed**:
+
+| sent | what it is | answer |
+| --- | --- | --- |
+| `011401534` | one digit off `011401533` | `PAYEE_ROUTING_NUMBER_IMPOSSIBLE` — *"The check digit does not hold: 3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9) = **61**, which is **1** away from a multiple of ten. No bank has this routing number."* |
+| `011041533` | positions 4 and 5 transposed | *"… = **76**, which is **6** away from a multiple of ten. No bank has this routing number. **Two adjacent digits look swapped: `011401533` would be valid.** Check the payee's paperwork rather than accepting a guess."* |
+| `101500001` | `0`↔`5` swap of `101050001` | **ACCEPTED** — queued as instruction `342c3a36-94ad-4883-9013-9f2271c5735b`, `money_moved: false` |
+
+The third row is the honest limit of the arithmetic, live. The two swapped
+digits differ by five, the weight difference has gcd 2 with ten, and the sum
+does not move — §1 predicts exactly this miss set and the deployed system
+reproduces it. Nothing downstream catches it either; the RDFI does, days later,
+as an R03 or R04.
+
+### What the screen names, and what it deliberately does not
+
+The claim being tested was *"the screen naming the single-digit repairs"*. **It
+does not, on purpose, and that is a feature rather than an omission.** §1 proves
+that every weight is invertible mod 10, so **every invalid routing number has
+exactly nine single-digit repairs — one per position, always.** Offering them
+would be "did you mean one of these nine?", which is the statement *"it is
+wrong"* re-typed in nine parts, and it would invite a clerk to pick one. What
+the message names instead is the **transposition** repair, which is a specific,
+checkable claim about what the hand did — and `abaNearMisses()` returns both
+kinds so the count can be asserted in a test while `verify.ts` and the gate show
+only the diagnostic one.
+
+### Legs 2–4 — the twin, and the two rails
+
+| sent | rail | answer |
+| --- | --- | --- |
+| `Fenwick Marine Supply LLC` ••8801, wire `021000021` | wire | `PAYEE_WIRE_PAYEE_NOT_ON_BOOK` — *"No confirmed wire payee matches "Fenwick Marine Supply LLC" ••8801 … A wire is final on receipt and business email compromise is a WELL-FORMED instruction … ACH deliberately allows it, because an ACH entry is recallable for two banking days and a wire is not. Nothing was written and no payment was raised."* |
+| **the same beneficiary**, ••8801, ACH `011401533` | ACH | **ACCEPTED** — `42cb1a2f-e2d2-4e08-b8d9-77e981c026b1`, $42.00, `queued_for_human_approval`, `money_moved: false` |
+| `Northwind Industrial LLC` ••3330, wire `011401533` | wire | `PAYEE_WIRE_ROUTING_NUMBER_UNCONFIRMED` — *"… is on your payee book, but not at 011401533. **The wire routing number somebody confirmed for this beneficiary is 021000021.** Same supplier, different bank is what a redirected invoice looks like from the inside, and a wire cannot be recalled once it is received. Confirm the change through a channel you already had — not one from the message that asked for it …"* |
+| `Northwind Industrial LLC` ••0000, wire `021000021` | wire | `PAYEE_WARNING_UNACKNOWLEDGED` (see §5e) |
+
+**The asymmetry, in two adjacent calls.** Same beneficiary, same last four,
+same instant: refused on wire, accepted on ACH. That is §5c's decision, running.
+
+**The twin, on the book.** The ••0000 payee warns because `confirmPayee()` ran
+the twin probe and found the same beneficiary already at a different account.
+The finding is stored, verbatim, in `payee_verification`
+`aa1c5be9-edbc-4ce8-bdce-46f68750d1a9` on payee
+`7e3f832e-98fb-4128-b181-52198db46c1b`:
+
+```json
+{ "code": "TWIN_WITH_DIFFERENT_DETAILS",
+  "severity": "warn",
+  "title": "You already pay someone by this name at a different account",
+  "detail": "\"Northwind Industrial LLC\" is already on your payee book with 021000021
+             routing and an account ending 3330 — different bank details for the same
+             name. This is what a redirected-invoice fraud looks like from the inside,
+             and it is also what a supplier changing bank looks like. Confirm the
+             change by a channel you already had, not one from the email that asked
+             for it." }
+```
+
+Append-only, so that row is what the check said at the moment it ran and stays
+that way. `v_payee_book.has_conflicting_twin` reads `true` on it.
+
+### Leg 5 — the refusal arrives before the approvers, and nothing is written
+
+Nine calls, three of which were meant to succeed. Afterwards, on the live book,
+by namespaced idempotency key:
+
+| key | instruction written? |
+| --- | --- |
+| `proof-aba-single-011401534` | **no** |
+| `proof-aba-transpose-011041533` | **no** |
+| `proof-wire-unknown-fenwick-1` | **no** |
+| `proof-wire-unconfirmed-bank-nw-2` | **no** |
+| `proof-wire-twin-unsigned-nw-2` | **no** |
+| `proof-aba-blindspot-101500001` | yes — the accepted one |
+| `proof-ach-unknown-fenwick-1` | yes — the accepted one |
+
+No `payment_instruction` row means no `payment_instruction_event`, which means
+nothing in the approvals queue, which means **no approver's attention was spent
+on a payment that could never be made**. The gate sits inside `conn.begin()` in
+`requestPayment()`, after the KYB gate and before the INSERT; that ordering is
+the whole of the claim and this is what it looks like from outside.
+
+### Fail-closed, against a real Postgres error rather than a stub
+
+§5b and §5d are argued against "a database this transaction cannot read". The
+suite now makes that literal instead of handing the code a rejecting object: it
+opens a real transaction on the live book, runs `SELECT 1 / 0` and swallows it,
+after which Postgres answers every further statement with **25P02
+`current_transaction_is_aborted`** — the driver's own `PostgresError`, with a
+SQLSTATE, on the same connection that was about to write.
+
+```
+confirmPayee → PAYEE_BOOK_UNREADABLE
+               check:  null        ← no check happened, which is not "a check that found nothing"
+               saved:  null
+               payee rows 0 · verification rows 0 · refusal rows 0
+```
+
+Both new tests were **made to fail first**. Restore the pre-2026-09-11
+`.catch(() => [])` and `confirmPayee` comes back with a populated `PayeeCheck`
+and the code `PAYEE_REFUSED` — a check reported for a probe that never ran,
+which is the defect §5d is about. Restore `catch { return null }` on the
+account-identity read and the gate test goes from a refusal to `undefined`,
+which is a payment proceeding unchecked.
+
+A `statement_timeout` was tried first and rejected: the payee book is one index
+scan and it sometimes beats the clock, so the test would have been flaky in the
+direction of passing — which is the worst direction a control test can be flaky
+in.
+
+---
+
+## 10. The operator loop, fired for real on 2026-09-11
+
+**WHERE THIS RAN, stated before anything else.** A production build of this
+repository (`next build` then `next start`), against the **live Neon book** and
+the **live Increase sandbox** — not against a fixture, and **not against
+`corgi-trial-psi.vercel.app`**, which still serves the commit that predates §6a
+and has no forms on `/payees`. Every id below is a row you can select today. The
+POSTs went through the real server actions over their no-JS form encoding, which
+is the same code path the browser drives.
+
+Acting as **Priya Raman** (`b3c4f786-…`), the staff demo role — a named human
+who cannot approve payments, which is the point: signing for a warning is not an
+approval and deliberately requires no approval rights.
+
+### Leg 1 — a payee the arithmetic refused, added from the form
+
+Submitted `Fenwick Marine Supply LLC`, ACH, `011041533`, ••8801.
+
+```
+payee_candidate_refusal  8702f7d4-094c-421c-898e-dec3fafd37fc
+  attempted_at  2026-09-11T15:35:38.928Z
+  routing_number 011041533          ← as typed. Not normalised, not corrected
+  code          ROUTING_CHECKSUM_FAILED
+  reason        "The check digit does not hold: 3(d1+d4+d7) + 7(d2+d5+d8) +
+                 (d3+d6+d9) = 76, which is 6 away from a multiple of ten. No
+                 bank has this routing number. Swapping two adjacent digits
+                 would give 011401533, which is the commonest way this happens.
+                 Confirm against the payee's own paperwork rather than taking a
+                 suggestion from us."
+```
+
+`SELECT count(*) FROM payee WHERE holder_name = 'Fenwick Marine Supply LLC'` →
+**0**. A blocked candidate is not a payee. The sum is 76 exactly as §1 predicts
+for that transposition, the transposition repair is named, and the nine
+single-digit repairs are not.
+
+### Leg 2 — a payee added, warned by the twin probe
+
+Submitted `Northwind Industrial LLC`, ACH, `011401533`, ••7742, reference
+`G2B-PROOF-TWIN-1`.
+
+```
+payee              ee3ae568-f210-4a30-9129-66da677f29f6
+  display_name     "Northwind Industrial — ACH (console)"
+  payee_key        console:payee:e274546d-…-cc839a7811f9:G2B-PROOF-TWIN-1
+  created_by_name  Priya Raman
+payee_verification b7c2fd1c-9a3e-4236-9ea7-a6a99ebc9db0
+  outcome          warned
+  directory        not_listed · increase.routing_numbers   ← a LIVE call
+  evidence         live
+  name_source      payer_asserted        ← nobody confirmed the name. §3
+  findings         DIRECTORY_NOT_LISTED  note
+                   NAME_NOT_VERIFIABLE   note
+                   TWIN_WITH_DIFFERENT_DETAILS  warn
+```
+
+verbatim from `payee_verification.detail`:
+
+```json
+{ "code": "TWIN_WITH_DIFFERENT_DETAILS",
+  "severity": "warn",
+  "title": "You already pay someone by this name at a different account",
+  "detail": "\"Northwind Industrial LLC\" is already on your payee book with 021000021
+             routing and an account ending 3330 — different bank details for the same
+             name. This is what a redirected-invoice fraud looks like from the inside,
+             and it is also what a supplier changing bank looks like. Confirm the change
+             by a channel you already had, not one from the email that asked for it." }
+```
+
+**The twin probe ran from a screen rather than from a test**, which is the
+sentence §7 could not say this morning.
+
+### Leg 3 — the signature, and the guard in front of it
+
+First, a signature naming nothing:
+
+```
+POST … reason="Trying to wave this through without naming what it is."
+      (no `code` field)
+→ PAYEE_WARNING_MOVED
+  payee_acknowledgement rows for this verification: 0
+```
+
+Then the real one:
+
+```
+payee_acknowledgement  12353dc0-4892-4fe0-bdbc-da6de91fbd3f
+  verification_id      b7c2fd1c-9a3e-4236-9ea7-a6a99ebc9db0
+  acknowledged_by      Priya Raman
+  acknowledged_at      2026-09-11T15:36:41.497Z
+  reason               "Northwind opened a second account for the industrial
+                        division in August. Confirmed on the finance line from the
+                        2025 master agreement, not the number in the remittance
+                        email; spoke to K. Ozuna who read back the last four.
+                        — signed for 1 finding on this check:
+                        TWIN_WITH_DIFFERENT_DETAILS ("You already pay someone by
+                        this name at a different account")."
+```
+
+The row names the human, the instant, the words, **and what the words were
+about**. `v_payee_book.acknowledged` → `true`, `acknowledged_by_name` → Priya
+Raman.
+
+### Leg 4 — the refusal reaching the fix, end to end
+
+A second warned payee, left unsigned: `3b2decf5-1f19-4664-9852-4e108a2dd3de`,
+`Northwind Industrial LLC` ACH `011401533` ••7743.
+
+```
+POST /api/v1/payments   $1.00 ACH to that beneficiary
+→ 422 PAYEE_WARNING_UNACKNOWLEDGED
+  "The last check on "Northwind Industrial LLC", filed on your payee book as
+   "Northwind Industrial — ACH loop proof", raised a warning that nobody has
+   signed for. Open /payees?payee=3b2decf5-1f19-4664-9852-4e108a2dd3de&sign=1 —
+   it shows that payee, what the check found, and the form that records why it
+   is right to pay this account. …"
+```
+
+That URL was then opened **verbatim**. It rendered the payee, the finding, and a
+signature form pre-addressed to verification
+`accdf9a2-265e-43e3-8b3f-0064213c303d` offering exactly one code,
+`TWIN_WITH_DIFFERENT_DETAILS`. Signed →
+`payee_acknowledgement 5e6e3a72-caa1-4e44-a6a7-4a2681ec0b15`.
+
+The same payment, re-sent:
+
+```
+→ 201 Created
+  instruction 993f222a-fbb9-4be5-a60b-1a3c1a3ad748
+  status      queued_for_human_approval
+  money_moved false
+```
+
+**Refused → the message names an address → the address performs the remedy →
+the same payment is accepted.** That is the loop that was open this morning.
+
+### Leg 5 — the re-check, appending
+
+Re-checked payee `ee3ae568-…` from the console:
+
+```
+payee_verification rows for this payee, oldest first
+  b7c2fd1c-9a3e-4236-9ea7-a6a99ebc9db0  15:35:59  Priya Raman  warned  signatures 1
+  effedc13-c626-4b23-8a5f-86ad9627419c  15:38:49  Priya Raman  warned  signatures 0
+
+v_payee_book  outcome warned · acknowledged FALSE · acknowledged_by_name NULL
+```
+
+Two rows, nothing updated, the older one keeps its signature — **and the payee's
+current standing is unsigned again**, because a signature answers a check and
+not a beneficiary. A payment to it is refused until somebody signs the new one.
+That is the behaviour §4's freshness argument implies and it is now observable.
+
+### What was NOT proven here
+
+* **Nothing was deployed.** These calls hit a local production build. The Vercel
+  deployment is unchanged and still has no forms on `/payees`; §5e's note about
+  the deployed commit still applies to it.
+* **No name check was performed by anybody but us.** `name_source` is
+  `payer_asserted` on every row above. §6a.7 says why, and the screen says so in
+  those words.
+* **No money moved.** Leg 4's instruction is queued and unreleased; nothing in
+  `src/lib/payees` can write a journal line, and `payees.integration.test.ts`
+  counts entries before and after a full confirmation to prove it.

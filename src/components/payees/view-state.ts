@@ -45,6 +45,26 @@ export type PayeeFilter = {
   readonly payeeId: string | null;
   /** Show the refused candidates rather than the book. */
   readonly showRefusals: boolean;
+  /**
+   * Open the add-a-payee form.
+   *
+   * A flag rather than a route, deliberately. `/payees/new` would be a second
+   * page carrying a form whose whole purpose is to be read NEXT TO the book it
+   * writes into — the twin probe's answer is only legible beside the payee it
+   * is a twin of — and it would put the operator somewhere they have to
+   * navigate back from after a refusal.
+   */
+  readonly add: boolean;
+  /**
+   * Scroll the signature form into the operator's hands.
+   *
+   * This is the flag the payment gate's refusal carries.
+   * `PAYEE_WARNING_UNACKNOWLEDGED` emits `/payees?payee=<id>&sign=1`, so the
+   * one message whose job is to send a person to a specific record and get a
+   * signature out of them now names a URL that lands on exactly that record
+   * with exactly that form open.
+   */
+  readonly sign: boolean;
 };
 
 function first(value: string | string[] | undefined): string | undefined {
@@ -77,6 +97,8 @@ export function parsePayeeFilter(
     state: isDemoState(rawState) ? rawState : "default",
     payeeId: asId(first(searchParams["payee"])),
     showRefusals: first(searchParams["refusals"]) === "1",
+    add: first(searchParams["add"]) === "1",
+    sign: first(searchParams["sign"]) === "1",
   };
 }
 
@@ -96,6 +118,8 @@ export function payeeQuery(filter: Partial<PayeeFilter>): string {
     parts.push(`payee=${encodeURIComponent(filter.payeeId)}`);
   }
   if (filter.showRefusals === true) parts.push("refusals=1");
+  if (filter.add === true) parts.push("add=1");
+  if (filter.sign === true) parts.push("sign=1");
   return parts.length === 0 ? "" : `?${parts.join("&")}`;
 }
 

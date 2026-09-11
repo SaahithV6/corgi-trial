@@ -4,6 +4,7 @@ import { FOCUS_RING } from "../ui/primitives";
 
 import { NavLinks } from "./NavLinks";
 import { RoleSwitcher } from "./RoleSwitcher";
+import { ScopeLine } from "./ScopeLine";
 import { ROLE_SUMMARY, type Role } from "./role";
 
 /**
@@ -30,9 +31,16 @@ import { ROLE_SUMMARY, type Role } from "./role";
  * book, whose ledger, which environment — and leaves the subject to the screen
  * that knows it.
  */
+/**
+ * `scope` is no longer here, and that is the point of `ScopeLine`.
+ *
+ * It read "Staff console — all businesses on this book", which was true of
+ * every page under this bar until `/client` shipped and stopped being true of
+ * five of them. A constant cannot tell the difference; a route can. See
+ * `ScopeLine.tsx` for why that sentence being wrong matters more than it looks.
+ */
 const PLATFORM = {
   operator: "Corgi",
-  scope: "Staff console — all businesses on this book",
   currency: "USD",
   environment: "Sandbox",
 } as const;
@@ -63,7 +71,7 @@ export function AppHeader({ role }: { readonly role: Role }) {
       <div className="border-t border-border bg-background">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-5 gap-y-1 px-6 py-2 text-xs">
           <span className="font-medium">{PLATFORM.operator}</span>
-          <span className="text-muted">{PLATFORM.scope}</span>
+          <ScopeLine />
           <span className="text-muted">{PLATFORM.currency}</span>
           <span className="ml-auto rounded border border-border-strong px-1.5 py-0.5 text-[11px] text-muted">
             {PLATFORM.environment}

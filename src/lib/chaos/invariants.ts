@@ -153,4 +153,11 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
     'v_value_date_unexplained',
     'no entry carries a value date outside [entity created − 1 year, today + 18 months] that no declared writer owns',
   ],
+  // 0015's four. They existed, were correct, and were checked by nothing —
+  // `--prove` said "26 of 26" against a list that did not contain them.
+  // Each made to fail in a rolled-back transaction before being listed.
+  ['v_internal_transfer_impure', "an internal transfer touches only the customer's own subtree"],
+  ['v_pot_identity_drift', 'every pot is exactly one sub-account, and nothing else lives under it'],
+  ['v_pot_negative', 'no pot holds less than nothing'],
+  ['v_pot_orphan', 'no pot sub-account exists without the pot that names it'],
 ] as const;

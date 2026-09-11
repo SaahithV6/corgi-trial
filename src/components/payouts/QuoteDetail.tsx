@@ -185,10 +185,10 @@ export function QuoteDetail({ quote }: { readonly quote: QuoteView }) {
               <p className="mt-2">
                 We hold that risk unhedged, so the difference is <strong>ours</strong> — a gain
                 when the move goes our way and a loss when it does not. It is measured at
-                settlement as <code>amount in − fee − what the delivery cost</code>, and{" "}
-                <code>fx_quote_settlement.variance_cents</code> records it. It does not post to the
-                journal today, because the chart has no account for it; docs/FX.md §6 names the one
-                to add.
+                settlement as <code>amount in − fee − what the delivery cost</code>,{" "}
+                <code>fx_quote_settlement.variance_cents</code> records it, and at settlement it
+                posts to <code>4300 FX quote settlement variance</code> — credited when the move
+                goes our way, debited when it does not.
               </p>
             </Note>
 
@@ -274,12 +274,27 @@ export function QuoteDetail({ quote }: { readonly quote: QuoteView }) {
                 },
               ]}
             />
-            <p className="mt-3 max-w-prose text-[11px] leading-relaxed text-muted">
-              The variance above is recorded and <strong>not posted</strong>. There is no account
-              in the chart for an FX settlement variance — it is not 5200 (credit loss), not 5100
-              (what providers charge us) and not 2900 (sub-cent dust) — and inventing one silently
-              would be worse than the gap. <Badge tone="quiet">unposted</Badge>
-            </p>
+            {quote.settlementEntryId === null ? (
+              <p className="mt-3 max-w-prose text-[11px] leading-relaxed text-muted">
+                The variance above is <strong>recorded but not posted</strong>: this settlement
+                carries no <code>entry_id</code>, so there is no journal entry behind it. On a
+                screen fixture that is expected. On a live row it is a break, and the figure above
+                is a statement about a commitment rather than about the book.{" "}
+                <Badge tone="quiet">unposted</Badge>
+              </p>
+            ) : (
+              <p className="mt-3 max-w-prose text-[11px] leading-relaxed text-muted">
+                Posted. The variance above is on the journal as{" "}
+                <code>4300 FX quote settlement variance</code> — one signed account, credited when
+                the move goes our way and debited when it does not, kept out of{" "}
+                <code>4200</code> because a disclosed fee and an unhedged market loss are different
+                facts. The USDC that left is credited to <code>1140</code> in whole cents and the
+                sub-cent conversion residual to <code>2900</code>, which is why the entry balances
+                to zero with nothing unowned. Entry{" "}
+                <span className="money">{quote.settlementEntryId}</span>.{" "}
+                <Badge tone="neutral">posted</Badge>
+              </p>
+            )}
           </div>
         </Panel>
       )}

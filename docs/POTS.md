@@ -535,3 +535,125 @@ Not built, and what week two would do:
 | `src/app/(app)/pots/page.tsx` | the route and its five states |
 | `src/app/(app)/pots/actions.ts` | the two server actions |
 | `src/components/pots/**` | the screen |
+
+---
+
+## 10. §10 — audited on the live book, 2026-09-11
+
+> Added after an audit that re-ran every claim in this document against Neon.
+> Two findings. Nothing above has been edited.
+
+### 10.1 The move that was made, so the claim is not a screenshot from Tuesday
+
+Ridgeline Robotics, `e274546d-6bdd-5266-b0fb-cc839a7811f9`, through
+`movePotFunds()` → `postEntry()` → `ledger_append()`, as `corgi_app`:
+
+**Entry `53fc0dc8-da7e-4041-a73e-050252db9fc6`** — seq 5628, value date
+2026-09-11, key `pot:ef7dd5c5-9479-4be8-9675-6ec3490ccca7:in:audit-2026-09-11-a`,
+$250.00 into "Sales tax".
+
+```
+ord 0  2100                                       +25000  debit    memo "earmarked into pot “Sales tax”"
+ord 1  2100.ef7dd5c5-9479-4be8-9675-6ec3490ccca7  −25000  credit   memo "earmarked from the main balance"
+                                                  ------
+                                                       0
+rail internal · external_ref NULL · inbox_id NULL · hold_id NULL · entry_type original
+```
+
+| | before | after |
+| --- | ---: | ---: |
+| main (all value dates) | $86,402.21 | $86,152.21 |
+| Σ pots | $15,000.00 | $15,250.00 |
+| **total deposit liability** | **$101,402.21** | **$101,402.21** |
+| available | $35,802.13 | $35,552.13 |
+
+Available fell by exactly $250.00. The total did not move. The subtree
+derivation agreed at $101,402.21 both times.
+
+Re-submitting the same reference returned **the same entry id** with
+`replay: true` and wrote nothing. `available + 1¢` in was refused
+`INSUFFICIENT_AVAILABLE`, short by 1¢; `pot balance + 1¢` out was refused
+`INSUFFICIENT_POT`, short by 1¢; and `journal_entry` holds no row under either
+refused key.
+
+### 10.2 Finding — the available subtraction on the screen did not add up
+
+`/pots` printed
+
+```
+$58,388.31 − $635.00 − $19,701.18 = $35,552.13
+```
+
+which is **wrong by $2,500.00**. `availableBalance()` has four subtrahends —
+ledger, holds, uncleared credits and **committed outflows** (debits already
+booked for a future value date) — and `AvailabilityView` carried only three.
+`decideMove()`'s refusal sentence had named all four since it was written, so
+the refusal and the panel disagreed on the same screen. Fixed:
+`pendingOutboundCents` is in the contract, in `screen.ts` and in the panel, and
+the identity now reads with four terms.
+
+**And the two "main" figures are two different questions.** The identity panel's
+`main` is `v_pot_identity.main_cents` — the account summed over **all** value
+dates — and the availability panel's `ledger` is `availableBalance()`'s, which
+is `value_date <= today`. On 2026-09-11 Ridgeline's were $86,152.21 and
+$58,388.31: the $27,763.90 between them is standing-order debits value-dated
+into 2027. Both are right; printing them six lines apart under labels that read
+like the same quantity was not. The labels now say which is which. The identity
+is asked of the all-time sum on **both** sides, so it still holds.
+
+### 10.3 Finding — the four invariants range over what the writer called itself
+
+All four views are empty, and each was **made to fail**, on this database, in
+transactions that were rolled back:
+
+| view | | probe |
+| --- | ---: | --- |
+| `v_internal_transfer_impure` | 0 → **1** | a `pot:` internal entry with a third line on `1000 Cash at bank` |
+| `v_pot_negative` | 0 → **1** | $1,000,000.00 released from a pot holding $3,250.00 |
+| `v_pot_orphan` | 0 → **1** | the pot account re-parented onto the house `2100` control root |
+| `v_pot_identity_drift` | 0 → **1** | a sub-account under the pot that the `pot` table has never heard of |
+| `v_deposit_control_drift` | 0 → **1** | customer money booked to the house `2100` root |
+
+Two things that probe exposed, neither of which §3 says:
+
+1. **`v_pot_negative` detects; it does not prevent.** Nothing in the schema
+   refuses a negative pot — the probe posted one through `ledger_append()` with
+   every trigger armed. `decideMove()` is the only thing between a customer and
+   an overdrawn pot, and §2's "a pot can never go negative" should read "a pot
+   is never *allowed* to go negative, and if one ever does the view will say
+   so".
+
+2. **`v_internal_transfer_impure`'s population is the writer's own label.** Its
+   predicate is `WHERE e.rail = 'internal' AND e.idempotency_key LIKE 'pot:%'`.
+   An entry that moves pot money *without* that label is not in the population
+   at all. Measured: **$50.00 posted out of Ridgeline's "Sales tax" pot into
+   `1000 Cash at bank`** — a real asset account, a real rail — under an `ach:`
+   key with `rail = 'ach'`. The pot balance fell $3,250.00 → $3,200.00 and
+   `v_internal_transfer_impure`, `v_pot_identity_drift` **and**
+   `v_deposit_control_drift` all stayed at **0**. (Control drift cannot see it
+   either: both of its sides count the same subtree, so money *leaving* the
+   subtree keeps them equal.)
+
+   `movePotFunds()` is the only writer today and it always labels, so the guard
+   is true of everything on the book. It is not *structural*: `postEntry()`
+   takes an account id and asks no questions, correctly, so another module
+   posting to a pot account would be invisible to every pot invariant.
+
+   **The repair, named rather than half-built.** A `v_pot_line_provenance` view
+   in the next migration, whose population starts from
+   `journal_line.account_id IN (SELECT account_id FROM pot)` — a fact about the
+   chart — and which reports any such entry that is not exactly two lines
+   summing to zero, wholly inside one customer's deposit subtree, on rail
+   `internal` under a `pot:` key. It was written as a query and it reports
+   exactly 1 row for the probe above and 0 for the live book; it is **not**
+   shipped inside `src/lib/pots/store.ts` because doing so raised that file's
+   ledger-boundary count from 3 to 7 and `src/lib/ledger/boundary.test.ts` is a
+   ratchet. The right home is a view in a migration, or a named reader in
+   `src/lib/ledger/`. Both are outside the audit's edit surface; the number in
+   the boundary allowlist is a bill, and dodging it would have been worse than
+   reporting it.
+
+None of the four is in `scripts/dbcheck.mjs`'s `INVARIANT_VIEWS`, so none of
+them is covered by `--prove`'s "26 of 26". They are read live on `/pots` and
+asserted by `pots.integration.test.ts` and `demo.test.ts`. Adding them makes it
+30 of 30 and is four lines.

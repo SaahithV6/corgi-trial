@@ -129,6 +129,27 @@ export type EpisodeEntryView = {
  * `availableCents` is `ledgerCents - holdsCents` computed at the same
  * watermark, which is why a reader can check the arithmetic by eye instead of
  * trusting the row.
+ *
+ * ─── THE ACCOUNT-WIDE COLUMNS ARE NOT THE CLAIM ───────────────────────────
+ *
+ * `ledgerCents`, `holdsCents` and `availableCents` are the WHOLE ACCOUNT at
+ * that watermark, so every other thing that happened to this customer in
+ * between — a card authorisation opening, a hold expiring, an inbound credit
+ * clearing — lands in them. On a quiet book the available column reads the
+ * same on all three rows and it is tempting to publish that as the proof.
+ *
+ * IT IS NOT THE PROOF, and on a busy book it is not even true: measured on
+ * 2026-09-11 on case DSP-20260911-8U46YC, available read $65,774.03 on the
+ * first two rows and $65,999.03 on the third, because an unrelated $225.00
+ * card authorisation released between watermark 5678 and watermark 5762. The
+ * screen was claiming "available does not move at all" over a number that had
+ * moved for a reason that had nothing to do with the dispute.
+ *
+ * So the invariant is carried by the three `case…` columns instead: THIS
+ * CASE'S OWN contribution to the same three sums, over this dispute's own
+ * journal lines and nothing else. `caseAvailableCents` is zero from the grant
+ * until the case resolves, whatever else the account is doing, and that is the
+ * statement the feature actually makes.
  */
 export type EpisodeBalanceView = {
   readonly label: string;
@@ -136,6 +157,12 @@ export type EpisodeBalanceView = {
   readonly ledgerCents: Cents;
   readonly holdsCents: Cents;
   readonly availableCents: Cents;
+  /** This dispute's own contribution to the ledger balance at this watermark. */
+  readonly caseLedgerCents: Cents;
+  /** This dispute's own contribution to active holds at this watermark. */
+  readonly caseHoldsCents: Cents;
+  /** `caseLedgerCents - caseHoldsCents`. Zero while the credit is outstanding. */
+  readonly caseAvailableCents: Cents;
 };
 
 export type EpisodeView = {

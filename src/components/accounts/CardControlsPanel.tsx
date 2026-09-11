@@ -22,6 +22,7 @@ import {
 import { FIXTURE_CONTROLS } from "@/lib/cards/fixtures";
 import { describeMcc } from "@/lib/cards/mcc";
 import { readAsaEnrollment, type AsaEnrollment } from "@/lib/cards/provider";
+import { readControlCoverage, type ControlCoverage } from "@/lib/cards/defaults";
 import { listCardsWithControls, listDecisions, type CardWithControls } from "@/lib/cards/store";
 import type { CardControls, DecisionRecord } from "@/lib/cards/types";
 import {
@@ -330,9 +331,14 @@ function ControlsSkeleton() {
  * a `Result` and let the caller decide what to draw.
  */
 type ControlsData =
-  | { readonly kind: "ok"; readonly cards: readonly CardWithControls[]; readonly decisions: readonly DecisionRecord[] }
+  | {
+      readonly kind: "ok";
+      readonly cards: readonly CardWithControls[];
+      readonly decisions: readonly DecisionRecord[];
+      readonly coverage: ControlCoverage;
+    }
   | { readonly kind: "no_customer" }
-  | { readonly kind: "no_cards" }
+  | { readonly kind: "no_cards"; readonly coverage: ControlCoverage }
   | { readonly kind: "failed"; readonly detail: string };
 
 async function loadControls(businessId: string | null): Promise<ControlsData> {
@@ -342,15 +348,120 @@ async function loadControls(businessId: string | null): Promise<ControlsData> {
     const target = businessId ?? businesses[0]?.businessId ?? null;
     if (target === null) return { kind: "no_customer" };
 
-    const [cards, decisions] = await Promise.all([
+    const [cards, decisions, coverage] = await Promise.all([
       listCardsWithControls(target),
       listDecisions({ businessId: target, limit: 25 }),
+      readControlCoverage(target),
     ]);
-    if (cards.length === 0) return { kind: "no_cards" };
-    return { kind: "ok", cards, decisions };
+    if (cards.length === 0) return { kind: "no_cards", coverage };
+    return { kind: "ok", cards, decisions, coverage };
   } catch (thrown) {
     return { kind: "failed", detail: thrown instanceof Error ? thrown.message : String(thrown) };
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Coverage — how much of the estate the decision path can actually judge      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `no_controls_configured` is a REAL STATE, and until this panel existed the
+ * only way to see it was to read an approval and infer it.
+ *
+ * That was the actual defect behind this feature's worst number. On
+ * 2026-09-11 the provider lane held 51 approvals, 38 of them produced by
+ * `no_controls_configured` — a rule that compared the authorisation with
+ * nothing, because 880 of 911 cards carried no control version. Nothing on any
+ * screen said so. The panel above renders the newest six cards of one business
+ * beautifully and says nothing at all about the other two hundred, and an
+ * operator reading a page of approvals has no way to tell "we judged this and
+ * allowed it" from "nobody had ever said anything about this card".
+ *
+ * The three numbers are the three branches `decide()` takes, not a
+ * configured/not pair — see `v_card_control_coverage` (migration 0051) and the
+ * note on `readControlCoverage()`. The uncontrolled figure is deliberately the
+ * loud one: it is the only one that means an authorisation will be approved
+ * without being judged.
+ */
+function CoveragePanel({
+  coverage,
+  live,
+}: {
+  readonly coverage: ControlCoverage;
+  readonly live: boolean;
+}) {
+  const { total, underControl, memberOnly, uncontrolled } = coverage;
+  const judged = underControl + memberOnly;
+  const pct = total === 0 ? 0 : Math.round((judged / total) * 100);
+
+  return (
+    <Panel
+      title="How much of this customer's estate is under control"
+      description={
+        total === 0
+          ? "This customer holds no cards."
+          : `${judged} of ${total} cards (${pct}%) would have their next authorisation judged against something. The rest are approved by rule no_controls_configured, which compares the authorisation with nothing.`
+      }
+      actions={
+        uncontrolled === 0 ? (
+          <Badge tone="positive">every card judged</Badge>
+        ) : (
+          <Badge tone={live ? "negative" : "quiet"}>{uncontrolled} unjudged</Badge>
+        )
+      }
+    >
+      <div className="grid gap-x-6 gap-y-3 px-5 py-4 sm:grid-cols-3">
+        <CoverageCount
+          label="Under a card control"
+          value={underControl}
+          note="A control version exists. Judged by the card's own limits, its category blocks and its on/off switch, and the decision row pins the version it was judged under."
+        />
+        <CoverageCount
+          label="Covered by their holder"
+          value={memberOnly}
+          note="No control version, but the card belongs to a team member — so removal, suspension and that person's own limits still judge it. Not the same as no controls."
+        />
+        <CoverageCount
+          label="Judged against nothing"
+          value={uncontrolled}
+          note="No control version and no holder. Every purchase is approved by no_controls_configured. Not a control that failed — a card nobody has ever configured."
+          loud={uncontrolled > 0 && live}
+        />
+      </div>
+      <p className="max-w-prose px-5 pb-4 text-[11px] leading-relaxed text-muted">
+        A card issued from the console above is born under the program default —
+        control version 1, a $5,000.00 per-transaction ceiling equal to the
+        <code className="mx-1 font-mono">spend_limit</code> this system already
+        declares to Lithic on that same card, so it declines nothing the issuer
+        would not already have declined. What it buys is that the decision is{" "}
+        <em>judged</em>: the row cites a control version instead of citing
+        nothing. The cards counted as unjudged reached this book another way —
+        a test fixture bound straight through{" "}
+        <code className="font-mono">registerCard()</code>, or a card issued
+        before the default existed.
+      </p>
+    </Panel>
+  );
+}
+
+function CoverageCount({
+  label,
+  value,
+  note,
+  loud = false,
+}: {
+  readonly label: string;
+  readonly value: number;
+  readonly note: string;
+  readonly loud?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-[0.08em] text-muted">{label}</div>
+      <div className={`mt-0.5 font-mono text-2xl ${loud ? "text-negative" : ""}`}>{value}</div>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted">{note}</p>
+    </div>
+  );
 }
 
 async function ControlsSection({
@@ -386,18 +497,22 @@ async function ControlsSection({
 
   if (data.kind === "no_cards") {
     return (
-      <Panel title="No cards" description="Issue one from the console above and it will appear here.">
-        <p className="px-5 py-8 max-w-prose text-sm text-muted">
-          This customer has no registered cards, so there is nothing to control.
-          Controls attach to a card, not to a business: two people on the same
-          account get different limits, which is the entire point.
-        </p>
-      </Panel>
+      <div className="space-y-4">
+        <CoveragePanel coverage={data.coverage} live />
+        <Panel title="No cards" description="Issue one from the console above and it will appear here.">
+          <p className="px-5 py-8 max-w-prose text-sm text-muted">
+            This customer has no registered cards, so there is nothing to
+            control. Controls attach to a card, not to a business: two people on
+            the same account get different limits, which is the entire point.
+          </p>
+        </Panel>
+      </div>
     );
   }
 
   return (
     <div className="space-y-4">
+      <CoveragePanel coverage={data.coverage} live />
       {data.cards.map((card) => (
         <CardPanel key={card.cardId} card={card} live />
       ))}
@@ -709,8 +824,18 @@ function FixtureSection({ view }: { readonly view: ControlViewState }) {
   const decisions: readonly DecisionRecord[] =
     view === "empty" ? [] : [FAIL_CLOSED_DECISION, DECLINED_FUEL_DECISION, APPROVED_DECISION];
 
+  // The fixture states carry a fixture coverage figure for the same reason the
+  // rest of this section does: a state that silently dropped a panel the live
+  // view has would make the five states incomparable, which is the one job
+  // they exist for. It reads nothing and writes nothing.
+  const coverage: ControlCoverage =
+    view === "empty"
+      ? { total: 1, underControl: 0, memberOnly: 0, uncontrolled: 1 }
+      : { total: 4, underControl: 1, memberOnly: 2, uncontrolled: 1 };
+
   return (
     <div className="space-y-4">
+      <CoveragePanel coverage={coverage} live={false} />
       <CardPanel card={card} live={false} />
       <DecisionHistory decisions={decisions} live={false} />
     </div>

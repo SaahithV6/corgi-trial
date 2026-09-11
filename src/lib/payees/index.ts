@@ -111,4 +111,23 @@ export {
   type PayeeRail,
 } from "./types";
 
-export { confirmPayee, gatePaymentOnPayee, type PayeeGateRefusal } from "./gate";
+export {
+  ADD_PAYEE_HREF,
+  confirmPayee,
+  gatePaymentOnPayee,
+  signWarningHref,
+  type ConfirmPayeeResult,
+  type PayeeGateRefusal,
+} from "./gate";
+
+export {
+  explainRoutingNumber,
+  summariseExplanation,
+  type AbaExplanation,
+  type AbaGroup,
+  type AbaTerm,
+  type InvisibleSwap,
+  type TranspositionRepair,
+} from "./explain";
+
+export { recheckPayee, type RecheckRefusal, type RecheckResult } from "./recheck";

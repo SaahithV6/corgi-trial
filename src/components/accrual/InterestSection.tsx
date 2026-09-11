@@ -17,10 +17,14 @@ import type { AccrualFilter } from "./view-state";
  * arithmetic on the same book, which you cannot see if they are on two pages.
  *
  * The one thing this section refuses to do is imply a capability it has not
- * demonstrated. Overdraft interest is built, priced on the rate card, and has
- * posted nothing, because no deposit leaf on this book has been in debit on
- * any value date. `OverdraftMeasurement` says so with the numbers rather than
- * leaving a reader to infer it from an empty column.
+ * demonstrated. Overdraft interest is built and priced on the rate card and
+ * has posted nothing — and as of 2026-09-11 that is NO LONGER because nothing
+ * has been in debit. One account is overdrawn by $858,941.45; the one business
+ * date it closed in debit had already been claimed by the credit side, hours
+ * earlier, while the date was still open. `OverdraftMeasurement` has three
+ * branches for exactly that reason: rows on 4400, an overdraft with no rows,
+ * and no overdraft at all. The middle one is the truth today and it is the
+ * only one of the three that is not a slogan.
  */
 export function InterestSection({
   view,
@@ -90,11 +94,13 @@ export function InterestSection({
         <Note title="Interest days are owed that nothing has claimed">
           <p>
             {inv.gap} (enrolment, date) pair{inv.gap === 1 ? " is" : "s are"} due
-            and unclaimed up to the book date. Normal for a few minutes after an
-            enrolment is created and before the first tick; persistent means the
-            tick is not running. Nothing is lost — the entry carries the date it
-            accrued for — but the customer is owed interest the ledger has not
-            yet credited.
+            and unclaimed up to the book date. <strong>Today is normally one of
+            them for every enrolment</strong>: the tick will not price a business
+            date until it has closed, because the basis is the settled balance at
+            the END of the date — so the open day stands here until midnight and
+            is taken by the first tick after it. Anything OLDER than today
+            persisting means the tick is not running. Nothing is lost either way:
+            the entry carries the date it accrued for, not the date the job ran.
           </p>
         </Note>
       ) : null}
@@ -112,7 +118,11 @@ export function InterestSection({
           value={<Money cents={charged} tone="neutral" />}
           note={
             charged === 0
-              ? "nothing — no deposit account has been in debit; see the measurement below"
+              ? inv.overdrawnAccounts > 0
+                ? `nothing yet — and ${inv.overdrawnAccounts} account${
+                    inv.overdrawnAccounts === 1 ? " is" : "s are"
+                  } overdrawn right now; read the measurement below`
+                : "nothing — no deposit account is in debit; see the measurement below"
               : `${posted.filter((d) => d.arithmetic?.side === "overdraft").length} day(s), credited to 4400`
           }
         />
@@ -135,6 +145,56 @@ export function InterestSection({
           }
         />
       </div>
+
+      {inv.pricedBeforeClose > 0 ? (
+        <Note emphasis title="Days priced before their own business date closed">
+          <p>
+            <strong>{inv.pricedBeforeClose}</strong> posted interest day
+            {inv.pricedBeforeClose === 1 ? "" : "s"} on this book
+            {inv.pricedBeforeClose === 1 ? " was" : " were"} claimed on or
+            before {inv.pricedBeforeClose === 1 ? "its" : "their"} own accrual
+            date, moving <Money cents={inv.pricedBeforeCloseCents} tone="neutral" />.
+            The basis is defined as the settled balance at the END of a business
+            date; a date that has not ended has no such balance, so what those
+            rows were priced on is the balance at the instant the tick ran.
+          </p>
+          <p className="mt-2">
+            They cannot be re-<em>priced</em>: <code>interest_day</code> is{" "}
+            <code>UNIQUE (schedule_id, accrual_date)</code>, and that is the
+            index that makes the tick exactly-once. The tick was changed so this
+            cannot recur — <code>interestPricingHorizon()</code> holds the open
+            date back to the last date that has closed, a tick asked for today
+            reports <code>openDateHeld</code> and prices through yesterday, and
+            migration 0049 refuses the posting in Postgres whether or not that
+            function is still there.
+          </p>
+          <p className="mt-2">
+            They <em>are</em> corrected, by append. A re-price is not a second
+            interest day, so it is not one: <code>interest_adjustment</code> is
+            a different claim about the same day — a reversal and a re-book at
+            the ORIGINAL value date, keyed{" "}
+            <code>interest-adj:&lt;enrolment&gt;:&lt;date&gt;:&lt;watermark&gt;</code>
+            . <strong>{inv.adjustments}</strong> day
+            {inv.adjustments === 1 ? " has" : "s have"} been corrected and{" "}
+            <strong>{inv.mispricedUncorrected}</strong> {" "}
+            {inv.mispricedUncorrected === 1 ? "is" : "are"} queued in{" "}
+            <code>v_interest_mispriced_uncorrected</code>.
+            {inv.mispricedUncorrected === 0 && inv.adjustments === 0 ? (
+              <>
+                {" "}
+                That queue is zero because the mispriced dates{" "}
+                <strong>have not closed yet</strong>, not because there is
+                nothing to do. The correction re-books what the date actually
+                closed at, and a date that is still open has no such figure —
+                correcting a mid-day price with a second mid-day price is the
+                same defect twice, so{" "}
+                <code>interest_adjustment_after_close</code> refuses it. The
+                queue fills itself at midnight America/New_York.
+              </>
+            ) : null}
+          </p>
+        </Note>
+      ) : null}
 
       <OverdraftMeasurement view={view} />
 
@@ -196,17 +256,84 @@ function OverdraftMeasurement({ view }: { readonly view: InterestPanelView }) {
   const overdraftDays = view.days.filter((d) => d.arithmetic?.side === "overdraft").length;
   const card = view.rateCard.find((r) => r.supersededOn === null && r.tier === "standard");
 
-  if (inv.overdrawnAccounts > 0 || overdraftDays > 0) {
+  if (overdraftDays > 0) {
     return (
       <Note title="Overdraft interest is live on this book">
         <p>
           <code>v_overdrawn_accounts</code> returns {inv.overdrawnAccounts} row
-          {inv.overdrawnAccounts === 1 ? "" : "s"} right now, and{" "}
+          {inv.overdrawnAccounts === 1 ? "" : "s"} right now (
+          <Money cents={inv.overdrawnCents} tone="neutral" /> overdrawn), and{" "}
           {inv.overdrawnDaysInWindow} (account, value date) pair
           {inv.overdrawnDaysInWindow === 1 ? " was" : "s were"} in debit inside
           the 45-day catch-up window. {overdraftDays} day
           {overdraftDays === 1 ? " has" : "s have"} been priced on the overdraft
           side and posted to <code>4400</code>.
+        </p>
+      </Note>
+    );
+  }
+
+  // THE HONEST MIDDLE CASE, AND THE ONE THIS BOOK IS IN: an account IS
+  // overdrawn and `4400` still has nothing on it. Saying "live" here would be
+  // a capability claim no row supports; saying "nothing has been in debit"
+  // would be false. So it says both numbers and the reason they disagree.
+  if (inv.overdrawnAccounts > 0) {
+    return (
+      <Note emphasis title="An account IS overdrawn — and 4400 still has no rows. Both, with the reason.">
+        <p>
+          <code>v_overdrawn_accounts</code> returns{" "}
+          <strong>{inv.overdrawnAccounts}</strong> row
+          {inv.overdrawnAccounts === 1 ? "" : "s"} right now —{" "}
+          <Money cents={inv.overdrawnCents} tone="neutral" /> in debit — and{" "}
+          <strong>{inv.overdrawnDaysInWindow}</strong> (account, value date)
+          pair{inv.overdrawnDaysInWindow === 1 ? "" : "s"} inside the 45-day
+          catch-up window closed in debit. Zero days have been priced on the
+          overdraft side. Those two facts are not a contradiction and the reason
+          is worth more than either of them.
+        </p>
+        <p className="mt-2">
+          The one business date on which this book has ever closed in debit was
+          already <em>claimed</em> — by the credit side, hours earlier, while
+          the date was still open and the account was still in credit.{" "}
+          <code>interest_day</code> is <code>UNIQUE (schedule_id,
+          accrual_date)</code>, which is what makes the tick exactly-once, and
+          it is the same index that makes a day priced early impossible to
+          price again. {inv.pricedBeforeClose > 0 ? (
+            <>
+              <strong>{inv.pricedBeforeClose}</strong> posted interest day
+              {inv.pricedBeforeClose === 1 ? "" : "s"} on this book
+              {inv.pricedBeforeClose === 1 ? " was" : " were"} claimed on or
+              before {inv.pricedBeforeClose === 1 ? "its" : "their"} own accrual
+              date, moving <Money cents={inv.pricedBeforeCloseCents} tone="neutral" />
+              .
+            </>
+          ) : null}
+        </p>
+        <p className="mt-2">
+          The tick no longer prices an open business date —{" "}
+          <code>interestPricingHorizon()</code> stops it at the last date that
+          has actually closed — so the next date that closes in debit prices on{" "}
+          <code>4400</code>
+          {card === undefined
+            ? ""
+            : ` at ${percent(card.overdraftRateBps)} a year, ACT/${card.dayCountDenominator}`}{" "}
+          with nothing reconfigured and nothing deployed.
+        </p>
+        <p className="mt-2">
+          The rows already written stand — nothing is edited on this ledger —
+          and they are <strong>corrected by append</strong>: an interest
+          adjustment, the product §19 named, built by migration 0049. It is a
+          reversal of the wrong entry plus a re-book at the ORIGINAL value date,
+          which for this account crosses sides — <code>5400</code> paid back,{" "}
+          <code>4400</code> charged. That correction has to price the balance the
+          date actually CLOSED at, so it waits for the date to close for exactly
+          the reason the tick now does;{" "}
+          <code>v_interest_mispriced_uncorrected</code> holds{" "}
+          <strong>{inv.mispricedUncorrected}</strong> and{" "}
+          <code>interest_adjustment</code> holds{" "}
+          <strong>{inv.adjustments}</strong>. The first date that closes in debit
+          with the horizon in place needs no correction at all: it prices on{" "}
+          <code>4400</code> the first time.
         </p>
       </Note>
     );

@@ -72,6 +72,15 @@ export type PayeeRow = {
   readonly archivedAt: Instant | null;
   readonly archivalReason: string | null;
 
+  /**
+   * The append-only `payee_verification` row the standing below comes from.
+   *
+   * Null when nobody has ever checked this payee. On the screen it is what a
+   * signature attaches itself to: an acknowledgement references a check by id,
+   * never a payee, which is why a re-check raises a warning nobody has signed
+   * for even when the payee was signed off last week.
+   */
+  readonly verificationId: string | null;
   /** Null when nobody has ever checked this payee. A real state, not an error. */
   readonly checkedAt: Instant | null;
   readonly checkedByName: string | null;

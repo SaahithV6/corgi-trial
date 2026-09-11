@@ -64,8 +64,21 @@ import {
   positionAt,
   readCardCharge,
   readDisputeState,
+  type DisputeLedgerLineRow,
   type DisputeStateRow,
 } from "./store";
+
+/**
+ * The two chart codes the customer's own halves of an episode live on.
+ *
+ * Not hard-coded account ids — codes, the same two the postings in `model.ts`
+ * are addressed by (`2100` through `DisputeAccounts.customerAccountId`, `9200`
+ * through `memoAccountId`). House legs — `1120`, `5200`, `9900` — are
+ * deliberately excluded: they are ours, not the customer's, and a customer's
+ * balance is not affected by either of them.
+ */
+const CUSTOMER_DEPOSIT_CODE = "2100";
+const CUSTOMER_MEMO_CODE = "9200";
 
 /** The one bigint -> number narrowing in the read path. Refuses, never rounds. */
 function toCents(value: bigint): number {
@@ -149,10 +162,53 @@ function toCase(row: DisputeStateRow, networkLabel: string | null): CaseView {
   };
 }
 
+/**
+ * THIS CASE'S OWN contribution to the customer's ledger and holds at a booking
+ * watermark, folded out of the episode's own journal lines.
+ *
+ * Why this exists, measured rather than imagined. `positionAt()` answers for
+ * the WHOLE ACCOUNT, so the three published rows move for every reason the
+ * customer's account moves — and on 2026-09-11, on case DSP-20260911-8U46YC,
+ * they did: an unrelated $225.00 card authorisation released between the grant
+ * and the clawback, and the "available" column read $65,774.03, $65,774.03,
+ * $65,999.03 under a caption that said available does not move at all. The
+ * account-wide figure is the right thing to SHOW — it is what the customer
+ * sees — but it is the wrong thing to make a claim about.
+ *
+ * So the claim is made about this fold instead. Both halves are derived the
+ * same way the account-wide ones are, with the same sign convention:
+ * `journal_line` is debit-positive, the 2100 deposit leaf and the 9200 memo
+ * leaf are both credit-normal, so the balance a customer would recognise is
+ * the NEGATED sum. A provisional credit posts −7340 to 2100 (ledger +73.40)
+ * and −7340 to 9200 (holds +73.40), and the difference is zero — which is the
+ * feature, stated over numbers nothing else on the book can perturb.
+ *
+ * No extra query: `listDisputeLedger()` has already returned every line, and
+ * `v_dispute_ledger` returns each of them exactly once (0023's anti-join, with
+ * `v_dispute_ledger_double_count` standing over it).
+ */
+function caseContributionAt(
+  ledger: readonly DisputeLedgerLineRow[],
+  seq: bigint,
+): { ledgerCents: bigint; holdsCents: bigint } {
+  let ledgerCents = 0n;
+  let holdsCents = 0n;
+  for (const line of ledger) {
+    if (line.bookingSeq > seq) continue;
+    if (line.book === "financial" && line.accountCode === CUSTOMER_DEPOSIT_CODE) {
+      ledgerCents -= line.amountCents;
+    } else if (line.book === "memo" && line.accountCode === CUSTOMER_MEMO_CODE) {
+      holdsCents -= line.amountCents;
+    }
+  }
+  return { ledgerCents, holdsCents };
+}
+
 function balanceRow(
   label: string,
   seq: bigint,
   position: { ledgerCents: bigint; holdsCents: bigint },
+  ownPosition: { ledgerCents: bigint; holdsCents: bigint },
 ): EpisodeBalanceView {
   return {
     label,
@@ -160,6 +216,9 @@ function balanceRow(
     ledgerCents: toCents(position.ledgerCents),
     holdsCents: toCents(position.holdsCents),
     availableCents: toCents(position.ledgerCents - position.holdsCents),
+    caseLedgerCents: toCents(ownPosition.ledgerCents),
+    caseHoldsCents: toCents(ownPosition.holdsCents),
+    caseAvailableCents: toCents(ownPosition.ledgerCents - ownPosition.holdsCents),
   };
 }
 
@@ -249,9 +308,24 @@ async function buildEpisode(
     })),
     entries,
     balances: [
-      balanceRow("before the claim", firstSeq - 1n, before),
-      balanceRow("provisional credit granted", holdOpenSeq, duringCredit),
-      balanceRow("after the case resolved", lastSeq, after),
+      balanceRow(
+        "before the claim",
+        firstSeq - 1n,
+        before,
+        caseContributionAt(ledger, firstSeq - 1n),
+      ),
+      balanceRow(
+        "provisional credit granted",
+        holdOpenSeq,
+        duringCredit,
+        caseContributionAt(ledger, holdOpenSeq),
+      ),
+      balanceRow(
+        "after the case resolved",
+        lastSeq,
+        after,
+        caseContributionAt(ledger, lastSeq),
+      ),
     ],
     noReversals: entries.every((e) => e.entryType !== "reversal"),
   };

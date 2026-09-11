@@ -70,6 +70,7 @@
 
 import "server-only";
 
+import { applyDefaultControls } from "@/lib/cards/defaults";
 import { registerCard } from "@/lib/holds";
 import { sql, type Sql } from "@/lib/ledger/db";
 import { createCard } from "@/lib/rails/lithic/client";
@@ -193,6 +194,32 @@ export async function issueCardToMember(
       message: `Lithic created card ${card.token}, but it could not be bound to this customer, so any authorisation on it will park instead of posting: ${describe(thrown)}`,
     };
   }
+
+  // A card issued to a person arrives WITH a control version.
+  //
+  // This is the second product issuance path — `issueCardAction()` on
+  // /accounts is the first — and it was the one still leaving cards
+  // uncontrolled. 880 of 911 cards had no control version, which is why 48 of
+  // 51 provider approvals were decided by `no_controls_configured`: a rule
+  // that judged nothing, on a card nobody had said anything about.
+  //
+  // The default DECLINES NOTHING and is chosen so it cannot: per-transaction
+  // $5,000, equal to the `spend_limit` this same function already sends Lithic
+  // above, same axis and same inclusivity. What it buys is that the decision
+  // row cites a pinned control VERSION instead of citing nothing, that a
+  // freeze becomes a version bump rather than a first-ever creation, and that
+  // rule 15 stops being noise and starts meaning "this card reached the book
+  // without going through a product issuance path".
+  //
+  // Deliberately NOT a trigger: an uncontrolled card must stay representable,
+  // because a fail-open that cannot be produced cannot be tested — and the
+  // fail-open sibling is a real, proven branch of the ASA decision.
+  //
+  // A failure here must not orphan the card. It is already created at Lithic
+  // and bound to the customer by the statement above; refusing the whole
+  // issuance over a missing default would leave a real provider card with no
+  // owner on this book, which is strictly worse than an uncontrolled one.
+  await applyDefaultControls({ cardId: binding.cardId }).catch(() => undefined);
 
   // And the one new row: whose card it is.
   const assigned = await assignCardToMember(

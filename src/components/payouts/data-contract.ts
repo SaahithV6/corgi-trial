@@ -101,6 +101,16 @@ export type QuoteView = {
   /** Signed, with its sign shown: what the market move cost us, or handed us. */
   readonly varianceLabel: string | null;
   readonly varianceIsLoss: boolean | null;
+  /**
+   * The journal entry this settlement posted, or `null` if nothing posted.
+   *
+   * A string the browser prints, like every other field here — but this one
+   * decides which paragraph the settlement panel shows, because "the variance
+   * is recorded but not posted" is a claim about the ledger and the ledger is
+   * the only thing entitled to answer it. It comes from
+   * `fx_quote_settlement.entry_id`, a foreign key into `journal_entry`.
+   */
+  readonly settlementEntryId: string | null;
 
   /**
    * What honouring this commitment would cost at the rate as it stands now,

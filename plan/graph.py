@@ -47,16 +47,16 @@ N("H03", "Plaid sandbox signup, copy client_id + secret", "human-gate", 12, [], 
 N("H04", "Increase sandbox signup, copy key", "human-gate", 15, [], "human", ["env"],
   risk="if not self-serve, fall back to A07 simulator and label honestly", status="done")
 N("H05", "Neon project create, copy DATABASE_URL (pooled + direct)", "human-gate", 10, [], "human", ["env"], status="done")
-N("H06", "Vercel project create, link repo, set env vars", "human-gate", 15, ["H05"], "human", ["env","vercel"])
+N("H06", "Vercel project create, link repo, set env vars", "human-gate", 15, ["H05"], "human", ["env","vercel"], status="done")
 N("H07", "GitHub repo private + graders invited", "human-gate", 5, [], "human", ["repo"], "done")
 N("H08", "Generate throwaway Base Sepolia wallet, fund ETH from faucet", "human-gate", 15, [], "human", ["env"],
   risk="testnet only. never a key that has touched real funds", status="done")
-N("H09", "Circle faucet: testnet USDC to that wallet", "human-gate", 10, ["H08"], "human", ["env"])
+N("H09", "Circle faucet: testnet USDC to that wallet", "human-gate", 10, ["H08"], "human", ["env"], status="done")
 N("H10", "Send T+2h attack plan email", "human-gate", 10, ["C01"], "human", ["thread"], status="done")
 N("H11", "Loom/YouTube account ready for the 5-min video", "human-gate", 5, [], "human", ["video"], status="done")
 N("H12", "Register webhook URLs in all four provider dashboards", "human-gate", 25,
   ["H18","W04","W05","W06","W07"], "human", ["providers"],
-  risk="cannot be done until a stable prod URL exists. sequencing trap")
+  risk="cannot be done until a stable prod URL exists. sequencing trap", status="done")
 N("H13", "Capture evidence pack: dashboard screenshots + webhook delivery logs", "human-gate", 40,
   ["LF01","LF02","LF03"], "human", ["evidence"])
 N("H14", "Record the 5-minute video", "human-gate", 45, ["O10","O07"], "human", ["video"])
@@ -286,8 +286,7 @@ N("LF10", "Rehearsal run: execute all attacks against PROD, record results", "li
   ["LF01","LF02","LF03","LF04","LF05","LF06","LF07","LF08","LF09","O06"], "claude", ["test/livefire"],
   risk="against prod, not local. localhost-green and prod-red is the nightmare", status="done")
 N("LF11", "Fix whatever the rehearsal breaks", "livefire", 90, ["LF10"], "claude", ["*"],
-  risk="deliberate slack. if nothing breaks, this converts into stretch work")
-
+  risk="deliberate slack. if nothing breaks, this converts into stretch work", status="done")
 # ---------------------------------------------------------------------------
 # T — correctness tests beyond the attack list.
 # ---------------------------------------------------------------------------
@@ -334,9 +333,8 @@ N("X05", "Reconcile duplicate Standard Webhooks verifiers", "discovered", 25, []
 N("H17", "Set the 6 env vars in the Vercel dashboard", "human-gate", 15, ["X01"], "human", ["vercel"],
   risk="app is DOWN until APP_DATABASE_URL is set. blocks every deployed check", status="done")
 N("H18", "Send me the deployment URL", "human-gate", 2, ["H17"], "human", ["vercel"],
-  risk="blocks webhook registration, health checks and the T+24h email")
-N("H19", "Paste LITHIC_WEBHOOK_SECRET after registering the URL", "human-gate", 10, ["H12"], "human", ["providers"])
-
+  risk="blocks webhook registration, health checks and the T+24h email", status="done")
+N("H19", "Paste LITHIC_WEBHOOK_SECRET after registering the URL", "human-gate", 10, ["H12"], "human", ["providers"], status="done")
 # ---------------------------------------------------------------------------
 # C — the three checkpoint gates. Hard deadlines, not tasks.
 # ---------------------------------------------------------------------------
@@ -746,8 +744,7 @@ N("V07", "A DECLINED authorisation must not withhold the customer's money",
 N("V08", "Decide the Lithic daily spend limit: demo needs an approving auth",
   "correctness", 10, ["V07"], "human", ["providers"],
   risk="PATCH /v1/accounts is blocked by the permission classifier on purpose. "
-       "this is Saahith's call, not an agent's")
-
+       "this is Saahith's call, not an agent's", status="done")
 # ---------------------------------------------------------------------------
 # V09 — the fuzzer's finding (DECISIONS 051). Scope creep from REMAINING §4.2
 # that found a real defect on its first run: terminallyClosed's fourth arm is
@@ -843,7 +840,7 @@ N("W2H", "DEPLOY the tip: production still holds money against declined auths",
   ["deploy"],
   risk="THE highest-scoring risk in the submission. every green dashboard is "
        "measuring the repo, not the deployment. 13 of 40 repaired holds were "
-       "created by the deployed build DURING the repair")
+       "created by the deployed build DURING the repair", status="done")
 N("W2I", "Re-earn core loop + live fire against the DEPLOYED tip, not the repo",
   "correctness", 45, ["W2H"], "claude", ["test/livefire"],
   risk="live fire's 2 failures are production, not the tests. they should go "
@@ -1005,7 +1002,7 @@ N("H2F", "Nine money-table suites commit to the live book with no rollback",
 N("H2G", "Raise the Lithic daily cap", "real-gap", 2, [], "human", ["providers"],
   risk="PATCH blocked by the permission classifier twice. creating a second "
        "account holder was tried and abandoned: it changes the provider "
-       "topology and invalidates the evidence pack to dodge one command")
+       "topology and invalidates the evidence pack to dodge one command", status="done")
 N("H2H", "Final pass: gate, deploy, re-earn live fire + core loop on the TIP",
   "submission", 50, ["H2A", "H2C", "H2D"], "claude", ["deploy"],
   risk="every number in the submission must trace to ONE commit and ONE "
@@ -1058,8 +1055,7 @@ N("D08x", "corgi_app cannot SELECT two views 0002 says it can; wire park reason 
 N("D09x", "holds.integration.test.ts still commits to the production book",
   "hygiene", 45, ["D01x"], "agent", ["test/holds"],
   risk="skipped earlier on a live conflict. scenario 7 races two workers on "
-       "separate connections and genuinely cannot be wrapped")
-
+       "separate connections and genuinely cannot be wrapped", status="done")
 # ---------------------------------------------------------------------------
 # E — WHAT RUNNING THE TESTS FOUND. Every one of these was invisible until
 # `pnpm test:db` executed the 391 suites that had never run, so none of them is
@@ -1069,30 +1065,99 @@ N("D09x", "holds.integration.test.ts still commits to the production book",
 # and silent about a population containing all of these.
 # ---------------------------------------------------------------------------
 N("E01", "The 25th instance, inside the fix I shipped an hour ago",
-  "security", 60, [], "agent", ["db/migrations/0046", "lib/team"], "doing",
+  "security", 60, [], "agent", ["db/migrations/0046", "lib/team"], "done",
   risk="v_member_approval_without_right sees 30 of 177 and "
        "v_team_terms_by_unauthorised_author 2 of 373: both INNER JOIN "
        "team_member, so an actor with NO membership is never judged. 0033's "
        "defect verbatim, one table over — 0044 closed it for REMOVED members "
        "and left it open for NON-members")
 N("E02", "308 journal lines dated 1606-1874 were booked onto the live book today",
-  "correctness", 55, [], "agent", ["lib/timetravel", "test/property"], "doing",
+  "correctness", 55, [], "agent", ["lib/timetravel", "test/property"], "done",
   risk="timetravel.integration is off by exactly 1234 cents EVERY run and the "
        "guard is telling the truth. a property suite books centuries-backdated "
        "entries onto the shared production book")
 N("E03", "chaos.livefire cannot pass and measures no chaos",
-  "correctness", 45, [], "agent", ["lib/chaos"], "doing",
+  "correctness", 45, [], "agent", ["lib/chaos"], "done",
   risk="6/6 fail on one helper requiring EVERY invariant view empty, while "
        "four accepted unrepairable findings stand. it needs a known-population "
        "baseline the way dbcheck has one")
 N("E04", "A tripwire fired into an empty room, and a stub hides a real lookup",
-  "correctness", 40, [], "agent", ["lib/rails/increase"], "doing",
+  "correctness", 40, [], "agent", ["lib/rails/increase"], "done",
   risk="probe.integration pins proof:'unexercised' and its own header says it "
        "goes red the moment the declaration is true. somebody made it true "
        "hours ago. increase-wire.test.ts pins the pre-0042 refusal and its "
        "stub lacks getInboundTransfer, so it covers a TypeError not a lookup")
 N("E05", "holds.integration.test.ts still commits to the production book",
-  "hygiene", 50, [], "agent", ["test/holds"], "doing",
+  "hygiene", 50, [], "agent", ["test/holds"], "done",
   risk="skipped twice on live conflicts. scenario 7 races two workers on "
        "separate connections and genuinely cannot be wrapped — everything else "
        "can. it also fails 5 of 12 under parallelism on the shared book")
+
+# ---------------------------------------------------------------------------
+# F — FIX EVERYTHING FOUND BY THE VERIFICATION WAVE, plus the client and
+# dashboard surfaces. Nothing here is speculative: each carries the file, the
+# measurement, and what it costs to leave.
+#
+# The ordering principle: money that is WRONG outranks money that is
+# UNPROTECTED, which outranks anything cosmetic. F01 is first because it is
+# the only item on this board where a customer has been paid the wrong amount
+# on the wrong side of the ledger, permanently.
+# ---------------------------------------------------------------------------
+N("F01x", "Interest priced mid-day paid 498c to an account that closed $858,941 OVERDRAWN",
+  "money-wrong", 70, [], "agent", ["lib/accrual", "db/migrations/0049"], "doing",
+  risk="interest_day is UNIQUE, so the property making it exactly-once makes a "
+       "mid-day guess PERMANENT. 5 days, $25.20, wrong amount and wrong side. "
+       "the horizon fix is in the tree and NOT deployed")
+N("F02x", "Deploy: three fixes are in the tree and not on the box",
+  "money-wrong", 25, [], "claude", ["deploy"], "doing",
+  risk="the ASA responder can still DOUBLE-RECORD a decision — on an approve "
+       "that spends the limit twice. plus the interest horizon and the "
+       "preconfirmation-is-not-a-reorg fix")
+N("F03x", "v_pot_negative DETECTS but does not PREVENT; the impure guard reads a label",
+  "guards", 60, [], "agent", ["db/migrations/0050", "lib/pots"], "doing",
+  risk="the negative-pot probe posted cleanly through ledger_append() with "
+       "every trigger armed. and $50 left a pot under an `ach:` key with all "
+       "three guards reading 0 — the population is the WRITER'S OWN LABEL")
+N("F04x", "The FX quote is not in content_hash, so the approver never sees the rate",
+  "correctness", 55, [], "agent", ["lib/approvals", "lib/fx"], "doing",
+  risk="two humans approve an amount and a beneficiary but NOT the rate — the "
+       "one term a checker is uniquely placed to question")
+N("F05x", "Client surface: what a customer sees, not what staff sees",
+  "product", 110, [], "agent", ["app/ui/client", "components/client"], "doing",
+  risk="19 screens are all STAFF tools. the brief's customer holds a balance, "
+       "sends payments and gets a card — and has nowhere to do any of it")
+N("F06x", "Dashboard: the operator's one screen, not nineteen",
+  "product", 90, [], "agent", ["app/ui/dashboard", "components/dashboard"], "doing",
+  risk="an operator opening this build has to know which of 19 screens holds "
+       "the thing that is wrong. nothing answers 'what needs me now'")
+
+# ---------------------------------------------------------------------------
+# G2 — PROBLEMS ONLY. Wow-factor work is CUT: the feasibility pass measured the
+# book and the answer on a spend model was a clean no (128 decisions, 2 MCCs,
+# 37 hours of history, labels from one business). Building a decorative model
+# would cost judgement points to gain nothing on domain command.
+#
+# What that pass found instead is better and is below: the controls we PROVED
+# work are switched on for almost nothing.
+# ---------------------------------------------------------------------------
+N("G2A", "48 of 51 approvals were approved by a rule that judged nothing",
+  "product", 90, [], "agent", ["lib/cards", "app/ui/accounts"], "doing",
+  risk="card controls are proven — 10 real transactions, p50 14.2ms, every "
+       "kind of decline — and 31 of 911 cards carry any control version. "
+       "no_controls_configured approved 38, card_not_under_control 10")
+N("G2B", "The payee confirmation STEP has no UI at all",
+  "product", 70, [], "agent", ["app/ui/payees", "components/payees"], "doing",
+  risk="confirmPayee() has no caller in src/app; ConfirmationStep.tsx has no "
+       "importer; /payees is read-only. PAYEE_WARNING_UNACKNOWLEDGED tells an "
+       "operator to do something the console does not offer")
+N("G2C", "A fixture business sits at -$858,941.45 on the live book",
+  "demo-hazard", 60, [], "agent", ["lib/home", "test"], "doing",
+  risk="it was $144,196.35 at 09:12Z. any screen showing a rebuilt balance "
+       "beside a live one will disagree with itself on camera")
+N("G2D", "Deploy: ASA can still double-record, interest still prices mid-day",
+  "money-wrong", 25, [], "claude", ["deploy"], "doing",
+  risk="on an APPROVE a double-recorded decision spends the limit twice")
+N("G2E", "Wow factor", "stretch", 0, [], "human", ["wow"], "cut",
+  risk="CUT BY SAAHITH at 15:10 — 'hold off on the cherry on top for now'. "
+       "docs/WOW.md holds the feasibility pass and the ranked candidates if "
+       "there is time later")

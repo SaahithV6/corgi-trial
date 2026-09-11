@@ -95,6 +95,7 @@ import {
   claimInterestDay,
   houseInterestAccountId,
   interestPostingFor,
+  interestPricingHorizon,
   listInterestDue,
   lockInterestSchedule,
   rateAt,
@@ -435,7 +436,22 @@ export async function runInterest(options: InterestRunOptions): Promise<Interest
   const ctx: Context = { runId: options.runId, log, actorId: options.actorId };
 
   const limit = Math.min(Math.max(options.limit ?? DEFAULT_RUN_LIMIT, 1), 2000);
-  const due = await listInterestDue(options.bookDate, limit);
+
+  // THE OPEN BUSINESS DATE IS NOT PRICED. `interestPricingHorizon()` carries
+  // the whole argument and the measurement behind it; the short version is
+  // that the basis is the balance at the END of a business date, a date that
+  // has not ended does not have one, and `interest_day`'s UNIQUE (schedule,
+  // date) means a mid-day guess can never be taken back.
+  const { horizon, openDateHeld } = await interestPricingHorizon(options.bookDate);
+  if (openDateHeld) {
+    log.info("interest.open_date_held", {
+      bookDate: options.bookDate,
+      pricedThrough: horizon,
+      why: "a business date is priced once it has closed; the next tick takes it",
+    });
+  }
+
+  const due = await listInterestDue(horizon, limit);
   const days: InterestDayReport[] = [];
 
   for (const item of due) {
@@ -492,11 +508,15 @@ export async function runInterest(options: InterestRunOptions): Promise<Interest
     replayed: days.filter((d) => d.replayed).length,
     creditInterestCents: creditCents.toString(),
     overdraftInterestCents: overdraftCents.toString(),
+    pricedThrough: horizon,
+    openDateHeld,
     days,
   };
 
   log.info("interest.complete", {
     bookDate: options.bookDate,
+    pricedThrough: horizon,
+    openDateHeld,
     considered: report.considered,
     posted: report.posted,
     skipped: report.skipped,

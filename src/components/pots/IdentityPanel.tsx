@@ -57,7 +57,7 @@ export function IdentityPanel({
           </div>
           <dl className="mt-3 grid gap-x-8 gap-y-1 text-xs sm:grid-cols-2">
             <Row
-              label="main — the 2100 deposit leaf, code 2100"
+              label="main — the 2100 deposit leaf, code 2100, summed over ALL value dates"
               cents={identity.mainCents}
             />
             <Row
@@ -95,6 +95,8 @@ export function IdentityPanel({
             <Money cents={availability.holdsCents} className="font-semibold" />
             <span className="text-muted">−</span>
             <Money cents={availability.unclearedCents} className="font-semibold" />
+            <span className="text-muted">−</span>
+            <Money cents={availability.pendingOutboundCents} className="font-semibold" />
             <span className="text-muted">=</span>
             <Money
               cents={availability.availableCents}
@@ -103,11 +105,38 @@ export function IdentityPanel({
             />
           </div>
           <dl className="mt-3 grid gap-x-8 gap-y-1 text-xs sm:grid-cols-2">
-            <Row label="ledger — the main leaf only, pots excluded" cents={availability.ledgerCents} />
+            <Row
+              label="ledger — the main leaf only, pots excluded, AS OF THE BOOK DATE"
+              cents={availability.ledgerCents}
+            />
             <Row label="− active card authorisation holds" cents={availability.holdsCents} />
             <Row label="− uncleared inbound credits" cents={availability.unclearedCents} />
+            <Row
+              label="− committed outflows (debits booked for a future value date)"
+              cents={availability.pendingOutboundCents}
+            />
             <Row label="= available to spend, or to earmark" cents={availability.availableCents} />
           </dl>
+          <p className="mt-2 text-xs text-muted">
+            FOUR terms, not three. This subtraction used to print the first
+            three and the answer, which on 2026-09-11 read{" "}
+            <em>$58,388.31 − $635.00 − $19,701.18 = $35,552.13</em> — short by
+            the $2,500.00 of committed outflows, and wrong to anybody who
+            checked it. <code>decideMove()</code>&rsquo;s refusal sentence had
+            named all four all along; the panel had not.
+          </p>
+          <p className="mt-2 text-xs text-muted">
+            <strong>
+              This <em>ledger</em> is not the <em>main</em> figure above it.
+            </strong>{" "}
+            Here it is the main leaf as of the book date —{" "}
+            <code>value_date &lt;= today</code> — and above it is the same
+            account summed over ALL time, future value dates included. Same
+            account, two questions, and the identity is asked of the all-time
+            sum on both sides so it still holds. A standing order booked for
+            next year is in one and not in the other, which is the whole reason
+            the labels differ.
+          </p>
         </div>
 
         <Note title="Why moving money into a pot lowers what can be spent">

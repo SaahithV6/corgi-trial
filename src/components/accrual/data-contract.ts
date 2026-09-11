@@ -190,6 +190,26 @@ export type InterestInvariantsView = {
   readonly overdrawnAccounts: number;
   /** Deposit leaves in debit on any value date in the catch-up window. */
   readonly overdrawnDaysInWindow: number;
+  /** How much is overdrawn right now, in cents. A count is not a measurement. */
+  readonly overdrawnCents: number;
+  /**
+   * Interest days claimed ON OR BEFORE their own accrual date — priced while
+   * the business date was still open, on a balance that was not that date's
+   * closing balance, and unrepeatable because the claim is UNIQUE.
+   */
+  readonly pricedBeforeClose: number;
+  /** What those days moved, in cents. */
+  readonly pricedBeforeCloseCents: number;
+  /**
+   * `v_interest_mispriced_uncorrected` — of those days, the ones whose date
+   * has CLOSED, whose closed figure differs, and which nothing has corrected.
+   * A work queue, not an invariant: zero while the dates are still open.
+   */
+  readonly mispricedUncorrected: number;
+  /** `interest_adjustment` rows — days corrected by a reversal and a re-book. */
+  readonly adjustments: number;
+  /** `v_interest_adjustment_drift` — MUST be 0. */
+  readonly adjustmentDrift: number;
 };
 
 export type InterestPanelView = {

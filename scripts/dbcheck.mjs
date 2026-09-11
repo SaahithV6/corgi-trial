@@ -401,6 +401,30 @@ const INVARIANT_VIEWS = [
   // that cannot be real, the earliest 1606-04-01, and the only thing that ever
   // noticed was a timetravel assertion going red three files from the cause.
   ["v_value_date_unexplained", "no entry carries a value date outside [entity created − 1 year, today + 18 months] that no declared writer owns"],
+  // ---- 0015's four, which were never in this list -------------------------
+  //
+  // Migration 0015 created all four and `--prove` reported "26 of 26" without
+  // them, because coverage is computed against THIS array — so the fraction
+  // was honest about its own list and silent about a whole module. Four pot
+  // invariants existed, were correct, and were checked by nothing on any run.
+  //
+  // Each was made to fail against the live database in a rolled-back
+  // transaction before being listed: impure 0->1 by posting a third line onto
+  // `1000 Cash at bank`, negative 0->1, orphan 0->1, identity drift 0->1 by
+  // planting a ghost sub-account under a pot.
+  //
+  // Read `v_internal_transfer_impure` with its limit in mind: its population
+  // is `rail='internal' AND idempotency_key LIKE 'pot:%'` — THE WRITER'S OWN
+  // LABEL. $50.00 was moved out of a pot into `1000 Cash at bank` under an
+  // `ach:` key and all three of impure, identity-drift and deposit-control
+  // stayed 0. The structural version keys on `journal_line.account_id IN
+  // (SELECT account_id FROM pot)` and belongs in a migration as
+  // `v_pot_line_provenance` — docs/POTS.md §10.3. Listing these is worth
+  // doing now; it does not make that one true.
+  ["v_internal_transfer_impure", "an internal transfer touches only the customer's own subtree"],
+  ["v_pot_identity_drift", "main plus every pot equals the whole subtree — nothing hides under a customer's 2100"],
+  ["v_pot_negative", "no pot holds less than nothing"],
+  ["v_pot_orphan", "no pot sub-account exists without the pot that names it"],
 ];
 
 // ---------------------------------------------------------------------
@@ -830,7 +854,13 @@ const REACH = [
   // column the view filters on, so the two cannot drift. It is printed in full
   // below this table, per source, with the one column that stops "outside the
   // guard" ever meaning "unexamined" again.
-  ["v_wire_availability_drift", "uncleared-credit holds with a wire memo entry",
+    ["v_internal_transfer_impure", "internal transfers carrying a pot key",
+    "SELECT count(*)::int AS n FROM journal_entry WHERE rail = 'internal' AND idempotency_key LIKE 'pot:%'",
+    "SELECT count(*)::int AS n FROM journal_entry WHERE rail = 'internal'"],
+  ["v_pot_identity_drift", "pots", "SELECT count(*)::int AS n FROM pot"],
+  ["v_pot_negative", "pots", "SELECT count(*)::int AS n FROM pot"],
+  ["v_pot_orphan", "pot sub-accounts", "SELECT count(*)::int AS n FROM pot"],
+["v_wire_availability_drift", "uncleared-credit holds with a wire memo entry",
     `SELECT count(*)::int AS n FROM hold h
       WHERE h.kind = 'uncleared_credit'
         AND EXISTS (SELECT 1 FROM journal_entry je
@@ -1731,6 +1761,146 @@ if (process.argv.includes("--prove")) {
           INSERT INTO card_auth_event (auth_id, kind, amount_cents, is_final, value_date, provider_event_id)
           VALUES ('${t.auth_id}'::uuid, 'authorization', 1, false, current_date,
                   'dbcheck-prove-unanswered-' || gen_random_uuid()::text)`);
+        return undefined;
+      },
+    },
+    {
+      // ---- 0015's four, proved late and for the right reason -------------
+      //
+      // These four views existed from migration 0015 and were in NO list: the
+      // gate did not run them and `--prove` reported "26 of 26" against a
+      // roster that did not contain them. Adding them to the roster without
+      // proofs immediately took it to 26 of 30, which is the coverage check
+      // doing its job on the person who added them.
+      view: "v_pot_orphan",
+      how: "a pot naming a sub-account that is not in the chart (FK dropped to reach it)",
+      as: "owner",
+      async run(tx) {
+        const seed = await one(tx, `SELECT id, business_id, account_id FROM pot LIMIT 1`);
+        if (!seed) return "no pot on this book to model the proof on";
+        // THE CONSTRAINT IS THE PROTECTION; THIS VIEW IS THE BACKSTOP.
+        //
+        // The first attempt at this proof was refused by `pot_account_id_fkey`
+        // — the state the view watches for is already UNREPRESENTABLE while
+        // that key stands. That is a good result and worth printing rather
+        // than hiding: it means the view can only ever fire if somebody has
+        // removed the foreign key, which is exactly what this does, inside a
+        // transaction that is rolled back.
+        await tx.unsafe(`ALTER TABLE pot DROP CONSTRAINT pot_account_id_fkey`);
+        await tx.unsafe(`
+          INSERT INTO pot (business_id, account_id, name, purpose, opened_by)
+          VALUES ('${seed.business_id}'::uuid, gen_random_uuid(),
+                  'dbcheck --prove: orphan', 'prove', ${ACTOR})`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_pot_identity_drift",
+      how: "a GHOST sub-account under a customer's 2100 that is not a pot",
+      as: "owner",
+      async run(tx) {
+        // MY FIRST TWO ATTEMPTS AT THIS PROOF WERE BOTH WRONG, and the reason
+        // is worth keeping. I wrote them against the view's one-line summary —
+        // "every pot is exactly one sub-account" — which describes OWNERSHIP.
+        // The view compares BALANCES: `main + pots <> subtree`. Dropping the
+        // UNIQUE and inserting a duplicate pot moved nothing, because the
+        // duplicate changed no balance. 0 -> 0.
+        //
+        // The state it actually catches is money hiding in the subtree that is
+        // neither the main balance nor any pot — a child account under the
+        // customer's 2100 that nothing declares. That is the real hazard: the
+        // subtree is what the deposit control reports, and a ghost under it
+        // would make the two disagree.
+        const seed = await one(tx, `
+          SELECT a.id AS main_id, a.entity_id, a.business_id
+            FROM account a JOIN pot p ON p.account_id <> a.id AND p.business_id = a.business_id
+           WHERE a.code = '2100' AND a.business_id IS NOT NULL AND a.book = 'financial'
+           LIMIT 1`);
+        if (!seed) return "no customer 2100 with a pot to model the proof on";
+        const ghost = await one(tx, `
+          INSERT INTO account (entity_id, business_id, parent_id, code, name, type, book)
+          SELECT '${seed.entity_id}'::uuid, '${seed.business_id}'::uuid, '${seed.main_id}'::uuid,
+                 '2100.ghost-' || substr(gen_random_uuid()::text, 1, 8),
+                 'dbcheck --prove: ghost under the subtree', type, book
+            FROM account WHERE id = '${seed.main_id}'::uuid
+          RETURNING id`);
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: money hiding under a customer 2100',
+            'dbcheck-prove-ghost:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${ghost.id}', 'amount_cents', '-4200',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${seed.main_id}', 'amount_cents', '4200',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'internal'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_pot_negative",
+      how: "a pot holding less than nothing",
+      // The view DETECTS and does not PREVENT: the probe posts cleanly through
+      // ledger_append() with every trigger armed, and `decideMove()` is the
+      // only thing standing between the book and a negative pot. That is a
+      // finding, and this proof is where it is visible.
+      as: "app",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT p.account_id, a.entity_id, p.business_id
+            FROM pot p JOIN account a ON a.id = p.account_id LIMIT 1`);
+        if (!seed) return "no pot on this book to model the proof on";
+        const main = await one(tx, `
+          SELECT id FROM account WHERE entity_id = '${seed.entity_id}'::uuid
+             AND code = '2100' LIMIT 1`);
+        if (!main) return "no 2100 leaf for that pot's entity";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: a pot driven below zero',
+            'dbcheck-prove-pot-negative:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.account_id}', 'amount_cents', '100000000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${main.id}', 'amount_cents', '-100000000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'internal'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_internal_transfer_impure",
+      how: "a pot move that reaches outside the customer's own subtree",
+      // Read this proof with the view's limit in mind: its population is
+      // `rail='internal' AND idempotency_key LIKE 'pot:%'` — THE WRITER'S OWN
+      // LABEL — so this proof has to adopt that label to be seen at all. A
+      // real impure move under an `ach:` key stays invisible, which is why
+      // docs/POTS.md §10.3 asks for a structural v_pot_line_provenance.
+      as: "app",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT p.account_id, a.entity_id FROM pot p
+            JOIN account a ON a.id = p.account_id LIMIT 1`);
+        if (!seed) return "no pot on this book to model the proof on";
+        const house = await one(tx, `
+          SELECT id FROM account WHERE entity_id = '${seed.entity_id}'::uuid
+             AND code = '1000' LIMIT 1`);
+        if (!house) return "no 1000 cash leaf for that entity";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: an internal transfer touching cash at bank',
+            'pot:dbcheck-prove-impure:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.account_id}', 'amount_cents', '5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${house.id}', 'amount_cents', '-5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'internal'::rail, NULL, NULL, NULL, NULL, NULL)`);
         return undefined;
       },
     },

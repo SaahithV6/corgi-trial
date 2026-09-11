@@ -1,5 +1,470 @@
 # Independent evaluation — Corgi work trial, Track 3 (Neobank)
 
+> ## PASS OF 2026-09-11T15:17:35Z → 15:42:59Z — ONE COMMIT, ONE WINDOW
+>
+> **This banner is the current reading. Everything below the horizontal rule that
+> follows §V is the earlier report of 04:49Z–05:05Z against commit `4c682e1`, and
+> it has not been edited — rewriting a dated measurement destroys the only thing
+> that makes it worth reading.** Where the two disagree, this banner is right.
+
+## The anchor
+
+| | |
+| --- | --- |
+| **Window** | 2026-09-11T15:17:35Z → 2026-09-11T15:42:59Z |
+| **Commit** | `0fa057de82972f37fd8c622b1288dd4a3314785e` (`0fa057d`), read from `GET /api/health` → `commit.sha`, source `VERCEL_GIT_COMMIT_SHA` |
+| **Sha at open** | `0fa057d` at 15:17:35Z |
+| **Sha at close** | `0fa057d` at 15:42:59Z — **UNMOVED.** This scoreboard spans one commit. |
+| **Target** | https://corgi-trial-psi.vercel.app |
+| **Database** | live Neon, read as `corgi_app` (no UPDATE, no DELETE; it cannot even read `schema_migrations`) |
+| **Health** | `ok` at open (db 157 ms), `degraded` at close (db 151 ms). Both `live 7 / 7`. The degradation is the Lithic 180–900 s quiet band entered after live fire ran at 15:31 — `webhookHealth.degradedBy: ["lithic"]`, not a broken rail. |
+
+**Nothing in this repository was modified to produce this section.** No source,
+script, migration or other doc was touched. `docs/EVALUATION.md` is the only file
+written. Every defect below is reported and left exactly as found.
+
+---
+
+## I. THE HEADLINE: none of this wave is on the deployed tip
+
+**`0fa057d` is the commit made at 2026-09-11T13:44:12Z. Every file this wave
+produced was written between 14:30Z and 15:43Z. None of it is committed, and
+none of it is deployed.**
+
+Evidence, taken without running a single git command — all of it is file reads:
+
+| Fact | Value |
+| --- | --- |
+| `/api/health` → `commit.sha` | `0fa057de82972f37fd8c622b1288dd4a3314785e` |
+| `.git/refs/heads/main` (file contents) | `0fa057de82972f37fd8c622b1288dd4a3314785e` — identical |
+| `.git/index`, `.git/COMMIT_EDITMSG`, `.git/refs/heads/main` mtime | `2026-09-11 06:44:12 -0700` = **13:44:12Z** |
+| `.git/logs/HEAD` last entry | `95aae9d → 0fa057d`, epoch `1789134252` = **13:44:12Z**, *"the sweep existed and fired before maturity every day, by construction"* |
+| Newest working-tree file at close | `docs/CARD-CONTROLS.md`, **15:43Z** — 119 minutes after the tip was cut |
+
+A commit writes objects and moves the ref. `.git/objects` was last written at
+13:44Z. **No commit has been made since.**
+
+What that costs, measured on the deployed URL at 15:42:59Z:
+
+```
+404  /client                 404  /client/pay
+404  /client/activity        404  /client/approvals
+404  /client/cards           404  /dashboard
+200  /payees                 200  /statements  200  /breaks  200  /approvals
+```
+
+**The client surface and the operator dashboard — two of this wave's headline
+deliverables, eleven source files and two new docs — return 404 to a grader.**
+The trial's first automatic fail is *"Localhost only, or a video in place of a
+URL."* These screens currently exist only on localhost.
+
+Every figure in §III below is therefore a measurement of the **previous** build.
+It is a true reading of `0fa057d` and it is not a reading of this wave's work.
+
+---
+
+## II. The tree gate — RED, and which agent's file
+
+The rule for this pass was: do not score a moving tree. The tree moved
+throughout — 47 files landed between 15:17Z and 15:33Z, and more through 15:43Z.
+Three files were red when the pass opened. Two were fixed while it ran. **One is
+still red at close.**
+
+| Gate | 15:16Z | 15:36Z | 15:43Z |
+| --- | --- | --- | --- |
+| `pnpm typecheck` | **PASS** | PASS | PASS |
+| `pnpm lint --max-warnings=0` | **FAIL** — 15 errors | **PASS** | PASS |
+| `pnpm test` | **FAIL** — 2 suites | FAIL — 1 suite | **FAIL — 1 suite** |
+
+**Fixed while the pass ran:**
+
+- `src/components/dashboard/__dump.test.ts` — 15 × `no-console`. A debug dump
+  committed into the lint set by the **dashboard agent**. Deleted ~15:35Z.
+- `src/components/home/ScreenLinks.test.ts` — *"these routes exist and the front
+  door claims to name every screen: `/client`, `/client/activity`,
+  `/client/cards`, `/client/pay`, `/dashboard`."* The **client-surface and
+  dashboard agents** shipped five screens the front door did not know about.
+  Fixed ~15:35Z.
+
+**Still red at close — `src/lib/ledger/boundary.test.ts`:**
+
+```
+New SQL against journal_entry / journal_line / account outside src/lib/ledger/:
+  src/lib/accrual/interest-adjust.ts
+```
+
+`src/lib/accrual/interest-adjust.ts` is the **mispriced-interest agent's** file,
+created 15:15Z and last touched 15:18Z. The test's own message says the fix is
+either to move the query behind a named reader or to raise the allowlist number
+*with a reason in DECISIONS* — "a raised number is a decision somebody has to
+defend, which is the entire point of this test." Neither has been done.
+
+Final: **1 failed | 2617 passed | 440 skipped** (148 files passed, 43 skipped).
+
+---
+
+## III. The scoreboard — one pass, against `0fa057d`
+
+| Runnable | Result | Exit | Window |
+| --- | --- | --- | --- |
+| `node scripts/coreloop.mjs` | **PASS 7 · FAIL 0 · SKIP 0** of 7 legs · 75 s · 103 HTTP calls to the deployed origin, 3 to Lithic | 1 | 15:21:56 → 15:23:11Z |
+| `node scripts/livefire.mjs` | **PASS 7 · FAIL 0 · SKIP 1** of 8 attacks · 346 s | 0 | 15:25:50 → 15:31:36Z |
+| `node scripts/dbcheck.mjs` | **42 passed, 4 failed** · 30 invariant views | 1 | 15:18:57 → 15:19:05Z |
+| `node scripts/dbcheck.mjs --prove` | **80 passed, 4 failed** · 30 of 30 views, 37 proofs, 13 needing a trigger disabled on the owner connection | 1 | 15:19:48 → 15:20:22Z |
+| `node scripts/rebuild.mjs` | 14 checks · **0 rebuild disagreements** · 12 fact-vs-fact · 3,156 ms | 1 | 15:20:37Z |
+| `node scripts/evidence.mjs` | **21 proven, 1 not proven**, 22 claims | 1 | 15:20:51 → 15:20:59Z |
+| `node scripts/compliance.mjs` | **PASS 26 · FAIL 4 · WARN 0 · UNKNOWN 4 · CITED 7** of 41 · 29 s | 1 | 15:21:12 → 15:21:42Z |
+| `node scripts/audit-claims.mjs` | **exit 0** — *"no document contradicts the endpoint"*; truth 7 of 7 live | 0 | 15:21:02Z |
+| `node scripts/verify-demo.mjs` | **18 PASS · 0 FAIL · 1 SKIP** of 19 | 0 | 15:31:47 → 15:32:49Z |
+| `curl /api/health` | `ok` → `degraded`, 7 / 7 live both times | 200 | 15:17:35Z / 15:42:59Z |
+
+Three of these are better than the last recorded reading and are worth saying so:
+**`coreloop` moved 6/1 → 7/0/0** (the Lithic daily spend cap has reset, so leg 4's
+$50 authorisation approves again); **`audit-claims` moved exit 1 with 7 false
+positives → exit 0**; **`compliance` moved 5 FAIL → 4 FAIL**.
+
+`rebuild.mjs`'s exit 1 is entirely the 12 expiry-clock rows — **0 rebuild
+disagreements** means the book reconstructed from its events matches production
+on all 14 checks, including the statement content hash re-rendered from the
+journal for 62 published statements.
+
+`evidence.mjs`'s single NOT PROVEN is honest and correctly labelled: *"the most
+recent real authorisations DECLINE — the sandbox account's daily cap is
+exhausted"*, measured against the provider rather than assumed.
+
+### The four deliberate `dbcheck` reds — decided, not alarms, and there is no fifth
+
+| View | Rows | Exposure | Reads as decided? |
+| --- | --- | --- | --- |
+| `v_refused_auth_hold` | 257 (215 holds) | $16,821.10 | **Yes** — *"no verdict was ever observed for these events. NOT repairable by inventing one; see 0032."* |
+| `v_hold_expiry_drift` | 12 | **$0.00** | **No subline at all** — see below |
+| `v_advice_delta_unsound` | 1 | $73.40 | **Yes** — *"converted against A < 0 … the conversion is fixed (base = max(A,0)); the ROW is not repairable."* |
+| `v_hold_closure_unexplained` | 4 | $132.00 | **Yes** — *"a fixture's closures. NOT repaired — 0043's header prices both repairs and both are worse."* |
+
+**No fifth red appeared.** The count is 4, the same four as the 10:07Z reading,
+and `--prove` shows all 30 views can be made to fail on purpose — none is
+structurally incapable of returning a row.
+
+**Minor defect, worth one line.** Three of the four print an indented rationale
+under the FAIL. **`v_hold_expiry_drift` prints none.** Its own `--prove` and
+`rebuild.mjs` both explain it (*"two separate clock reads at insert time"*, zero
+cents of exposure), but on the `dbcheck` scoreboard — the surface a grader will
+actually read — it is indistinguishable from an alarm. Its row count also grew
+9 → 12 during the day with no note saying growth is expected.
+
+---
+
+## IV. Every figure cross-checked against another surface
+
+One account, one instant, one watermark. **Ridgeline Robotics, Inc.**, account
+`a0c41a37-2be1-5c30-bfe9-03455f048fac`, **booking watermark 6005**, 15:40Z:
+
+| Surface | Ledger balance | Available |
+| --- | --- | --- |
+| `v_available_balance` / `ledger_availability()` (Postgres) | $59,522.91 | **$35,661.73** |
+| `/accounts/a0c41a37…` — staff console, **deployed** | $59,522.91 | **$35,661.73** |
+| `/client?business=e274546d…` — customer screen | $59,522.91 | **$35,661.73** |
+| `scripts/verify-demo.mjs` check 15 | $59,522.91 | **$35,661.73** |
+| **`scripts/coreloop.mjs` summary line** | **$88,222.51** | **$66,861.33** |
+
+Four surfaces agree to the cent, itemise the same four terms
+(−$410.00 card holds, −$20,951.18 uncleared, −$2,500.00 committed) and quote the
+same watermark. **One does not, and it is off by $31,199.60.** That is DEFECT 2.
+
+**The customer screen is exact.** `/client` renders *"You can spend right now
+$35,661.73 / In your account $59,522.91"* with all three deductions written out
+in plain English and the identity named as *"the same subtraction the ledger did
+— not a second calculation."* On the number the brief grades hardest, the new
+customer surface and the staff console do not differ by one cent.
+
+**Not verifiable in this pass, and not claimed:** `/api/v1` and `/api/mcp` were
+**not** exercised. Only the SHA-256 of the demo bearer token is in the repo
+(`MCP_AGENT_TOKENS` stores `tokenSha256`), which is correct security and means
+the plaintext is not available to me. **A skip is not a pass:** the agent
+surface's figure is unverified today, and given DECISIONS 054 that is exactly the
+surface with the worst history on this axis.
+
+### The fixture business
+
+`Holds Integration Fixture Co.` stands at **−$858,941.45** ledger / **−$863,224.45**
+available. It is labelled: `verify-demo` check 17 separates *2 customers* from
+*5 test fixtures* by name, and `docs/DEMO.md` §1.1 names them before the click
+path reaches them. **No screen in this build shows a rebuilt balance beside a
+live one**, so the self-disagreement that was anticipated does not occur — every
+balance surface reads `ledger_availability()`, and `rebuild.mjs` is a script
+whose output is never rendered next to a live figure.
+
+---
+
+## V. Defects this wave introduced
+
+### DEFECT 1 — Nothing this wave built is committed or deployed *(critical)*
+
+§I. `/client`, `/client/activity`, `/client/cards`, `/client/pay`,
+`/client/approvals` and `/dashboard` all 404 on https://corgi-trial-psi.vercel.app.
+A reviewer opening the submitted URL sees none of it.
+
+### DEFECT 2 — `coreloop.mjs` holds a sixth definition of "available", $31,199.60 too permissive
+
+**File:** `scripts/coreloop.mjs:634-668`, `async function facts(businessId)`.
+
+```sql
+booked AS (
+  SELECT COALESCE(SUM(l.amount_cents), 0)::bigint * d.normal_side AS cents
+    FROM deposit d LEFT JOIN journal_line l ON l.account_id = d.id
+   GROUP BY d.normal_side
+)
+...
+return { ledger, holds, uncleared, available: ledger - holds - uncleared };
+```
+
+Two independent faults:
+
+1. **No value-date filter.** The join has no `WHERE l.value_date <= current_date`
+   and no booking watermark. Measured on this account: **132 journal lines worth
+   $28,699.60 carry a value date in the future, the latest being 2027-12-07** —
+   fifteen months out. `coreloop` counts all of it as already on the ledger.
+   This is the identical fault DECISIONS 054 records for the agent surface
+   (*"the old code queried at value date 9999-12-31, so money that has not
+   arrived was spendable"*), reintroduced in the script that certifies the core
+   loop.
+2. **The `pending_outbound` term is missing entirely.** `available = ledger −
+   holds − uncleared`. Every other surface subtracts committed outflows
+   ($2,500.00 here). `verify-demo` check 15 asserts the four-term identity
+   explicitly; `coreloop` asserts a three-term one.
+
+**What a reviewer would see.** `coreloop.mjs` **disagrees with itself inside a
+single run**: leg 6 prints *"as corrected **$59,522.91** read at watermark 5943"*
+for this very account, and the summary line 40 lines later prints *"ledger
+**$88,222.51**"*. Same script, same run, same account, **$28,699.60 apart**.
+
+**Arithmetic, so it can be checked rather than believed:**
+
+```
+all journal lines          × normal_side  =  $88,222.51   <- coreloop's "ledger"
+lines with value_date<=today × normal_side =  $59,522.91  <- every other surface
+future-dated (132 lines)                   =  $28,699.60
+  $88,222.51 − $410.00 − $20,951.18                = $66,861.33  <- coreloop's "available"
+  $59,522.91 − $410.00 − $20,951.18 − $2,500.00    = $35,661.73  <- the truth
+  difference                                        = $31,199.60
+```
+
+**Why it matters beyond the number.** `coreloop.mjs` is the runnable
+`compliance.mjs` CITES for the core loop and the one the debrief will run. It
+prints the closing balance as its final line. A grader who cross-checks that line
+against the account screen finds a $31,199.60 gap in the build's headline claim.
+
+### DEFECT 3 — The team card-issuance path never applies default controls; 137 member cards are uncontrolled
+
+**Files:** `db/migrations/0051_card_control_defaults.sql` (the claim),
+`src/lib/team/lifecycle.ts:123` `issueCardToMember()` (the gap),
+`src/app/(app)/accounts/actions.ts:379` (the only caller of the fix).
+
+Migration 0051 is the response to the last wave's finding that *48 of 51 card
+approvals were approved by a rule that judged nothing*. Its header states the
+diagnosis precisely and correctly:
+
+> *"The gap is PROVISIONING. … **Both issuance paths** — `issueCardAction()` for
+> the console and `issueCardForMember()` for the team — call Lithic's
+> `createCard()`, then `registerCard()`, and stop."*
+
+**The fix wired one of the two.** `applyDefaultControls()` has exactly one
+non-test caller in the tree:
+
+```
+src/app/(app)/accounts/actions.ts:379:  const defaults = await applyDefaultControls({ cardId: binding.cardId });
+```
+
+`issueCardToMember()` in `src/lib/team/lifecycle.ts` calls `createCard()` →
+`registerCard()` → `assignCardToMember()` and stops. **The string `control` does
+not appear anywhere in that file.** (The header also names the function
+`issueCardForMember()`; no such function exists — the real one is
+`issueCardToMember()`. A reader checking the claim against the tree finds
+nothing, which is how this survived review.)
+
+**Measured on the live book at 15:41Z, through 0051's own new view:**
+
+| `v_card_control_coverage.cover` | Cards |
+| --- | --- |
+| `uncontrolled` (no member, no control) | 755 |
+| **`member_only` (a person's card, no control)** | **137** |
+| `under_control` | 43 |
+
+All 137 `member_only` cards belong to **Ridgeline Robotics, Inc.** — the demo
+customer. **137 of its 157 member cards (87%) are held by a named person and
+judged by no rule.** Decisions on the live book still read
+`no_controls_configured → approve` **44** and `card_not_under_control → approve`
+**11**: **55 of 91 approvals (60%) are still produced by a rule that judged
+nothing.**
+
+To be fair to the work: this is a real improvement — genuinely-judged approvals
+went from **3 → 36** — and 0051's refusal to INSERT control rows from a migration
+is well-argued and right. But the brief's sentence is *"a card for every person
+on the team"*, and the team path is the one left unwired. **The finding is not
+closed, and nothing in the tree says it is still open.**
+
+### DEFECT 4 — `src/lib/ledger/boundary.test.ts` is red at close
+
+§II. `src/lib/accrual/interest-adjust.ts`. The tree cannot be certified green.
+
+### DEFECT 5 — THE TWENTY-SIXTH INSTANCE: the triage board answers "nothing is wrong" when it cannot read the book
+
+**Files:** `src/app/(app)/dashboard/page.tsx` `selectSource()`;
+`src/components/dashboard/TriageView.tsx`;
+`src/components/dashboard/DashboardStateBar.tsx`.
+
+`TriageView.tsx` states the rule, in its own words, above `TriageErrorPanel`:
+
+> *"It says so, with the driver's own code, and it does **NOT** fall back to a
+> fixture. A triage board that quietly served drawn data when the database was
+> unreachable would be the worst possible version of this screen: the one
+> question it exists to answer is 'is anything wrong', and **an unread book
+> rendering as an all-clear is the same failure as an unreadable invariant
+> counting as a pass**."*
+
+`page.tsx` does exactly that, one caller up, before the component can object:
+
+```ts
+const { hasDatabase } = await import("./live-source");
+if (!hasDatabase()) return createFixtureTriageSource("empty");
+```
+
+`createFixtureTriageSource("error")` exists and returns `fail("TRIAGE_57014", …)`.
+It is not used. `"empty"` returns `ok(...)` — and `"empty"` is, in the page's own
+docstring, *"a quiet shift: nothing red, nothing queued."* **With no database the
+screen returns HTTP 200 and renders an all-clear.**
+
+The badging then contradicts itself, because the two badges are driven by
+different things:
+
+| Badge | Driven by | Renders with no database |
+| --- | --- | --- |
+| `DashboardStateBar` | `isLiveState(view.state)` — the **URL** | **`LIVE`**, tone `positive` |
+| `TriageView` | `triage.live` — the **snapshot** | `FIXTURE`, tone `negative` |
+
+`DashboardStateBar`'s own comment is *"the LIVE/FIXTURE badge sits on the state
+bar as well as on the board itself, **because a cropped screenshot has to carry
+it**."* In this state the cropped screenshot carries the **wrong** one.
+
+**This is the shape the register has been tracking since 033: a guard reports
+healthy because the failure is outside its population by construction.** Here the
+no-database case is routed out of the error path into the all-clear path — and it
+is the *"found inside a fix shipped the same night"* variety, because the file
+that names the failure in prose is the file that has it.
+
+**Honesty caveat, stated so it can be discounted.** This is a **code-path
+finding, not a runtime demonstration.** I attempted to reproduce it by starting
+the dev server with `APP_DATABASE_URL` unset; Next.js loads `.env` itself
+(`- Environments: .env.local, .env`), so the page read the live book anyway
+(watermark 5986, badge `LIVE`, correct). **I could not make `hasDatabase()`
+return false, so I have not seen this render.** The three lines above contain no
+branching and the conclusion follows from them, but it is read, not measured, and
+it is recorded that way.
+
+**On the count.** The repository's canonical list — `docs/DEBRIEF.md` §1, adopted
+as canonical by DECISIONS 058 — **ends at 22**. This pass was briefed that the
+count is 25, so instances 23–25 exist somewhere that is not the canonical list.
+By the canonical list this is the **23rd**; by the briefed count it is the
+**26th**. **I am not asserting a number**, because DECISIONS 058's own conclusion
+is that *"a number four documents disagree about is not a finding, it is a
+mood"* — and the fact that DEBRIEF §1 has not been updated past 22 while the
+count in use is 25 **is 058's failure recurring, three entries after it was
+written.** That is itself worth a line before submission.
+
+### DEFECT 6 — `compliance.mjs` reports four violations and not one of them is the violation it names
+
+This is the most likely thing to lose points that nobody built wrong. The
+scoreboard a grader reads prints:
+
+```
+VIOLATIONS
+  AF1  "Localhost only, or a video in place of a URL."
+  AF3  "UPDATE or DELETE on money rows. Anywhere. Ever."
+  AF5  "Secrets committed to the repo." — GIT HISTORY, not just the tip
+  G1   Ledger balance versus available balance — derived, never a second stored number
+```
+
+Three of those four are named **automatic fails**. Checked one at a time:
+
+- **AF1** fires on `docs/EVENTS.md:460`. That line is row 4 of the **SSRF
+  blocklist table** — the list of hosts the webhook sender *refuses*:
+  `` `localhost`, `*.localhost`, `*.local`, `*.internal`, `*.home.arpa`,
+  `*.onion` ``. The rule matched the word and not the claim. **False positive.**
+- **AF3** reports `scripts/dbcheck.mjs exit 1 — 42 passed, 4 failed`. It
+  delegates to the exit code. `dbcheck` exits 1 because of the **four deliberate
+  standing reds**, none of which is an UPDATE or a DELETE on a money row. **AF3
+  reads FAIL for a reason that is not AF3** — the identical defect DECISIONS 058
+  records for AF2/`audit-claims`, now relocated one row down the same scoreboard.
+- **AF5** names four file/shape pairs. Three are the constant
+  `CHAOS_WEBHOOK_SECRET_DEFAULT` in `src/lib/chaos/sign.ts` and its two tests,
+  which base64-decodes to the ASCII string
+  `chaos-mode-development-only-not-a-real-secret`. The fourth is a redacted
+  fragment inside `docs/EVALUATION.md` itself. The tool's own adjacent line reads
+  *"no current .env secret value appears in any commit (17 values pickaxed)."*
+  **No secret.**
+- **G1** flags `interest_posting.basis_balance_cents`. `dbcheck` **PASSES** the
+  same fact — *"no stored balance column — balances are derived, not stored (3
+  named exceptions, each proven reproducible)"* — and pays for the exception with
+  check 5b, which re-derives every stored basis from the journal. **Two of this
+  build's own tools return opposite verdicts on one column**, and the one that
+  reasoned about it is the one a grader is less likely to run.
+
+**Zero of four are real.** A grader who runs the repo's own compliance tool and
+stops reading sees three automatic fails.
+
+### DEFECT 7 — `audit-claims.mjs` still never checks the endpoint against the tree
+
+Instance 21 on the canonical list, recorded as *"Still open"* in
+`docs/DEBRIEF.md:306`, remains open: `grep` over `scripts/audit-claims.mjs` finds
+no reference to a commit sha, `VERCEL_GIT_COMMIT_SHA`, or the tree.
+
+**Tonight it is worse than a known gap.** The tool exited **0** at 15:21:02Z —
+*"no document contradicts the endpoint"* — while validating this wave's brand-new
+documents (`docs/CLIENT.md`, `docs/DASHBOARD.md`, written 15:28Z) against a
+deployment that predates them by 104 minutes and does not contain the screens
+they describe. **Its green tick is the strongest single piece of evidence for
+DEFECT 1, and it cannot see it.**
+
+---
+
+## Scoring, as this pass reads it
+
+| Area | Points | This pass | Why |
+| --- | --- | --- | --- |
+| Domain command | 30 | **27** | The hold model, bitemporality, the four-term availability identity and the statement hash all hold up under `rebuild` and `--prove`; 0051's reasoning is first-rate. −3 for the card-controls gap being 60% open and undeclared. |
+| A system that runs | 25 | **14** | `coreloop` 7/7 and `livefire` 7/0/1 against the deployed origin are real and good. But six screens this wave built return **404** on the submitted URL, and the tree does not pass its own tests. |
+| Integration reality | 20 | **19** | 7 / 7 live, signature-verified, idempotent, honestly labelled; `evidence.mjs` 21/22 with the one gap measured rather than asserted. |
+| Live fire | 15 | **13** | Seven of eight attacks pass on real provider bytes; the skip names what is missing. |
+| Judgment and communication | 10 | **8** | DECISIONS 058 is the best thing in the repository. −2 because its own lesson — keep one number, in one place — has already lapsed. |
+| **Total** | **100** | **81** | |
+
+## The single most likely reason this submission would lose
+
+**Not a defect in the build — the gap between the build and the tip.**
+
+Every automatic fail on the trial page is about what a grader can *see*. This
+wave produced a client surface, an operator dashboard, a mispriced-interest
+repair, pot invariants, card-control defaults and a payee confirmation flow — and
+**`GET https://corgi-trial-psi.vercel.app/dashboard` returns 404**. The deployed
+commit is two hours and twelve agents behind the working tree. The repository's
+own honesty tool reports green **because** it checks documents against that stale
+deployment and has never once checked the deployment against the tree.
+
+That is the failure mode this whole verification discipline was built to catch,
+occurring at the last possible moment and in the one place no guard looks:
+**"built" and "on the deployed tip" are still different claims, and tonight the
+distance between them is the entire wave.**
+
+The remedy is not in this report's gift — it is one commit and one push, followed
+by re-running this scoreboard against the new sha. Until then **nothing in §III
+is evidence about the work done between 14:30Z and 15:43Z**, and this section is
+the only honest thing that can be said about it.
+
+---
+
+## The earlier report — 2026-09-11 04:49Z–05:05Z against commit `4c682e1`, unedited
+
+
 Evaluator: independent, adversarial, forbidden from fixing anything it found.
 Evaluated **2026-09-11 04:49Z → 05:05Z** against deployed commit **`4c682e1`**
 (`/api/health` → `commit.shortSha`, read 05:04:11.989Z).

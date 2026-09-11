@@ -870,3 +870,72 @@ The schema now refuses the next one outright —
 transactions that are rolled back. `docs/FX.md` §12 is the full account: the
 decision, the argument against deleting, the one scenario that genuinely has to
 commit and what it does about it.
+
+---
+
+## A second FX settlement, and the receipt race that nearly lost it
+
+*2026-09-11, an end-to-end re-verification. `docs/FX.md` §13 is the full
+account; this is the part that belongs to the rail.*
+
+| | |
+|---|---|
+| tx hash | [`0x92b308ab099f1cab79e9f54e9c58940ddc2e98e1b7bc8a1389261aac082fd58d`](https://sepolia.basescan.org/tx/0x92b308ab099f1cab79e9f54e9c58940ddc2e98e1b7bc8a1389261aac082fd58d) |
+| network | Base Sepolia, chain id 84532 |
+| token | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` (Circle USDC) |
+| from | `0xd3629d7399945A1Ff2C5a1c5b0F7C9d32D3c2918` |
+| to | `0x000000000000000000000000000000000000dEaD` |
+| amount | 1.979521 USDC (`1979521` minor units), derived from the commitment |
+| nonce | 5 |
+| receipt status | `0x1` |
+| block | 46,683,447 · `0x4b915ea989f036f16e4653fc0e54fd3319c7abae329bc57ff86d3e36250c25a8` |
+| block time | 2026-09-11T13:59:42Z |
+| gas | 44,843 used @ 6,000,000 wei = 269,058,000,000 wei |
+| quote | `FXQ-3BHA0ZKW`, accepted 13:59:30.987Z at 16.8587825 MXN/USD |
+| entry | `8bd5066d-e710-418c-837d-e5e75f90773c`, value date 2026-09-11 |
+
+Balances read off the chain, not inferred:
+
+```
+sender USDC       15.037961 USDC  ->  13.058440 USDC
+recipient USDC  6279.461260 USDC  ->  6281.440781 USDC
+```
+
+### The receipt race, stated properly this time
+
+*"And then we do not believe the receipt either"* above is the right instinct
+and it fired again here — but the section that follows it treats the zero-hash
+case as an accident of one run, and it is not.
+
+`eth_getTransactionReceipt`, asked at the tip, answered with `blockHash` set to
+sixty-four zeroes. That is a **preconfirmation**: the node knows the transaction
+executed and does not yet have a sealed block to name. The adapter's
+canonicality re-check compares the receipt's `blockHash` against
+`eth_getBlockByNumber(receipt.blockNumber).hash`, finds a zero on one side and a
+real hash on the other, and returns `kind: "reorged"`. Nothing posts.
+
+**Refusing to post is correct.** A receipt the client cannot tie to a canonical
+block is a receipt it must not book, and no amount of "it's probably fine"
+belongs in that decision. What was wrong was the aftermath: 1.98 USDC had left,
+the ledger did not know, and the operator was told only *"Nothing posted."*
+
+Two changes came out of it, and only one of them is in a directory this work
+owns:
+
+* **Done.** `scripts/payout-usdc.mjs`'s `reorged` branch now prints the
+  diagnostic `curl` and the exact `--settle` recovery command, as the
+  `unconfirmed` branch already did. The script still posts nothing on its own;
+  a human reads the chain and decides. The recovery ran and posted the entry
+  above.
+* **Named, not done.** The real fix is in
+  `src/lib/rails/stablecoin/adapter.ts`: an all-zero `blockHash` is *"not final
+  yet"*, not *"reorganised out"*, and the two deserve different outcomes —
+  `unconfirmed` (keep waiting, the hash is still valid) rather than `reorged`
+  (stop, something changed underneath you). One `if` before the comparison at
+  `adapter.ts:194` and the same one at `adapter.ts:231`. That module is owned
+  elsewhere, so it is written down here with the line numbers rather than
+  edited.
+
+Until that lands, **the quoted USDC payout is a two-command path on this
+corridor more often than a one-command path**, and saying so is worth more than
+a demo that happened to catch a sealed block.

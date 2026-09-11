@@ -1,7 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { usePathname } from "next/navigation";
+
+import { CLIENT_SCREENS } from "@/components/client/view-state";
 
 import { FOCUS_RING } from "../ui/primitives";
 
@@ -50,10 +53,36 @@ export const LIVE = [
   // because that test guards the front door and nothing guarded the nav.
   { href: "/economics", label: "Unit economics" },
   { href: "/team", label: "Team" },
+  { href: "/dashboard", label: "Triage" },
   { href: "/audit", label: "Audit trail" },
   { href: "/events", label: "Outbound events" },
   { href: "/chaos", label: "Chaos harness" },
+
+  // ==========================================================================
+  // THE CLIENT SURFACE. Nineteen entries above this line and every one of them
+  // is a STAFF tool: every business on the book in one table, `2100` account
+  // codes, invariant row counts. The brief opens "Customers hold a balance,
+  // send and receive payments, and get a card for each person on the team" —
+  // and until these five existed, a customer of this bank could not see their
+  // own balance without reading a table of everyone else's.
+  //
+  // They are in this list because `NavLinks.test.ts` asserts the nav carries
+  // every screen the front door names, and the front door names every route
+  // under `src/app`. They are rendered as their own GROUP below rather than
+  // mixed into the console's nav, because a customer surface and an operator
+  // console are different products and a reader should be able to see the
+  // seam. They are rendered AT ALL — rather than hidden when a staff page is
+  // open — because that test cannot see whether a link is reachable on the
+  // screen somebody is actually looking at, and "carried but painted nowhere"
+  // is the exact failure it was written to catch, one layer down.
+  // ==========================================================================
+  ...CLIENT_SCREENS.map((screen) => ({ href: screen.href, label: screen.label })),
 ] as const;
+
+/** True for the five customer screens. Used to draw the seam, nothing else. */
+export function isClientHref(href: string): boolean {
+  return href === "/client" || href.startsWith("/client/");
+}
 
 /**
  * `flex-wrap` on the nav below is load-bearing, and its absence was measured
@@ -81,25 +110,57 @@ export const LIVE = [
 export function NavLinks() {
   const pathname = usePathname();
 
+  /**
+   * `startsWith` is wrong for `/client`, and only for `/client`.
+   *
+   * Every other entry is a prefix of nothing else in this list, but `/client`
+   * is a prefix of `/client/activity` — so the plain test would light BOTH up
+   * while a reader is on the activity screen, and `aria-current="page"` would
+   * name two pages. An exact match for the one route that is somebody else's
+   * prefix, and the prefix test everywhere else, where a detail route like
+   * `/accounts/<id>` genuinely should light its parent.
+   */
+  const isCurrent = (href: string): boolean =>
+    href === "/client" ? pathname === "/client" : pathname.startsWith(href);
+
+  const link = (item: { readonly href: string; readonly label: string }) => {
+    const current = isCurrent(item.href);
+    return (
+      <Link
+        key={item.href}
+        href={item.href as Route}
+        aria-current={current ? "page" : undefined}
+        className={`rounded px-2.5 py-1.5 text-sm ${FOCUS_RING} ${
+          current
+            ? "bg-surface-raised font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border)]"
+            : "text-muted hover:text-text"
+        }`}
+      >
+        {item.label}
+      </Link>
+    );
+  };
+
+  const staff = LIVE.filter((item) => !isClientHref(item.href));
+  const client = LIVE.filter((item) => isClientHref(item.href));
+
   return (
-      <nav aria-label="Primary" className="flex flex-wrap items-center gap-1">
-      {LIVE.map((item) => {
-        const current = pathname.startsWith(item.href);
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            aria-current={current ? "page" : undefined}
-            className={`rounded px-2.5 py-1.5 text-sm ${FOCUS_RING} ${
-              current
-                ? "bg-surface-raised font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border)]"
-                : "text-muted hover:text-text"
-            }`}
-          >
-            {item.label}
-          </Link>
-        );
-      })}
-    </nav>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <nav aria-label="Operations console" className="flex flex-wrap items-center gap-1">
+        {staff.map(link)}
+      </nav>
+
+      {client.length === 0 ? null : (
+        <nav
+          aria-label="Customer view"
+          className="flex flex-wrap items-center gap-1 rounded border border-dashed border-border-strong px-1.5 py-0.5"
+        >
+          <span className="px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted">
+            Customer
+          </span>
+          {client.map(link)}
+        </nav>
+      )}
+    </div>
   );
 }

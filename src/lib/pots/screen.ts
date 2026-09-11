@@ -78,7 +78,7 @@ const INVARIANT_MEANING: Record<string, string> = {
   v_pot_orphan:
     "Every pot's account is a liability leaf parented directly on that business's own 2100 deposit account.",
   v_internal_transfer_impure:
-    "Every pot transfer is exactly two lines, both inside one customer's deposit subtree.",
+    "Every pot transfer is exactly two lines, both inside one customer's deposit subtree. READ ITS POPULATION: WHERE rail = 'internal' AND idempotency_key LIKE 'pot:%' — the WRITER'S OWN LABEL, not the chart. Probed 2026-09-11: $50.00 posted out of a pot onto 1000 Cash at bank under an ach: key moved the pot balance and left this view, v_pot_identity_drift and v_deposit_control_drift all at zero. The structural form — every line ON a pot account, whatever its entry calls itself — belongs in a migration as v_pot_line_provenance; see docs/POTS.md §10.",
   v_entry_unbalanced: "Every journal entry sums to zero, per currency.",
   v_book_not_zero: "Each book nets to zero, per entity and currency, exactly.",
 };
@@ -232,6 +232,7 @@ export async function loadPotsView(args: {
       ledgerCents: toCents(availability.ledgerCents),
       holdsCents: toCents(availability.holdsCents),
       unclearedCents: toCents(availability.unclearedCents),
+      pendingOutboundCents: toCents(availability.pendingOutboundCents),
       availableCents: toCents(availability.availableCents),
     };
 
