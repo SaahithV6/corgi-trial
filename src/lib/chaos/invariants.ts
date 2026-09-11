@@ -68,13 +68,22 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
   ],
   // 0033. Both made to fail on purpose before being trusted; the second
   // needed two triggers disabled to violate, which proves they compose.
+  //
+  // BOTH WIDENED BY MIGRATION 0046, with the third team view below. Each
+  // resolved its subject through an INNER JOIN — to `team_member` for the
+  // approval guards, to `team_member_version` for the decision guard — so a
+  // principal with no membership of that business, or a decision that pinned
+  // no member version, fell out of the FROM clause and was neither judged nor
+  // reported. Measured by `dbcheck`'s GUARD REACH before the repair: 33 of
+  // 186 approvals, 11 of 26 approved decisions, 3 of 422 member-version rows.
+  // The claims below are the wider ones and the counts are now N of N.
   [
     'v_approved_auth_for_dead_member',
-    'no authorisation is approved for a member who has been removed',
+    "no authorisation is approved without the cardholder's terms, or under terms that were dead at the time",
   ],
   [
     'v_member_approval_without_right',
-    'no approval stands from a member who lacked the right at the time',
+    'no approval stands from anybody but a member who held the right at the time, or Corgi staff',
   ],
   // 0031's three and 0040's one. They lived in side arrays in dbcheck.mjs
   // because the agents that added them could not write THIS file, and the two
@@ -122,8 +131,26 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
   // author a member's terms and mint a new approver with can_approve = true,
   // because the authority lookup filtered `AND state <> 'removed'` and then
   // treated NULL as Corgi staff.
+  //
+  // Widened by 0046 in the same pass: 0044's repair resolved the AUTHOR
+  // through an inner LATERAL, so an author holding no membership of that
+  // business produced no author row and the version left the guard entirely.
+  // A security fix carrying its own defect one table over — the twenty-fifth
+  // instance of this build's defining failure, and the first one found inside
+  // a repair for the same failure.
   [
     'v_team_terms_by_unauthorised_author',
-    "no member's terms were written by somebody who was not an active admin of that business at the time",
+    "no member's terms were written by anybody but an active admin of that business, or Corgi staff",
+  ],
+  // 0047's one, and the FIFTH side array in `scripts/dbcheck.mjs` to be folded
+  // back — always for the same cause: the agent that added it could not write
+  // this file, and the gate's list is asserted equal to this one. It is the
+  // first guard on this book about WHEN an entry claims to have happened
+  // rather than whether it balances: 1,712 entries carried value dates that
+  // cannot be real, the earliest 1606-04-01, and nothing on the system noticed
+  // except a timetravel assertion going red three files from the cause.
+  [
+    'v_value_date_unexplained',
+    'no entry carries a value date outside [entity created − 1 year, today + 18 months] that no declared writer owns',
   ],
 ] as const;

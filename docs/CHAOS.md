@@ -270,12 +270,11 @@ the deliveries park"**:
 ## 9. Measured, against the live system
 
 `src/lib/chaos/chaos.livefire.test.ts`, eight tests, run with `LIVEFIRE=1`
-against the live Neon database. **All eight pass.** Every test asserts every
-invariant view unconditionally, because "they held throughout" is the claim.
+against the live Neon database. **All eight pass.**
 
 | Test | What the ledger did |
 | --- | --- |
-| At rest | every invariant empty; chaos off |
+| At rest | the invariant population captured and printed; chaos off |
 | Duplicate delivery ×3 | 6 planned, 2 accepted, **4 suppressed as replays**; inbox holds one row per slot, not three |
 | Reorder | clearing released first and accepted; the authorisation it overtook released after; both landed |
 | Settlement delay | authorisation accepted immediately, clearing **withheld** and scheduled later, then accepted |
@@ -284,9 +283,102 @@ invariant view unconditionally, because "they held throughout" is the claim.
 | The bound | application refused 601s; **direct `INSERT` of 11 minutes refused by `chaos_control_bounded`** |
 | Expiry | armed for 2s, gone from `v_chaos_active` with no job run, reported as history |
 
-`node scripts/dbcheck.mjs` after all of it: **30 passed, 0 failed** — including
-the two card-hold invariants another branch added while this was being built,
-which `invariants.test.ts` caught drifting and which are now on this screen too.
+### 9.1 The suite that could not pass, and what replaced it
+
+The sentence that used to stand here — *"every test asserts every invariant view
+unconditionally, because they held throughout is the claim"* — was the bug. Four
+of the gated views carry a **standing, measured, deliberately unrepairable
+population**, which is why `node scripts/dbcheck.mjs` reads **37 passed, 4
+failed** and why those four are accepted findings rather than defects:
+
+```
+[chaos baseline] 25 invariant view(s) read at 2026-09-11T12:48:23Z
+[chaos baseline] 21 empty, 4 carrying a standing population (274 row(s)), 0 unreadable
+[chaos baseline]   v_refused_auth_hold        = 257 row(s)
+[chaos baseline]   v_hold_expiry_drift        =  12 row(s)
+[chaos baseline]   v_advice_delta_unsound     =   1 row(s)
+[chaos baseline]   v_hold_closure_unexplained =   4 row(s)
+[chaos baseline] the assertion from here is NO VIEW GROWS. These numbers are the
+                 book as chaos found it, not a claim that it is spotless.
+```
+
+So every case failed on that one helper — **6 of 6, the two that never called it
+excepted** — and would have failed *identically* whether chaos corrupted the book
+or left it untouched. A test that is red in both worlds distinguishes nothing,
+and this one was not measuring chaos at all: it was measuring a fact about the
+book that was already true before anything was armed. The chaos claim went
+unmeasured for as long as the suite looked like it was making it.
+
+**`dbcheck` had already solved this exact problem and the fix is its shape.**
+`dbcheck --prove` does not demand zero either: it counts a view, builds a
+violating state, counts again, and asserts the **delta** — `${before} -> ${after}
+after ${how}` — then checks the rollback put the population back. A known
+population plus a reported change is strictly more information than a demand for
+emptiness, and it is the only form that survives a book with accepted findings on
+it.
+
+`src/lib/chaos/baseline.ts` is that shape, as four pure functions:
+
+| | |
+| --- | --- |
+| `captureBaseline` | the population at the start of the run, before anything is armed |
+| `growth` | every view returning **more** rows than it did then |
+| `ratchet` | a view that **shrank** becomes the new known population |
+| `unreadable` | its own channel — never a pass, whatever the baseline says |
+
+**What is asserted now is `chaos introduced no NEW violation`.** Four things did
+not get weaker in the change:
+
+- an **unreadable** view is still never a pass, and no baseline value can excuse
+  one — `rows: -1` would otherwise read as a *decrease* against any baseline,
+  which is exactly how an unreadable guard turns into a silent pass;
+- a view that was **empty at capture is still held at empty**, so every guard
+  chaos could plausibly break — the balanced-entry, hold-drift, hold-release and
+  availability ones — is asserted exactly as hard as before;
+- a **repair ratchets the baseline down**, so a view fixed from 257 to 4 cannot
+  climb back to 257 with nothing firing;
+- and the baseline is **read from the book, never written into this file**. The
+  four populations move as other branches write, so a literal `212` in a test
+  would be a second lie with a shorter half-life than the first.
+
+### 9.2 Growth is attributed before it is blamed
+
+Eleven branches write to this database. `v_refused_auth_hold` was measured
+climbing **251 → 252 → 255 inside one 60-second run** of this suite while chaos's
+own rows accounted for **none** of it: the new rows are `auth-<epoch>` fixtures
+from the holds integration suite, and chaos posts its authorisation with
+`result: 'APPROVED'`, so it cannot enter that view at all — measured, by joining
+`chaos_run.transaction_token` to the view: **0 rows, ever**. Asserting the raw
+delta would have swapped one suite that always fails for one that fails whenever
+somebody else is working.
+
+So a grown view is a **failure unless the run can prove the new rows are not its
+own**, and there is exactly one way to prove it: the view exposes
+`provider_auth_id` and none of its rows carry an authorisation token this run
+originated. Every card-hold invariant does expose it — which is why `dbcheck`'s
+own `explain()` can select it from all three standing card findings. The set is
+read from `information_schema` at the start of the run rather than listed in the
+test, so a view that gains or loses the column moves itself in and out instead of
+drifting against a hand-kept list.
+
+**A view that grew and cannot be attributed that way fails**, including every
+view with no `provider_auth_id` column at all. Unknown is never a pass, and that
+is the safe direction precisely because chaos's whole risk surface — a
+double-counted duplicate, a hold released twice, an unbalanced entry — lands in
+those views. Exonerated growth is reported with the view and the delta, and the
+baseline is re-taken at the new number.
+
+### 9.3 And the guard itself is made to fail on purpose
+
+The mirror of a suite that cannot pass is a suite that cannot fail, so the
+comparison is a pure function with no database and `src/lib/chaos/baseline.test.ts`
+runs it in CI, ungated, four ways: a view that **grows** is reported; a view
+**unchanged at 235 rows** is silent; a view that **shrinks** is silent *and*
+lowers the floor, proved by asserting the climb back is then caught; and a view
+that **cannot be read** never reaches the delta channel to be excused by it.
+
+`node scripts/dbcheck.mjs` after all of it: **37 passed, 4 failed** — the same
+four, unchanged, which is the point.
 
 ---
 
@@ -358,6 +450,7 @@ exercised from the screen rather than only from the live-fire suite.
 | `src/lib/chaos/switch.ts` | arm, disarm, and the one answer to "is chaos on" |
 | `src/lib/chaos/driver.ts` | the outbox and the door into the real pipeline |
 | `src/lib/chaos/observe.ts` | invariants, inbox and position, at one instant |
+| `src/lib/chaos/baseline.ts` | the known population and the change against it. Pure, so §9.3 can make it fail |
 | `src/lib/chaos/invariants.ts` | the list, mirrored from `scripts/dbcheck.mjs` and kept in sync by a test |
 | `src/components/chaos/**` | pure view code against a data contract |
 | `src/app/(app)/chaos/**` | the page, its live source, its six server actions |

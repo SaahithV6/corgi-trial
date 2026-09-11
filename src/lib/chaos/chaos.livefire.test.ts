@@ -24,9 +24,69 @@
  *   as chaos corrupting the book is worse than one that says which it could
  *   not tell apart.
  *
- * The invariants are asserted UNCONDITIONALLY in every test, because they are
- * invariants: they hold whoever else is writing, and "they held throughout" is
- * the entire claim this feature makes.
+ * ============================================================================
+ * THE INVARIANTS ARE CHECKED AGAINST A BASELINE, NOT AGAINST ZERO
+ *
+ * This suite used to demand that EVERY invariant view be empty at every step,
+ * and called that "the invariants held throughout". Four of them are not empty
+ * and are not going to be: `v_refused_auth_hold`, `v_hold_expiry_drift`,
+ * `v_advice_delta_unsound` and `v_hold_closure_unexplained` each carry a
+ * standing, measured, deliberately unrepairable population — which is why
+ * `node scripts/dbcheck.mjs` reads 37 passed / 4 FAILED and why those four are
+ * accepted findings rather than bugs.
+ *
+ * So every case here failed on that one helper, 6 of 6, and would have failed
+ * identically whether chaos corrupted the book or left it untouched. A test
+ * that is red in both worlds distinguishes nothing, and this one was not
+ * measuring chaos at all: it was measuring a fact about the book that was
+ * already true before anything was armed.
+ *
+ * WHAT IS ASSERTED NOW: **chaos introduced no NEW violation.** The population
+ * is captured from the live database in `beforeAll`, before a single control
+ * is armed, and every later reading is compared against it — the same shape
+ * `dbcheck --prove` uses, which counts a view, perturbs the book and asserts
+ * the DELTA rather than demanding emptiness it knows it will not get. The
+ * comparison itself is a pure function in `./baseline.ts`, and
+ * `baseline.test.ts` makes it fail on purpose four ways, because the mirror of
+ * a suite that cannot pass is a suite that cannot fail.
+ *
+ * FOUR THINGS THAT DID NOT GET WEAKER:
+ *   - an UNREADABLE view is still never a pass, on its own channel, and no
+ *     baseline value can excuse one;
+ *   - a view that was EMPTY at capture is still held at empty, so the guards
+ *     that matter to chaos — the balanced-entry, hold-drift and availability
+ *     ones — are asserted exactly as hard as before;
+ *   - a repaired view RATCHETS the baseline down, so a repair cannot be spent
+ *     later as headroom to climb back into;
+ *   - growth this suite cannot EXONERATE is a failure, not a shrug. See below.
+ *
+ * ── AND GROWTH IS ATTRIBUTED BEFORE IT IS BLAMED ──────────────────────────
+ *
+ * Eleven branches write to this database. `v_refused_auth_hold` was measured
+ * climbing 251 -> 252 -> 255 across one 60-second run of this suite while
+ * chaos's own rows accounted for NONE of it: the new rows are `auth-<epoch>`
+ * fixtures from the holds integration suite, and chaos posts its authorisation
+ * with `result: 'APPROVED'` so it cannot enter that view at all. Asserting the
+ * raw delta would have swapped one suite that always fails for another that
+ * fails whenever somebody else is working.
+ *
+ * So a grown view is a FAILURE unless this run can PROVE the new rows are not
+ * its own, and there is exactly one way to prove it: the view exposes
+ * `provider_auth_id` and none of its rows carry an authorisation token this
+ * run originated. Every card-hold invariant does expose it — which is why
+ * `dbcheck.mjs`'s `explain()` can select it from all three of the standing
+ * card findings. A view that grew and CANNOT be attributed that way fails,
+ * including every view with no `provider_auth_id` column at all: unknown is
+ * never a pass, and that is the safe direction because chaos's whole risk
+ * surface (a double-counted duplicate, a hold released twice, an unbalanced
+ * entry) lands in exactly those views.
+ *
+ * Exonerated growth is REPORTED with the view and the delta, and the baseline
+ * is re-taken at the new number so the same rows are not reported again.
+ *
+ * The baseline is read from the book, never written into this file. The four
+ * populations move as other branches write, and a literal 212 here would be a
+ * second lie with a shorter half-life than the first.
  * ============================================================================
  *
  * SKIPPED, LOUDLY, WITHOUT `LIVEFIRE=1`. A test that silently passes when it
@@ -38,6 +98,16 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { Sql } from '@/lib/ledger/db';
 
+import {
+  captureBaseline,
+  describeBaseline,
+  describeGrowth,
+  growth,
+  ratchet,
+  unreadable,
+  type CapturedBaseline,
+  type InvariantBaseline,
+} from './baseline';
 import type * as ChaosModule from './index';
 
 const MISSING: string[] = [];
@@ -55,12 +125,72 @@ d('chaos mode against the live system', () => {
   let sql: Sql;
   let chaos: typeof ChaosModule;
 
+  /** The book as chaos found it. Captured once, before anything is armed. */
+  let captured: CapturedBaseline;
+  let baseline: InvariantBaseline;
+  let viewCount = 0;
+
+  /**
+   * Every authorisation token THIS suite originated, across every run it
+   * starts. The only thing that can put a chaos row into a card-hold invariant
+   * view, and therefore the only thing that can convict chaos of growing one.
+   */
+  const ourAuthTokens: string[] = [];
+
+  /** The invariant views that carry a `provider_auth_id`, i.e. the attributable ones. */
+  let attributable: Set<string>;
+
   beforeAll(async () => {
     ({ sql } = await import('@/lib/ledger/db'));
     chaos = await import('./index');
     // Start from a known state: nothing armed.
     await chaos.disarmAll(ACTOR);
+
+    // THE KNOWN POPULATION. Read from the live database, before the first
+    // control is armed, so everything asserted afterwards is a statement about
+    // what chaos did and not about what it walked in on.
+    const readings = await chaos.readInvariants();
+    viewCount = readings.length;
+    captured = captureBaseline(readings);
+    baseline = captured.baseline;
+    // eslint-disable-next-line no-console
+    console.log(describeBaseline(captured, viewCount));
+
+    // Which views can be ASKED whose rows they are. Read from the catalogue
+    // rather than listed here, so a view that gains or loses the column moves
+    // itself in and out of the attributable set instead of drifting against a
+    // hand-kept list — the same failure `invariants.test.ts` exists to catch.
+    const withAuthId = await sql<{ table_name: string }[]>`
+      SELECT table_name FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND column_name = 'provider_auth_id'
+         AND table_name = ANY(${readings.map((r) => r.view)})`;
+    attributable = new Set(withAuthId.map((r) => r.table_name));
   });
+
+  /**
+   * How many rows of `view` belong to an authorisation THIS run originated.
+   *
+   * `null` means the question cannot be asked of this view at all, which is
+   * treated as guilt rather than innocence.
+   */
+  async function rowsOfThisRunIn(view: string): Promise<number | null> {
+    if (!attributable.has(view)) return null;
+    const rows = await sql.unsafe<{ n: number }[]>(
+      `SELECT count(*)::int AS n FROM ${view} WHERE provider_auth_id = ANY($1)`,
+      [ourAuthTokens],
+    );
+    return rows[0]?.n ?? 0;
+  }
+
+  /** `startChaosRun`, with the run's authorisation token recorded for attribution. */
+  async function startRun(
+    opts: Parameters<typeof ChaosModule.startChaosRun>[0],
+  ): Promise<Awaited<ReturnType<typeof ChaosModule.startChaosRun>>> {
+    const run = await chaos.startChaosRun(opts);
+    ourAuthTokens.push(run.transactionToken);
+    return run;
+  }
 
   afterAll(async () => {
     // THE SUITE CANNOT LEAVE CHAOS ON. Even if a test throws halfway through.
@@ -69,15 +199,80 @@ d('chaos mode against the live system', () => {
     expect(state.on).toBe(false);
   });
 
-  /** Every invariant, asserted unconditionally. This is the claim. */
-  async function invariantsMustHold(when: string): Promise<void> {
+  /**
+   * CHAOS INTRODUCED NO NEW VIOLATION — the claim, against the baseline.
+   *
+   * Not "the book is spotless". Four views carry an accepted, unrepairable
+   * population and demanding zero of them made this suite unable to pass under
+   * any behaviour of the system it tests. What is asserted is the DELTA: no
+   * view returns more rows than it did before chaos was armed, and a view that
+   * was empty then is empty now.
+   *
+   * An unreadable view is asserted separately and is never a pass, because an
+   * unreadable invariant and a satisfied one are indistinguishable to anything
+   * that treats an exception as a zero.
+   */
+  async function noNewViolations(when: string): Promise<void> {
     const readings = await chaos.readInvariants();
-    const broken = readings.filter((r) => r.rows !== 0 || r.error !== null);
+
+    // The list itself has to still be there. A helper that read nothing would
+    // report no growth, for ever.
+    expect(readings.length, 'the invariant list shrank mid-run').toBeGreaterThanOrEqual(
+      Math.max(13, viewCount),
+    );
+
+    expect(unreadable(readings), `an invariant could not be READ ${when}`).toEqual([]);
+
+    const grew = growth(baseline, readings);
+    const ours: string[] = [];
+    const elsewhere: string[] = [];
+
+    for (const g of grew) {
+      const mine = await rowsOfThisRunIn(g.view);
+      if (mine === null) {
+        ours.push(
+          `${describeGrowth(g)} [NOT ATTRIBUTABLE: this view exposes no provider_auth_id, so ` +
+            `this run cannot prove the new rows are not its own — and unknown is never a pass]`,
+        );
+      } else if (mine > 0) {
+        ours.push(
+          `${describeGrowth(g)} [${String(mine)} row(s) carry an authorisation THIS RUN ` +
+            `originated: ${ourAuthTokens.join(', ')}]`,
+        );
+      } else {
+        elsewhere.push(describeGrowth(g));
+      }
+    }
+
+    // THE ASSERTION. Not "the book is spotless" — "chaos put nothing new on it".
     expect(
-      broken.map((b) => `${b.view}: ${b.error ?? `${String(b.rows)} row(s)`}`),
-      `invariants were not satisfied ${when}`,
+      ours,
+      `chaos introduced a NEW invariant violation ${when}. Each line is ` +
+        'view: known -> now, against the population this run captured before arming ' +
+        'anything; see the [chaos baseline] block above.',
     ).toEqual([]);
-    expect(readings.length).toBeGreaterThanOrEqual(13);
+
+    // Somebody else's writes. Named, with the delta, and re-baselined at the
+    // new number — reported rather than asserted away, and never silently
+    // folded into the claim chaos is making.
+    if (elsewhere.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[chaos baseline] grew ${when}, and NOT from this run's rows — another branch is ` +
+          `writing to this database. Re-baselined: ${elsewhere.join(' | ')}`,
+      );
+      for (const g of grew) {
+        if (elsewhere.includes(describeGrowth(g))) baseline.set(g.view, g.now);
+      }
+    }
+
+    // Somebody repaired a standing finding while this ran: take the repair as
+    // the new floor, so it cannot be spent later as room to climb back into.
+    const repaired = ratchet(baseline, readings);
+    if (repaired.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[chaos baseline] repaired while the suite ran, baseline lowered: ${repaired.join(', ')}`);
+    }
   }
 
   async function inboxStateOf(webhookId: string): Promise<string | null> {
@@ -89,8 +284,33 @@ d('chaos mode against the live system', () => {
 
   // -------------------------------------------------------------------------
 
-  it('holds every invariant before anything is armed', async () => {
-    await invariantsMustHold('at rest, before chaos was armed');
+  it('starts from a KNOWN population, not from a clean one', async () => {
+    // The baseline exists and covers the whole list. A baseline that failed to
+    // capture would make every later delta vacuously green, which is the same
+    // hole as demanding zero, inverted.
+    expect(viewCount).toBeGreaterThanOrEqual(13);
+    expect(baseline.size + captured.unreadable.length).toBe(viewCount);
+
+    // AN UNREADABLE VIEW IS NEVER A PASS, and least of all at capture: it would
+    // leave a guard with no known population for the rest of the run.
+    expect(captured.unreadable.map((u) => `${u.view}: ${u.error ?? '?'}`)).toEqual([]);
+
+    // This book is NOT spotless and the suite says so out loud. The standing
+    // population is the accepted, unrepairable findings `dbcheck` prints as
+    // 4 failed — they are the reason the old "every view is empty" assertion
+    // could not pass under any behaviour of the system it was testing.
+    // eslint-disable-next-line no-console
+    console.log(
+      `[chaos baseline] standing at rest: ${
+        captured.standing.length === 0
+          ? 'nothing — every view empty'
+          : captured.standing.map((sv) => `${sv.view}=${String(sv.rows)}`).join(' ')
+      }`,
+    );
+
+    // And, trivially but not pointlessly, the book has not moved against
+    // itself between the capture and this line.
+    await noNewViolations('at rest, before chaos was armed');
     const state = await chaos.readChaosState();
     expect(state.on).toBe(false);
   });
@@ -104,7 +324,7 @@ d('chaos mode against the live system', () => {
       actor: ACTOR,
     });
 
-    const run = await chaos.startChaosRun({ actor: ACTOR, registerCardFirst: true });
+    const run = await startRun({ actor: ACTOR, registerCardFirst: true });
     const outbox = await chaos.readOutbox(run.runId);
 
     // Three copies of each of the two lifecycle steps.
@@ -132,7 +352,7 @@ d('chaos mode against the live system', () => {
          AND provider_event_id IN ${sql([...authIds])}`;
     expect(count?.n).toBe(1);
 
-    await invariantsMustHold('while every delivery was being sent three times');
+    await noNewViolations('while every delivery was being sent three times');
     await chaos.disarmAll(ACTOR);
   });
 
@@ -140,7 +360,7 @@ d('chaos mode against the live system', () => {
     await chaos.disarmAll(ACTOR);
     await chaos.armControl({ control: 'reorder_window', seconds: 120, value: 1, actor: ACTOR });
 
-    const run = await chaos.startChaosRun({ actor: ACTOR, registerCardFirst: true });
+    const run = await startRun({ actor: ACTOR, registerCardFirst: true });
     const outbox = await chaos.readOutbox(run.runId);
 
     // seq 0 leaves first, and seq 0 is the CLEARING.
@@ -152,7 +372,7 @@ d('chaos mode against the live system', () => {
     // to the far edge of the buffer and released on the next pass.
     expect(first?.outcome).toBe('accepted');
 
-    await invariantsMustHold('with the settlement delivered ahead of its authorisation');
+    await noNewViolations('with the settlement delivered ahead of its authorisation');
 
     // Turn the buffer off and let the overtaken authorisation catch up.
     await chaos.disarmAll(ACTOR);
@@ -162,7 +382,7 @@ d('chaos mode against the live system', () => {
     const after = await chaos.readOutbox(run.runId);
     expect(after.every((d0) => d0.outcome !== 'withheld')).toBe(true);
 
-    await invariantsMustHold('after the out-of-order pair had both landed');
+    await noNewViolations('after the out-of-order pair had both landed');
   });
 
   it('SETTLEMENT DELAY — the clearing is late, the authorisation is not', async () => {
@@ -174,7 +394,7 @@ d('chaos mode against the live system', () => {
       actor: ACTOR,
     });
 
-    const run = await chaos.startChaosRun({ actor: ACTOR, registerCardFirst: true });
+    const run = await startRun({ actor: ACTOR, registerCardFirst: true });
     const immediately = await chaos.readOutbox(run.runId);
 
     const auth = immediately.find((d0) => d0.step === 'authorization');
@@ -185,7 +405,7 @@ d('chaos mode against the live system', () => {
     expect(clearing?.outcome).toBe('withheld');
     expect(Date.parse(clearing?.plannedAt ?? '')).toBeGreaterThan(Date.parse(auth?.plannedAt ?? ''));
 
-    await invariantsMustHold('with a settlement still outstanding');
+    await noNewViolations('with a settlement still outstanding');
 
     // Wait it out and release. Nobody had to turn anything off: a delay is a
     // delay, and it expires on its own schedule.
@@ -195,7 +415,7 @@ d('chaos mode against the live system', () => {
     const later = await chaos.readOutbox(run.runId);
     expect(later.find((d0) => d0.step === 'clearing')?.outcome).toBe('accepted');
 
-    await invariantsMustHold('after the late settlement landed');
+    await noNewViolations('after the late settlement landed');
     await chaos.disarmAll(ACTOR);
   });
 
@@ -203,7 +423,7 @@ d('chaos mode against the live system', () => {
     await chaos.disarmAll(ACTOR);
     await chaos.armControl({ control: 'webhooks_off', seconds: 120, actor: ACTOR });
 
-    const run = await chaos.startChaosRun({ actor: ACTOR, registerCardFirst: true });
+    const run = await startRun({ actor: ACTOR, registerCardFirst: true });
     const dark = await chaos.readOutbox(run.runId);
 
     // EVERY delivery is withheld, and every one of them EXISTS. That is the
@@ -223,7 +443,7 @@ d('chaos mode against the live system', () => {
     expect(refused.released).toBe(0);
     expect(refused.webhooksOff).toBe(true);
 
-    await invariantsMustHold('while the feed was dark');
+    await noNewViolations('while the feed was dark');
 
     // THE FEED COMES BACK. Turning the switch off IS the provider returning:
     // no sweeper, no requeue, no state transition.
@@ -235,14 +455,14 @@ d('chaos mode against the live system', () => {
     const after = await chaos.readOutbox(run.runId);
     expect(after.every((d0) => d0.outcome === 'accepted')).toBe(true);
 
-    await invariantsMustHold('after the backlog caught up');
+    await noNewViolations('after the backlog caught up');
   });
 
   it('PARKS — the system refuses to guess whose money to move, then drains', async () => {
     await chaos.disarmAll(ACTOR);
 
     // The card is deliberately NOT registered.
-    const run = await chaos.startChaosRun({ actor: ACTOR, registerCardFirst: false });
+    const run = await startRun({ actor: ACTOR, registerCardFirst: false });
 
     // Give the dispatcher a moment; the drain runs inside the release.
     await new Promise((r) => setTimeout(r, 1_500));
@@ -271,7 +491,7 @@ d('chaos mode against the live system', () => {
        WHERE provider = 'lithic' AND provider_auth_id = ${run.transactionToken}`;
     expect(posted?.n).toBe(0);
 
-    await invariantsMustHold('while deliveries were parked on an unregistered card');
+    await noNewViolations('while deliveries were parked on an unregistered card');
 
     // NOW TELL IT WHOSE MONEY IT IS. The same rows — never re-delivered, never
     // re-signed — wake and post.
@@ -286,7 +506,7 @@ d('chaos mode against the live system', () => {
        WHERE provider = 'lithic' AND provider_auth_id = ${run.transactionToken}`;
     expect(nowPosted?.n).toBeGreaterThan(0);
 
-    await invariantsMustHold('after the parked deliveries drained');
+    await noNewViolations('after the parked deliveries drained');
   });
 
   it('THE BOUND — the database refuses an arming longer than ten minutes', async () => {

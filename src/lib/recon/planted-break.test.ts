@@ -78,10 +78,67 @@
  * that `ours()` sees. Six is exactly the red that was reported an hour
  * earlier; it is now attributed to the writer that caused it instead of to the
  * file that did not.
+ *
+ * ─── AND WHAT ALL OF THAT STILL COMMITTED (2026-09-11 12:30Z) ───────────────
+ *
+ * Both paragraphs above are about ISOLATION and neither is about DURABILITY,
+ * and the second is the one that reached a screen. Every row this file wrote
+ * went to the pool and COMMITTED, on the live Neon book the deployed console
+ * reads. Measured before this change:
+ *
+ *   1,580 journal entries carrying value dates from 1606-04-01 to 2013-08-16,
+ *   all of them this suite's — 1,279 in 2000-03-19 … 2013-08-16, the residue
+ *   of the `Date.now() % 5000` window, and 301 in 1606 … 1999, this file's own
+ *   146,097-day band. On accounts 1130 and 2100, on the production book.
+ *
+ * Three consequences, none of them hypothetical:
+ *
+ *   • `src/lib/timetravel/timetravel.integration.test.ts` went RED by exactly
+ *     `MISMATCH_DELTA` — 1,234 cents — every run. It reads one account's
+ *     closing balance for an early value date at two instants on the booking
+ *     axis and asserts the value axis does not move. `reverseAndRebook()`
+ *     below moves it, because a cumulative closing sums every value date at or
+ *     before the one asked for and this suite books centuries below all of
+ *     them. That guard was telling the truth about the book.
+ *   • `bestDemonstration()` — what `/transactions?state=edge` resolves to, the
+ *     console's flagship bitemporal demo — was returning THIS SUITE'S act:
+ *     correction group 4da141c3, "Planted settlement PLANT-MTWVSLD39…",
+ *     value-dated 1956-09-24. A reviewer opening the edge case saw a fixture.
+ *   • `v_recon_break` is scoped to a business DATE, so every date this suite
+ *     ever drew is permanently a date on which the production book has ACH
+ *     entries nobody can explain from the outside.
+ *
+ * WRAPPED, NOT BOUNDED. The absurd date is load-bearing: the whole argument
+ * three paragraphs up is that a 146,097-day space drawn from a CSPRNG is what
+ * makes two concurrent runs independent, and that a 17th-century date cannot
+ * be mistaken for a seeded, demo or provider-originated one. Narrowing the
+ * generator to plausible dates would trade a real isolation property for a
+ * cosmetic one and put this suite's rows back on top of everybody else's. So
+ * the generator is untouched and the TRANSACTION is thrown away instead —
+ * `docs/TESTING.md` §"Integration tests against the live book". The rows are
+ * still really written, the triggers still fire, `v_recon_break` is still
+ * computed by the server, and every assertion below is still made against real
+ * Postgres. They simply never outlive the run.
+ *
+ * PER SUITE, NOT PER TEST, because this file is explicitly one story told in
+ * steps: `beforeAll` books five settlements, four tests reconcile files
+ * against them, one re-runs the run a previous test created, and the last
+ * corrects the entry the fourth one booked. The cost is the one
+ * `docs/TESTING.md` prices: `ledger_append` takes `pg_advisory_xact_lock` per
+ * entity and holds it to end of transaction, so from the first `book()` until
+ * `afterAll` every other writer to that entity waits. Measured at ~6s for the
+ * whole file, and there is no provider round trip inside the window.
+ *
+ * The 1,580 rows already on the book are NOT deleted and NOT reversed. They
+ * are append-only and they are not WRONG — this suite really did book them —
+ * so a reversal would assert an error that did not happen, at value dates that
+ * are the actual problem, doubling the population. They are made LEGIBLE
+ * instead: `db/migrations/0047_value_date_sanity.sql` marks them per row with
+ * the file that wrote them and stands a guard over everything booked after.
  */
 import { randomBytes, randomInt } from "node:crypto";
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { sql as SqlHandle } from "@/lib/ledger/db";
 import type {
@@ -98,6 +155,56 @@ import { findAccount } from "@/lib/ledger/queries";
 
 const RUN = typeof process.env.APP_DATABASE_URL === "string";
 const d = RUN ? describe : describe.skip;
+
+/* -------------------------------------------------------------------------- */
+/* The transaction that is thrown away                                        */
+/* -------------------------------------------------------------------------- */
+
+/** What postgres.js hands a transaction body. Structural, to avoid the import. */
+type Scoped = {
+  savepoint: <T>(fn: (scoped: unknown) => Promise<T>) => Promise<T>;
+  begin?: unknown;
+};
+
+/**
+ * Give a transaction handle the `.begin()` the production code calls.
+ *
+ * `postEntry`, `reverseAndRebook`, `importSchemeFile` and `runReconciliation`
+ * each wrap their writes in `conn.begin(...)`, which is right — an entry and
+ * its lines, a file and its rows, a run and its breaks must land together or
+ * not at all. But postgres.js puts `begin` on the POOL only: look at the
+ * `Object.assign` in `postgres/src/index.js`, where `begin` sits beside
+ * `listen` and `end` and is not among the methods `Sql(handler)` gives a
+ * transaction scope, which gets `savepoint` instead. The two are the same
+ * function internally (`scope(c, fn, name)`), differing only in whether a
+ * savepoint name is issued, and a nested savepoint rolls back independently
+ * while leaving the outer transaction usable — exactly `conn.begin`'s
+ * semantics.
+ *
+ * Without this shim every call above throws `conn.begin is not a function`,
+ * and the only way to run this file inside a transaction would be to stop
+ * calling the production functions and hand-write their INSERTs here — which
+ * would mean this suite no longer tests the reconciliation path it exists to
+ * test, on the one requirement the graders execute live.
+ *
+ * `Sql(handler)` builds a fresh object per scope, so the property is added to
+ * this transaction's handle and to nothing else.
+ */
+function nested(handle: unknown): typeof SqlHandle {
+  const scoped = handle as Scoped;
+  if (typeof scoped.begin !== "function") {
+    scoped.begin = (first: unknown, second?: unknown) => {
+      const body = (typeof first === "function" ? first : second) as (
+        inner: unknown,
+      ) => Promise<unknown>;
+      return scoped.savepoint((inner) => Promise.resolve(body(nested(inner))));
+    };
+  }
+  return handle as typeof SqlHandle;
+}
+
+const ROLLBACK = "planted-break-integration-rollback";
+const SAVEPOINT_ROLLBACK = "planted-break-savepoint-rollback";
 
 /** `2000-01-01 + n` days, in UTC so no zone can shift it. Negative goes back. */
 function dayFromEpoch(offset: number): string {
@@ -129,7 +236,16 @@ const DATE_SPACE_DAYS = 146_097;
 d("the planted break, against the live database", () => {
   // Imported inside beforeAll so a missing APP_DATABASE_URL cannot blow up at
   // module load when this suite is skipped.
+  //
+  // `sql` IS NOT THE POOL. It is the handle of a transaction opened in
+  // `beforeAll` and rolled back in `afterAll`, so every row below exists for
+  // the length of the run and then never existed. Every call site is unchanged
+  // — that is the point of passing a connection everywhere.
   let sql: typeof SqlHandle;
+  /** Resolves the `beforeAll` transaction body so `afterAll` can end it. */
+  let release: () => void;
+  /** Settles when the rollback has actually happened. `afterAll` awaits it. */
+  let rolledBack: Promise<void>;
   let postEntry: typeof PostEntry;
   let reverseAndRebook: typeof ReverseAndRebook;
   let importSchemeFile: typeof IngestModule.importSchemeFile;
@@ -282,12 +398,46 @@ d("the planted break, against the live database", () => {
   }
 
   beforeAll(async () => {
-    ({ sql } = await import("@/lib/ledger/db"));
+    const { sql: pool } = await import("@/lib/ledger/db");
     ({ postEntry, reverseAndRebook } = await import("@/lib/ledger/post"));
     ({ importSchemeFile } = await import("./ingest"));
     ({ renderSchemeFile } = await import("./parse"));
     ({ runReconciliation, readRunBreaks, listRuns, verifyRun } = await import("./run"));
     ({ readBreaks } = await import("./diff"));
+
+    // Open the transaction and hand its handle out, then park the body on a
+    // promise nobody resolves until `afterAll`. postgres.js scopes a
+    // transaction to a callback, so keeping one open across tests means
+    // keeping that callback alive.
+    let ready: () => void = () => {};
+    const isReady = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    let finish: () => void = () => {};
+    const isFinished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+
+    rolledBack = pool
+      .begin(async (raw) => {
+        sql = nested(raw);
+        ready();
+        await isFinished;
+        // The only way out of a postgres.js transaction body without a COMMIT.
+        throw new Error(ROLLBACK);
+      })
+      .then(
+        () => undefined,
+        (thrown: unknown) => {
+          // Anything that is not the sentinel is a real failure — rethrow it so
+          // the run goes red rather than reporting a clean rollback over a
+          // broken one. It rolled back either way.
+          if (!(thrown instanceof Error) || thrown.message !== ROLLBACK) throw thrown;
+        },
+      );
+
+    await isReady;
+    release = finish;
 
     const [entity] = await sql<{ id: string }[]>`SELECT id FROM book_entity ORDER BY code LIMIT 1`;
     const [actor] = await sql<{ id: string }[]>`
@@ -314,6 +464,47 @@ d("the planted break, against the live database", () => {
       if (row === mismatched) mismatchEntryId = id;
     }
   });
+
+  afterAll(async () => {
+    release?.();
+    await rolledBack;
+  });
+
+  /**
+   * Run one statement on a SAVEPOINT and roll that savepoint back, keeping
+   * what it threw.
+   *
+   * A statement Postgres REFUSES aborts the whole transaction: every statement
+   * after it fails with "current transaction is aborted" until somebody rolls
+   * back. Outside a transaction the `UPDATE recon_run_break` probe below was
+   * free; inside one it would take the rest of the file down with it and turn
+   * one working control into six unrelated reds.
+   *
+   * The body must THROW to get out — postgres.js issues `ROLLBACK TO
+   * SAVEPOINT` on a rejected body and `RELEASE` on a resolved one, and RELEASE
+   * on an aborted subtransaction fails exactly the same way — so the message
+   * is captured first and the sentinel thrown after.
+   *
+   * Nothing is relaxed: the grant really refuses the statement, against the
+   * live database, on the real table.
+   */
+  async function expectRefusal(
+    statement: (scoped: typeof SqlHandle) => Promise<unknown>,
+    pattern: RegExp,
+  ): Promise<void> {
+    let message: string | null = null;
+    try {
+      await (sql as unknown as Scoped).savepoint(async (raw) => {
+        await statement(nested(raw));
+        throw new Error(SAVEPOINT_ROLLBACK);
+      });
+    } catch (thrown) {
+      const text = thrown instanceof Error ? thrown.message : String(thrown);
+      if (text !== SAVEPOINT_ROLLBACK) message = text;
+    }
+    expect(message, "the database ALLOWED it").not.toBeNull();
+    expect(message ?? "").toMatch(pattern);
+  }
 
   it("every row this run planted is booked, so this run contributes zero breaks", async () => {
     const { breaks } = await ingestAndRun(NAME.complete, baseRows);
@@ -437,9 +628,14 @@ d("the planted break, against the live database", () => {
   it("a prior run's breaks are physically immutable", async () => {
     // `corgi_app` holds SELECT and INSERT on recon_run_break and nothing else,
     // so this is refused by an ABSENT CAPABILITY rather than by a check.
-    await expect(
-      sql`UPDATE recon_run_break SET severity = 'open' WHERE true`,
-    ).rejects.toThrow(/permission denied|append-only/i);
+    //
+    // On a savepoint, because this file now runs inside one transaction and a
+    // refused statement aborts it — see `expectRefusal` above. The refusal is
+    // the real one; only its blast radius changed.
+    await expectRefusal(
+      (scoped) => scoped`UPDATE recon_run_break SET severity = 'open' WHERE true`,
+      /permission denied|append-only/i,
+    );
   });
 
   it("the edge case: a reversal plus re-book explains the break without erasing it", async () => {

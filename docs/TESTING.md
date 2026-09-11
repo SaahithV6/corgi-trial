@@ -83,7 +83,19 @@ Test Files  1 failed | 169 passed | 15 skipped (185)
 **2,904 tests ran against the live Neon book**, up from 2,568 — the whole
 database estate, `holds.integration` included, every money-table suite but one
 inside a rolled-back transaction. One failure, diagnosed below, and it is not
-the code's. The remaining 54 are the four opt-in gates above, each named in
+the code's.
+
+> **"every money-table suite but one" was wrong when it was written, and by
+> more than one.** It counted the `RUN_DB_TESTS` population, and
+> `src/lib/recon/planted-break.test.ts` is not in it — that file gates on
+> `APP_DATABASE_URL` and had been committing to the journal on every plain
+> `pnpm test` for as long as it has existed. It is wrapped as of 12:45Z. The
+> sentence is a small, exact instance of this document's own opening
+> complaint: a number that reports healthy about a population it excludes.
+> The 2,904 figure itself stands — that run really did execute those tests;
+> only the claim about what was wrapped was short by a file.
+
+The remaining 54 are the four opt-in gates above, each named in
 that run's own skip block with the command that runs it; 6 more were `it.skip`
 inside suites that did run, `RUN_LITHIC_TESTS`'s twelfth team scenario among
 them.
@@ -183,6 +195,10 @@ and `src/lib/rails/adapters/ach.ts`, owned by whoever promoted the cell.
 
 ### `src/lib/timetravel/timetravel.integration.test.ts` — real, and not ours
 
+**Closed 2026-09-11 12:55Z. Green, and green for the right reason.** The
+paragraphs below are kept because the diagnosis was correct and the number it
+turned up is bigger than the one it was written about.
+
 ```
 holds the value axis still: a different day does not move with the cut
 expected 1492544n to be 1493778n
@@ -193,17 +209,121 @@ cents every time**. The test reads one account's closing balance for value
 date `1979-01-02` at two instants on the booking axis, and a day that early
 should have nothing on it at either.
 
-It has something on it now. **308 journal lines with value dates between
-1606-04-01 and 1874-03-02 were booked onto the live book today**, all of them
-between 09:49Z and 10:47Z, netting to zero across `1130` and `2100` but not
-within either — a property/fuzz suite belonging to another worker, running
-against the same book. `1493778` is precisely the pre-1979 net on that
-account; `1492544` is the same net at the earlier booking cut.
+It has something on it now. A property suite belonging to another worker was
+planting centuries-backdated entries on the live book. So the guard was
+telling the truth about the book, which is a fact about the ledger a reviewer
+can read off the statements screen, not only about the test.
 
-So the guard is telling the truth about the book. The finding is that **a
-property suite is planting centuries-backdated entries on the live ledger**,
-which is a fact about the ledger a reviewer can read off the statements
-screen, not only about the test.
+#### The suite, and the exact generator
+
+`src/lib/recon/planted-break.test.ts`, and it is not a fuzz suite — it is the
+graded planted-break requirement, running against the live database. The
+generator is one line:
+
+```ts
+const DATE_SPACE_DAYS = 146_097;                          // one Gregorian cycle
+const businessDate = dayFromEpoch(-1 - randomInt(DATE_SPACE_DAYS));
+                                                          // 1600-01-02 … 1999-12-31
+```
+
+Every run books five inbound ACH settlements on that date — `DR 1130 / CR
+2100` — and then corrects one of them with `reverseAndRebook()` at
+`MISMATCH_DELTA = 1_234n`. **That constant is the 1,234 cents, exactly.**
+
+**How it escaped last night's wrapping pass.** That pass was over the
+`RUN_DB_TESTS` population. This file gates on `typeof
+process.env.APP_DATABASE_URL === "string"` instead — deliberately, and its own
+header gives the reason: *"A graded requirement should not be behind an
+environment variable somebody has to know about."* The reason is good and the
+gate is kept. It just meant the file was never in the set anybody looked at,
+and it ran on every plain `pnpm test` on a machine with `.env` sourced.
+
+#### What was actually on the book
+
+Not 308 lines. Measured 2026-09-11 12:30Z, across **four** writers:
+
+| ref | entries | value dates | writer |
+| --- | --- | --- | --- |
+| `PLANT-` | 1,580 | 1606-04-01 … 2013-08-16 | `src/lib/recon/planted-break.test.ts` |
+| `STMT-` | 104 | 1980-12-09 … 2011-11-19 | `statements.integration.test.ts`, exempt-must-commit |
+| `LF3-` | 16 | 2000-05-05 … 2011-08-06 | live fire attack 3, an earlier revision |
+| `LF6-` | 12 | 2002-02-15 … 2010-05-11 | live fire attack 6 |
+
+1,712 entries whose value date cannot be real, on a book whose entity was
+created on 2026-09-10. The 1,279 `PLANT-` rows in 2000–2013 are the residue of
+the `Date.now() % 5000` window that preceded the 146,097-day one.
+
+Two consequences worse than a red test:
+
+* **`bestDemonstration()` was returning a fixture.** What
+  `/transactions?state=edge` resolves to — the console's flagship bitemporal
+  demonstration — is the most recent correction act on any deposit account,
+  and that was correction group `4da141c3`, *"Planted settlement
+  PLANT-MTWVSLD39…"*, value-dated **1956-09-24**. A reviewer opening the edge
+  case was shown a test fixture. It self-heals now the planting has stopped —
+  a real act overtakes it on `booking_seq` — and `landmarks.ts` is deliberately
+  **not** filtered, because a live demonstration that skips rows it dislikes is
+  not live.
+* **The test's own premise was false.** `other = "1979-01-02"` was commented
+  *"a value date years before the act's own"*. With the act at 1956, 1979 is
+  **after** it, so the act's own reversal and re-book were inside the
+  cumulative closing the case asserted could not contain them.
+
+#### What was done
+
+1. **`planted-break.test.ts` is wrapped**, per suite, in a transaction that is
+   rolled back. **Wrapped, not bounded** — the absurd date is load-bearing:
+   the file's own header argues that a 146,097-day CSPRNG draw is what makes
+   two concurrent runs independent and what stops a synthetic date being
+   mistaken for a seeded one. Narrowing the generator would trade a real
+   isolation property for a cosmetic one. Per suite rather than per test
+   because the file is explicitly one story told in steps. Measured: eight
+   cases, 9.5s, and a targeted count either side of the run is **unchanged**.
+2. **The 1,712 rows stay.** Not deleted — append-only, and there is no DELETE
+   for any role including the owner. Not reversed either: they are not *wrong*,
+   they are balanced postings a suite really made, so a reversal would assert
+   an error that did not happen — and a reversal carries the **original** value
+   date, so 1,712 of them would put 1,712 more impossible dates on the book to
+   complain about the first 1,712. The correction would be shaped like the
+   defect.
+3. **They are made legible instead.**
+   `db/migrations/0047_value_date_sanity.sql` marks 1,596 of them per row in
+   `journal_value_date_residue` with the file that wrote them and a sentence
+   saying why, declares the two writers still sanctioned to back-date
+   (`STMT-`, `LF6-`) in the view where adding a third costs a migration, and
+   stands `v_value_date_unexplained` over everything booked after. `PLANT-` is
+   deliberately **not** a declared writer: one new `PLANT-` entry now means the
+   wrapping came off.
+4. **The assertion is green, and it asserts more than it did.** See
+   `docs/TIMETRAVEL.md` §"Holding the value axis still".
+
+#### The finding underneath all of it
+
+**Nothing on this book could say a value date was impossible.** Twenty-five
+invariants asked whether entries balance, whether two derivations of a number
+agree, and whether an act had the right to happen. Not one looked at *when* an
+entry claimed to have happened, and `ledger_append()` takes a `p_value_date
+date` with no bound on it at all — 1500 is as acceptable to this schema as
+today. The only thing in the whole system that noticed 1,712 impossible rows
+was one assertion in `src/lib/timetravel/`, going red by 1,234 cents, three
+files from the cause.
+
+`v_value_date_unexplained` is the twenty-sixth invariant and is the first
+guard on the value axis. It is **green by attribution, not by narrowing**:
+0047 filters nothing out of the predicate, it names every row.
+
+There is **no CHECK constraint** on `journal_entry.value_date`, and that is a
+decision rather than an omission. A `CHECK` — even `NOT VALID`, 0041-style —
+would refuse the statements seeder and live-fire attack 6 **mid-run**, and
+breaking two working suites in order to catch a third is a worse trade than
+reporting all three. The band is enforced by a guard that reports, not by a
+constraint that refuses.
+
+**Also checked, since nothing had:** the future side of the band is **empty**.
+The furthest-dated entry on this book is 2027-12-07 — standing orders,
+value-dated ahead on purpose, and the quadrant `docs/TIMETRAVEL.md` relies on
+for `asKnownAt` < `asOf`. 14.9 months out, inside the 18-month window, nothing
+beyond it.
 
 ### `src/lib/chaos/chaos.livefire.test.ts` — asserts something known false
 
@@ -454,18 +574,26 @@ changes is only that **our** book no longer keeps a copy of the bookkeeping.
 set -a; . ./.env; set +a
 RUN_DB_TESTS=1 pnpm vitest run --no-file-parallelism <path>
 
-node scripts/dbcheck.mjs            # 37 passed / 4 failed — all four deliberate
+node scripts/dbcheck.mjs            # 38 passed / 4 failed — all four deliberate
                                     # or red-on-arrival. Leave them failing.
-                                    # GUARD REACH must read "25 of 25 views".
-node scripts/dbcheck.mjs --prove    # "covered 25 of 25 invariant views"
+                                    # GUARD REACH must read "26 of 26 views".
+node scripts/dbcheck.mjs --prove    # "covered 26 of 26 invariant views"
                                     # and must stay complete.
 ```
 
 The two figures in that block are **counts of a list, not of a memory**. The
-tally moves the day somebody adds a check, and it has: this section read
+tally moves the day somebody adds a check, and it has, twice: this section read
 "36 passed / 2 failed" and "22 of 22" until it was corrected on 2026-09-11,
-by which time the script itself read 37/4 and 25/25. Quote the script, not
-this file, and if the two disagree the script is right.
+by which time the script itself read 37/4 and 25/25 — and it read 37/4 and
+25/25 until `v_value_date_unexplained` was added the same afternoon, which made
+it **38/4 and 26/26**. The **four** has not moved and must not: it is the same
+four deliberate findings, and the twenty-sixth invariant is green. Quote the
+script, not this file, and if the two disagree the script is right.
+
+> **`package.json` still says 25.** `pnpm test:submission` prints
+> *"(must read: covered 25 of 25 invariant views)"* above the `--prove` run.
+> That banner is stale and `package.json` is outside this change's write scope.
+> The script's own line is the authority; it reads 26 of 26.
 
 **GUARD REACH is now complete and cannot quietly stop being complete.** It was
 fifteen hand-typed rows against twenty-five gated invariants — built because a
@@ -498,6 +626,7 @@ something the suite owns, such as its own idempotency-key prefix or
 | `disputes` | per scenario | 0 |
 | `wire` | the one booking test | 0 |
 | `wire/outbound` | per suite | 0 — **green as of 2026-09-11 03:46**, seven cases, fixed mid-session by another worker. The "RED for an unrelated reason" note this row used to carry is spent. |
+| `recon/planted-break` | per suite | 0 — **wrapped 2026-09-11 12:45**, eight cases, 9.5s. It was never on this table, which is why it was never wrapped: it gates on `APP_DATABASE_URL` rather than `RUN_DB_TESTS`, so it ran on every plain `pnpm test` and was outside the population last night's pass ranged over. It had committed **1,580** entries value-dated 1606–2013. |
 | `holds` | **not yet** | holds, closures, cards, auths and entries per run, plus three `sql.begin` blocks that COMMIT |
 | `advice-wake` | exempt, by design | 0 in steady state |
 | `accrual`, `interest`, `interchange` | exempt, by design | stated in-file |

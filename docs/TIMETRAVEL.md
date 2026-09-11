@@ -430,8 +430,75 @@ screenshot of any state carries the URL that reproduces it.
 | --- | --- | --- |
 | `params.test.ts` | 29 cases: absence, both axes, refusals, banking-day arithmetic, link building | none |
 | `integrity.test.ts` | 11 cases: the straddle rule, including that a cut **between an original and its correction is allowed** | none |
-| `timetravel.integration.test.ts` | 11 cases against the live book: default unchanged, the day reading differently at two instants, the identity, the guard firing, the refusals | `RUN_DB_TESTS=1` |
+| `timetravel.integration.test.ts` | 11 cases against the live book: default unchanged, the day reading differently at two instants, the identity, the value axis held still, the guard firing, the refusals. **11 of 11 green, 2026-09-11 12:55Z** | `RUN_DB_TESTS=1` |
 
 Every integration assertion is a **relation between two readings**, never a fixed
 figure. Twelve workers write to this book while the suite runs; a test asserting
 `$1,001.50` would be red by the time it was committed.
+
+### Holding the value axis still — and the constant that was not a relation
+
+That rule had one exception and it cost a red for three hours. The case
+*"holds the value axis still"* read:
+
+```ts
+// A value date years before the act's own. The correction carries the
+// ORIGINAL value date, so it cannot reach a day before it.
+const other = "1979-01-02";
+expect(await closingAt(before.at)).toBe(await closingAt(after.at));
+```
+
+`1979-01-02` is a fixed figure, and the sentence above it is a claim about a
+book nobody was holding still. It failed by **exactly 1,234 cents on every
+run** for two independent reasons, both of them the same reason:
+
+1. **`bestDemonstration()` is live.** It returns the most recent correction act
+   on any deposit account, and it was returning one value-dated **1956-09-24**
+   — planted by `src/lib/recon/planted-break.test.ts`, which was committing
+   centuries-backdated settlements to this book (`docs/TESTING.md` has the
+   whole measurement; it is wrapped now). 1979 is *after* 1956, so the act's
+   own reversal and re-book were inside the very figure the case asserted could
+   not contain them. A constant cannot be "years before" a date chosen at read
+   time. 1,234 is `MISMATCH_DELTA` in that suite, to the cent.
+2. **A closing balance is cumulative.** It is every value date at or below the
+   one asked for, so *any* writer booking below it moves the figure. An
+   equality between two absolute readings on a shared book is a bet.
+
+The repair is the one `src/test/livefire/README.md` §1 settled on — *never
+widen a tolerance to absorb another writer; isolate, or take a delta* — and it
+makes the case assert **more** than it did:
+
+* the comparison day is `dayBefore(act.valueDate)`, **derived from the act**,
+  so "a day below the act's own" is true by construction rather than by luck;
+* the entries that landed between the two cuts are listed, and the assertion is
+  that **none of them belongs to the act** — by `entryId` and by
+  `correctionGroupId`, which is the claim in its own terms rather than as a
+  number;
+* the arithmetic is closed exactly: `closing(after) − closing(before)` must
+  equal the net of those entries. On a quiet book that set is empty, the net is
+  `0n`, and the original equality comes back as a **corollary** instead of a
+  premise. Another worker's posting is cancelled arithmetically, never
+  absorbed by a tolerance.
+
+Proven to still have teeth rather than assumed to: pointing `other` at the
+act's own value date instead of the day below it turns the case red with
+`expected [ …(2) ] to deeply equal []` — the act's two correcting entries,
+named.
+
+### What `?state=edge` was showing, and why it is not filtered
+
+While the planting was running, `bestDemonstration()` — and therefore
+`/transactions?state=edge`, the flagship demonstration on this console — was
+resolving to correction group `4da141c3`, *"Planted settlement
+PLANT-MTWVSLD39…"*, value date **1956-09-24**. A reviewer opening the edge case
+was shown a test fixture presented as the book's most recent correction.
+
+`landmarks.ts` is deliberately **not** changed to skip it. A demonstration that
+is live is live, and one that quietly drops the rows it finds embarrassing is
+the thing this whole feature exists to argue against. The planting has stopped,
+so the next real correction act overtakes it on `booking_seq` and the screen
+heals itself. The rows stay visible, and
+`db/migrations/0047_value_date_sanity.sql` is what makes them *legible* rather
+than invisible: `v_value_date_out_of_band` names the file behind every one of
+them, and `v_value_date_unexplained` — invariant twenty-six — is the first
+guard this ledger has ever had on the value axis.

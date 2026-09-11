@@ -314,8 +314,17 @@ const INVARIANT_VIEWS = [
   //
   // They are here rather than only on the /team screen because a screen that
   // counts an invariant is a dashboard; a gate that counts it is a test.
-  ["v_approved_auth_for_dead_member", "no authorisation is approved for a member who has been removed"],
-  ["v_member_approval_without_right", "no approval stands from a member who lacked the right at the time"],
+  //
+  // BOTH WIDENED BY 0046, and the third team view with them. Each resolved
+  // its subject through an INNER JOIN — to `team_member` here, to
+  // `team_member_version` for the decision guard — so a principal with no
+  // membership of that business, or a decision that pinned no member
+  // version, fell out of the FROM clause and was neither judged nor
+  // reported: 33 of 186 approvals, 11 of 26 decisions, 3 of 422 member
+  // versions. GUARD REACH is what found it. The claims below are the wider
+  // ones, and THE TEAM CENSUS (§8d) prints who is still exempt and why.
+  ["v_approved_auth_for_dead_member", "no authorisation is approved without the cardholder's terms, or under terms that were dead at the time"],
+  ["v_member_approval_without_right", "no approval stands from anybody but a member who held the right at the time, or Corgi staff"],
   // ---- 0031 and 0040, folded back in --------------------------------------
   //
   // These four lived in side arrays for one honest reason: the agents that
@@ -370,7 +379,28 @@ const INVARIANT_VIEWS = [
   // reads payment_instruction_event, and the approver this defect mints is
   // active, correctly-roled and perfectly legitimate at the moment they
   // approve. The fraud is one level up, in who put them there.
-  ["v_team_terms_by_unauthorised_author", "no member's terms were written by somebody who was not an active admin of that business at the time"],
+  //
+  // Widened by 0046 in the same pass and for the same reason: 0044's repair
+  // resolved the AUTHOR through an inner LATERAL, so an author holding no
+  // membership of that business produced no author row and the version left
+  // the guard entirely — 3 of 422. A security fix carrying its own defect
+  // one table over, found by GUARD REACH a day later.
+  ["v_team_terms_by_unauthorised_author", "no member's terms were written by anybody but an active admin of that business, or Corgi staff"],
+  // ---- 0047's one, folded in ----------------------------------------------
+  //
+  // FIFTH time an agent has had to park a new invariant in a side array, always
+  // the same cause: it cannot write `src/lib/chaos/invariants.ts`, which this
+  // list is asserted equal to. Its own header asks whoever owns that module to
+  // move it up here and mirror it; this is that edit, made by the same pass
+  // that widened the three team guards, because the pass could write both
+  // files. The prose below §'THE AXIS NOTHING ON THIS BOOK HAD EVER GUARDED'
+  // is 0047's and is left where it is.
+  //
+  // It is the first guard on this book about WHEN an entry claims to have
+  // happened rather than whether it balances — 1,712 entries had value dates
+  // that cannot be real, the earliest 1606-04-01, and the only thing that ever
+  // noticed was a timetravel assertion going red three files from the cause.
+  ["v_value_date_unexplained", "no entry carries a value date outside [entity created − 1 year, today + 18 months] that no declared writer owns"],
 ];
 
 // ---------------------------------------------------------------------
@@ -589,6 +619,63 @@ const INVARIANT_VIEWS = [
 // widening of a view over payment approvals can see a table it does not
 // read.
 
+// ---------------------------------------------------------------------
+// MIGRATION 0047'S ONE. IT WAS IN A SIDE ARRAY; IT IS NOW IN THE FIRST.
+// ---------------------------------------------------------------------
+//
+// The reason it was parked is below, kept because it is the right reason
+// and it will be true again for the sixth agent. The move was made by the
+// 0046 pass, which could write `src/lib/chaos/invariants.ts`.
+//
+// The same mechanical reason as every side array above:
+// `src/lib/chaos/invariants.test.ts` parses the FIRST array literal out of
+// this file and asserts `src/lib/chaos/invariants.ts` lists exactly the
+// same views in exactly the same order, and `src/lib/chaos/**` is outside
+// this change's write scope — four other agents are live and a red
+// `pnpm test` nobody can fix is holding a deploy. So: an unrun invariant
+// is a comment, this one runs here, it counts towards the SAME tally,
+// `--prove` proves it like every other view, and nothing about it is
+// softer. Whoever owns `src/lib/chaos/**` moves it into the array above
+// and mirrors it — a two-line edit.
+//
+// ---------------------------------------------------------------------
+// THE AXIS NOTHING ON THIS BOOK HAD EVER GUARDED
+// ---------------------------------------------------------------------
+//
+// Every invariant above asks whether entries BALANCE, whether two
+// derivations of one number AGREE, or whether an act had the right to
+// happen. Not one of them looks at WHEN an entry claims to have happened.
+//
+// So 1,712 journal entries accumulated value dates that cannot be real —
+// the earliest 1606-04-01, on a book whose entity was created on
+// 2026-09-10 — and the only thing on this system that noticed was an
+// assertion in `src/lib/timetravel/timetravel.integration.test.ts` going
+// red by exactly 1,234 cents, three files away from the cause. A
+// statement, a balance-as-of, a reconciliation diff and the bitemporal
+// demo all read `value_date`, and none of them could say "that date is
+// impossible".
+//
+// GREEN ON ARRIVAL, AND IT WENT GREEN BY ATTRIBUTION RATHER THAN BY
+// NARROWING — which is the distinction 0032 and 0040 both insist on and
+// the one this check could have failed most easily. 0047 does not filter
+// the 1,712 out of the predicate. It marks 1,596 of them per row, in
+// `journal_value_date_residue`, with the file that wrote them and a
+// sentence saying why the date is not real, and declares the two writers
+// that are still sanctioned to back-date (the statements seeder and
+// live-fire attack 6) in SQL, in the view, where adding a third costs a
+// migration. `v_value_date_out_of_band` is the census and filters
+// nothing; this view is its `accounted_by = 'unexplained'` arm.
+//
+// `PLANT-` IS DELIBERATELY NOT A DECLARED WRITER. Its 1,580 rows are
+// residue, which closes them, but `src/lib/recon/planted-break.test.ts`
+// is now wrapped in a rolled-back transaction — so one new PLANT- entry
+// means the wrapping came off, and this check says so on the next run
+// instead of leaving it for the timetravel suite to discover sideways.
+// FOLDED IN, and the side array is gone. `v_value_date_unexplained` now sits
+// in `INVARIANT_VIEWS` above with the other twenty-five, mirrored in
+// `src/lib/chaos/invariants.ts` in the same pass — the two-line edit the
+// header above asks for, made by the agent that could write both files.
+
 // ONE LIST, THREE CONSUMERS. The emptiness check below, GUARD REACH (§8)
 // and `--prove` (§9) all range over exactly this, and none of them keeps a
 // second copy. Side arrays have appeared in this file three times — each
@@ -793,26 +880,41 @@ const REACH = [
   // named FAILURE, exactly as `--prove` does it for a view with no proof.
   // Adding an invariant without its reach is now impossible to do quietly.
   //
-  // TWO OF THE TEN ARE THE REASON THIS MATTERS, and both were measured on
+  // TWO OF THE TEN WERE THE REASON THIS MATTERS, and both were measured on
   // this database rather than reasoned about:
   //
   //   v_member_approval_without_right     30 of 177 'approved' events
   //   v_team_terms_by_unauthorised_author  2 of 373 member-version rows
   //
-  // Both have the SHAPE OF THE BUG THEY WERE WRITTEN AGAINST. Each reaches
+  // Both had the SHAPE OF THE BUG THEY WERE WRITTEN AGAINST. Each reached
   // its subject through an INNER JOIN to a `team_member` row, so an actor
   // with no membership of that business — the CORGI-STAFF break-glass
-  // path, a seeder, an agent surface — is not judged and not reported. It
-  // falls out of the FROM clause. That is precisely 0033's defect: a
+  // path, a seeder, an agent surface — was not judged and not reported. It
+  // fell out of the FROM clause. That is precisely 0033's defect: a
   // lookup filtered `AND state <> 'removed'` moved the removed member out
   // of the branch that CHECKS and into the branch that TRUSTS, and 0044's
-  // repair view now reproduces the same silence one table over. The
-  // percentages below are the sentence "what the lookup excluded from
-  // itself is exactly the population it existed to stop", in numbers.
+  // repair view reproduced the same silence one table over. The
+  // percentages this section printed were the sentence "what the lookup
+  // excluded from itself is exactly the population it existed to stop",
+  // in numbers.
   //
-  // NOT REPAIRED HERE. These are views in migrations, and this file may
-  // not edit a migration. What it can do is stop the blind spot being
-  // invisible, which is the whole job of this section.
+  // THE THIRD ONE WAS FOUND BY THE SAME MEASURE ONCE THE FIRST TWO WERE
+  // NAMED: `v_approved_auth_for_dead_member` read 11 of 26 approved
+  // decisions, its INNER JOIN being to `team_member_version` rather than
+  // to `team_member` — a decision that pinned no member version was not
+  // reported as unjudgeable, it was not reported at all.
+  //
+  // REPAIRED BY MIGRATION 0046, and this section is how it was found. All
+  // three now LEFT JOIN and classify the non-member case by name instead
+  // of dropping it, so their reach below is the whole population and the
+  // three rows print as `reach N` rather than `ranges over N of M`. If any
+  // of them ever prints "ranges over" again, a join went back to INNER.
+  //
+  // The three permitted classes each guard still exempts — Corgi staff,
+  // a card that belongs to nobody, a provider token this book has no card
+  // row for — are printed per row under THE TEAM CENSUS below, from the
+  // views' own `is_violation` column, so "outside the guard" can never
+  // again mean "unexamined".
 
   // The denormalised clock check. Its join is to the entry every line must
   // have, so its reach is every line there is — stated, not assumed.
@@ -852,33 +954,40 @@ const REACH = [
     `SELECT count(*)::int AS n FROM hold_closure hc
        JOIN card_authorization ca ON ca.hold_id = hc.hold_id`],
 
-  // An approval is only judged if the decision recorded WHICH member
-  // version authorised it. A decision with a null member_version_id is not
-  // reported as unjudgeable — it is not reported at all, because the join
-  // is inner.
-  ["v_approved_auth_for_dead_member", "approved auth decisions that cite a member version",
-    `SELECT count(*)::int AS n FROM card_auth_decision d
-       JOIN team_member_version tmv ON tmv.id = d.member_version_id
-      WHERE d.outcome = 'approve'
-        AND d.request_status IN ('AUTHORIZATION','FINANCIAL_AUTHORIZATION')`,
+  // THE THIRD SIBLING, found by this section once the other two were named.
+  // It used to read: "approved auth decisions that CITE a member version",
+  // `JOIN team_member_version tmv ON tmv.id = d.member_version_id`, 11 of
+  // 26 — a decision that pinned NO member version was not reported as
+  // unjudgeable, it was not reported at all. 0046 LEFT JOINs it and splits
+  // the unpinned rows three ways: the card belongs to nobody (permitted,
+  // docs/TEAM.md §4), the token is not a card in this book (permitted, rule
+  // 2's deliberate fail-open), or THE CARD IS HELD BY A PERSON AND THE
+  // DECISION DID NOT CONSULT THEIR TERMS, which is a violation and which no
+  // guard on this build could previously see.
+  //
+  // The reach is now the view's own population, read from the view, so the
+  // numerator cannot drift from what the guard actually ranges over.
+  ["v_approved_auth_for_dead_member", "approved auth decisions, ALL of them, each classified by what was known about its cardholder",
+    `SELECT count(*)::int AS n FROM v_card_auth_member_judged`,
     `SELECT count(*)::int AS n FROM card_auth_decision d
       WHERE d.outcome = 'approve'
         AND d.request_status IN ('AUTHORIZATION','FINANCIAL_AUTHORIZATION')`],
 
   // ONE OF THE TWO. `JOIN team_member tm ON tm.actor_id = e.actor_id AND
-  // tm.business_id = acct.business_id` is an INNER join, so every approval
+  // tm.business_id = acct.business_id` was an INNER join, so every approval
   // by an actor who is not a member of that business — break-glass, an
-  // operator, the agent surface — is invisible to the guard that exists to
+  // operator, the agent surface — was invisible to the guard that exists to
   // ask whether the approver had the right. Maker-checker is the control
-  // this build grades hardest, and this is the fraction of approvals its
-  // standing guard can even see.
-  ["v_member_approval_without_right", "'approved' events whose actor IS a member of the paying business",
-    `SELECT count(*)::int AS n FROM payment_instruction_event e
-       JOIN payment_instruction pi ON pi.id = e.instruction_id
-       JOIN account acct ON acct.id = pi.account_id
-       JOIN team_member tm ON tm.actor_id = e.actor_id
-                          AND tm.business_id = acct.business_id
-      WHERE e.kind::text = 'approved'`,
+  // this build grades hardest, and this row printed 33 of 186: the fraction
+  // of approvals its standing guard could even see.
+  //
+  // 0046 made it a LEFT JOIN and gave the non-member case a NAME —
+  // corgi_staff (permitted, and 0044 argues that exemption rather than
+  // inheriting it from a join), a member of another business, a non-human
+  // principal, an actor with no membership anywhere. Reach is now 186 of
+  // 186, read from the view itself.
+  ["v_member_approval_without_right", "'approved' events, ALL of them, each classified by the kind of principal who filed it",
+    `SELECT count(*)::int AS n FROM v_payment_approval_judged`,
     `SELECT count(*)::int AS n FROM payment_instruction_event e
       WHERE e.kind::text = 'approved'`],
 
@@ -903,28 +1012,51 @@ const REACH = [
     `SELECT count(*)::int AS n FROM interchange_posting`,
     `SELECT count(*)::int AS n FROM interchange_posting`],
 
-  // THE OTHER ONE, AND THE WORST OF THE TWO. 0044's repair view resolves
+  // THE OTHER ONE, AND THE WORST OF THE TWO. 0044's repair view resolved
   // the AUTHOR through `JOIN team_member atm ON atm.business_id =
   // tm.business_id AND atm.actor_id = tmv.created_by`, inside a LATERAL
   // with LIMIT 1. A member version written by an actor who holds no
-  // membership of that business produces no author row, the LATERAL yields
-  // nothing, and the INNER join drops the version entirely.
+  // membership of that business produced no author row, the LATERAL yielded
+  // nothing, and the INNER join dropped the version entirely — 3 of 422.
   //
   // That is the same door 0033 left open. 0033 looked up the author `AND
   // state <> 'removed'`, got NULL for a removed admin, and NULL was the
   // break-glass branch that TRUSTS. 0044 closed that for removed members
   // and left it open for non-members, in the view rather than in the
-  // function. The number below is how much of the table is behind that
-  // door.
-  ["v_team_terms_by_unauthorised_author", "member-version rows whose author holds a membership of that same business",
-    `SELECT count(*)::int AS n FROM team_member_version tmv
-       JOIN team_member tm ON tm.id = tmv.member_id
-      WHERE EXISTS (SELECT 1 FROM team_member atm
-                      JOIN team_member_version v ON v.member_id = atm.id
-                     WHERE atm.business_id = tm.business_id
-                       AND atm.actor_id = tmv.created_by
-                       AND v.created_at < tmv.created_at)`,
+  // function — a security fix carrying its own defect one table over.
+  //
+  // 0046 LEFT JOINs it, keeps 0044's clock exactly (strictly-before, so a
+  // change made later in a transaction cannot indict a write made earlier
+  // in it) and names the third clock case 0044's `<` also silently dropped:
+  // an author whose own terms were written in the SAME instant as the row
+  // they authored. Permitted, and NAMED, which is the whole difference.
+  ["v_team_terms_by_unauthorised_author", "member-version rows, ALL of them, each classified by the kind of principal who authored it",
+    `SELECT count(*)::int AS n FROM v_team_terms_judged`,
     `SELECT count(*)::int AS n FROM team_member_version`],
+
+  // ---- 0047's one ------------------------------------------------------
+  //
+  // THE REACH IS THE OUT-OF-BAND POPULATION, NOT THE TABLE. The guard's
+  // predicate is evaluated against every entry there is — a range test on
+  // `journal_entry.value_date`, a NOT NULL column, with no join to fall out
+  // of — so `count(*) FROM journal_entry` would be the honest table size
+  // and the dishonest reach. The number that says whether this tick is
+  // worth anything is how many entries are CANDIDATES: if nothing on the
+  // book were out of band, green would mean nothing had been tested.
+  //
+  // It reads 1,712 of 4,517 today, and every one of the 1,712 is accounted
+  // for — 1,596 marked per row in `journal_value_date_residue` with the
+  // file that wrote them, 116 owned by a writer declared in the view. The
+  // guard is green by ATTRIBUTION, not by a narrowed predicate, and this
+  // line is where that claim is checkable rather than asserted.
+  // `SELECT accounted_by, source, count(*) FROM v_value_date_out_of_band
+  //  GROUP BY 1, 2` is the breakdown, and it names a file per row.
+  //
+  // Three columns, not four: the in-band majority is not "outside this
+  // guard by construction", it is inside it and passing, and the 4th
+  // column's sentence would say the opposite of what is true.
+  ["v_value_date_unexplained", "entries whose value date is OUT OF BAND — the candidates this guard could report, every one of them accounted for",
+    `SELECT count(*)::int AS n FROM v_value_date_out_of_band`],
 ];
 
 // ---- the driver, and why it no longer walks REACH ---------------------
@@ -1120,6 +1252,58 @@ if ((undeclared[0]?.n ?? 0) === 0) {
 }
 
 
+// ---- 8d. THE TEAM CENSUS — who each team guard judges, and who it lets
+// ----      through on purpose ------------------------------------------
+//
+// The three team guards each exempt somebody, and every one of those
+// exemptions is defensible — Corgi staff have to be able to act on a
+// customer's account, a card that belongs to nobody has to be judged the
+// way it was before members existed. What is NOT defensible is an
+// exemption that is invisible, which is what an INNER JOIN is: the rows
+// leave through the FROM clause and no line of output is missing, because
+// the line was never there.
+//
+// So each guard's whole population is printed by verdict, with the same
+// `is_violation` column the invariant filters on — 0040's census argument,
+// applied to people instead of closures. A permitted class that starts
+// growing, or a new verdict nobody has seen, shows up here as a number
+// before it shows up anywhere as an incident.
+//
+// IN  = the invariant judges it. out = deliberately permitted, and the
+// migration says which sentence permits it.
+const TEAM_CENSUS = [
+  ["v_payment_approval_census", "v_member_approval_without_right", "actor_scope", "approvals", "approval(s)"],
+  ["v_team_terms_author_census", "v_team_terms_by_unauthorised_author", "author_scope", "member_versions", "member-version row(s)"],
+  ["v_card_auth_member_census", "v_approved_auth_for_dead_member", "subject_scope", "decisions", "approved decision(s)"],
+];
+for (const [census, guard, scopeCol, countCol, noun] of TEAM_CENSUS) {
+  try {
+    const rows = await sql.unsafe(
+      `SELECT ${scopeCol} AS scope, verdict, is_violation, ${countCol}::int AS n FROM ${census}
+        ORDER BY is_violation DESC, n DESC`,
+    );
+    const total = rows.reduce((a, r) => a + r.n, 0);
+    console.log(`\n  ${guard} — ${total} ${noun}, every one classified`);
+    if (rows.length === 0) console.log(`      (no ${noun} on this book)`);
+    for (const r of rows) {
+      console.log(
+        `      ${r.is_violation ? "IN " : "out"}  ${String(r.verdict).padEnd(32)} ${String(r.n).padStart(4)}  ` +
+          `${noun} — ${r.scope}`,
+      );
+    }
+    console.log(
+      "      out = permitted by name, not by a join: corgi staff break-glass (0044), a card that",
+      "\n            belongs to nobody or a token this book has no card row for (docs/TEAM.md §4),",
+      "\n            an author whose own terms were written in the same instant (0044's strict clock).",
+    );
+  } catch (e) {
+    // A census that cannot be read is exactly as useful as one that was
+    // never written, so it fails rather than printing nothing.
+    bad(`${guard} states its whole population`, `${census} could not be read: ${String(e.message).split("\n")[0].slice(0, 70)}`);
+  }
+}
+
+
 // ---- 9. MAKE IT FAIL ON PURPOSE ---------------------------------------
 //
 // `node scripts/dbcheck.mjs --prove`
@@ -1202,6 +1386,29 @@ if (process.argv.includes("--prove")) {
 
   /** The system actor every posting in this book is attributed to. */
   const ACTOR = `(SELECT id FROM actor WHERE kind='system' AND display_name='ledger-poster' LIMIT 1)`;
+
+  /**
+   * A CORGI STAFF actor: human, `business_id IS NULL`, a member of nothing.
+   *
+   * Needed since 0046, and the reason is itself a small demonstration of what
+   * 0046 repaired. The team proofs build their fixtures — the removal that
+   * disqualifies an author, the terms a violating row hangs off — by appending
+   * a `team_member_version`, and they attributed those appends to `ACTOR`, the
+   * `ledger-poster` SYSTEM actor. Under 0044's view that attribution was
+   * invisible: a non-member author resolved to no author row and the fixture
+   * fell out of the guard's population, so only the row the proof was ABOUT
+   * was counted. Under 0046 it is visible and correctly judged `not_a_person`,
+   * and the proof's delta became 0 -> 2: one violation the proof intended and
+   * one it had been writing unnoticed for as long as it has existed.
+   *
+   * The fix is the attribution, not the expectation. docs/TEAM.md §11's own
+   * transcript removes that admin "(authored by Corgi staff)", which is what a
+   * removal actually is, so the fixture says so and the proof goes back to
+   * asserting exactly one row.
+   */
+  const STAFF = `(SELECT id FROM actor WHERE kind='human' AND business_id IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM team_member tm WHERE tm.actor_id = actor.id)
+                  ORDER BY created_at LIMIT 1)`;
 
   // =====================================================================
   // THE PROOFS
@@ -1811,7 +2018,7 @@ if (process.argv.includes("--prove")) {
           VALUES ('${seed.member_id}'::uuid,
                   (SELECT max(version) + 1 FROM team_member_version WHERE member_id = '${seed.member_id}'::uuid),
                   now(), 'removed', '${seed.role}',
-                  'dbcheck --prove: the member is gone', ${ACTOR})
+                  'dbcheck --prove: the member is gone', ${STAFF})
           RETURNING id`);
         const card = await one(tx, `SELECT id, provider_card_token FROM card LIMIT 1`);
         if (!card) return "this book has no card to attach the decision to";
@@ -1859,11 +2066,64 @@ if (process.argv.includes("--prove")) {
           VALUES ('${seed.member_id}'::uuid,
                   (SELECT max(version) + 1 FROM team_member_version WHERE member_id = '${seed.member_id}'::uuid),
                   now() - interval '1 year', 'active', 'viewer',
-                  'dbcheck --prove: a viewer, who cannot approve', ${ACTOR})`);
+                  'dbcheck --prove: a viewer, who cannot approve', ${STAFF})`);
         await tx.unsafe(`
           INSERT INTO payment_instruction_event (instruction_id, kind, actor_id, value_date, reason)
           SELECT pi.id, 'approved', '${seed.actor_id}'::uuid, pi.value_date,
                  'dbcheck --prove: approved by someone who held no right to'
+            FROM payment_instruction pi WHERE pi.id = '${seed.instruction_id}'::uuid`);
+        return undefined;
+      },
+    },
+    // ---- 0046: the population the guard could not see until tonight -----
+    //
+    // THE PROOF THE WIDENING EXISTS FOR. The case above is the one 0033
+    // could already catch: a MEMBER of the paying business whose role did
+    // not carry the right. This one is the one it could not — an approval
+    // filed by somebody who holds no membership of that business at all,
+    // which the old INNER JOIN removed from the guard's population before
+    // any predicate ran.
+    //
+    // Run it against the pre-0046 view and the delta is 0 -> 0: not a
+    // refusal, not a miss, simply a row the guard was never shown.
+    {
+      view: "v_member_approval_without_right",
+      label: "v_member_approval_without_right, the NON-MEMBER arm",
+      how: "an approval filed by a signer of a DIFFERENT business, whom the old INNER JOIN deleted from the guard",
+      as: "owner",
+      disable: [
+        ["payment_instruction_event", "payment_instruction_event_maker_checker"],
+        ["payment_instruction_event", "payment_instruction_event_team"],
+      ],
+      note:
+        "0033 §5(1) names this exact actor — 'Alex Whitfield, a signer scoped to Ridgeline, could " +
+        "approve Kettle & Crumb's payment and nothing in the database would have stopped him' — and " +
+        "added the trigger that refuses it. The GUARD behind that trigger could not see the state at " +
+        "all until 0046, because the join that made the check necessary was the join that hid it. " +
+        "Corgi staff are still permitted and still not reported: that exemption is now a named " +
+        "verdict, argued in 0044, rather than a row falling out of a FROM clause",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT pi.id AS instruction_id, other.actor_id
+            FROM payment_instruction pi
+            JOIN account acct ON acct.id = pi.account_id
+            JOIN LATERAL (
+                  SELECT tm.actor_id
+                    FROM team_member tm
+                   WHERE tm.business_id <> acct.business_id
+                     AND NOT EXISTS (SELECT 1 FROM team_member t2
+                                      WHERE t2.actor_id    = tm.actor_id
+                                        AND t2.business_id = acct.business_id)
+                   LIMIT 1) other ON true
+           WHERE NOT EXISTS (SELECT 1 FROM payment_instruction_event e
+                              WHERE e.instruction_id = pi.id AND e.kind = 'approved'
+                                AND e.actor_id = other.actor_id)
+           ORDER BY pi.requested_at DESC LIMIT 1`);
+        if (!seed) return "this book has no member of a second business to approve across";
+        await tx.unsafe(`
+          INSERT INTO payment_instruction_event (instruction_id, kind, actor_id, value_date, reason)
+          SELECT pi.id, 'approved', '${seed.actor_id}'::uuid, pi.value_date,
+                 'dbcheck --prove: approved by a signer of another business'
             FROM payment_instruction pi WHERE pi.id = '${seed.instruction_id}'::uuid`);
         return undefined;
       },
@@ -2128,7 +2388,10 @@ if (process.argv.includes("--prove")) {
         "trigger armed. The removed version is BACKDATED one minute because now() is the " +
         "TRANSACTION timestamp and the view reads the author's terms STRICTLY BEFORE the " +
         "row it judges, so that a change made later in a transaction can never indict a " +
-        "write made earlier in it",
+        "write made earlier in it. The removal is attributed to CORGI STAFF, as " +
+        "docs/TEAM.md §11's own transcript attributes it: before 0046 it was attributed to " +
+        "the ledger-poster system actor and the guard could not see that, which is the " +
+        "blind spot 0046 closed showing up inside the proof of the guard it widened",
       async run(tx) {
         // An author and a target in the SAME business, and not the same
         // person — a member editing their own terms is a different question.
@@ -2151,7 +2414,7 @@ if (process.argv.includes("--prove")) {
           SELECT '${seed.author_member_id}'::uuid,
                  max(version) + 1, now() - interval '1 minute', 'removed',
                  (SELECT role FROM v_team_member_current WHERE member_id = '${seed.author_member_id}'::uuid),
-                 'dbcheck --prove: the author is gone', ${ACTOR}, now() - interval '1 minute'
+                 'dbcheck --prove: the author is gone', ${STAFF}, now() - interval '1 minute'
             FROM team_member_version WHERE member_id = '${seed.author_member_id}'::uuid`);
         // 2. …and then writes somebody else's terms anyway.
         await tx.unsafe(`
@@ -2162,6 +2425,160 @@ if (process.argv.includes("--prove")) {
                  'dbcheck --prove: authored by a removed admin',
                  '${seed.author_actor_id}'::uuid
             FROM team_member_version WHERE member_id = '${seed.target_member_id}'::uuid`);
+        return undefined;
+      },
+    },
+
+    // ---- 0046: the two populations the team guards could not see --------
+    //
+    // The case above is 0044's: an author who IS a member of the business
+    // and was removed. This one is the author 0044's own INNER LATERAL
+    // deleted — a member of a DIFFERENT business, who resolves to no author
+    // row at all and therefore to no row in the guard.
+    //
+    // It is the same sentence as the defect it was written to repair, one
+    // level out: what the lookup excludes from itself is exactly the
+    // population it exists to stop.
+    {
+      view: "v_team_terms_by_unauthorised_author",
+      label: "v_team_terms_by_unauthorised_author, the NON-MEMBER arm",
+      how: "a member's terms written by an admin of a DIFFERENT business, whom the old INNER LATERAL deleted",
+      as: "owner",
+      disable: [["team_member_version", "team_member_version_chain"]],
+      note:
+        "the author here is a real, active, administering member — of somebody else's company. " +
+        "0033's trigger refuses them and 0044's guard could not see them, because resolving the " +
+        "author through an inner join means an author who is not a member of that business produces " +
+        "no row rather than a bad row. Corgi staff still pass, by the named verdict " +
+        "`corgi_staff_break_glass`, which is 0044's argument written down where a reader can count it",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT target.id AS target_member_id, outsider.actor_id AS author_actor_id
+            FROM team_member target
+            JOIN v_team_member_current tc ON tc.member_id = target.id
+            JOIN LATERAL (
+                  SELECT tm.actor_id
+                    FROM team_member tm
+                   WHERE tm.business_id <> target.business_id
+                     AND NOT EXISTS (SELECT 1 FROM team_member t2
+                                      WHERE t2.actor_id    = tm.actor_id
+                                        AND t2.business_id = target.business_id)
+                   LIMIT 1) outsider ON true
+           WHERE tc.state = 'active'
+           ORDER BY target.created_at DESC LIMIT 1`);
+        if (!seed) return "this book has no member of a second business to author across";
+        await tx.unsafe(`
+          INSERT INTO team_member_version
+            (member_id, version, state, role, note, created_by)
+          SELECT '${seed.target_member_id}'::uuid, max(version) + 1, 'active',
+                 (SELECT role FROM v_team_member_current WHERE member_id = '${seed.target_member_id}'::uuid),
+                 'dbcheck --prove: authored by an admin of somebody else''s company',
+                 '${seed.author_actor_id}'::uuid
+            FROM team_member_version WHERE member_id = '${seed.target_member_id}'::uuid`);
+        return undefined;
+      },
+    },
+
+    // THE THIRD SIBLING, AND THE ONLY PROOF IN THIS FILE THAT NEEDS NO
+    // TRIGGER DISABLED AND NO OWNER CONNECTION.
+    //
+    // `card_auth_decision` is the append-only log the real-time
+    // authorisation path writes, and `corgi_app` holds SELECT and INSERT on
+    // it with no BEFORE INSERT trigger of any kind — by design: a decision
+    // has to be recordable inside Lithic's 6000 ms window, and 0033 §6 put
+    // the member binding in two denormalised columns precisely so the hot
+    // path would not have to join to write them.
+    //
+    // Which means a decision that simply FAILS TO BIND — approves a
+    // purchase on a card that demonstrably belongs to a named person, and
+    // pins no member version — is writable through the front door, by the
+    // application role, today, with everything armed. It is the state rules
+    // 5 and 6 (`member_removed`, `member_suspended`) exist to stop, arriving
+    // as a silent NULL rather than as a wrong answer, and until 0046 the
+    // guard's INNER JOIN dropped it: 0 -> 0, no refusal, no report.
+    {
+      view: "v_approved_auth_for_dead_member",
+      label: "v_approved_auth_for_dead_member, the UNBOUND arm",
+      how: "an approval on a card that belongs to a person, decided without consulting that person's terms",
+      as: "app",
+      note:
+        "NO trigger is disabled and this runs as corgi_app, not the owner — which is the finding. " +
+        "The other team proofs need the owner because 0033's triggers refuse the state through the " +
+        "product; this one does not, because a missing binding is not a refusable write, it is an " +
+        "absent one. A card with no holder at all, and a token this book has no card row for, stay " +
+        "OUTSIDE the guard on purpose (docs/TEAM.md §4, rule 2's deliberate fail-open) and are " +
+        "counted by name under THE TEAM CENSUS above rather than joined away",
+      async run(tx) {
+        const held = await one(tx, `
+          SELECT cm.card_id, c.provider_card_token
+            FROM card_member cm
+            JOIN card c ON c.id = cm.card_id
+           WHERE cm.assigned_at < now()
+           ORDER BY cm.assigned_at DESC LIMIT 1`);
+        if (!held) return "no card on this book belongs to a member";
+        await tx.unsafe(`
+          INSERT INTO card_auth_decision
+            (provider, provider_auth_token, provider_card_token, card_id, amount_cents,
+             request_status, outcome, result_code, rule, reason, decision_latency_us,
+             source, member_id, member_version_id)
+          VALUES ('lithic', 'dbcheck-prove-unbound-' || gen_random_uuid()::text,
+                  '${held.provider_card_token}', '${held.card_id}'::uuid, 100,
+                  'AUTHORIZATION', 'approve', 'APPROVED', 'within_controls',
+                  'dbcheck --prove: the cardholder was never consulted', 1, 'harness',
+                  NULL, NULL)`);
+        return undefined;
+      },
+    },
+
+    // ---- 0047: the value axis -----------------------------------------
+    //
+    // THE ONLY PROOF HERE THAT NEEDS NOTHING DISABLED, NOTHING BORROWED
+    // AND NOTHING PRETENDED — because the state it builds is one the
+    // product can write today, through the front door, as `corgi_app`.
+    // That is the finding, not an aside: `ledger_append()` takes a
+    // `p_value_date date` and imposes no bound on it whatsoever. 1500 is
+    // as acceptable to this schema as today, and 1,712 entries on the live
+    // book are the evidence that nobody had to try hard.
+    //
+    // The lines are borrowed from an existing entry so the posting
+    // BALANCES — an unbalanced entry would be refused by the deferred
+    // constraint at COMMIT and this proof would be measuring
+    // `v_entry_unbalanced` instead. `p_external_ref` is left NULL on
+    // purpose: an entry no declared prefix owns is exactly the
+    // `accounted_by = 'unexplained'` arm, and an entry the residue table
+    // has never heard of cannot be marked, since 0047's backfill ran once
+    // and this row did not exist then.
+    {
+      view: "v_value_date_unexplained",
+      how: "a balanced entry value-dated 1500-01-01, posted through ledger_append() by the application role",
+      as: "app",
+      note:
+        "nothing is disabled and nothing is impersonated: ledger_append() accepts any date a " +
+        "caller passes and always has. The guard is the FIRST thing on this book that would " +
+        "say so — 0047 adds no CHECK constraint, because a CHECK would refuse the statements " +
+        "seeder and live-fire attack 6 mid-run, and breaking two working suites to catch a " +
+        "third is a worse trade than reporting all three",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT e.entity_id, e.id AS entry_id
+            FROM journal_entry e
+           WHERE e.book = 'financial'
+             AND EXISTS (SELECT 1 FROM journal_line l WHERE l.entry_id = e.id)
+           ORDER BY e.booking_seq DESC LIMIT 1`);
+        if (!seed) return "this book has no financial entry to model the proof on";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, DATE '1500-01-01', 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: a settlement value-dated before the republic',
+            'dbcheck-prove-valuedate:' || gen_random_uuid()::text, ${ACTOR},
+            (SELECT jsonb_agg(jsonb_build_object(
+                      'account_id', l.account_id,
+                      'amount_cents', l.amount_cents::text,
+                      'currency', l.currency,
+                      'memo', 'dbcheck --prove') ORDER BY l.ordinal)
+               FROM journal_line l WHERE l.entry_id = '${seed.entry_id}'::uuid),
+            NULL, NULL, NULL, NULL, NULL, NULL)`);
         return undefined;
       },
     },

@@ -929,3 +929,247 @@ Checked and cleared, with the reason in each case:
 | `assert_card_auth_event_result()` (0026) | a near-miss worth naming: `IF NEW.result <> 'APPROVED' AND v_kind <> 'declined'` *would* fall permissive on a NULL `v_kind`, but the lookup excludes nothing, `card_auth_event.kind` is `NOT NULL` and `event_id` is FK-backed, so NULL is unreachable |
 | `lock_*()` helpers (0008, 0012, 0020, 0024) | they **return** `v_id IS NOT NULL` as their answer; the caller decides. Not gates |
 | audit (0035), mcp wiring (0037), webhook refusals (0038) | no `SELECT … INTO` at all; 0038 compares only `NEW.*` against `OLD.*` |
+
+---
+
+## 12. The same hole in the guard, and migration 0046
+
+§11a swept every **function** for the shape and found exactly two, both
+repaired by 0044. It did not sweep the **views**, and that is where the third,
+fourth and fifth instances were: in 0033's two invariant views, and in the view
+0044 wrote to guard its own repair.
+
+`scripts/dbcheck.mjs`'s `GUARD REACH` section found it, which is what that
+section is for.
+
+### What it read, before anything was changed
+
+```
+v_member_approval_without_right       33 of 186 'approved' events
+v_team_terms_by_unauthorised_author    3 of 422 member-version rows
+v_approved_auth_for_dead_member       11 of  26 approved decisions
+```
+
+All three resolve their subject through an **`INNER JOIN`** — to `team_member`
+for the two approval guards, to `team_member_version` for the decision guard.
+So an actor with **no membership of that business**, or a decision that pinned
+**no member version**, is not judged and not reported. It leaves through the
+`FROM` clause, and a row that leaves that way subtracts nothing visible from
+the count: there is no line of output missing, because the line was never
+there.
+
+That is 0033's defect **verbatim, one table over**. 0033 filtered the author
+lookup `AND state <> 'removed'` and read the resulting NULL as Corgi staff —
+moving a removed admin out of the branch that **checks** and into the branch
+that **trusts**. 0044 closed that door for **removed** members and left it open
+for **non-**members, in the *view* rather than in the function. **What the
+guard excludes from its own population is exactly the population it exists to
+stop**, now for the fifth time, and the first time inside a repair written for
+the same sentence.
+
+### The exposure, measured before anything was changed
+
+Because the answer decides whether this is a reporting gap or a live hole, and
+the two get different write-ups.
+
+**The 153 unjudged approvals.** Every one of them Corgi staff — `business_id
+IS NULL`, `kind = 'human'`, a member of no business at all — and exactly two
+people:
+
+| actor | | approvals | paying businesses |
+| --- | --- | --- | --- |
+| `76f9266f-23c9-52de-b8ff-0ec0b23ef386` | Dana Okonkwo | 100 | 3 |
+| `9fff2b99-0a56-56cd-8fdf-699d64d085ac` | Miles Ferrara | 53 | 3 |
+
+**The 419 unjudged member-version rows.** Every one authored by Dana Okonkwo,
+the same staff actor. The three rows the guard *could* see are all authored by
+an active admin of that business — the fixtures scenario 13 leaves behind.
+
+**The 15 unjudged authorisation decisions.** 12 on a card that exists and
+belongs to nobody, 3 on a provider token this book holds no `card` row for at
+all. None on a card that has a holder.
+
+**Zero by a member of another business. Zero by a business-scoped actor
+holding no membership. Zero by the agent surface.**
+
+So: **a reporting gap today, a live hole tomorrow.** Nothing on this book is
+being laundered through the blind spot — and nothing on this book would have
+*shown* if it were. A guard whose greenness depends on who happens to have been
+seeded is not a guard, and 0033's trigger already refuses the cross-business
+approver it could not see, which means the refusal has been running untested by
+anything that could observe it.
+
+### The repair, and the shape it borrowed
+
+`LEFT JOIN`, with the non-member case **classified explicitly rather than
+dropped** — 0044's own repair used exactly this shape inside the function (the
+state filter came out of the `WHERE` and became a named refusal), and 0032 used
+it on `v_refused_auth_hold`, whose inner join to the verdict table excluded the
+missing verdict that *was* the bug. An unattributable row must **appear**, never
+vanish.
+
+`team_actor_scope(actor_id, business_id)` is one definition read by all three
+guards, because three copies of a classification is how two of them come to
+disagree about who Corgi staff are. Six answers, checked in this order:
+
+| scope | what it is | judged? |
+| --- | --- | --- |
+| `non_human` | the MCP agent surface, `ledger-poster`, `webhook-dispatcher` | **yes** |
+| `member` | a member of **this** business, judged by their terms **at that instant** | **yes** |
+| `member_of_other_business` | a signer of somebody else's company | **yes** |
+| `corgi_staff` | `business_id IS NULL`, human, a member of nothing | no — permitted |
+| `unattributable` | a business-scoped human holding no membership anywhere | **yes** |
+| `unknown_actor` | FK-unreachable; exists so the `CASE` has no NULL arm | **yes** |
+
+**`non_human` is checked first, before membership and before scoping.** The
+brief is explicit — "The initiator can never approve their own action. Neither
+can an agent" — and `team_add_member()` hardcodes `kind = 'human'`, so a
+non-human membership is unrepresentable through the only door there is. If one
+ever appears it is a finding, not a category, and a classifier that let a
+membership row launder it would be the same mistake again.
+
+**`unattributable` is reported, and that is the decision worth arguing.**
+`team_add_member()` is the only door that can mint a business-scoped human and
+it writes the actor, the membership and terms version 1 in one statement — §3,
+"a membership with no terms is unrepresentable". So this principal did not come
+through the product; it is a seeder, a script, or a direct insert by the owner.
+Break-glass is `business_id IS NULL` and it is **attributable**: two named
+people, both Corgi's, both auditable. This is neither a member nor staff, and
+treating *"we do not know who this is"* as permission is the precise sentence
+0033 and 0044 were both written about. A seeder that wants authority can hold a
+staff actor or a membership; it cannot hold neither. It is **zero on this book
+today**, which is exactly when a door should be closed.
+
+### The third sibling, found by the same measure
+
+`v_approved_auth_for_dead_member` is the one the task's instruction to "look
+for a third" was about, and its blind spot is a different join with the same
+consequence: `JOIN team_member_version tmv ON tmv.id = d.member_version_id` is
+inner, so a decision that pinned **no** version is not reported as unjudgeable
+— it is not reported at all. The unpinned rows split three ways and only one
+of them is a fault:
+
+* **`card_belongs_to_nobody`** — permitted, and §4 already argues it: *"a card
+  that belongs to no member is judged exactly as it was before this feature
+  existed"*, which is rule 2's distinction between *we know the answer is no
+  member* and *we do not know the answer*. 12 rows.
+* **`card_not_in_this_book`** — the token resolves to no `card` row. Permitted,
+  for the same sentence: rule 2 approves by design. 3 rows, now **counted**,
+  which is the only claim made about them.
+* **`card_is_held_but_unjudged`** — the card **does** belong to a person, the
+  binding existed at the instant of the decision, and the decision consulted no
+  terms. **A violation**, and 0 rows today. It is the state rules 5 and 6
+  (`member_removed`, `member_suspended`) exist to stop, arriving as a silent
+  NULL rather than as a wrong answer.
+
+Plus one that is not about pinning at all: **`pinned_version_wrong_member`**.
+`member_id` and `member_version_id` are denormalised side by side at the
+instant of the decision (§6) and nothing constrains them to agree, so a
+decision could cite one person's limits while attributing the spend to another.
+0 rows today.
+
+The card-holder lookup is `cm.assigned_at <= d.decided_at`, deliberately:
+`card_member` is append-only and keyed on the card, so a card acquires a holder
+once and never loses one. Without the clock, a card bound to somebody **today**
+would retroactively indict every decision taken on it before anybody held it —
+the same retroactive-indictment trap 0044 named about the author clock, and the
+reason both guards are historically exact rather than current-state.
+
+### The clock case 0044's `<` also dropped
+
+0044 chose `v.created_at < tmv.created_at` — **strictly** before — and the
+argument stands: `created_at` is the *transaction* timestamp, so `<=` would let
+a change made later in a transaction indict a write made earlier in it. But
+`<` has a silent case of its own: an author who **is** a member of the business
+whose own terms were written in the *same instant* as the row they are
+authoring. Under 0044 that row has no author and vanishes. It is now
+`author_terms_concurrent` — **permitted and named**, because the trigger
+already refuses the dangerous half of it (`v_team_member_current` inside that
+same transaction already reads `removed` for an author who removed themselves).
+Named and permitted is not the same as invisible, which is the whole of this
+migration.
+
+### What the guards judge now
+
+```
+GUARD REACH
+  reach v_member_approval_without_right    — 186 'approved' events, ALL of them
+  reach v_team_terms_by_unauthorised_author — 422 member-version rows, ALL of them
+  reach v_approved_auth_for_dead_member     —  26 approved decisions, ALL of them
+```
+
+and `dbcheck` prints the whole population per verdict under **THE TEAM
+CENSUS**, from the views' own `is_violation` column rather than from a
+hand-typed list beside it — 0040's `v_hold_closure_census` argument, applied to
+people instead of closures:
+
+```
+v_member_approval_without_right — 186 approval(s), every one classified
+    out  corgi_staff_break_glass           153  approval(s) — corgi_staff
+    out  member_with_the_right              33  approval(s) — member
+
+v_team_terms_by_unauthorised_author — 422 member-version row(s), every one classified
+    out  corgi_staff_break_glass           419  member-version row(s) — corgi_staff
+    out  active_admin_of_this_business       3  member-version row(s) — member
+
+v_approved_auth_for_dead_member — 26 approved decision(s), every one classified
+    out  card_belongs_to_nobody             12  approved decision(s) — card_unheld
+    out  judged_under_active_terms          11  approved decision(s) — version_pinned
+    out  card_not_in_this_book               3  approved decision(s) — card_unknown
+```
+
+**All three are still GREEN**, at five and a half times, a hundred and forty
+times and two and a half times the population. `scripts/dbcheck.mjs` reads
+**38 passed / 4 failed** and `--prove` covers **26 of 26** views with 33
+proofs; the four reds are the same four, all of them deliberate or
+red-on-arrival, and none is this work's.
+
+### Made to fail, over the population that was added
+
+A widened guard whose new population cannot be made to fail has widened
+nothing, so `--prove` gained three proofs — **33 in all, 26 of 26** views covered:
+
+| view | the arm | how |
+| --- | --- | --- |
+| `v_member_approval_without_right` | the **non-member** arm | an approval filed by a signer of a *different* business — 0033 §5(1)'s Alex Whitfield, the actor whose refusal had never been observable |
+| `v_team_terms_by_unauthorised_author` | the **non-member** arm | a member's terms written by an active, administering admin **of somebody else's company** |
+| `v_approved_auth_for_dead_member` | the **unbound** arm | an approval on a card that belongs to a person, decided without consulting their terms |
+
+Each `0 -> 1`, in a transaction that was rolled back. Run against the pre-0046
+views the same three build `0 -> 0`: not a refusal, not a miss — a row the
+guard was never shown.
+
+**The third one needs no trigger disabled and runs as `corgi_app`**, and that
+is the finding rather than a convenience. The other team proofs need the owner
+because 0033's triggers refuse the state through the product; this one does
+not, because a missing binding is not a refusable write, it is an absent one.
+`card_auth_decision` carries no `BEFORE INSERT` trigger by design — a decision
+has to be recordable inside Lithic's 6000 ms window — so the application role
+can write that row today, with everything armed.
+
+### And one the widening found inside the proofs themselves
+
+0044's own proof went from `0 -> 1` to `0 -> 2` the moment the view could see
+non-members. The proof builds its fixture — the removal that disqualifies the
+author — by appending a `team_member_version` attributed to the `ledger-poster`
+**system** actor, and under 0044's view that attribution was invisible: a
+non-member author resolved to no author row, so the fixture fell out of the
+guard's population and only the row the proof was *about* was counted. It had
+been writing an unjudged violation on every run for as long as it has existed.
+
+**The fix is the attribution, not the expectation.** §11's own transcript
+removes that admin *"(authored by Corgi staff)"*, which is what a removal
+actually is, so the fixture now says so — `dbcheck.mjs`'s `STAFF` constant —
+and the proof is back to asserting exactly one row.
+
+### What this leaves for whoever owns the other modules
+
+1. **`src/components/team/TeamView.tsx:157`** still captions the block "Two
+   invariants from migration 0033". There are three, and the claims beside them
+   now carry their denominators. Two stale words, named here for the second
+   time because `src/components/**` is owned elsewhere.
+2. **`src/lib/chaos/invariants.ts`** now carries all twenty-six views and the
+   widened claims, in step with `scripts/dbcheck.mjs`. The **fifth** side array
+   in that file — 0047's `v_value_date_unexplained` — was folded in by the same
+   pass, because this pass could write both files and its own header asked for
+   exactly that. Nothing is parked any more.

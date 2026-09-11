@@ -1020,7 +1020,7 @@ N("H2H", "Final pass: gate, deploy, re-earn live fire + core loop on the TIP",
 # and nothing else. No new scope.
 # ---------------------------------------------------------------------------
 N("D01x", "A REMOVED member passes the authorship check and can mint an approver",
-  "security", 60, [], "agent", ["db/migrations/0044", "lib/team"], "doing",
+  "security", 60, [], "agent", ["db/migrations/0044", "lib/team"], "done",
   risk="0033:309 and :818 filter the author lookup AND state <> 'removed', "
        "then treat NULL as Corgi staff. removal is meant to be the REMEDY for "
        "a compromised signer; here it is the qualification. gauntlet item 10")
@@ -1028,34 +1028,71 @@ N("D02x", "wire/outbound red 4 of 6: the gate reads a field the instruction refu
   "correctness", 70, [], "agent", ["lib/rails/wire", "lib/payees", "lib/approvals/types"],
   risk="PAYEE_WIRE_ROUTING_NUMBER_MISSING. the file's argument is that the ABA "
        "comes from the CONFIRMED PAYEE BOOK, not the instruction — and that "
-       "argument is right. supplying it reaches a second refusal")
+       "argument is right. supplying it reaches a second refusal", status="done")
 N("D03x", "payees/gate.ts:356 still fails open and writes a permanent verified row",
   "security", 45, [], "agent", ["lib/payees"],
   risk="one path still returns a pass it did not earn, and the row it writes "
-       "is PERMANENT. the fail-closed fix tonight missed this branch")
+       "is PERMANENT. the fail-closed fix tonight missed this branch", status="done")
 N("D04x", "Five cron routes authorise on a header a client can type",
   "security", 50, [], "agent", ["app/api/cron", "middleware"],
   risk="x-vercel-cron is set by the platform and NOT stripped from an inbound "
        "request. no middleware.ts exists. /api/drain, standing, accrual, "
-       "outbound, holds all move money or state")
+       "outbound, holds all move money or state", status="done")
 N("D05x", "events/transport.ts:239 hangs the delivery worker for ever on a >8KiB body",
   "correctness", 40, [], "agent", ["lib/events"],
   risk="one oversized customer payload stops EVERY later outbound delivery. "
-       "the queue has no other worker")
+       "the queue has no other worker", status="done")
 N("D06x", "CI runs no database test: 381 skipped, RUN_DB_TESTS gates 103 sites",
   "correctness", 55, [], "agent", ["ci", "test/config"],
   risk="'2,556 passing' is true and silent about the fact that every "
-       "DB-backed suite and all 8 live-fire attacks are in the skipped count")
+       "DB-backed suite and all 8 live-fire attacks are in the skipped count", status="done")
 N("D07x", "GUARD REACH is hand-typed 15 rows against 24 gated invariants",
   "correctness", 40, [], "agent", ["scripts/dbcheck"],
   risk="built BECAUSE a guard that cannot fail is a green tick, and it is "
-       "itself incomplete by construction. two omissions reach 14.7% and 1.2%")
+       "itself incomplete by construction. two omissions reach 14.7% and 1.2%", status="done")
 N("D08x", "corgi_app cannot SELECT two views 0002 says it can; wire park reason is stale",
   "correctness", 30, [], "agent", ["db/migrations", "lib/webhooks/consumers"],
   risk="v_webhook_dead_letter and v_webhook_parked are unreadable by the app "
        "role; 27 wire parks still say 'this build issues no virtual account "
-       "numbers', which 0042 made false")
+       "numbers', which 0042 made false", status="done")
 N("D09x", "holds.integration.test.ts still commits to the production book",
   "hygiene", 45, ["D01x"], "agent", ["test/holds"],
   risk="skipped earlier on a live conflict. scenario 7 races two workers on "
        "separate connections and genuinely cannot be wrapped")
+
+# ---------------------------------------------------------------------------
+# E — WHAT RUNNING THE TESTS FOUND. Every one of these was invisible until
+# `pnpm test:db` executed the 391 suites that had never run, so none of them is
+# a regression: they are defects that were always there and never observed.
+#
+# That is the honest headline of this block. "2,568 passing" was true for weeks
+# and silent about a population containing all of these.
+# ---------------------------------------------------------------------------
+N("E01", "The 25th instance, inside the fix I shipped an hour ago",
+  "security", 60, [], "agent", ["db/migrations/0046", "lib/team"], "doing",
+  risk="v_member_approval_without_right sees 30 of 177 and "
+       "v_team_terms_by_unauthorised_author 2 of 373: both INNER JOIN "
+       "team_member, so an actor with NO membership is never judged. 0033's "
+       "defect verbatim, one table over — 0044 closed it for REMOVED members "
+       "and left it open for NON-members")
+N("E02", "308 journal lines dated 1606-1874 were booked onto the live book today",
+  "correctness", 55, [], "agent", ["lib/timetravel", "test/property"], "doing",
+  risk="timetravel.integration is off by exactly 1234 cents EVERY run and the "
+       "guard is telling the truth. a property suite books centuries-backdated "
+       "entries onto the shared production book")
+N("E03", "chaos.livefire cannot pass and measures no chaos",
+  "correctness", 45, [], "agent", ["lib/chaos"], "doing",
+  risk="6/6 fail on one helper requiring EVERY invariant view empty, while "
+       "four accepted unrepairable findings stand. it needs a known-population "
+       "baseline the way dbcheck has one")
+N("E04", "A tripwire fired into an empty room, and a stub hides a real lookup",
+  "correctness", 40, [], "agent", ["lib/rails/increase"], "doing",
+  risk="probe.integration pins proof:'unexercised' and its own header says it "
+       "goes red the moment the declaration is true. somebody made it true "
+       "hours ago. increase-wire.test.ts pins the pre-0042 refusal and its "
+       "stub lacks getInboundTransfer, so it covers a TypeError not a lookup")
+N("E05", "holds.integration.test.ts still commits to the production book",
+  "hygiene", 50, [], "agent", ["test/holds"], "doing",
+  risk="skipped twice on live conflicts. scenario 7 races two workers on "
+       "separate connections and genuinely cannot be wrapped — everything else "
+       "can. it also fails 5 of 12 under parallelism on the shared book")

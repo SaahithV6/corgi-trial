@@ -18,7 +18,12 @@
  *   suppressed     the duplicate control's copies, absorbed by
  *                  `webhook_inbox UNIQUE (provider, provider_event_id)`.
  *   dead letters   bounded failure, in front of a human, rather than silence.
- *   invariants     all fourteen, all empty, THROUGHOUT. This is the claim.
+ *   invariants     every gated view, read at one instant. The SCREEN reports
+ *                  emptiness because a dashboard's job is to show the book as
+ *                  it is; the live suite compares them against a baseline
+ *                  captured before chaos was armed, because four of them carry
+ *                  an accepted, unrepairable population and "no NEW violation"
+ *                  is the claim chaos is entitled to make. See ./baseline.ts.
  *   position       ledger balance flat while available drops — the brief's own
  *                  first live-fire line.
  *

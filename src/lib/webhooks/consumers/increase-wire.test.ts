@@ -24,10 +24,14 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   MEASURED_INBOUND_DELIVERY,
+  MEASURED_INBOUND_WIRE,
   MEASURED_OUTBOUND_DELIVERY,
   MEASURED_OUTBOUND_WIRE,
 } from "@/lib/rails/wire/measured";
-import type { IncreaseWireTransfer } from "@/lib/rails/wire/types";
+import type {
+  IncreaseInboundWireTransfer,
+  IncreaseWireTransfer,
+} from "@/lib/rails/wire/types";
 import type { RailEventSemantics } from "@/lib/rails/semantics";
 
 import type { ConsumerContext, ConsumerResult, WebhookConsumer } from "../dispatch";
@@ -171,23 +175,91 @@ const WIRE_ROWS: readonly RailEventSemantics[] = [
     valueDateSource: "payload.created_at",
     note: "Refused before it left. No IMAD was ever issued.",
   },
+  // THE INBOUND ROWS, and they are here because the inbound path is now under
+  // test. Copied from the same live table: the consumer resolves one row per
+  // step `inboundWireAssertedSteps()` reads off the object, and with these
+  // absent every inbound delivery would park on `rail_event_semantics` before
+  // the attribution lookup was ever reached — a second way to hide the lookup,
+  // one layer past the one this file just stopped hiding it with.
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "inbound_wire_transfer.created",
+    canonicalKind: "inbound_wire_credit",
+    semantics: "new_event",
+    valueDateSource: "payload.acceptance.accepted_at",
+    note: "THE INBOUND LEG, dated from the acceptance instant, which is when the money became ours. An inbound wire has no pending stage.",
+  },
+  {
+    rail: "wire",
+    provider: "increase",
+    providerEventType: "inbound_wire_transfer.updated/reversed",
+    canonicalKind: "inbound_wire_returned",
+    semantics: "new_event",
+    valueDateSource: "payload.reversal.reversed_at",
+    note: "WE SENT IT BACK: a wire originated in the other direction, dated from the day we did it. The arrival really happened and that day's statement keeps saying so.",
+  },
 ];
 
-/** A stub adapter whose read-back returns exactly this transfer. */
-function adapterReturning(transfer: IncreaseWireTransfer): {
-  readonly client: { getTransfer: (id: string) => Promise<IncreaseWireTransfer> };
+/**
+ * A stub adapter whose read-backs return exactly these objects.
+ *
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ THE STUB USED TO HAVE ONLY `getTransfer`, AND THAT HID THE THING THE     │
+ * │ INBOUND TEST CLAIMED TO COVER.                                          │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * `applyInboundWire()` opens with a capability check: the destination
+ * `account_number_id` lives on the OBJECT and not in the delivery, so a client
+ * that cannot read an `inbound_wire_transfer` back cannot attribute the credit,
+ * and the consumer answers a NAMED PARK rather than a TypeError the dispatcher
+ * would retry eight times and dead-letter with a stack trace.
+ *
+ * A stub missing the method therefore never reached the lookup at all. It
+ * answered the capability refusal — whose wording also contains the phrase
+ * "virtual account numbers" — and the one inbound test in this file asserted
+ * that string and believed it was asserting the attribution refusal. So the
+ * unit test covered the deployment-wiring branch while migration 0042 gave
+ * every business a virtual account number, `findVirtualAccountNumber()` went
+ * into this path, and a real simulated wire to Ridgeline's number booked
+ * +41,234 on the live book. None of that was under test here.
+ *
+ * `inboundAsked` is separate from `asked` on purpose: a wire delivery must
+ * reach exactly one of the two read-backs, and a single recorder could not tell
+ * "it read the inbound object" from "it read the outbound one".
+ */
+function adapterReturning(
+  transfer: IncreaseWireTransfer,
+  inbound?: IncreaseInboundWireTransfer,
+): {
+  readonly client: {
+    getTransfer: (id: string) => Promise<IncreaseWireTransfer>;
+    getInboundTransfer?: (id: string) => Promise<IncreaseInboundWireTransfer>;
+  };
   readonly asked: string[];
+  readonly inboundAsked: string[];
 } {
   const asked: string[] = [];
-  return {
-    asked,
-    client: {
-      getTransfer: (id: string) => {
-        asked.push(id);
-        return Promise.resolve(transfer);
-      },
+  const inboundAsked: string[] = [];
+  const client: {
+    getTransfer: (id: string) => Promise<IncreaseWireTransfer>;
+    getInboundTransfer?: (id: string) => Promise<IncreaseInboundWireTransfer>;
+  } = {
+    getTransfer: (id: string) => {
+      asked.push(id);
+      return Promise.resolve(transfer);
     },
   };
+  // Omitted ENTIRELY when no inbound object is supplied, because that is the
+  // shape of the deployment fault the capability refusal exists for, and a
+  // method present-but-throwing would be testing a different thing.
+  if (inbound !== undefined) {
+    client.getInboundTransfer = (id: string) => {
+      inboundAsked.push(id);
+      return Promise.resolve(inbound);
+    };
+  }
+  return { asked, inboundAsked, client };
 }
 
 /** `MEASURED_OUTBOUND_WIRE` with one field changed. Never a hand-built object. */
@@ -200,16 +272,22 @@ type Deps = Parameters<typeof IncreaseWireModule.createIncreaseWireConsumer>[0];
 function consumerWith(
   transfer: IncreaseWireTransfer,
   extra: Partial<NonNullable<Deps>> = {},
-): { consumer: WebhookConsumer; ach: ReturnType<typeof achSpy>; asked: string[] } {
+  inbound?: IncreaseInboundWireTransfer,
+): {
+  consumer: WebhookConsumer;
+  ach: ReturnType<typeof achSpy>;
+  asked: string[];
+  inboundAsked: string[];
+} {
   const ach = achSpy();
-  const adapter = adapterReturning(transfer);
+  const adapter = adapterReturning(transfer, inbound);
   const consumer = m.createIncreaseWireConsumer({
     ach: ach.consumer,
     adapter: adapter as unknown as NonNullable<Deps>["adapter"],
     semanticsRows: WIRE_ROWS,
     ...extra,
   });
-  return { consumer, ach, asked: adapter.asked };
+  return { consumer, ach, asked: adapter.asked, inboundAsked: adapter.inboundAsked };
 }
 
 /* ========================================================================== */
@@ -300,31 +378,292 @@ describe("the Increase router: one vendor, two rails", () => {
 });
 
 /* ========================================================================== */
-/* 2. Inbound wires — the refusal, and why it is a park                       */
+/* 2. Inbound wires — the lookup, the booking, and the refusal                */
 /* ========================================================================== */
 
-describe("an inbound wire nobody can attribute", () => {
-  it("parks on the account mapping and posts nothing", async () => {
-    const { consumer, asked } = consumerWith(MEASURED_OUTBOUND_WIRE);
+/**
+ * THE MEASURED INBOUND PAIR: one number nobody owns, one number Ridgeline does.
+ *
+ * Both ids, both amounts and both `account_number_id`s were read off Increase's
+ * own objects on 2026-09-11 and off `virtual_account_number` on the live book.
+ * The two arrivals are the whole of this rail's attribution question:
+ *
+ *   sandbox_account_number_96mzhz3n61f5p0jpvytc   the programme's shared FBO
+ *                                                 number, deliberately mapped
+ *                                                 to NOBODY. Every one of the
+ *                                                 13 historical inbound wires
+ *                                                 named it, and all of them
+ *                                                 parked, correctly.
+ *   sandbox_account_number_bh5spt0xmebnj6xq6t3l   issued to Ridgeline Robotics
+ *                                                 by migration 0042 and the
+ *                                                 provisioning script. A wire
+ *                                                 to it books.
+ */
+const FBO_NUMBER_ID = "sandbox_account_number_96mzhz3n61f5p0jpvytc";
+const RIDGELINE_NUMBER_ID = "sandbox_account_number_bh5spt0xmebnj6xq6t3l";
+const RIDGELINE_BUSINESS = "e274546d-6bdd-5266-b0fb-cc839a7811f9";
+const RIDGELINE_WIRE_ID = "sandbox_inbound_wire_transfer_cz9s1u6u12znrr9njhau";
+
+/**
+ * The FBO arrival AS IT STOOD WHEN IT ARRIVED.
+ *
+ * `MEASURED_INBOUND_WIRE` is that same transfer read back AFTER we sent it back
+ * out, so it carries a `reversal` — and an arrival that was reversed before
+ * anybody attributed it takes the consumer's `returned_unattributed` branch,
+ * which RESOLVES rather than parks. The park is the state the 13 real arrivals
+ * are in, so the one field that post-dates the delivery is removed. Same
+ * doctrine as `measuredWith()` above: the measured object with one field
+ * changed, never a hand-built one.
+ */
+const FBO_ON_ARRIVAL = {
+  ...MEASURED_INBOUND_WIRE,
+  status: "accepted",
+  reversal: null,
+} as unknown as IncreaseInboundWireTransfer;
+
+/**
+ * The Ridgeline arrival, measured. `GET /inbound_wire_transfers/{id}` on
+ * 2026-09-11: $412.34, accepted at 10:54:35Z, IMAD 20260911fqlrvcqr748694, no
+ * reversal — and addressed to Ridgeline's own number rather than the FBO one,
+ * which is the entire difference between this object and the one above.
+ */
+const RIDGELINE_ON_ARRIVAL = {
+  ...MEASURED_INBOUND_WIRE,
+  id: RIDGELINE_WIRE_ID,
+  amount: 41234,
+  account_number_id: RIDGELINE_NUMBER_ID,
+  status: "accepted",
+  created_at: "2026-09-11T10:54:35Z",
+  input_message_accountability_data: "20260911fqlrvcqr748694",
+  acceptance: {
+    accepted_at: "2026-09-11T10:54:35Z",
+    transaction_id: "sandbox_transaction_ritv4c1jd21itu6qm39k",
+  },
+  reversal: null,
+} as unknown as IncreaseInboundWireTransfer;
+
+/** The exact verified bytes of the Ridgeline delivery, out of `webhook_inbox`. */
+const RIDGELINE_DELIVERY =
+  '{"type":"event","associated_object_id":"sandbox_inbound_wire_transfer_cz9s1u6u12znrr9njhau","associated_object_type":"inbound_wire_transfer","category":"inbound_wire_transfer.created","created_at":"2026-09-11T10:54:36Z","id":"sandbox_event_001m281nr1jcdmctdrr4ck877ea"}';
+
+describe("an inbound wire, attributed by a lookup and never by a guess", () => {
+  it("READS THE OBJECT BACK, because the delivery does not say where it was sent", async () => {
+    // The pointer carries no `account_number_id` — nothing in the signed bytes
+    // says whose money this is. This is the call the old stub could not make.
+    expect(JSON.parse(RIDGELINE_DELIVERY)).not.toHaveProperty("account_number_id");
+
+    const { consumer, inboundAsked, asked } = consumerWith(
+      MEASURED_OUTBOUND_WIRE,
+      { conn: stubAttribution({ owner: null, mapped: 7 }) },
+      FBO_ON_ARRIVAL,
+    );
+    await consumer.handle(delivery(MEASURED_INBOUND_DELIVERY), ctx);
+
+    // The INBOUND read-back, with the pointer's own id — and not the outbound
+    // one, which would be the router sending a receipt down the payment path.
+    expect(inboundAsked).toEqual(["sandbox_inbound_wire_transfer_00lkxr57i04x31blx06x"]);
+    expect(asked).toHaveLength(0);
+  });
+
+  it("PARKS a wire to the shared FBO number, with the reason 0042 left true", async () => {
+    const { consumer } = consumerWith(
+      MEASURED_OUTBOUND_WIRE,
+      { conn: stubAttribution({ owner: null, mapped: 7 }) },
+      FBO_ON_ARRIVAL,
+    );
     const result = await consumer.handle(delivery(MEASURED_INBOUND_DELIVERY), ctx);
 
     expect(result.status).toBe("parked");
     if (result.status !== "parked") throw new Error("unreachable");
     expect(result.waitingFor.kind).toBe("inbound_wire_account_mapping");
+    // Parked on the TRANSFER id now, not the delivery's pointer: the refusal is
+    // reached after the object is in hand, so the referent is the object.
     expect(result.waitingFor.ref).toBe("sandbox_inbound_wire_transfer_00lkxr57i04x31blx06x");
-    // The refusal has to SAY that nothing was posted, because "recognised" and
-    // "booked" are the two things an operator must never have to guess between.
+
+    // THE REASON, AS IT STANDS AFTER 0042. It names the number that was
+    // addressed, says how many numbers ARE mapped — so "we issue none" and
+    // "this one is not one of them" cannot be confused — and puts the FBO
+    // explanation in the sentence rather than in a comment somebody has to find.
+    expect(result.reason).toContain(FBO_NUMBER_ID);
+    expect(result.reason).toContain("NOTHING ON THIS BOOK SAYS WHOSE");
+    expect(result.reason).toContain("7 number(s) are mapped");
+    expect(result.reason).toContain("shared FBO number");
     expect(result.reason).toContain("NOTHING WAS POSTED");
-    expect(result.reason).toContain("virtual account numbers");
-    // PARKED, not ignored: a credit nobody can attribute is exactly what an
-    // operator should be shown, and `ignored` would file somebody's money under
+    expect(result.reason).toContain("what this consumer will not do is guess");
+
+    // AND THE PRE-0042 SENTENCE IS GONE. "this build issues no virtual account
+    // numbers" was true when it was written, false from migration 0042, and
+    // carried by 27 live deliveries. Asserted as an ABSENCE so it cannot come
+    // back quietly.
+    expect(result.reason).not.toContain("issues no virtual account numbers");
+
+    // PARKED, not ignored: `ignored` would file somebody's money under
     // "recognised and skipped".
     expect(result.status).not.toBe("ignored");
-    // And it did not call the provider: there is nothing a read-back could tell
-    // us that would make the money attributable.
-    expect(asked).toHaveLength(0);
+  });
+
+  it("BOOKS a wire to a mapped number — the lookup answers, and the credit posts", async () => {
+    // The same delivery shape, the same consumer, the same stub. The ONLY
+    // difference from the case above is that the book has a row saying whose
+    // that number is, which is exactly the claim migration 0042 makes.
+    const book = stubAttribution({
+      owner: {
+        providerAccountNumberId: RIDGELINE_NUMBER_ID,
+        businessId: RIDGELINE_BUSINESS,
+        legalName: "Ridgeline Robotics, Inc.",
+      },
+      mapped: 7,
+      // No availability policy row, deliberately: see the assertion below.
+      availabilityPolicy: false,
+    });
+    const { consumer, inboundAsked } = consumerWith(
+      MEASURED_OUTBOUND_WIRE,
+      { conn: book },
+      RIDGELINE_ON_ARRIVAL,
+    );
+    const result = await consumer.handle(delivery(RIDGELINE_DELIVERY), ctx);
+
+    expect(inboundAsked).toEqual([RIDGELINE_WIRE_ID]);
+
+    // ATTRIBUTION SUCCEEDED AND THE CREDIT WENT TO THE BOOKER. The proof is
+    // WHICH refusal comes back: `inbound_wire_booking` with `NO_AVAILABILITY_POLICY`
+    // is thrown from INSIDE `creditInboundWire()`, several steps past the
+    // mapping refusal, and there is no other path in this consumer that can
+    // produce it. A wire that had not been attributed would have parked on
+    // `inbound_wire_account_mapping` and never reached the booker at all.
+    //
+    // This half runs with no database, so the entry itself is posted by the
+    // RUN_DB_TESTS case below, against the live book, on the real row. Two
+    // halves, neither borrowing the other's evidence.
+    expect(result.status).toBe("parked");
+    if (result.status !== "parked") throw new Error("unreachable");
+    expect(result.waitingFor.kind).toBe("inbound_wire_booking");
+    expect(result.waitingFor.ref).toBe(`NO_AVAILABILITY_POLICY:${RIDGELINE_WIRE_ID}`);
+    expect(result.reason).toContain("Nothing was booked");
+    // The refusal names the rail and the value date it looked the policy up by.
+    expect(result.reason).toContain("2026-09-11");
+    // And it did NOT fall back to "wires are immediate" — the one default that
+    // can make somebody's money spendable because nobody decided.
+    expect(result.reason).toContain('"wires are immediate" is a policy row, not a constant');
+  });
+
+  it("RESOLVES an unattributed arrival that was already sent back, rather than parking for ever", async () => {
+    // The branch the old stub could not reach at all. `MEASURED_INBOUND_WIRE`
+    // unchanged: the FBO arrival AFTER `POST /inbound_wire_transfers/{id}/reverse`
+    // returned 200 with reason `creditor_request`. Nothing was ever booked for
+    // it, so there is nothing to correct and nobody to attribute it to — and
+    // waking an operator every few minutes about money that has already left is
+    // a park that can never be cleared.
+    const { consumer } = consumerWith(
+      MEASURED_OUTBOUND_WIRE,
+      { conn: stubAttribution({ owner: null, mapped: 7 }) },
+      MEASURED_INBOUND_WIRE,
+    );
+    const result = await consumer.handle(delivery(MEASURED_INBOUND_DELIVERY), ctx);
+
+    expect(result.status).toBe("processed");
+    if (result.status !== "processed") throw new Error("unreachable");
+    expect(result.produced).toEqual([
+      { kind: "inbound_wire_account_mapping", ref: "sandbox_inbound_wire_transfer_00lkxr57i04x31blx06x" },
+    ]);
+  });
+
+  it("PRESERVES the capability refusal: a client that cannot read the object back", async () => {
+    // THE REFUSAL THIS FILE USED TO TEST BY ACCIDENT. Passing no inbound object
+    // omits `getInboundTransfer` from the stub client entirely, which is the
+    // shape of the deployment fault: the `account_number_id` lives only on that
+    // object, so a client without the method cannot attribute anything.
+    //
+    // It must stay a NAMED PARK. Without the check it is a TypeError, and
+    // dispatch would retry it eight times and dead-letter it with a stack trace
+    // where a sentence belongs.
+    const { consumer } = consumerWith(MEASURED_OUTBOUND_WIRE);
+    const result = await consumer.handle(delivery(MEASURED_INBOUND_DELIVERY), ctx);
+
+    expect(result.status).toBe("parked");
+    if (result.status !== "parked") throw new Error("unreachable");
+    expect(result.waitingFor.kind).toBe("inbound_wire_account_mapping");
+    expect(result.reason).toContain("cannot read an inbound_wire_transfer back");
+    expect(result.reason).toContain("NOTHING WAS POSTED");
+    // AND IT SAYS WHOSE FAULT IT IS. This is a wiring fault in the deployment,
+    // not a fact about the payment — the distinction the old single inbound
+    // test in this file could not draw, because it was answering this refusal
+    // while believing it was answering the attribution one.
+    expect(result.reason).toContain("wiring fault in the deployment");
+    expect(result.reason).toContain("the shipped client implements the read-back");
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* 2b. THE SAME CREDIT, POSTED — on the live book, on the real row             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The half the stub cannot buy: the entry.
+ *
+ * `creditInboundWire()` reads an availability policy, resolves the chart,
+ * writes an `uncleared_credit` hold and posts two entries inside one
+ * transaction. Stubbing that would be re-implementing the ledger in a test
+ * file, so this case uses the real connection and the real
+ * `rail_event_semantics` table — the only two things the cases above inject —
+ * and re-drives the DELIVERY THAT ALREADY BOOKED.
+ *
+ * That is not a trick: `postEntry` is keyed on
+ * `increase.wire:credit:<transfer id>` and the hold is `ON CONFLICT (kind,
+ * external_ref) DO NOTHING`, so a second run of a booked credit must post
+ * NOTHING and answer `processed` with the same entry id. Asserting exactly that
+ * is asserting idempotency, which is what a webhook consumer owes above all —
+ * "we will replay events, twice is one" — and it does it without inventing a
+ * fake arrival on a real book.
+ *
+ *     set -a; . ./.env; set +a
+ *     RUN_DB_TESTS=1 pnpm vitest run \
+ *       src/lib/webhooks/consumers/increase-wire.test.ts
+ */
+(process.env["RUN_DB_TESTS"] === "1" ? describe : describe.skip)(
+  "the credit that is actually on the book",
+  () => {
+    it("books once, answers processed, and a redelivery posts nothing twice", async () => {
+      const { sql } = await import("@/lib/ledger/db");
+      const { findEntryByIdempotencyKey } = await import("@/lib/ledger/queries");
+
+      const KEY = `increase.wire:credit:${RIDGELINE_WIRE_ID}`;
+      const before = await findEntryByIdempotencyKey(KEY, sql);
+
+      // THE ENTRY IS ALREADY THERE, from the live arrival. If it is not, this
+      // assertion fails rather than quietly booking a new one — a test that
+      // creates the thing it is checking for proves nothing about the system.
+      expect(before, `no ledger entry for ${KEY}; the live credit is missing`).not.toBe(null);
+
+      const { consumer, inboundAsked } = consumerWith(
+        MEASURED_OUTBOUND_WIRE,
+        // The real connection AND the real semantics table: `semanticsRows:
+        // undefined` puts the classification back on `rail_event_semantics`.
+        { conn: sql, semanticsRows: undefined },
+        RIDGELINE_ON_ARRIVAL,
+      );
+      const result = await consumer.handle(delivery(RIDGELINE_DELIVERY), ctx);
+
+      expect(inboundAsked).toEqual([RIDGELINE_WIRE_ID]);
+      expect(result.status).toBe("processed");
+      if (result.status !== "processed") throw new Error("unreachable");
+
+      // It names the transfer, the mapping and the rail, which is what wakes
+      // every sibling delivery parked on any of them — including the ones that
+      // parked under the pre-0042 reason.
+      expect(result.produced).toEqual([
+        { kind: "inbound_wire_transfer", ref: RIDGELINE_WIRE_ID },
+        { kind: "inbound_wire_account_mapping", ref: RIDGELINE_WIRE_ID },
+        { kind: "inbound_wire", ref: RIDGELINE_WIRE_ID },
+      ]);
+
+      // TWICE IS ONE. Same entry, same booking position, same value date.
+      const after = await findEntryByIdempotencyKey(KEY, sql);
+      expect(after).toEqual(before);
+      expect(after?.valueDate).toBe("2026-09-11");
+    });
+  },
+);
 
 /* ========================================================================== */
 /* 3. The lifecycle, against the real object                                  */
@@ -662,6 +1001,76 @@ function stubLink(opts: {
         },
       ]);
     }
+    throw new Error(`the stub connection was asked an unexpected query: ${text.slice(0, 120)}`);
+  };
+  return tag as never;
+}
+
+/**
+ * A `Sql`-shaped tag for the INBOUND path: whose number is this, how many are
+ * mapped, and what the availability policy says.
+ *
+ * Same doctrine as `stubLink` — it answers the queries this path makes and
+ * throws on anything else, so a future edit that adds one fails here loudly
+ * rather than silently reading nothing. The three are told apart by a token
+ * only one of them carries, never by a shared table name.
+ *
+ * `availabilityPolicy: false` is not a shortcut, it is the seam: with no policy
+ * row `creditInboundWire()` refuses with `NO_AVAILABILITY_POLICY`, which is a
+ * refusal only reachable from INSIDE the booker. That is how the no-database
+ * half proves attribution reached the booking call without asking a stub to
+ * impersonate the ledger. The entry itself is posted in section 2b.
+ */
+function stubAttribution(opts: {
+  owner: {
+    providerAccountNumberId: string;
+    businessId: string;
+    legalName: string;
+  } | null;
+  mapped: number;
+  availabilityPolicy?: boolean;
+}): never {
+  const tag = (strings: TemplateStringsArray, ...values: unknown[]): Promise<unknown[]> => {
+    const text = strings.join("?");
+
+    // countVirtualAccountNumbers(): the only one of the three that counts.
+    if (text.includes("count(*)") && text.includes("virtual_account_number")) {
+      return Promise.resolve([{ n: opts.mapped }]);
+    }
+
+    // findVirtualAccountNumber(): whose number is this. `null` is an ANSWER.
+    if (text.includes("virtual_account_number")) {
+      if (opts.owner === null) return Promise.resolve([]);
+      return Promise.resolve([
+        {
+          provider: "increase",
+          provider_account_number_id: opts.owner.providerAccountNumberId,
+          provider_account_id: "sandbox_account_zkfx1wcn4brwoaiyksj6",
+          routing_number: "123308582",
+          account_number: "3164662367",
+          business_id: opts.owner.businessId,
+          legal_name: opts.owner.legalName,
+          name: opts.owner.legalName,
+          recorded_at: new Date("2026-09-11T10:00:00Z"),
+        },
+      ]);
+    }
+
+    // effectiveAvailabilityPolicy(), inside creditInboundWire().
+    if (text.includes("funds_availability_policy")) {
+      if (opts.availabilityPolicy !== true) return Promise.resolve([]);
+      return Promise.resolve([
+        {
+          id: "00000000-0000-0000-0000-0000000000p1",
+          rail: "wire",
+          counterparty_class: String(values[1] ?? "unknown"),
+          banking_days_hold: 0,
+          release_local_time: "00:00:00",
+          note: "A wire is final on receipt.",
+        },
+      ]);
+    }
+
     throw new Error(`the stub connection was asked an unexpected query: ${text.slice(0, 120)}`);
   };
   return tag as never;

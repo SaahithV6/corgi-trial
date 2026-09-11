@@ -50,6 +50,19 @@ afterAll(async () => {
   if (shared !== null) await shared.end({ timeout: 5 });
 });
 
+/**
+ * The value date one day below `asOf`, in UTC.
+ *
+ * A value date is a label on a business day, not a moment, so it has no zone
+ * to get wrong — the same argument `read.ts`'s `windowStart` makes.
+ */
+function dayBefore(valueDate: string): string {
+  const [year, month, day] = valueDate.split("-").map(Number) as [number, number, number];
+  const at = new Date(Date.UTC(year, month - 1, day));
+  at.setUTCDate(at.getUTCDate() - 1);
+  return at.toISOString().slice(0, 10);
+}
+
 function request(overrides: {
   asOf?: string | null;
   asKnownAt?: Date | null;
@@ -163,7 +176,7 @@ describeDb("2 & 3. the same day, read at two points on the booking axis", () => 
     expect(then.at.pending.length).toBeGreaterThan(0);
   });
 
-  it("holds the value axis still: a different day does not move with the cut", async () => {
+  it("holds the value axis still: the act cannot reach a day before its own", async () => {
     const c = await conn();
     const act = await bestDemonstration(c);
     if (act === null) return;
@@ -172,11 +185,43 @@ describeDb("2 & 3. the same day, read at two points on the booking axis", () => 
     const after = act.landmarks.find((l) => l.kind === "after");
     if (before === undefined || after === undefined) return;
 
-    // A value date years before the act's own. The correction carries the
-    // ORIGINAL value date, so it cannot reach a day before it.
-    const other = "1979-01-02";
+    // THE DAY BEFORE THE ACT'S OWN, DERIVED FROM THE ACT.
+    //
+    // This line read `const other = "1979-01-02"` with the comment "a value
+    // date years before the act's own", and both halves of that sentence were
+    // assumptions about a book nobody was holding still. It went red by
+    // exactly 1,234 cents on every run for two independent reasons, and the
+    // fix for each is the same one:
+    //
+    //   1. `bestDemonstration()` is LIVE — it is the most recent correction
+    //      act on any deposit account — and at the time it was returning an
+    //      act value-dated 1956-09-24, planted by
+    //      `src/lib/recon/planted-break.test.ts` (now wrapped). 1979 is AFTER
+    //      1956, so the act's own reversal and re-book were inside the
+    //      cumulative closing this test was asserting could not contain them.
+    //      A constant cannot be "years before" a date chosen at read time.
+    //   2. Even with a genuinely earlier day, a closing balance is CUMULATIVE
+    //      — every value date at or below the one asked for — so any writer
+    //      booking below it moves the figure. On a book twelve workers write
+    //      to, an equality between two absolute readings is a bet, not a
+    //      claim. `src/test/livefire/README.md` §1: never widen a tolerance to
+    //      absorb another writer; isolate, or take a delta.
+    //
+    // So the day is derived from the act, and the assertion below is an exact
+    // delta with every other writer cancelled arithmetically rather than
+    // tolerated. Nothing is loosened: the claim this file makes about the two
+    // axes is now checked against the act it actually got.
+    const other = dayBefore(act.valueDate);
+    if (other < "1900-01-02") {
+      // `params.ts` refuses either axis outside 1900–2999, so an act value
+      // dated at the very bottom of the supported range has no addressable day
+      // below it to ask about. Saying so beats asserting on a coordinate the
+      // console would refuse.
+      expect(act.valueDate <= "1900-01-02").toBe(true);
+      return;
+    }
 
-    const closingAt = async (asKnownAt: string) => {
+    const read = async (asKnownAt: string) => {
       const point = await resolveTimePoint(
         request({ asOf: other, asKnownAt: new Date(asKnownAt) }),
         c,
@@ -186,10 +231,48 @@ describeDb("2 & 3. the same day, read at two points on the booking axis", () => 
         { accountId: act.accountId, point, window: "day" },
         c,
       );
-      return foldClosing(at.period);
+      return { point, at, closing: foldClosing(at.period) };
     };
 
-    expect(await closingAt(before.at)).toBe(await closingAt(after.at));
+    const then = await read(before.at);
+    const now = await read(after.at);
+
+    // Same value date, two cuts, and the later cut really is later.
+    expect(then.point.snapshot.valueDate).toBe(other);
+    expect(now.point.snapshot.valueDate).toBe(other);
+    expect(then.point.snapshot.bookingWatermark).toBeLessThan(
+      now.point.snapshot.bookingWatermark,
+    );
+
+    // Everything value-dated at or before `other` that landed BETWEEN the two
+    // cuts. `at.late` is "above the earlier cut, clipped to live"; clipping it
+    // again to the later cut makes it exactly the window between them.
+    const between = then.at.late.filter(
+      (entry) => entry.bookingSeq <= now.point.snapshot.bookingWatermark,
+    );
+    let betweenNet = 0n;
+    for (const entry of between) betweenNet += entry.signedCents;
+
+    // THE CLAIM, and it is the whole point of the case: a correction carries
+    // the ORIGINAL value date, so moving the booking cut across THIS ACT
+    // changes nothing about a day below it. Asserted against the act's own
+    // members rather than against a number, so it holds whatever else the book
+    // is doing.
+    const ofTheAct = new Set(act.members.map((member) => member.entryId));
+    expect(
+      between.filter((entry) => ofTheAct.has(entry.entryId)).map((e) => e.description),
+    ).toEqual([]);
+    expect(
+      between.filter((entry) => entry.correctionGroupId === act.correctionGroupId),
+    ).toEqual([]);
+
+    // AND THE ARITHMETIC IS CLOSED. Whatever else landed in that window —
+    // another worker's posting, on a book this suite does not own — is
+    // accounted for entry by entry rather than absorbed by a tolerance. On a
+    // quiet book `between` is empty, `betweenNet` is 0n and the two readings
+    // are identical, which is the original assertion recovered as a corollary
+    // instead of assumed as a premise.
+    expect(now.closing - then.closing).toBe(betweenNet);
   });
 });
 

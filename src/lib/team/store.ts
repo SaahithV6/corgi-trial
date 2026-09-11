@@ -620,49 +620,87 @@ export async function listUnassignedCards(
 /* -------------------------------------------------------------------------- */
 
 /**
- * The views 0033 and 0044 assert are empty, counted.
+ * The views 0033, 0044 and 0046 assert are empty, counted — AND THE SIZE OF
+ * THE POPULATION EACH ONE RANGES OVER.
  *
  * Exposed so the team screen can state the claim and its current value rather
  * than assert it in prose. A guard nobody queries is a comment — this build has
  * found seventeen of those — and the screen is one more place that queries
  * them.
  *
- * THE THIRD ONE IS 0044'S. `v_team_terms_by_unauthorised_author` is the guard
- * on the authorship hole: 0033 established the author's authority with a lookup
- * filtered `AND state <> 'removed'` and then gated on `IF v_author IS NOT NULL`,
- * where NULL is the Corgi-staff break-glass — so a REMOVED member fell out of
- * the branch that checks and into the branch that trusts, and could mint a new
- * approver. `src/components/team/TeamView.tsx` still captions this block "Two
- * invariants from migration 0033"; that is one stale word and it is named in
+ * WHY THE DENOMINATOR IS IN THE CLAIM. A zero is only worth what its
+ * population is worth, and until migration 0046 these three zeroes were worth
+ * a fifth of theirs. All three resolved their subject through an INNER JOIN —
+ * to `team_member` for the two approval guards, to `team_member_version` for
+ * the decision guard — so an actor with no membership of that business, or a
+ * decision that pinned no member version, was not judged AND NOT REPORTED. It
+ * left through the FROM clause, and a row that leaves that way subtracts
+ * nothing visible from the count. `scripts/dbcheck.mjs` GUARD REACH measured
+ * it: 33 of 186 approvals, 11 of 26 approved decisions, 3 of 422
+ * member-version rows.
+ *
+ * That is 0033's own defect, one table over, inside 0044's repair for it —
+ * 0033 filtered the author lookup `AND state <> 'removed'` and read the
+ * resulting NULL as Corgi staff, which moved a removed admin out of the branch
+ * that CHECKS and into the branch that TRUSTS. 0044 closed that door for
+ * removed members and left it open for NON-members, in the view rather than in
+ * the function. 0046 makes every one of those joins a LEFT JOIN and gives the
+ * non-member case a NAME — `corgi_staff_break_glass`, permitted and argued;
+ * `approver_from_another_business`, never legitimate; `not_a_person`, the
+ * agent surface; `no_membership_anywhere`, a seeder or a script. The
+ * per-verdict breakdown lives in `v_payment_approval_census`,
+ * `v_team_terms_author_census` and `v_card_auth_member_census`.
+ *
+ * So the number printed beside each claim below is `judged of population`, and
+ * the two being equal is itself the assertion. If they ever diverge, a join
+ * went back to INNER.
+ *
+ * `src/components/team/TeamView.tsx` still captions this block "Two invariants
+ * from migration 0033"; there are three and the word is stale, named in
  * docs/TEAM.md §9, because `src/components/**` is owned elsewhere tonight.
  */
 export async function readTeamInvariants(
   conn: Sql = sql,
 ): Promise<readonly { readonly view: string; readonly claim: string; readonly rows: number }[]> {
-  const [dead] = await conn<{ n: number }[]>`
-    SELECT count(*)::int AS n FROM v_approved_auth_for_dead_member`;
-  const [right] = await conn<{ n: number }[]>`
-    SELECT count(*)::int AS n FROM v_member_approval_without_right`;
-  const [author] = await conn<{ n: number }[]>`
-    SELECT count(*)::int AS n FROM v_team_terms_by_unauthorised_author`;
+  // ONE ROUND TRIP. Six counts, and a screen read is not the place to spend
+  // six of them; the views are all counts over indexed joins.
+  const [n] = await conn<
+    {
+      dead: number;
+      dead_pop: number;
+      without_right: number;
+      without_right_pop: number;
+      author: number;
+      author_pop: number;
+    }[]
+  >`
+    SELECT (SELECT count(*)::int FROM v_approved_auth_for_dead_member)     AS dead,
+           (SELECT count(*)::int FROM v_card_auth_member_judged)           AS dead_pop,
+           (SELECT count(*)::int FROM v_member_approval_without_right)     AS without_right,
+           (SELECT count(*)::int FROM v_payment_approval_judged)           AS without_right_pop,
+           (SELECT count(*)::int FROM v_team_terms_by_unauthorised_author) AS author,
+           (SELECT count(*)::int FROM v_team_terms_judged)                 AS author_pop`;
   return [
     {
       view: "v_approved_auth_for_dead_member",
       claim:
-        "no purchase was approved under member terms that were suspended or removed at the instant it was decided",
-      rows: dead?.n ?? 0,
+        "no purchase was approved under member terms that were suspended or removed at the instant it was decided, " +
+        `and none was approved on a card belonging to a person without consulting their terms — over all ${n?.dead_pop ?? 0} approved authorisation decisions`,
+      rows: n?.dead ?? 0,
     },
     {
       view: "v_member_approval_without_right",
       claim:
-        "no payment was approved by a member whose role, at that instant, did not carry approve_payment",
-      rows: right?.n ?? 0,
+        "no payment was approved by anybody whose role and state, at that instant, did not carry approve_payment — " +
+        `over all ${n?.without_right_pop ?? 0} approvals, members and non-members alike, Corgi staff permitted by name`,
+      rows: n?.without_right ?? 0,
     },
     {
       view: "v_team_terms_by_unauthorised_author",
       claim:
-        "no member's terms were written by somebody who, at that instant, was a member of that business without being an active admin of it",
-      rows: author?.n ?? 0,
+        "no member's terms were written by anybody who, at that instant, was not an active admin of that business — " +
+        `over all ${n?.author_pop ?? 0} member-version rows, Corgi staff permitted by name`,
+      rows: n?.author ?? 0,
     },
   ];
 }

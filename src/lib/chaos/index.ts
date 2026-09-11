@@ -8,6 +8,7 @@
  *   switch.ts   arm, disarm, and the one answer to "is chaos on".
  *   driver.ts   the outbox, and the door into the real delivery pipeline.
  *   observe.ts  the invariants, the inbox and the position, at one instant.
+ *   baseline.ts the known population, and the change against it. Pure.
  *
  * The first four have no database and no clock of their own, which is why the
  * interesting properties — that duplicates share an id, that reordering really
@@ -88,6 +89,19 @@ export {
   type StartRunOptions,
   type StartRunResult,
 } from './driver';
+
+export {
+  captureBaseline,
+  describeBaseline,
+  describeGrowth,
+  growth,
+  ratchet,
+  unreadable,
+  type CapturedBaseline,
+  type InvariantBaseline,
+  type InvariantGrowth,
+  type InvariantRowCount,
+} from './baseline';
 
 export {
   INVARIANT_VIEWS,
