@@ -3,6 +3,20 @@ name: CI
 # Typecheck, lint and unit tests. Deliberately secret-free: nothing here reads
 # a provider key or touches a database, so it runs on forks and on every push
 # without any repository secrets configured.
+#
+# THAT DECISION IS KEPT, AND IT IS NOW STATED WHERE THE TICK IS. This job
+# cannot run the database-backed suites or the live-fire attacks — roughly 390
+# tests, including the hold model under hostile sequencing, the bitemporal
+# correction and maker-checker — and for a while nothing said so. The green
+# tick was a true statement about the tests it ran and a silent one about the
+# tests it did not, which is this codebase's defining failure in its most
+# ordinary form.
+#
+# So the run summary below carries the skip block verbatim onto the Actions
+# page, beside the tick, and the last step fails the build if the block is
+# missing. A reader who sees green here sees the qualification in the same
+# glance. The suites themselves run from a developer machine, before
+# submission — `pnpm test:submission`, written up in docs/TESTING.md.
 on:
   push:
   pull_request:
@@ -17,7 +31,7 @@ concurrency:
 
 jobs:
   verify:
-    name: typecheck · lint · test
+    name: typecheck · lint · test (no credentials, and it says so)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -45,5 +59,56 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # `tee` rather than a redirect: the log must still read normally for
+      # anyone watching it live. The copy is only so the next two steps can
+      # quote the run's own output instead of a sentence somebody typed here
+      # and forgot to update.
       - name: Unit tests
-        run: pnpm test
+        run: set -o pipefail && pnpm test 2>&1 | tee /tmp/vitest.log
+
+      # THE QUALIFICATION, NEXT TO THE NUMBER. Not a hand-written caveat —
+      # the reporter's own block, cut out of the log that was just produced.
+      - name: Publish what CI did not run
+        if: always()
+        run: |
+          {
+            echo '## What this CI run did NOT execute'
+            echo
+            echo 'This job holds no database URL and no provider key, deliberately, so'
+            echo 'that the repository builds on a fork and no green tick is ever bought'
+            echo 'with a secret. Everything below was skipped HERE and is run before'
+            echo 'submission with `pnpm test:submission` — see `docs/TESTING.md`.'
+            echo
+            echo '```'
+            if [ -f /tmp/vitest.log ]; then
+              sed -n '/RAN NO TESTS AT ALL/,$p;/WHAT THIS RUN DID NOT RUN/,$p' /tmp/vitest.log
+            else
+              echo '(vitest never ran — an earlier step failed.)'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A reporter that silently stops reporting is the same failure again, one
+      # level up. If the skip block is absent from a run that skipped tests,
+      # this build is red — the qualification is part of the deliverable, not a
+      # nicety that may quietly lapse.
+      - name: The skip block must be present
+        if: always()
+        run: |
+          if [ ! -f /tmp/vitest.log ]; then
+            echo "vitest never ran — an earlier step failed. Nothing to check here."
+            exit 0
+          fi
+          if grep -q 'WHAT THIS RUN DID NOT RUN' /tmp/vitest.log; then
+            echo "skip summary present"
+            exit 0
+          fi
+          if grep -qE 'SKIPPED — nothing\.' /tmp/vitest.log; then
+            echo "nothing was skipped, and the reporter said so"
+            exit 0
+          fi
+          echo "::error::vitest produced neither a skip summary nor a 'nothing skipped' line."
+          echo "The reporter in vitest.config.ts is what keeps 'N passed' from being silent"
+          echo "about what it did not run. Its absence is a regression, not a formatting"
+          echo "detail. See docs/TESTING.md."
+          exit 1

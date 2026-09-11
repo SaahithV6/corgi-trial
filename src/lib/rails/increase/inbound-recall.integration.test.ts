@@ -45,25 +45,66 @@
  * `scripts/redrive.mjs` does for the historical rows.
  */
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
-import { accountAvailability, mainDepositAccountId, readSnapshot } from "@/lib/ledger/balance-definitions";
-import { sql } from "@/lib/ledger/db";
-import { findEntryByIdempotencyKey } from "@/lib/ledger/readers";
-// The same book-date conversion the consumer dates a posting with, so the
-// expectation is "the day `transfer_return.returned_at` falls on in book time"
-// rather than a second implementation of that arithmetic.
+// EVERY DATABASE-TOUCHING IMPORT IS DEFERRED, AND THAT IS NOT STYLE.
+//
+// `@/lib/ledger/db` constructs the postgres client and reads APP_DATABASE_URL
+// at module scope. A static import therefore runs when vitest COLLECTS the
+// file — before `describe.skip` can decline it and before any gate is read —
+// so with no credentials the suite does not skip, it fails to COLLECT.
+//
+// That is worse than a failing test: a file that dies during collection
+// contributes zero passes and zero skips, so it is invisible to both numbers a
+// reader looks at. It is how this suite turned CI red while `pnpm test`
+// reported 2,568 passed and 391 skipped locally, with nothing in either figure
+// naming it.
+//
+// The house pattern, already used by accrual, interest and api: declare the
+// bindings, import them inside a `beforeAll` that returns early when the gate
+// is closed. See `src/lib/accrual/accrual.integration.test.ts`.
 import { bookDateOfIso } from "@/lib/webhooks/consumers/payload";
-import { drain } from "@/lib/webhooks/drain";
 
-import { listVirtualAccountNumbers } from "./account-numbers";
-import { IncreaseAchRail } from "./client";
-import { inboundAchExternalRef, INBOUND_CREDIT_KEY_PREFIX } from "./inbound-ach-ledger";
+// Type-only imports: erased at compile time, so they reach no module scope at
+// runtime. This is the house form — see accrual.integration.test.ts — and the
+// lint rule that forbids inline `import()` annotations is what enforces it.
+import type * as BalanceDefs from "@/lib/ledger/balance-definitions";
+import type { sql as SqlHandle } from "@/lib/ledger/db";
+import type * as LedgerReaders from "@/lib/ledger/readers";
+import type * as DrainModule from "@/lib/webhooks/drain";
+
+import type * as AccountNumbers from "./account-numbers";
+import type * as ClientModule from "./client";
+import type * as InboundLedger from "./inbound-ach-ledger";
+
+let sql: typeof SqlHandle;
+let accountAvailability: typeof BalanceDefs.accountAvailability;
+let mainDepositAccountId: typeof BalanceDefs.mainDepositAccountId;
+let readSnapshot: typeof BalanceDefs.readSnapshot;
+let findEntryByIdempotencyKey: typeof LedgerReaders.findEntryByIdempotencyKey;
+let drain: typeof DrainModule.drain;
+let listVirtualAccountNumbers: typeof AccountNumbers.listVirtualAccountNumbers;
+let IncreaseAchRail: typeof ClientModule.IncreaseAchRail;
+let inboundAchExternalRef: typeof InboundLedger.inboundAchExternalRef;
+let INBOUND_CREDIT_KEY_PREFIX: typeof InboundLedger.INBOUND_CREDIT_KEY_PREFIX;
 
 const LIVE =
   process.env["RUN_INBOUND_RECALL"] === "1" &&
   (process.env["INCREASE_API_KEY"] ?? "") !== "" &&
   (process.env["DATABASE_URL"] ?? process.env["APP_DATABASE_URL"] ?? "") !== "";
+
+beforeAll(async () => {
+  if (!LIVE) return;
+  ({ sql } = await import("@/lib/ledger/db"));
+  ({ accountAvailability, mainDepositAccountId, readSnapshot } = await import(
+    "@/lib/ledger/balance-definitions"
+  ));
+  ({ findEntryByIdempotencyKey } = await import("@/lib/ledger/readers"));
+  ({ drain } = await import("@/lib/webhooks/drain"));
+  ({ listVirtualAccountNumbers } = await import("./account-numbers"));
+  ({ IncreaseAchRail } = await import("./client"));
+  ({ inboundAchExternalRef, INBOUND_CREDIT_KEY_PREFIX } = await import("./inbound-ach-ledger"));
+});
 
 /** Cents. Deliberately not round: a round number hides a units error. */
 const AMOUNT_CENTS = 187_425;

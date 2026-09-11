@@ -1,3 +1,257 @@
+# Where the tests run — and what `pnpm test` is silent about
+
+> `pnpm test` read **2,556 passed / 381 skipped**, and in the 381 were **every
+> database-backed suite and all eight live-fire attacks**. Both halves of that
+> sentence were true. Only the first half was printed.
+
+That is this codebase's defining failure in its most ordinary form: a number
+that reports healthy about a population it excludes. It is the same shape as
+`v_standing_order_double_fire` joining a UNIQUE column and asking for
+`count > 1`; the same shape as GUARD REACH measuring `hold_closure` instead of
+the guard's own predicate; the same shape as a KYB requirement scored against
+a *summary* of the brief instead of the brief. Every time, the artefact was
+accurate about what it looked at and mute about what it did not.
+
+Three things changed, and none of them is "run the database suites in CI".
+
+## 1. The skip is printed next to the number, every run
+
+`vitest.config.ts` carries a reporter that prints, after every run including a
+fully green one:
+
+```
+────────────────────────────────────────────────────────────────────────────
+  WHAT THIS RUN DID NOT RUN — 391 skipped, next to the 2568 that passed
+────────────────────────────────────────────────────────────────────────────
+
+  41 of 185 suites did not execute at all.
+  A skipped test is not a passing test. Grouped by what this environment
+  did not provide, read out of each suite's own source:
+
+  RUN_DB_TESTS
+      23 suite(s), 223 test(s)
+      set -a; . ./.env; set +a; RUN_DB_TESTS=1 pnpm vitest run --no-file-parallelism \
+          <paths below>
+        src/lib/accrual/accrual.integration.test.ts (11)
+        …
+```
+
+**It is not a list of suites.** A hand-typed list is exactly what GUARD REACH
+was, and GUARD REACH was wrong by ten rows for as long as it existed. The
+reporter opens each skipped file and reads the gate out of that file's own
+source: an env name is reported when the file **compares** it on its own line
+(`=== "1"`, `!== ""`, `typeof … !== "string"`) or defaults it to the **empty**
+string — this repo's idiom for a credential one may not hold. A name read with
+a real default (`process.env["LIVEFIRE_BASE_URL"] ?? "https://…"`) is a knob,
+not a gate, and is left out, because a list padded with things that are not
+the reason teaches the reader to stop reading the list.
+
+Consequence: **a new gated suite appears in the output the first time it is
+skipped**, with nobody remembering to add it.
+
+The reporter also names something neither number could ever have contained: a
+suite that **throws while being collected** contributes zero passes and zero
+skips, and is invisible to both. Those are printed first, separately.
+
+## 2. The suites run, from a developer machine, under named commands
+
+CI holds no database URL and no provider key, **on purpose**, so that this
+repository builds on a fork and so that no green tick is ever bought with a
+secret. That decision is worth keeping and it is kept. What was missing was
+the other half — somewhere the suites *do* run, named, documented, and run
+before submission rather than discussed.
+
+| Command | What it runs | Cost |
+| --- | --- | --- |
+| `pnpm test` | everything hermetic. Prints the skip summary. | free |
+| `pnpm test:db` | `RUN_DB_TESTS=1 RUN_LIVE_TESTS=1`, whole suite, sequential | live Neon; every money-table suite but one is rolled back |
+| `pnpm test:probes` | `RUN_LIVE_PROBES=1` — the Increase probes | two authenticated GETs, read-only |
+| `pnpm test:livefire` | `LIVEFIRE=1` — the eight attacks and chaos mode | real Lithic sandbox cards, real webhook deliveries |
+| `pnpm test:optin` | `RUN_LITHIC_TESTS=1 RUN_POT_DEMO=1 EVENTS_LIVE=1` | a real card, real demo-pot money, a third-party echo host |
+| `pnpm test:submission` | all of the above, then `dbcheck` and `dbcheck --prove` | **this is the one that runs before submission** |
+
+Each sources `./.env` itself if it is there, so the commands in this table are
+the whole command — there is no prelude to remember.
+
+### What `pnpm test:db` actually measured, 2026-09-11 04:18–04:35 PDT
+
+```
+Test Files  1 failed | 169 passed | 15 skipped (185)
+     Tests  1 failed | 2904 passed | 54 skipped (2959)
+```
+
+**2,904 tests ran against the live Neon book**, up from 2,568 — the whole
+database estate, `holds.integration` included, every money-table suite but one
+inside a rolled-back transaction. One failure, diagnosed below, and it is not
+the code's. The remaining 54 are the four opt-in gates above, each named in
+that run's own skip block with the command that runs it; 6 more were `it.skip`
+inside suites that did run, `RUN_LITHIC_TESTS`'s twelfth team scenario among
+them.
+
+`pnpm test:optin` is separate on purpose and stays separate. Its three gates
+are not habit: `RUN_POT_DEMO` moves real money on the demo business rather
+than on a fixture company, `RUN_LITHIC_TESTS` creates a real card at Lithic,
+and `EVENTS_LIVE` depends on `httpbin.org` — and, as that suite's own header
+says, *a suite that goes red when a third party has a bad afternoon teaches
+people to ignore red suites*. Those reasons still hold. `RUN_LIVE_PROBES` did
+not: it is two read-only GETs, and its stated reason was only ever "CI holds
+no credentials", which says nothing about a developer machine that does. It is
+now run by name.
+
+## 3. CI states the qualification where the tick is
+
+`.github/workflows/ci.yml` cuts the reporter's own block out of the run it
+just produced and writes it into `$GITHUB_STEP_SUMMARY`, so a reader who sees
+green on the Actions page sees what that green excludes in the same glance.
+A final step **fails the build** if a run that skipped tests produced no skip
+block: a reporter that silently stops reporting is the same failure again, one
+level up.
+
+## Why `--no-file-parallelism`
+
+Not a style preference, and not caution. **Measured.**
+
+`holds.integration.test.ts` fails five of its twelve cases when it is run in
+the same parallel pass as `ledger`, `fx`, `pots` and `statements`, and passes
+all twelve when run alone — 100s, same book, same machine, same minute. The
+failures are contention, not defects: these suites share one live book, and
+`ledger_append` takes `pg_advisory_xact_lock` per entity and holds it to end
+of transaction, so a suite-wide transaction in one file stalls or perturbs the
+arithmetic another file is asserting on.
+
+A parallel `test:db` therefore reports red about suites that are correct, and
+that is worse than not running them: it manufactures exactly the noise that
+trains people to re-skip. Every `test:*` script above passes
+`--no-file-parallelism` for that reason.
+
+## Why `pnpm test:livefire` raises the timeout, and what that found
+
+The eight attacks run. With `LIVEFIRE=1` at the repository's 30s
+`testTimeout`, seven pass and **attack 07 cannot pass at any speed**:
+
+```
+ATTACK 7 — … invents no money while the feed is dark
+Error: Test timed out in 30000ms.
+```
+
+Its own inner steps declare 60s, 90s and 60s budgets, inside an `it` that
+declares no timeout of its own — so its ceiling was 30s while its floor was
+210s. Measured at `--testTimeout=300000` it takes **218s and passes all three
+cases**, the long one being the 180s health-endpoint read that is the outage
+window itself. That is the mirror image of a guard that cannot fail: a guard
+that cannot pass, reporting red about a system that is right. It is fixed
+where it is safe to fix — in `pnpm test:livefire`, for that directory only.
+A global 300s would turn every genuinely hung unit test into a five-minute
+wait for 2,568 tests that finish in twenty seconds.
+
+`vitest.config.ts` keeps `testTimeout: 30_000` for exactly that reason, and
+now says so beside the number.
+
+Result, measured 2026-09-11:
+
+| Attack | |
+| --- | --- |
+| 01 fuel-pump authorisation | pass |
+| 02 over-capture and release | pass |
+| 03 bitemporal correction | pass |
+| 04 settlement before authorisation | pass |
+| 05 maker-checker | pass |
+| 06 planted break | pass |
+| 07 provider outage | pass (218s; red at the 30s default) |
+| 08 real-provider replay | pass |
+| `chaos.livefire` | **red** — see below |
+
+## Standing reds, as of 2026-09-11, and what each one is
+
+Run, not reasoned about. **Do not re-skip any of these.**
+
+### `src/lib/rails/increase/probe.integration.test.ts` — a tripwire that fired
+
+```
+expected { supported: true, proof: 'measured' } to match { supported: true, proof: 'unexercised' }
+```
+
+This is the file working. Its own header says the last case *"still pins all
+four to `unexercised` because that is what `INCREASE_SUPPORT` … still
+DECLARES … so it goes red the moment somebody makes the declaration true,
+which is the point at which this comment and that assertion are both
+replaced."* Somebody made the declaration true. The assertion was not
+replaced — and nobody saw, because nothing on this machine or in CI had ever
+set `RUN_LIVE_PROBES=1`. **A guard designed to fire, that fired, into an empty
+room.** The repair is in `src/lib/rails/increase/probe.integration.test.ts`
+and `src/lib/rails/adapters/ach.ts`, owned by whoever promoted the cell.
+
+### `src/lib/timetravel/timetravel.integration.test.ts` — real, and not ours
+
+```
+holds the value axis still: a different day does not move with the cut
+expected 1492544n to be 1493778n
+```
+
+Reproducible: the absolute numbers move between runs, the delta is **1234
+cents every time**. The test reads one account's closing balance for value
+date `1979-01-02` at two instants on the booking axis, and a day that early
+should have nothing on it at either.
+
+It has something on it now. **308 journal lines with value dates between
+1606-04-01 and 1874-03-02 were booked onto the live book today**, all of them
+between 09:49Z and 10:47Z, netting to zero across `1130` and `2100` but not
+within either — a property/fuzz suite belonging to another worker, running
+against the same book. `1493778` is precisely the pre-1979 net on that
+account; `1492544` is the same net at the earlier booking cut.
+
+So the guard is telling the truth about the book. The finding is that **a
+property suite is planting centuries-backdated entries on the live ledger**,
+which is a fact about the ledger a reviewer can read off the statements
+screen, not only about the test.
+
+### `src/lib/chaos/chaos.livefire.test.ts` — asserts something known false
+
+All six cases fail on one helper, `invariantsMustHold()`, which requires every
+invariant view to be empty:
+
+```
+v_refused_auth_hold: 212 row(s)
+v_hold_expiry_drift: 11 row(s)
+v_advice_delta_unsound: 1 row(s)
+v_hold_closure_unexplained: 4 row(s)
+```
+
+Those are the **four deliberate, documented, unrepairable findings** that
+`node scripts/dbcheck.mjs` reports and that this build has accepted in writing
+(0032, 0040, 0043, docs/HOLDS.md §10.4). The chaos suite cannot pass while
+they stand, and no amount of chaos is being measured by it — it fails before
+it arms anything. It needs the same treatment `dbcheck` already gives them: a
+known-population baseline it asserts has not **grown**, rather than a zero it
+asserts absolutely. `src/lib/chaos/**` is not this change's to edit.
+
+### `src/lib/rails/increase/inbound-recall.integration.test.ts` — red in CI, invisible here
+
+It imports `@/lib/ledger/db` at module scope, so with no `APP_DATABASE_URL` it
+throws during **collection**:
+
+```
+EnvironmentError: Environment is invalid. 1 problem(s): APP_DATABASE_URL is required
+```
+
+Every other gated suite in this repo imports the database *inside* the gated
+`describe`, which is why they skip instead of exploding. Locally, with `.env`
+sourced, this file collects and then skips, so it looks fine. **In CI — no
+`.env`, by design — `pnpm test` is red on this one file**, and it contributes
+neither a pass nor a skip to either number while doing it. That is why the
+reporter now prints collection failures first and separately. The fix is one
+line in that file: move the `@/lib/ledger/db` import under the gate.
+
+### The one that went green while this was being written
+
+`src/lib/rails/wire/outbound.integration.test.ts` was red at 03:44
+(`WIRE_ROUTING_NUMBER_NOT_CONFIRMED` not carried on the thrown error) and
+green at 03:46 with seven cases. Another worker fixed it mid-run. Recorded
+because a red observed once and not reproduced is worth exactly one sentence,
+and no more than one.
+
+---
+
 # Integration tests against the live book
 
 This database is LIVE. It is the one the deployed system at
@@ -198,10 +452,33 @@ changes is only that **our** book no longer keeps a copy of the bookkeeping.
 
 ```sh
 set -a; . ./.env; set +a
-RUN_DB_TESTS=1 pnpm vitest run <path>
-node scripts/dbcheck.mjs            # 36 passed / 2 failed, both deliberate
-node scripts/dbcheck.mjs --prove    # 22 of 22, and must stay complete
+RUN_DB_TESTS=1 pnpm vitest run --no-file-parallelism <path>
+
+node scripts/dbcheck.mjs            # 37 passed / 4 failed — all four deliberate
+                                    # or red-on-arrival. Leave them failing.
+                                    # GUARD REACH must read "25 of 25 views".
+node scripts/dbcheck.mjs --prove    # "covered 25 of 25 invariant views"
+                                    # and must stay complete.
 ```
+
+The two figures in that block are **counts of a list, not of a memory**. The
+tally moves the day somebody adds a check, and it has: this section read
+"36 passed / 2 failed" and "22 of 22" until it was corrected on 2026-09-11,
+by which time the script itself read 37/4 and 25/25. Quote the script, not
+this file, and if the two disagree the script is right.
+
+**GUARD REACH is now complete and cannot quietly stop being complete.** It was
+fifteen hand-typed rows against twenty-five gated invariants — built because a
+guard that cannot fail is a green tick, and incomplete by exactly the same
+construction. It now walks `GATED_INVARIANTS`, the one list all three
+consumers share, and a view with no reach query is a named `FAIL` in the tally
+rather than an absence that prints as nothing. Two of the ten that were
+missing are worth reading when you run it: `v_member_approval_without_right`
+reaches 30 of 177 `approved` events and
+`v_team_terms_by_unauthorised_author` reaches 2 of 373 member-version rows,
+both because they resolve their subject through an INNER JOIN to a
+`team_member` row — so an actor with no membership of that business is not
+judged and not reported. That is 0033's defect, one table over.
 
 A suite is done when it is **green** and a row count taken either side of the
 run is **unchanged**. Count with a targeted query — `journal_entry` alone moves
@@ -220,7 +497,7 @@ something the suite owns, such as its own idempotency-key prefix or
 | `statements` | per scenario | 0 |
 | `disputes` | per scenario | 0 |
 | `wire` | the one booking test | 0 |
-| `wire/outbound` | per suite | 0 — but the suite is RED for an unrelated reason; see its header |
+| `wire/outbound` | per suite | 0 — **green as of 2026-09-11 03:46**, seven cases, fixed mid-session by another worker. The "RED for an unrelated reason" note this row used to carry is spent. |
 | `holds` | **not yet** | holds, closures, cards, auths and entries per run, plus three `sql.begin` blocks that COMMIT |
 | `advice-wake` | exempt, by design | 0 in steady state |
 | `accrual`, `interest`, `interchange` | exempt, by design | stated in-file |

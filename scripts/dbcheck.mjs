@@ -589,8 +589,17 @@ const INVARIANT_VIEWS = [
 // widening of a view over payment approvals can see a table it does not
 // read.
 
+// ONE LIST, THREE CONSUMERS. The emptiness check below, GUARD REACH (§8)
+// and `--prove` (§9) all range over exactly this, and none of them keeps a
+// second copy. Side arrays have appeared in this file three times — each
+// for a good mechanical reason, each merged back — and every time one
+// existed, a section that walked only `INVARIANT_VIEWS` quietly stopped
+// covering the views in it. Spreading it here once means a fourth side
+// array is added in ONE place and all three consumers pick it up.
+const GATED_INVARIANTS = [...INVARIANT_VIEWS];
+
 console.log("\nINVARIANT VIEWS — each MUST return zero rows\n");
-for (const [view, claim] of [...INVARIANT_VIEWS]) {
+for (const [view, claim] of GATED_INVARIANTS) {
   try {
     const rows = await sql.unsafe(`SELECT count(*)::int AS n FROM ${view}`);
     const n = rows[0]?.n ?? 0;
@@ -765,10 +774,196 @@ const REACH = [
   ["v_hold_closure_unexplained", "card-auth closures, ALL of them, whatever their declared writer",
     `SELECT count(*)::int AS n FROM hold_closure hc
        JOIN card_authorization ca ON ca.hold_id = hc.hold_id`],
+
+  // =====================================================================
+  // THE TEN THAT WERE NEVER HERE, AND WHY THAT WAS THE SAME FAILURE AGAIN
+  // =====================================================================
+  //
+  // This table was fifteen hand-typed rows against twenty-five gated
+  // invariants. It was built BECAUSE a guard that cannot fail is a green
+  // tick, and it was itself incomplete by construction: ten views were
+  // checked for emptiness above and their populations were never measured,
+  // so ten green ticks stood with nothing behind them saying whether there
+  // had been anything to be green about. Nobody had to remove a row to
+  // make that happen — the row simply was never typed, and an absence
+  // prints as nothing at all.
+  //
+  // The loop below no longer walks this array. It walks the SAME invariant
+  // arrays the emptiness check walks, and a view with no entry here is a
+  // named FAILURE, exactly as `--prove` does it for a view with no proof.
+  // Adding an invariant without its reach is now impossible to do quietly.
+  //
+  // TWO OF THE TEN ARE THE REASON THIS MATTERS, and both were measured on
+  // this database rather than reasoned about:
+  //
+  //   v_member_approval_without_right     30 of 177 'approved' events
+  //   v_team_terms_by_unauthorised_author  2 of 373 member-version rows
+  //
+  // Both have the SHAPE OF THE BUG THEY WERE WRITTEN AGAINST. Each reaches
+  // its subject through an INNER JOIN to a `team_member` row, so an actor
+  // with no membership of that business — the CORGI-STAFF break-glass
+  // path, a seeder, an agent surface — is not judged and not reported. It
+  // falls out of the FROM clause. That is precisely 0033's defect: a
+  // lookup filtered `AND state <> 'removed'` moved the removed member out
+  // of the branch that CHECKS and into the branch that TRUSTS, and 0044's
+  // repair view now reproduces the same silence one table over. The
+  // percentages below are the sentence "what the lookup excluded from
+  // itself is exactly the population it existed to stop", in numbers.
+  //
+  // NOT REPAIRED HERE. These are views in migrations, and this file may
+  // not edit a migration. What it can do is stop the blind spot being
+  // invisible, which is the whole job of this section.
+
+  // The denormalised clock check. Its join is to the entry every line must
+  // have, so its reach is every line there is — stated, not assumed.
+  ["v_line_denorm_drift", "journal lines carrying a denormalised clock",
+    `SELECT count(*)::int AS n FROM journal_line l
+       JOIN journal_entry e ON e.id = l.entry_id`,
+    `SELECT count(*)::int AS n FROM journal_line`],
+
+  // The whole-book identity. It is a GROUP BY, so its population is
+  // groups, not rows: one number per (entity, book, currency). Counting
+  // journal_line here would have been the `hold_closure` mistake again —
+  // the table's size is not the guard's reach.
+  ["v_book_not_zero", "(entity × book × currency) groups the book nets over",
+    `SELECT count(*)::int AS n FROM (
+       SELECT 1 FROM journal_line l
+         JOIN journal_entry e ON e.id = l.entry_id
+        GROUP BY e.entity_id, e.book, l.currency) g`],
+
+  // A CROSS JOIN of two scalars: the guard is ONE comparison, and what
+  // varies underneath it is which accounts the recursive walk reaches.
+  // That walk is the reach, because an account outside the 2100 subtree is
+  // outside the subtree arm of the comparison.
+  ["v_deposit_control_drift", "accounts inside the 2100 deposit subtree the walk reaches",
+    `WITH RECURSIVE t AS (
+       SELECT id FROM account WHERE code = '2100' AND business_id IS NULL
+       UNION ALL
+       SELECT a.id FROM account a JOIN t ON a.parent_id = t.id)
+     SELECT count(*)::int AS n FROM t`],
+
+  // BY DECLARED WRITER, and the census below prints the rest per source.
+  // This is the row the 0040 comment above refers to when it says
+  // "129 of 197": the same fraction, measured live rather than quoted.
+  ["v_hold_closure_not_terminal", "card-auth closures whose declared writer is posting_path or expiry_sweep",
+    `SELECT count(*)::int AS n FROM hold_closure hc
+       JOIN card_authorization ca ON ca.hold_id = hc.hold_id
+      WHERE hc.source IN ('posting_path','expiry_sweep')`,
+    `SELECT count(*)::int AS n FROM hold_closure hc
+       JOIN card_authorization ca ON ca.hold_id = hc.hold_id`],
+
+  // An approval is only judged if the decision recorded WHICH member
+  // version authorised it. A decision with a null member_version_id is not
+  // reported as unjudgeable — it is not reported at all, because the join
+  // is inner.
+  ["v_approved_auth_for_dead_member", "approved auth decisions that cite a member version",
+    `SELECT count(*)::int AS n FROM card_auth_decision d
+       JOIN team_member_version tmv ON tmv.id = d.member_version_id
+      WHERE d.outcome = 'approve'
+        AND d.request_status IN ('AUTHORIZATION','FINANCIAL_AUTHORIZATION')`,
+    `SELECT count(*)::int AS n FROM card_auth_decision d
+      WHERE d.outcome = 'approve'
+        AND d.request_status IN ('AUTHORIZATION','FINANCIAL_AUTHORIZATION')`],
+
+  // ONE OF THE TWO. `JOIN team_member tm ON tm.actor_id = e.actor_id AND
+  // tm.business_id = acct.business_id` is an INNER join, so every approval
+  // by an actor who is not a member of that business — break-glass, an
+  // operator, the agent surface — is invisible to the guard that exists to
+  // ask whether the approver had the right. Maker-checker is the control
+  // this build grades hardest, and this is the fraction of approvals its
+  // standing guard can even see.
+  ["v_member_approval_without_right", "'approved' events whose actor IS a member of the paying business",
+    `SELECT count(*)::int AS n FROM payment_instruction_event e
+       JOIN payment_instruction pi ON pi.id = e.instruction_id
+       JOIN account acct ON acct.id = pi.account_id
+       JOIN team_member tm ON tm.actor_id = e.actor_id
+                          AND tm.business_id = acct.business_id
+      WHERE e.kind::text = 'approved'`,
+    `SELECT count(*)::int AS n FROM payment_instruction_event e
+      WHERE e.kind::text = 'approved'`],
+
+  // "An interchange posting whose settlement was reversed must itself be
+  // reversed" can only speak about postings whose settlement WAS reversed.
+  // The rest are outside by construction and correctly so — but the number
+  // belongs here, because a guard over a third of its table that is read
+  // as covering the table is how the last three of these went wrong.
+  ["v_interchange_unreversed", "interchange postings whose settlement entry has a reversal",
+    `SELECT count(*)::int AS n FROM interchange_posting ip
+       JOIN journal_entry srev ON srev.reverses_entry_id = ip.settlement_entry_id`,
+    `SELECT count(*)::int AS n FROM interchange_posting`],
+
+  // Both interchange arithmetic guards LEFT JOIN, so a posting with no
+  // settlement group and no booked line still lands in the view with
+  // COALESCE zeroes rather than vanishing. Reach is the whole table, and
+  // that is a property worth printing rather than assuming.
+  ["v_interchange_drift", "interchange postings (LEFT JOINed, so none drop out)",
+    `SELECT count(*)::int AS n FROM interchange_posting`,
+    `SELECT count(*)::int AS n FROM interchange_posting`],
+  ["v_interchange_rate_drift", "interchange postings re-priced against the rate card of their value date",
+    `SELECT count(*)::int AS n FROM interchange_posting`,
+    `SELECT count(*)::int AS n FROM interchange_posting`],
+
+  // THE OTHER ONE, AND THE WORST OF THE TWO. 0044's repair view resolves
+  // the AUTHOR through `JOIN team_member atm ON atm.business_id =
+  // tm.business_id AND atm.actor_id = tmv.created_by`, inside a LATERAL
+  // with LIMIT 1. A member version written by an actor who holds no
+  // membership of that business produces no author row, the LATERAL yields
+  // nothing, and the INNER join drops the version entirely.
+  //
+  // That is the same door 0033 left open. 0033 looked up the author `AND
+  // state <> 'removed'`, got NULL for a removed admin, and NULL was the
+  // break-glass branch that TRUSTS. 0044 closed that for removed members
+  // and left it open for non-members, in the view rather than in the
+  // function. The number below is how much of the table is behind that
+  // door.
+  ["v_team_terms_by_unauthorised_author", "member-version rows whose author holds a membership of that same business",
+    `SELECT count(*)::int AS n FROM team_member_version tmv
+       JOIN team_member tm ON tm.id = tmv.member_id
+      WHERE EXISTS (SELECT 1 FROM team_member atm
+                      JOIN team_member_version v ON v.member_id = atm.id
+                     WHERE atm.business_id = tm.business_id
+                       AND atm.actor_id = tmv.created_by
+                       AND v.created_at < tmv.created_at)`,
+    `SELECT count(*)::int AS n FROM team_member_version`],
 ];
 
-console.log("\nGUARD REACH — the population each invariant ranges over (not a pass/fail)\n");
-for (const [view, what, query, totalQuery] of REACH) {
+// ---- the driver, and why it no longer walks REACH ---------------------
+//
+// IT WALKS THE INVARIANT ARRAYS. Identical in shape to `--prove`'s driver
+// below: coverage is COMPUTED from the list of things that must be covered,
+// never from the list of things that happen to be covered. `for (const row
+// of REACH)` could only ever report on rows somebody had typed, which is
+// why fifteen rows stood against twenty-five invariants and the output said
+// nothing was missing. A view checked for emptiness above and absent from
+// REACH is now a named FAIL in the tally.
+//
+// A reach that is genuinely not expressible as a count is declared, not
+// omitted: pass `null` as the query and a sentence as the fourth element,
+// and the row prints as HARD with the sentence. Nothing uses that today —
+// all twenty-five have a real query — and it exists so that the cheapest
+// way out of a difficult one is still a visible row.
+const REACH_BY_VIEW = new Map(REACH.map((row) => [row[0], row]));
+const GATED_VIEWS = GATED_INVARIANTS.map(([v]) => v);
+const reachCovered = GATED_VIEWS.filter((v) => REACH_BY_VIEW.has(v)).length;
+
+console.log(
+  `\nGUARD REACH — the population each invariant ranges over` +
+    ` (${reachCovered} of ${GATED_VIEWS.length} views; a missing one is a FAIL, not a blank)\n`,
+);
+for (const view of GATED_VIEWS) {
+  const row = REACH_BY_VIEW.get(view);
+  if (row === undefined) {
+    bad(
+      `${view} declares its reach`,
+      "NO REACH QUERY IS REGISTERED — its emptiness is unexplained, and an unexplained green tick is what this section exists to stop",
+    );
+    continue;
+  }
+  const [, what, query, totalQuery] = row;
+  if (query === null) {
+    console.log(`  HARD  ${view} — reach is not expressible as a count: ${totalQuery}`);
+    continue;
+  }
   try {
     const rows = await sql.unsafe(query);
     const n = rows[0]?.n ?? 0;
@@ -791,7 +986,27 @@ for (const [view, what, query, totalQuery] of REACH) {
         : `  reach ${view} — ${n} ${what}`,
     );
   } catch (e) {
-    console.log(`  ????? ${view} — reach could not be measured: ${String(e.message).split("\n")[0].slice(0, 60)}`);
+    // A reach that cannot be MEASURED is worth exactly what a reach that
+    // was never written is worth, so it fails the same way rather than
+    // printing five question marks into a scroll nobody re-reads.
+    bad(
+      `${view} declares its reach`,
+      `the reach query could not be run: ${String(e.message).split("\n")[0].slice(0, 70)}`,
+    );
+  }
+}
+
+// A reach row for a view nothing checks is the mirror image, and cheap to
+// catch while the two lists are in hand: it means either the view was
+// dropped from the invariant list without its row, or the row names a view
+// that was never gated. Both are a stale table pretending to be a complete
+// one.
+for (const [view] of REACH) {
+  if (!GATED_VIEWS.includes(view)) {
+    bad(
+      `${view} is a gated invariant`,
+      "a REACH row names a view that no invariant list checks — the table is measuring something nothing guards",
+    );
   }
 }
 
@@ -1958,7 +2173,7 @@ if (process.argv.includes("--prove")) {
   // script already checks, so a view added above without a proof here is a
   // named FAILURE on the next run rather than a quiet gap. That is the same
   // mistake this whole section exists to stop being possible.
-  const ALL_VIEWS = [...INVARIANT_VIEWS];
+  const ALL_VIEWS = GATED_INVARIANTS;
   const proven = new Set();
 
   for (const [view] of ALL_VIEWS) {
