@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { Route } from "next";
+import { Suspense } from "react";
 
 import { isOperator } from "@/lib/authz";
 
@@ -76,7 +77,18 @@ export function AppHeader({ role }: { readonly role: Role }) {
           </span>
         </div>
 
-        <NavLinks role={role} />
+        {/*
+          `NavLinks` reads `useSearchParams()` so the customer links can carry
+          `?business=` — see the block comment there. Every route under `(app)`
+          is dynamic (this layout awaits `headers()`), so that hook is resolved
+          on the server today and the nav is in the HTML. The boundary is here
+          so it stays that way: if a route under this shell is ever prerendered,
+          Next bails the closest Suspense boundary out to the client instead of
+          failing the build, and the bailout is this nav rather than the page.
+        */}
+        <Suspense fallback={null}>
+          <NavLinks role={role} />
+        </Suspense>
 
         {/*
           THE ROLE SWITCHER MUST COME FIRST IN THE DOM. Measured, not assumed:

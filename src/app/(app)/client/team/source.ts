@@ -53,7 +53,7 @@ import type {
   TeammateCard,
   TeammateLine,
 } from "@/components/client/team/contract";
-import { formatUsd } from "@/lib/format/money";
+import { formatUsd, sumCents } from "@/lib/format/money";
 import { hasDatabase } from "@/lib/has-database";
 import type { TeamMemberDetail } from "@/lib/team/types";
 
@@ -83,7 +83,16 @@ function limitDisplay(cents: bigint | null): string {
 
 function toLine(detail: TeamMemberDetail, actingMemberId: string | null): TeammateLine {
   const { member, cards, outstanding, spend } = detail;
-  const outstandingCents = outstanding.reduce((sum, a) => sum + a.targetHoldCents, 0n);
+  // `sumCents()`, not `reduce((sum, a) => sum + a.targetHoldCents, 0n)`.
+  // That reduce is what put `05000` on this screen: `v_card_auth_hold`
+  // publishes its folds as `numeric`, postgres.js hands a `numeric` over as a
+  // STRING, and `0n + "5000"` is the string `"05000"` — silently, with no type
+  // error, all the way to `formatUsd()`, which refused it. `@/lib/team/store`
+  // now parses those columns at the read (`centsFrom`), so this is bigint
+  // arithmetic; summing through the money module means the next reader that
+  // hands this line a string is refused here too, by name, instead of
+  // concatenated.
+  const outstandingCents = sumCents(outstanding.map((a) => a.targetHoldCents));
 
   return {
     memberId: member.memberId,

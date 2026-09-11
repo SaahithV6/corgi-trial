@@ -76,7 +76,13 @@ import { sql, type Sql } from "@/lib/ledger/db";
 import { createCard } from "@/lib/rails/lithic/client";
 
 import { providerStateFor, setProviderCardState } from "./provider";
-import { assignCardToMember, listTermsVersions, readMember, setMemberTerms } from "./store";
+import {
+  assignCardToMember,
+  centsFrom,
+  listTermsVersions,
+  readMember,
+  setMemberTerms,
+} from "./store";
 import type { MemberCard, OutstandingAuthorisation, TeamOutcome } from "./types";
 
 const PROVIDER = "lithic";
@@ -534,10 +540,12 @@ export async function outstandingForMember(
       hold_id: string;
       card_id: string;
       last_four: string | null;
-      auth_net_cents: bigint;
-      captured_cents: bigint;
-      target_hold_cents: bigint;
-      memo_balance_cents: bigint;
+      // numeric, not int8 — see `centsFrom` in ./store for why these are
+      // strings on the wire and what typing them `bigint` produced.
+      auth_net_cents: string | bigint;
+      captured_cents: string | bigint;
+      target_hold_cents: string | bigint;
+      memo_balance_cents: string | bigint;
       expires_at: Date;
     }[]
   >`
@@ -558,10 +566,10 @@ export async function outstandingForMember(
     holdId: row.hold_id,
     cardId: row.card_id,
     lastFour: row.last_four,
-    authorisedCents: row.auth_net_cents,
-    capturedCents: row.captured_cents,
-    targetHoldCents: row.target_hold_cents,
-    memoBalanceCents: row.memo_balance_cents,
+    authorisedCents: centsFrom(row.auth_net_cents, "v_card_auth_hold.auth_net_cents"),
+    capturedCents: centsFrom(row.captured_cents, "v_card_auth_hold.captured_cents"),
+    targetHoldCents: centsFrom(row.target_hold_cents, "v_card_auth_hold.target_hold_cents"),
+    memoBalanceCents: centsFrom(row.memo_balance_cents, "v_hold_state.memo_balance_cents"),
     expiresAt: row.expires_at.toISOString(),
   }));
 }

@@ -210,16 +210,51 @@ export async function listMemberCards(
   }));
 }
 
+/**
+ * A money column out of Postgres is a CLAIM, exactly like the role text above.
+ *
+ * `v_card_auth_hold` and `v_hold_state` publish their folds as **numeric**, not
+ * `bigint` — `SUM()` over a `bigint` is `numeric` in Postgres, and 0001 leaves
+ * the sums uncast. postgres.js only maps OID 20 (`int8`) through the `bigint`
+ * parser this repo configures in `@/lib/ledger/db`; OID 1700 (`numeric`) is
+ * handed over as a **string**, because no JS number can hold it losslessly.
+ *
+ * Typing those columns `bigint` in the row type did not make them one. It made
+ * `0n + row.target_hold_cents` a STRING CONCATENATION — `0n + "5000"` is
+ * `"05000"` — and that string travelled to `formatUsd()`, which refused it:
+ *   `money: expected finite integer cents, received 05000`.
+ * The guard was right. This is the producer.
+ *
+ * So the boundary parses, and refuses by name rather than coercing: `Number()`
+ * would turn `"5000.00"` into a float and `BigInt()` alone would throw a bare
+ * `SyntaxError` with no column in it. A fractional cent from a money view is a
+ * schema defect and must arrive as one, not as a silently truncated figure.
+ */
+export const NON_INTEGER_CENTS_CODE = "TEAM_NON_INTEGER_CENTS";
+
+export function centsFrom(value: unknown, column: string): bigint {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number" && Number.isSafeInteger(value)) return BigInt(value);
+  if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
+  throw new Error(
+    `${NON_INTEGER_CENTS_CODE}: ${column} came back as ${typeof value} ${JSON.stringify(value)} — money is integer minor units`,
+  );
+}
+
+/**
+ * The row as Postgres actually sends it: `numeric` columns arrive as strings.
+ * Honest types, parsed one line later — a lie here is what produced `05000`.
+ */
 type OutstandingRow = {
   readonly auth_id: string;
   readonly provider_auth_id: string;
   readonly hold_id: string;
   readonly card_id: string;
   readonly last_four: string | null;
-  readonly auth_net_cents: bigint;
-  readonly captured_cents: bigint;
-  readonly target_hold_cents: bigint;
-  readonly memo_balance_cents: bigint;
+  readonly auth_net_cents: string | bigint;
+  readonly captured_cents: string | bigint;
+  readonly target_hold_cents: string | bigint;
+  readonly memo_balance_cents: string | bigint;
   readonly expires_at: Date;
   readonly member_id: string;
 };
@@ -267,10 +302,10 @@ export async function listOutstandingByMember(
       holdId: row.hold_id,
       cardId: row.card_id,
       lastFour: row.last_four,
-      authorisedCents: row.auth_net_cents,
-      capturedCents: row.captured_cents,
-      targetHoldCents: row.target_hold_cents,
-      memoBalanceCents: row.memo_balance_cents,
+      authorisedCents: centsFrom(row.auth_net_cents, "v_card_auth_hold.auth_net_cents"),
+      capturedCents: centsFrom(row.captured_cents, "v_card_auth_hold.captured_cents"),
+      targetHoldCents: centsFrom(row.target_hold_cents, "v_card_auth_hold.target_hold_cents"),
+      memoBalanceCents: centsFrom(row.memo_balance_cents, "v_hold_state.memo_balance_cents"),
       expiresAt: row.expires_at.toISOString(),
     });
     out.set(row.member_id, list);

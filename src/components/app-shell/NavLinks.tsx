@@ -2,9 +2,14 @@
 
 import Link from "next/link";
 import type { Route } from "next";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 
-import { CLIENT_SCREENS } from "@/components/client/view-state";
+import {
+  CLIENT_SCREENS,
+  clientHref,
+  parseClientView,
+  type ClientScreenHref,
+} from "@/components/client/view-state";
 import { visibleTo, type Role } from "@/lib/authz";
 
 import { FOCUS_RING } from "../ui/primitives";
@@ -128,6 +133,48 @@ export function NavLinks({ role }: { readonly role: Role }) {
   const pathname = usePathname();
 
   /**
+   * ==========================================================================
+   * THE HEADER NAV CARRIES THE BUSINESS. IT USED TO DROP IT.
+   * ==========================================================================
+   *
+   * Measured on the deployed build: the thirteen customer links up here were
+   * emitted as BARE hrefs — `/client/funding`, not
+   * `/client/funding?business=<id>` — while `ClientNav`, six hundred pixels
+   * below on the same page, built the same thirteen links through
+   * `clientHref()` and carried `?business=` correctly.
+   *
+   * Two identical-looking navs, one of which silently changes customer. Open
+   * Ridgeline's balance, click "Add money" in the HEADER, and you land on a
+   * different business's funding screen with a different balance and no
+   * warning — on a surface whose entire subject is one customer, which
+   * `view-state.ts` names as "the worst possible navigation bug" in the
+   * comment on `clientHref` itself.
+   *
+   * The fix is not a second href builder. It is THE SAME ONE: this reads the
+   * view out of the live query string exactly as the five server pages do with
+   * `parseClientView(searchParams)`, and builds every customer link with
+   * `clientHref()` exactly as `ClientNav` does. `state` travels too, for the
+   * same reason and by the same mechanism — the two navs now differ in
+   * position and in nothing else.
+   *
+   * Staff links are untouched: they take no `?business=`, this console spans
+   * every business on the book, and `clientHref` is never reached for them.
+   */
+  const searchParams = useSearchParams();
+  const view = parseClientView(Object.fromEntries(searchParams.entries()));
+
+  /** The customer screen this href names, or `null` for a staff screen. */
+  const clientScreen = (href: string): ClientScreenHref | null =>
+    CLIENT_SCREENS.find((screen) => screen.href === href)?.href ?? null;
+
+  const hrefFor = (href: string): string => {
+    const screen = clientScreen(href);
+    return screen === null
+      ? href
+      : clientHref(screen, { state: view.state, businessId: view.businessId });
+  };
+
+  /**
    * `startsWith` is wrong for `/client`, and only for `/client`.
    *
    * Every other entry is a prefix of nothing else in this list, but `/client`
@@ -145,7 +192,7 @@ export function NavLinks({ role }: { readonly role: Role }) {
     return (
       <Link
         key={item.href}
-        href={item.href as Route}
+        href={hrefFor(item.href) as Route}
         aria-current={current ? "page" : undefined}
         className={`rounded px-2.5 py-1.5 text-sm ${FOCUS_RING} ${
           current

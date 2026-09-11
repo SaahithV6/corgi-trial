@@ -16,13 +16,16 @@ import { readRole, ROLE_LABEL } from "@/components/app-shell/role";
  * WHY THIS SITS INSIDE THE STAFF CONSOLE AND SAYS SO
  * ===========================================================================
  *
- * This build has no authentication of any kind — `docs/DEMO.md` §1, "There is
- * nothing to sign into". Rendering a customer surface behind a fake login, or
- * on its own origin with the same open access, would be dressing up a boundary
- * that is not there. So `/client` is honestly what it is: the customer's VIEW,
- * rendered by an open console, with the isolation that matters — the query
- * predicate — already real, and the isolation that is not yet real named out
- * loud rather than implied by chrome.
+ * This build's reads are open on purpose and its writes are not: `/signin`
+ * takes the console passphrase, and every action refuses without the signed
+ * session it sets (`src/middleware.ts`, control 3). What is still absent is
+ * CUSTOMER authentication — nobody signs in *as a business* — so the business
+ * selector chooses the subject of a query and claims no tenancy. Rendering a
+ * customer surface behind a fake customer login would be dressing up a
+ * boundary that is not there. So `/client` is honestly what it is: the
+ * customer's VIEW, rendered by a console whose reads are public, with the
+ * isolation that matters — the query predicate — already real, and the
+ * isolation that is not yet real named out loud rather than implied by chrome.
  *
  * The thing that would be dishonest is the opposite: a surface that looks
  * sealed and is not.
@@ -44,7 +47,7 @@ export default async function ClientLayout({
           Customer view · one business
         </p>
         <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted">
-          These nine screens are the bank&rsquo;s customer speaking to their own
+          These screens are the bank&rsquo;s customer speaking to their own
           money: one business, their words, no chart-of-accounts codes and no
           other customer&rsquo;s figures anywhere on the page. Every read is
           scoped inside the query, by a <code>WHERE business_id</code> predicate
@@ -52,14 +55,14 @@ export default async function ClientLayout({
         </p>
         <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted">
           <strong className="font-medium text-text">
-            The business selector is a demo control, not a login.
+            The business selector is a demo control, not a tenant claim.
           </strong>{" "}
-          This deployment has no authentication, and the console it sits in is
-          open to anyone with the URL. Choosing a business here changes the
-          subject of a query; it grants nothing that <code>/accounts</code> does
-          not already show a stranger. When a session claim replaces it, one
-          line changes — where the id comes from — because every read beneath it
-          already treats the id as a predicate rather than as permission.
+          Reading this console is open to anyone with the link, on purpose.
+          Writing is not: every action refuses without the console passphrase.
+          Choosing a business here changes the subject of a query — a{" "}
+          <code>WHERE business_id</code> predicate the database applies, never
+          permission this screen grants. When a session carries the id instead,
+          one line changes.
         </p>
         <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted">
           You are acting as{" "}
