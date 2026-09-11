@@ -26,6 +26,7 @@ const LIVE = [
   { href: "/pots", label: "Pots" },
   { href: "/funding", label: "Funding" },
   { href: "/payments", label: "Payments" },
+  { href: "/payees", label: "Payees" },
   { href: "/approvals", label: "Approvals" },
   { href: "/standing-orders", label: "Standing orders" },
   { href: "/reconciliation", label: "Reconciliation" },

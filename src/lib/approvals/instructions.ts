@@ -28,6 +28,7 @@ import "server-only";
 
 import { sql, type Sql } from "@/lib/ledger/db";
 import { transactGateForAccount } from "@/lib/kyb/wire";
+import { gatePaymentOnPayee } from "@/lib/payees";
 import { fail, ok, type Result } from "@/lib/result";
 
 import { contentHash } from "./hash";
@@ -254,6 +255,30 @@ export async function requestPayment(
         conn: tx as unknown as Sql,
       });
       if (!gate.allowed) return fail(gate.code, gate.message);
+
+      // Destination validation, in the same transaction and before the INSERT.
+      //
+      // This blocks on exactly ONE thing: a routing number that fails the ABA
+      // check digit. That is a closed question — no fact about the world could
+      // make it right — so no informed human could be right to override it,
+      // and an "are you sure?" in front of arithmetic teaches people that this
+      // system's warnings are clickable.
+      //
+      // A name mismatch is a WARNING, never a block, because it is open in the
+      // direction of false positives: trading names, subsidiaries, factoring
+      // companies. A hard block there does not stop fraud, it stops legitimate
+      // payments and then gets switched off. What this refuses is an
+      // *implicit* override — a payee carrying an unsigned warning — and the
+      // signature is one step by anybody.
+      //
+      // It never throws. A failure inside returns null and the payment
+      // proceeds, because a destination-validation service that can stop every
+      // payment by falling over is the worse risk.
+      const payee = await gatePaymentOnPayee(
+        { accountId: args.accountId, destination: args.destination },
+        tx as unknown as Sql,
+      );
+      if (payee !== null) return fail(payee.code, payee.message);
 
       const hash = contentHash({
         accountId: args.accountId,
