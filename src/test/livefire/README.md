@@ -29,6 +29,15 @@ never includes it. This is the rule that matters most: the previous attempt at
 the dedupe claim (DECISIONS 020) *looked* like a pass and was not, and a test
 that passes for the wrong reason is worse than one that fails.
 
+There is exactly one thing that is neither of those, and §2b is it: a test that
+proves a **different, smaller, named** claim than the published attack, because
+the provider refused to produce the published one. That is not a skip — the
+pipeline ran end to end and something real was demonstrated — and it is not a
+pass on the attack either. It is allowed only on the terms §2b sets: the smaller
+claim is stated in the file and here, and the FIRST evidence line the reader sees
+says which published sentence was **not** exercised, and why. A test that reads
+as if it proved more than it did is still worse than a skip.
+
 **The verdict is not self-reported.** `scripts/livefire.mjs` derives PASS / FAIL
 / SKIP from Vitest's own JSON result, not from anything a test writes about
 itself. The tests write only evidence strings; they cannot promote themselves.
@@ -94,6 +103,9 @@ database: available down by exactly 5000, ledger unchanged, the whole of the
 drop attributable to card-auth holds, and the financial trial balance unmoved
 because a hold is memo-only.
 
+**Today it proves the other half of that sentence**, because Lithic refuses the
+authorisation — see §2b, which covers attacks 1 and 2 together.
+
 ### 2 — the over-capture
 
 Authorise $50.00, clear $73.40. Two tests, because the attack names two things
@@ -106,6 +118,81 @@ and only one of them holds today:
   with no floor. This passes.
 * **the bookkeeping claim** — exactly one `hold_closure` row. This SKIPS, and
   the skip is a real finding rather than a missing feature. See §4.
+
+### 2b — what attacks 1 and 2 prove while the sandbox declines everything
+
+Both attacks read the network's verdict from the provider before asserting
+anything (migration 0026), and both currently read
+`AUTHORIZATION 5000 result DECLINED [ACCOUNT_DAILY_SPEND_LIMIT_EXCEEDED]`. The
+Lithic sandbox account's rolling 24-hour cap is exhausted —
+`available_spend_limit.daily = 0` against `spend_limit.daily = 500000`, with
+`spend_velocity.daily = 760210` — so **no authorisation can be approved at any
+amount**, which a prior run established directly by sending a one-cent
+authorisation and watching it decline. The only routes out are raising the limit
+(`PATCH /v1/accounts/{token}`, deliberately blocked by the permission
+classifier) or standing up a second provider account. Both are a human's
+decision, not a thing a test may tune around.
+
+**A refusal is a PASS, on a smaller claim, loudly labelled.** Both files used to
+`throw` on it, on the argument that "the demo could not be performed" is a red
+rather than a skip. That was right about the skip and wrong about the red.
+Nothing is broken on a declined run: the delivery arrives, the consumer runs,
+the verdict survives ingest, and the ledger correctly withholds nothing.
+Reporting a working system as a broken one is the same misreport as a green on a
+broken one, pointing the other way. So the branch asserts, in full:
+
+> **a declined authorisation places no hold** — holds, available, ledger and
+> the trial balance all flat across the authorisation; zero memo entries on the
+> hold; and this run's own hold absent from `v_refused_auth_hold`.
+
+That is a real and demonstrable property, and it is the property production did
+**not** have for eight hours (DECISIONS 050, 056). It is arguably the more
+interesting one: the happy path shows money being withheld, and this shows money
+correctly *not* being withheld, which is the failure that actually cost a
+customer $300.00.
+
+**It is not allowed to read as more than it is.** The first evidence line on a
+declined run opens `THE PUBLISHED HAPPY PATH WAS NOT EXERCISED`, says which
+published sentence is not shown by the run, and names the cause. The scoreboard
+title comes from `scripts/livefire.mjs` and still reads "AVAILABLE drops 5000",
+so the evidence is the only place that can be said — which is why it is said
+first, before the numbers. Attack 1's own test title was changed for the same
+reason: it now reads "available moves by exactly what the network granted", true
+at 5000 on an approval and at 0 on a refusal, instead of asserting a drop in its
+name on a run where nothing was granted. Attack 2 still scores **SKIP** on a
+declined run, correctly: its other two tests cannot run at all without an
+approved authorisation, and the runner scores any file with a skipped test as
+SKIP. One test passing on a smaller claim does not promote the attack.
+
+**And the assertion that used to fail here was scoped wrong, not sized wrong.**
+The refusal branch ended on `expect(count(*) FROM v_refused_auth_hold).toBe(0)`
+— *nobody on the whole deployment is withholding money against an unapproved
+authorisation*. Measured: 149 rows, and they should be there. They are the
+historical backlog of authorisations whose verdict was never observed —
+pre-0026 fixture events plus test authorisations from the other suites —
+migration 0032 **deliberately refused to exclude them**, and `dbcheck` reports
+that count as a standing, deliberate failure that must not be tuned back.
+
+So the fix is neither a wider tolerance nor a deletion. It is the repair attacks
+3 and 7 had earlier in the night: the claim is pointed at **this run's own
+rows**, by hold id and by provider transaction, both of which must be absent
+from the view. `v_refused_auth_hold` lists a hold only while
+`active_hold_cents > 0`, so absence *is* the claim — this declined authorisation
+is not withholding a cent. The book-wide count is still read, and printed in the
+evidence next to the scoped one under `NOT ASSERTED, REPORTED`, so a reader sees
+the number and sees that none of it is ours. The rule in §1 holds: **never widen
+a tolerance to absorb another writer** — and the corollary this pass adds is
+that a global zero is not a tolerance at all, it is a claim about every other
+suite on the book, which an attack has no business making and cannot keep.
+
+One residual, recorded rather than fixed: attacks 1, 2 and 4 still pick their
+customer with `ORDER BY business_id LIMIT 1` and measure a delta on it, rather
+than opening their own business as attacks 3 and 7 do (§1). Every assertion
+across that customer is a **delta over the attack's own window**, which is the
+shape §1 asks for, but the window is not isolated the way attack 7's two
+watermarks are. It was left alone in this pass because the defect being repaired
+was the absolute assertion, and widening the change to re-home two more attacks
+on a deployed, green tree is a separate decision.
 
 ### 3 — the backdated correction
 

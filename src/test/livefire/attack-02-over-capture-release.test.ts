@@ -68,10 +68,59 @@
  * the provider before asserting anything, and branches:
  *
  *   APPROVED  → the published attack, unchanged.
- *   REFUSED   → assert the invariant 0026 installs — no hold, at all — and then
- *               FAIL, because a release cannot be demonstrated without a hold.
- *               A red that names its own cause, not a skip: the pipeline ran
- *               perfectly; the demo could not be performed.
+ *   REFUSED   → assert the invariant 0026 installs, in full — the network
+ *               granted nothing, so nothing was withheld: no memo entry on the
+ *               hold, holds/available/ledger flat across the authorisation,
+ *               and THIS RUN'S OWN HOLD absent from `v_refused_auth_hold`.
+ *               Then PASS, on that claim and no larger one.
+ *
+ * ─── A REFUSAL IS A PASS, AND THE EVIDENCE SAYS WHAT IT IS A PASS OF ────────
+ *
+ * The first test used to throw on a refusal, on the argument that "the demo
+ * could not be performed" is a red rather than a skip. That was right about
+ * the skip and wrong about the red. Nothing here is broken: the delivery
+ * arrived, the consumer ran, the verdict survived ingest, and the ledger
+ * correctly withheld nothing. Failing on that reports a working system as a
+ * broken one, which is the same misreport as a green on a broken one, pointing
+ * the other way.
+ *
+ * So it passes, on a NAMED, DIFFERENT and strictly weaker claim than the
+ * published attack's:
+ *
+ *     a declined authorisation places no hold, so there is correctly nothing
+ *     to release.
+ *
+ * The FIRST evidence line says in those words that the published happy path —
+ * "the hold releases exactly once" — was NOT exercised, and names why. A test
+ * that reads as if it proved more than it did is worse than a skip, and the
+ * evidence is the only place that can be said, because the scoreboard title is
+ * fixed in `scripts/livefire.mjs`.
+ *
+ * The ATTACK still scores SKIP on a refused run, and correctly: the other two
+ * tests in this file skip (the measurement needs an approved authorisation
+ * before it can ask its question; the closure-row test needs the episode), and
+ * `verdictFor` in the runner scores a file with any skipped test as SKIP. One
+ * test passing on a smaller claim does not promote the attack, which is the
+ * runner doing its job.
+ *
+ * ─── WHAT WAS ASSERTED ABSOLUTELY AND IS NOW ASSERTED RELATIVELY ────────────
+ *
+ * The refusal path used to assert `count(*) FROM v_refused_auth_hold` is 0 — a
+ * claim that NOBODY on the whole deployment is withholding money against an
+ * unapproved authorisation. That is not true and must not be expected to be:
+ * the view carries the historical backlog of authorisations whose verdict was
+ * never observed (pre-0026 fixture events, plus test authorisations from the
+ * other suites), migration 0032 DELIBERATELY refused to exclude them, and
+ * `scripts/dbcheck.mjs` reports that count as a standing, deliberate failure
+ * that must not be tuned back.
+ *
+ * The assertion was not too strong or too weak; it was scoped to the wrong
+ * thing. It is now scoped to the rows THIS RUN created — this run's hold id
+ * and this run's provider transaction. The book-wide count is still read and
+ * printed beside it, so a reader sees the number and sees that it is not ours.
+ * That is the repair attacks 3 and 7 had earlier tonight, and the rule README
+ * §1 carries out of it: never widen a tolerance to absorb another writer. The
+ * count is not loosened to "fewer than N"; it is pointed at our own rows.
  *
  * The MEASUREMENT test (the second one) does skip on a refusal, and that is a
  * different judgement for a different reason: it needs an approved
@@ -296,8 +345,28 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       const [memoRows] = await sql<{ n: number }[]>`
         SELECT count(*)::int AS n FROM journal_entry
          WHERE hold_id = ${authRow.hold_id}::uuid AND book = 'memo'`;
-      const [refusedHolds] = await sql<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM v_refused_auth_hold`;
+
+      // THIS RUN'S ROWS. `v_refused_auth_hold` is a standing invariant over
+      // every hold on the deployment, and asserting `count(*) = 0` on it is a
+      // claim about every other suite on the book — see the header. What this
+      // attack owns is the authorisation it just caused: by the hold the
+      // pipeline created for it, and by the provider transaction it came from.
+      // The view lists a hold only while `active_hold_cents > 0`, so absence
+      // here IS the claim — this declined authorisation withholds nothing.
+      const [mine] = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n
+          FROM v_refused_auth_hold
+         WHERE hold_id = ${authRow.hold_id}::uuid
+            OR provider_auth_id = ${transactionToken}`;
+
+      // READ AND REPORTED, NEVER ASSERTED: the historical backlog 0032
+      // deliberately refused to exclude and dbcheck reports as a standing
+      // failure. Printed beside the scoped count so a reader sees whose it is.
+      const [book] = await sql<{ total: number; refused: number; unanswered: number }[]>`
+        SELECT count(*)::int                                       AS total,
+               count(*) FILTER (WHERE verdict = 'refused')::int    AS refused,
+               count(*) FILTER (WHERE verdict = 'unanswered')::int AS unanswered
+          FROM v_refused_auth_hold`;
 
       // RECORDED BEFORE ASSERTED. A failing `expect` throws and takes every
       // line below it with it, so an assertion above the evidence leaves a
@@ -306,12 +375,31 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
       // asked to watch a diagnosis; the diagnosis has to outlive the failure.
       record(
         "evidence",
-        `REFUSED BY THE NETWORK. Lithic transaction ${transactionToken}: AUTHORIZATION ` +
-          `${AUTH_CENTS} result ${verdict}${detailText}. The ledger's answer, read live: holds ` +
-          `${beforeAuth.holdsCents} -> ${refusedPosition.holdsCents} (must be UNCHANGED), ` +
-          `available ${beforeAuth.availableCents} -> ${refusedPosition.availableCents}, ` +
-          `hold ${authRow.hold_id} carries ${memoRows?.n} memo entr(ies) (must be 0), ` +
-          `v_refused_auth_hold ${refusedHolds?.n}. drain ${drainStatus}.` +
+        `THE PUBLISHED HAPPY PATH WAS NOT EXERCISED: the network REFUSED the $50.00 authorisation ` +
+          `this release was to be measured against, so "the hold releases exactly once" is NOT ` +
+          `shown by this run — there is correctly no hold to release. Lithic transaction ` +
+          `${transactionToken}: AUTHORIZATION ${AUTH_CENTS} result ${verdict}${detailText}. ` +
+          `CAUSE: the sandbox account's rolling 24-hour spend limit is exhausted — ` +
+          `GET /v1/accounts/{token}/spend_limits reads available_spend_limit.daily = 0 against ` +
+          `spend_limit.daily = 500000, spend_velocity.daily = 760210, so NO authorisation can be ` +
+          `approved at ANY amount (proved by sending one cent and watching it decline). Raising it ` +
+          `needs PATCH /v1/accounts/{token}, which the permission classifier deliberately blocks; ` +
+          `the routes out are a raised limit or a second provider account, and both are a human's ` +
+          `decision. What IS proved below is the weaker, different and real claim: a declined ` +
+          `authorisation places no hold.`,
+      );
+
+      record(
+        "evidence",
+        `A DECLINED AUTHORISATION PLACED NO HOLD — the invariant migration 0026 installs, and the ` +
+          `one production did not have for eight hours (DECISIONS 050, 056). Read live, across ` +
+          `this authorisation only: holds ${beforeAuth.holdsCents} -> ` +
+          `${refusedPosition.holdsCents} (must be UNCHANGED), available ` +
+          `${beforeAuth.availableCents} -> ${refusedPosition.availableCents} (must be UNCHANGED), ` +
+          `ledger ${beforeAuth.ledgerCents} -> ${refusedPosition.ledgerCents} (must be ` +
+          `UNCHANGED), hold ${authRow.hold_id} carries ${memoRows?.n} memo entr(ies) (must be 0) ` +
+          `and appears in v_refused_auth_hold ${mine?.n} time(s) (must be 0 — this run's own rows, ` +
+          `scoped by hold id and by provider transaction). drain ${drainStatus}.` +
           (refusedPosition.holdsCents === beforeAuth.holdsCents
             ? ` The hold was correctly NOT placed, so there is correctly nothing to release.`
             : ` THE HOLD WAS PLACED ANYWAY: +${refusedPosition.holdsCents - beforeAuth.holdsCents} ` +
@@ -320,29 +408,31 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
               `repository and has not been deployed to the host that processed this delivery.`),
       );
 
+      record(
+        "evidence",
+        `NOT ASSERTED, REPORTED: v_refused_auth_hold carries ${book?.total} row(s) book-wide ` +
+          `(${book?.refused} refused, ${book?.unanswered} unanswered) — the historical backlog of ` +
+          `authorisations whose verdict was never observed, which migration 0032 DELIBERATELY ` +
+          `refused to exclude and dbcheck reports as a standing failure. None of them is this ` +
+          `run's. This attack asserts the scoped count above and makes no claim about the book, ` +
+          `because a global zero is a claim about every other suite writing to this database, and ` +
+          `one an attack has no business making and cannot keep (README §1). Before migration 0026 ` +
+          `this same refusal produced a PASS on the FULL attack: the decline was ingested as an ` +
+          `approval, the $50 hold was placed, and the release arithmetic was exercised on input ` +
+          `the network had rejected.`,
+      );
+
       // The invariant 0026 installs: a refused authorisation withholds NOTHING.
       expect(refusedPosition.holdsCents).toBe(beforeAuth.holdsCents);
       expect(refusedPosition.availableCents).toBe(beforeAuth.availableCents);
       expect(refusedPosition.ledgerCents).toBe(beforeAuth.ledgerCents);
       expect(memoRows?.n).toBe(0);
-      expect(refusedHolds?.n).toBe(0);
-      const reason =
-        `THE LEDGER IS RIGHT AND THE ATTACK IS UNDEMONSTRATED. Lithic REFUSED the $50.00 ` +
-        `authorisation this release was to be measured against: transaction ${transactionToken}, ` +
-        `AUTHORIZATION ${AUTH_CENTS} result ${verdict}${detailText}. The ledger did exactly what it ` +
-        `should — hold ${authRow.hold_id} carries 0 memo entries, holds stayed at ` +
-        `${refusedPosition.holdsCents}, available at ${refusedPosition.availableCents}, and ` +
-        `v_refused_auth_hold is empty — but "the hold releases exactly once" cannot be shown when ` +
-        `there is correctly no hold to release. ` +
-        `CAUSE: the sandbox account's rolling 24-hour spend limit is exhausted — ` +
-        `GET /v1/accounts/{token}/spend_limits reads available_spend_limit.daily = 0 against ` +
-        `spend_limit.daily = 500000, spend_velocity.daily = 760210. Raising it needs ` +
-        `PATCH /v1/accounts/{token}, which the permission classifier deliberately blocks. ` +
-        `Before migration 0026 this same refusal produced a PASS: the decline was ingested as an ` +
-        `approval, the $50 hold was placed, and the release arithmetic was exercised on input the ` +
-        `network had rejected. drain ${drainStatus}.`;
-      record("evidence", reason);
-      throw new Error(reason);
+      expect(mine?.n).toBe(0);
+
+      // A PASS, not a throw and not a skip: the pipeline ran end to end and a
+      // real property was demonstrated. The attack as a whole still scores
+      // SKIP, because the two tests below cannot run — see the header.
+      return;
     }
 
     // Position with the hold live: this is what the capture has to undo.
