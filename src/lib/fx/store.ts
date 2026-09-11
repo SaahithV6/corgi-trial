@@ -55,6 +55,11 @@ import { sql, type Sql } from "@/lib/ledger/db";
 import { err, fail, ok, type ErrorShape, type Result } from "@/lib/result";
 
 import {
+  checkCommitmentFunds,
+  placeCommitmentHold,
+  releaseSettledCommitment,
+} from "./hold";
+import {
   DEFAULT_FEE_BPS,
   DEFAULT_FEE_FLAT_CENTS,
   DEFAULT_QUOTE_TTL_SECONDS,
@@ -634,31 +639,104 @@ export interface AcceptQuoteInput {
  * control and it would be the copy people hit, and between reading the expiry
  * and writing the row the offer can lapse — a race a pre-check cannot close
  * and the trigger closes by construction.
+ *
+ * ── AN ACCEPTANCE NOW RESERVES THE MONEY IT COMMITS ─────────────────────────
+ *
+ * It did not, and that was an overdraft path: measured on this book, two
+ * acceptances of $21,308.95 each against $35,514.93 available left availability
+ * UNMOVED and the payout gate cleared both. docs/FX.md §6 and §11.2 both named
+ * it. `placeCommitmentHold()` closes it by putting an ordinary `manual` hold on
+ * the customer's 2100 leaf for `sell_cents`, which `ledger_availability()`
+ * subtracts through its existing hold term — no second definition of available
+ * balance, which is the thing migration 0022 exists to have ended.
+ *
+ * THE THREE WRITES ARE ONE TRANSACTION and the ORDER IS LOAD-BEARING:
+ *
+ *   1. the funds check, under an advisory lock on the customer's deposit
+ *      account, so two acceptances racing one balance cannot both pass it;
+ *   2. `fx_quote_acceptance`, so the expiry trigger decides before any money
+ *      is reserved, and so the commitment exists for step 3's guard to see;
+ *   3. the hold, the binding row and the memo posting.
+ *
+ * A refusal at step 1 returns before ANY write. It is not an exception and it
+ * is not thrown: a customer trying to commit more than they hold has done
+ * nothing wrong, and `FX_COMMITMENT_EXCEEDS_AVAILABLE` names the fix.
  */
 export async function acceptQuote(
   input: AcceptQuoteInput,
   conn: Sql = sql,
 ): Promise<Result<QuoteRecord, ErrorShape>> {
   try {
-    const written = await conn.begin(async (tx) => {
+    const outcome = await conn.begin(async (tx) => {
       const t = tx as unknown as Sql;
       const actorId = await quoteActorId(t);
-      const rows = await tx<{ id: string }[]>`
-        SELECT id FROM fx_quote WHERE quote_ref = ${input.quoteRef}`;
+      const rows = await tx<
+        {
+          id: string;
+          quote_ref: string;
+          business_id: string;
+          entity_id: string;
+          sell_cents: bigint;
+        }[]
+      >`
+        SELECT id, quote_ref, business_id, entity_id, sell_cents
+          FROM fx_quote WHERE quote_ref = ${input.quoteRef}`;
       const quote = rows[0];
-      if (quote === undefined) return false;
+      if (quote === undefined) return { kind: "not_found" } as const;
+
+      // STEP 1, BEFORE ANY WRITE. A refusal here returns having written
+      // nothing at all, which is the only honest undo an append-only book has.
+      //
+      // IT THEREFORE RUNS BEFORE THE EXPIRY TRIGGER, and that reorders one
+      // pair of refusals: a quote that is BOTH expired and unaffordable now
+      // answers `FX_COMMITMENT_EXCEEDS_AVAILABLE` where it used to answer
+      // `FX_QUOTE_EXPIRED`. Both sentences are true, the actionable one is
+      // the money, and — the part that matters — the expiry control is
+      // untouched: an expired quote with the money behind it still reaches
+      // the INSERT and is still refused by `fx_quote_acceptance_guard()`.
+      // Reading `expires_at` here instead would be a second, weaker copy of
+      // that control, which rule 2 in this file's header refuses at length.
+      const reservation = await checkCommitmentFunds(
+        {
+          quoteRef: quote.quote_ref,
+          businessId: quote.business_id,
+          entityId: quote.entity_id,
+          sellCents: quote.sell_cents,
+        },
+        t,
+      );
+      if (!reservation.ok) return { kind: "refused", error: reservation.error } as const;
 
       await tx`
         INSERT INTO fx_quote_acceptance (quote_id, accepted_by, reference)
         VALUES (${quote.id}::uuid, ${actorId}::uuid, ${input.reference ?? null})`;
-      return true;
+
+      // The commitment is the QUOTE's figure and the window is the
+      // ACCEPTANCE's instant, both read back from the database inside this
+      // transaction. Nothing on this path takes a number from a caller.
+      await placeCommitmentHold(
+        {
+          quoteId: quote.id,
+          quoteRef: quote.quote_ref,
+          entityId: quote.entity_id,
+          sellCents: quote.sell_cents,
+          actorId,
+          reservation: reservation.value,
+        },
+        t,
+      );
+
+      return { kind: "accepted" } as const;
     });
 
-    if (!written) {
+    if (outcome.kind === "not_found") {
       return fail(
         NOT_FOUND,
         `There is no quote ${input.quoteRef}. Nothing was written.`,
       );
+    }
+    if (outcome.kind === "refused") {
+      return err(outcome.error);
     }
 
     const record = await loadQuoteByRef(input.quoteRef, conn);
@@ -742,6 +820,19 @@ export interface RecordSettlementInput {
  * The trigger checks the two preconditions this function does not: that the
  * quote was accepted, and that its settlement window is still open. It also
  * re-derives the variance identity and refuses a row that does not add up.
+ *
+ * ── AND IT RELEASES THE COMMITMENT HOLD, TERMINALLY ─────────────────────────
+ *
+ * The settlement row is the fact that licenses a permanent `hold_closure`:
+ * `quote_id` is its PRIMARY KEY and the table is append-only at both layers,
+ * so "this quote settled" is an EXISTS over a growing set and an EXISTS never
+ * un-fires. That is the monotonicity `terminallyClosed` demands, and it is why
+ * the closure is written HERE and not by the lapse clock — see
+ * `./hold.ts`'s header for the other half of that argument.
+ *
+ * Both writes are in one transaction, so a book in which the commitment is
+ * consumed but the money is still withheld is not a state this function can
+ * leave behind.
  */
 export async function recordQuoteSettlement(
   input: RecordSettlementInput,
@@ -767,6 +858,20 @@ export async function recordQuoteSettlement(
            ${input.settlementMidRateScaled}, ${input.settlementRateScale},
            ${input.settlementObservationId ?? null}::uuid,
            ${input.settlementCostCents}, ${input.varianceCents})`;
+
+      // Compare-and-append: the amount released is the memo book's own balance
+      // read inside this transaction, so a replay, a race or a quote that never
+      // had a hold (every acceptance predating migration 0053) all compute zero
+      // and append nothing.
+      await releaseSettledCommitment(
+        {
+          quoteId: quote.id,
+          quoteRef: input.quoteRef,
+          txHash: input.txHash.toLowerCase(),
+          actorId,
+        },
+        t,
+      );
       return true;
     });
 

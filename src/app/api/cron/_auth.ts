@@ -51,6 +51,20 @@ import { logger } from "@/lib/log";
  * Until it is set AND the project is redeployed, Vercel Cron sends no
  * Authorization header at all, and all five schedules will 401.
  *
+ * RESOLVED, and re-measured on 2026-09-11 rather than assumed:
+ * `vercel env ls production` now lists `CRON_SECRET` (Production, created 4h
+ * before the check) and the live production deployment is 2h old — so the
+ * running build carries it and the five schedules can authenticate. The
+ * refusal side was re-proved from outside on the same day, against
+ * https://corgi-trial-psi.vercel.app: all five scheduled paths answered 401
+ * to an anonymous GET, to a forged `x-vercel-cron: 1`, and to a wrong bearer,
+ * and every response carried `x-stripped-request-headers: x-vercel-cron`,
+ * which is the middleware proving from outside that the header was deleted.
+ * What is still NOT proved by a call is the ACCEPTING path in production:
+ * that would mean running a money-posting cron on the real book on demand,
+ * which is not a thing to do to demonstrate a header. It is proved locally
+ * instead, by `_auth.test.ts`.
+ *
  * That failure is deliberately not silent: every refusal that carries
  * `x-vercel-cron` logs at ERROR with the event `scheduled.auth.refused` and
  * `looksLikePlatformCron: true`, which is exactly the line to grep for in the

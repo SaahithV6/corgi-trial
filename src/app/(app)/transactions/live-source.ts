@@ -32,13 +32,22 @@ import type {
   TransactionsView,
 } from "@/components/timetravel/contract";
 
-/** Is there a book to travel through at all? */
-export function hasDatabase(): boolean {
-  return (
-    typeof process.env["APP_DATABASE_URL"] === "string" &&
-    process.env["APP_DATABASE_URL"] !== ""
-  );
-}
+/*
+ * THE PREDICATE THAT USED TO LIVE HERE IS GONE ON PURPOSE.
+ *
+ * `export function hasDatabase()` sat at this line, inside a module that opens
+ * a connection, and `page.tsx` reached it with
+ * `const { hasDatabase } = await import("./live-source")`. That import only
+ * succeeds when a database IS configured, so the predicate could only ever
+ * return true to the caller that needed a false — the defect this console
+ * carried on eight screens.
+ *
+ * The page now asks `@/lib/has-database`, which imports nothing, and this copy
+ * had no importers left. It is deleted rather than left as dead code because a
+ * predicate named `hasDatabase` living in a live module is the attractor that
+ * produced the shape in the first place: the next person to need the question
+ * answered finds it here, one `await import` away, and writes the bug again.
+ */
 
 function readFailure(where: string, thrown: unknown): Result<never, ErrorShape> {
   const message = thrown instanceof Error ? thrown.message : String(thrown);

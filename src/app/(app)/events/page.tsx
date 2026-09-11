@@ -4,8 +4,12 @@ import type { Metadata } from "next";
 import { EventsError, EventsScreen, EventsSkeleton } from "@/components/events/EventsView";
 import { RegisterForm, type BusinessOption } from "@/components/events/RegisterForm";
 import { createFixtureEventsSource, type FixtureState } from "@/components/events/fixtures";
+import { createUnreadableEventsSource } from "@/components/events/unreadable";
 import type { EventsDataSource } from "@/components/events/data-contract";
 import { EVENT_TYPES } from "@/lib/events/envelope";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 export const metadata: Metadata = {
   title: "Outbound events · Corgi ops console",
@@ -55,7 +59,9 @@ export default async function EventsPage({
   const raw = params["state"];
   const state = typeof raw === "string" ? raw : "default";
 
-  const { source, businesses } = await select(state);
+  // ONE VALUE. Which source this screen reads through, and therefore every
+  // badge and counter below, comes from this line.
+  const { source, businesses } = await select(state, !hasDatabase());
 
   return (
     <Suspense key={state} fallback={<EventsSkeleton />}>
@@ -72,7 +78,14 @@ async function Body({
   readonly businesses: readonly BusinessOption[];
 }) {
   const result = await source.load();
-  if (!result.ok) return <EventsError code={result.error.code} message={result.error.message} />;
+  if (!result.ok)
+    return (
+      <EventsError
+        code={result.error.code}
+        message={result.error.message}
+        details={result.error.details}
+      />
+    );
 
   return (
     <EventsScreen view={result.value}>
@@ -86,22 +99,50 @@ async function Body({
 const FIXTURE_STATES: readonly string[] = ["loading", "empty", "error", "edge"];
 
 /**
+ * Live for the default state, fixture for the four demo states — and a REFUSAL
+ * for the default state when there is no database to read.
+ *
  * The live module is imported DYNAMICALLY because importing it evaluates
  * `src/lib/env.ts`, which refuses to load without a database URL. That is the
  * right behaviour for the app and the wrong behaviour for a page that must be
- * able to render the words "no database configured".
+ * able to render the words "no database configured" — so the import happens
+ * only on the branch that has already established there is a database to read.
+ *
+ * WHAT THIS FUNCTION USED TO DO, AND WHY IT IS THE DEFECT THIS SCREEN CARRIED.
+ * It asked `live.hasDatabase()` on the line AFTER
+ * `const live = await import("./live-source")`, and that module's
+ * `import { sql } from "@/lib/ledger/db"` throws `EnvironmentError` without
+ * `APP_DATABASE_URL`. The guard was unreachable in the one case it was written
+ * for: the import above it only succeeds when a database IS configured.
+ * Measured with the variable deleted, the render threw at
+ * `src/lib/ledger/db.ts:18` and the operator got the framework's error page.
+ *
+ * If it HAD run, it returned `createFixtureEventsSource("empty")`: the delivery
+ * counters and the queue cursor, all reading nought. On a delivery log that is
+ * not a blank screen, it is the answer to the only question this screen is
+ * opened to settle — is anything stuck — given by a deployment that had opened
+ * no connection. The customer whose webhooks are not arriving would have read
+ * "0 pending, 0 dead" and gone back to their own logs.
+ *
+ * With no database the answer is now a REFUSAL, from
+ * `@/components/events/unreadable`, which `EventsError` renders the same way it
+ * renders a failed read: no counter, no endpoint, no register form. The form is
+ * withheld for its own reason as well as the shared one — it writes, and it
+ * cannot write to a book nothing can see.
  */
 async function select(
   state: string,
+  noDatabase: boolean,
 ): Promise<{ source: EventsDataSource; businesses: readonly BusinessOption[] }> {
   if (FIXTURE_STATES.includes(state)) {
+    // A demo state stays a fixture whether or not a database is configured:
+    // those four are drawn on purpose, and "no database" does not make a
+    // drawing any more or less drawn.
     return { source: createFixtureEventsSource(state as FixtureState), businesses: [] };
   }
 
-  const live = await import("./live-source");
-  if (!live.hasDatabase()) {
-    return { source: createFixtureEventsSource("empty"), businesses: [] };
-  }
+  if (noDatabase) return { source: createUnreadableEventsSource(), businesses: [] };
 
+  const live = await import("./live-source");
   return { source: live.createLiveEventsSource(), businesses: await live.listBusinessOptions() };
 }

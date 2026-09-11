@@ -3,6 +3,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 
 import { isErr } from "@/lib/result";
+import type { ErrorShape } from "@/lib/result";
 import {
   Badge,
   FOCUS_RING,
@@ -11,6 +12,7 @@ import {
   TH_CLASS,
   TableScroll,
 } from "@/components/ui/primitives";
+import { isRetryable } from "@/components/ui/error-detail";
 import { RetryButton } from "@/components/ui/RetryButton";
 import {
   AS_KNOWN_AT_PARAM,
@@ -25,6 +27,9 @@ import { WINDOWS, type Window } from "@/lib/timetravel/read";
 // `src/lib/env.ts` — which refuses to load without a full set of keys — into a
 // page that must be able to render "no database configured".
 import type { Sql } from "@/lib/ledger/db";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 import { RefusalPanel } from "@/components/timetravel/Refusal";
 import { TransactionsSkeleton } from "@/components/timetravel/TransactionsSkeleton";
@@ -32,8 +37,8 @@ import { TransactionsView } from "@/components/timetravel/TransactionsView";
 import {
   EMPTY_STATE_VALUE_DATE,
   FIXTURE_READ_FAILURE,
-  NO_DATABASE,
 } from "@/components/timetravel/fixtures";
+import { TRANSACTIONS_NO_DATABASE } from "@/components/timetravel/unreadable";
 
 export const metadata: Metadata = {
   title: "Transactions · time travel · Corgi ops console",
@@ -65,6 +70,30 @@ const STATE_HINTS: Record<DemoState, string> = {
   error: "A synthesised read failure. The only fixture here: there is no honest way to make a live read fail on demand.",
   edge: "THE EDGE CASE — the most recent correction act, entered at an instant INSIDE its atomic write, so the cut guard fires.",
 };
+
+/**
+ * What the state bar says when the coordinates did not parse.
+ *
+ * It replaces the state hint rather than sitting beside it. `STATE_HINTS.default`
+ * reads "the same reads the account screens take", which is a promise that this
+ * render went to the book — hoverable, and false, over a panel saying the
+ * request never reached a connection. One screen, one claim, includes the
+ * claims a reader has to hover to find.
+ */
+const REFUSED_COORDINATE_HINT =
+  "The time-travel coordinates on this URL did not parse, so no connection was opened and no row was read. Nothing below is a statement about this book at any instant. Clear the parameters to return to the live watermark.";
+
+/**
+ * What the state bar says when there is nothing to read.
+ *
+ * One sentence, used in two places — the line under the links, and the
+ * tooltip on every state that would otherwise have read the database. The
+ * tooltip mattered: it carried a hint promising the live watermark, and left
+ * that promise hoverable on a screen whose badge says NO DATABASE. One screen,
+ * one claim, includes the claims a reader has to hover to find.
+ */
+const NO_DATABASE_HINT =
+  "No database is configured for this deployment. No account was listed, no posting was folded and no closing balance was derived — nothing below was read, and no day is drawn in its place.";
 
 /**
  * `/transactions` — the time machine.
@@ -126,9 +155,16 @@ export default async function TransactionsPage({
   const basePath = buildBasePath({ state, accountId, window, resolved });
   const liveHref = withTimeTravel(basePath, { asOf: null, asKnownAt: null });
 
+  // ONE VALUE, TWO SURFACES. The state bar's badge and the section's refusal
+  // both come from this line. They used to be worked out separately and both
+  // printed the word `live` on a deployment that had read nothing — the state
+  // bar because the state was not `error`, and the error panel because the
+  // failure was not a fixture.
+  const noDatabase = !hasDatabase();
+
   return (
     <div className="space-y-6">
-      <StateBar state={state} />
+      <StateBar state={state} noDatabase={noDatabase} coordinatesRefused={!parsed.ok} />
 
       {parsed.ok ? (
         <Suspense
@@ -137,6 +173,7 @@ export default async function TransactionsPage({
         >
           <TransactionsSection
             state={state}
+            noDatabase={noDatabase}
             accountId={accountId}
             window={window}
             request={parsed.request}
@@ -169,6 +206,7 @@ export default async function TransactionsPage({
  */
 async function TransactionsSection({
   state,
+  noDatabase,
   accountId,
   window,
   request,
@@ -176,6 +214,7 @@ async function TransactionsSection({
   liveHref,
 }: {
   readonly state: DemoState;
+  readonly noDatabase: boolean;
   readonly accountId: string | null;
   readonly window: Window;
   readonly request: TimeTravelRequest;
@@ -183,12 +222,22 @@ async function TransactionsSection({
   readonly liveHref: string;
 }) {
   if (state === "error") {
-    return <ErrorPanel error={FIXTURE_READ_FAILURE} fixture liveHref={liveHref} />;
+    return <ErrorPanel error={FIXTURE_READ_FAILURE} claim="fixture" liveHref={liveHref} />;
   }
 
-  const { hasDatabase } = await import("./live-source");
-  if (!hasDatabase()) {
-    return <ErrorPanel error={NO_DATABASE} fixture={false} liveHref={liveHref} />;
+  // Asked of `@/lib/has-database`, which imports nothing. It used to be asked
+  // by destructuring `hasDatabase` off `await import("./live-source")` — the
+  // shape that on five sibling screens made the guard unreachable, because
+  // importing a live source evaluates `@/lib/env` and throws without
+  // `APP_DATABASE_URL`. It happened to survive here; it survived on luck.
+  if (noDatabase) {
+    return (
+      <ErrorPanel
+        error={TRANSACTIONS_NO_DATABASE}
+        claim="unreadable"
+        liveHref={liveHref}
+      />
+    );
   }
 
   // The loading state is not a mock of a slow read; it IS a slow read.
@@ -214,7 +263,7 @@ async function TransactionsSection({
   const result = await loadTransactions({ accountId, window, point });
 
   if (isErr(result)) {
-    return <ErrorPanel error={result.error} fixture={false} liveHref={liveHref} />;
+    return <ErrorPanel error={result.error} claim="live" liveHref={liveHref} />;
   }
 
   return (
@@ -258,7 +307,42 @@ async function edgeRequest(
 /* Chrome                                                                     */
 /* -------------------------------------------------------------------------- */
 
-function StateBar({ state }: { readonly state: DemoState }) {
+/**
+ * The demo-state switch, and THE SCREEN'S ONE CLAIM ABOUT ITS DATA SOURCE.
+ *
+ * The badge on the right used to read `live` for every state but `error`,
+ * which made it a claim about the URL rather than about the data: with no
+ * database configured it said `live` above a panel that also said `live`,
+ * on a screen that had read nothing. `noDatabase` is resolved once in
+ * `TransactionsPage` and this badge and the section's refusal both come from
+ * it, so the two cannot disagree.
+ *
+ * THERE IS A SECOND WAY THIS SCREEN READS NOTHING, and the repair above did
+ * not cover it. `?asOf=` and `?asKnownAt=` are validated by a pure function
+ * BEFORE a connection is opened — that is the point of validating them, so an
+ * impossible coordinate never reaches the database — and when the validation
+ * fails the page renders `RefusalPanel` in place of the board. On a deployment
+ * WITH a database, in the `default` state, `noDatabase` is false and the badge
+ * read `live` directly above a panel whose own words are "nothing was read and
+ * nothing moved ... this request never reached a connection".
+ *
+ * So the badge now takes `read`, which is the question it was always trying to
+ * answer: did THIS render reach the book. It is one more input to the same
+ * value rather than a second predicate — `TransactionsPage` computes it on the
+ * line where it already knows both halves, and passes the answer down.
+ */
+function StateBar({
+  state,
+  noDatabase,
+  coordinatesRefused,
+}: {
+  readonly state: DemoState;
+  readonly noDatabase: boolean;
+  /** The coordinates did not parse, so no connection was opened for this render. */
+  readonly coordinatesRefused: boolean;
+}) {
+  const refusing = noDatabase && state !== "error";
+
   return (
     <aside
       aria-label="Demo states"
@@ -276,7 +360,7 @@ function StateBar({ state }: { readonly state: DemoState }) {
                 key={option}
                 href={option === "default" ? "/transactions" : `/transactions?state=${option}`}
                 aria-current={current ? "page" : undefined}
-                title={STATE_HINTS[option]}
+                title={refusing && option !== "error" ? NO_DATABASE_HINT : STATE_HINTS[option]}
                 className={`rounded px-2 py-1 text-xs ${FOCUS_RING} ${
                   current
                     ? "bg-surface-raised font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border-strong)]"
@@ -288,33 +372,77 @@ function StateBar({ state }: { readonly state: DemoState }) {
             );
           })}
         </div>
-        {state === "error" ? (
+        {refusing ? (
+          <Badge tone="negative">NO DATABASE</Badge>
+        ) : state === "error" ? (
           <Badge tone="quiet">fixture</Badge>
+        ) : coordinatesRefused ? (
+          // No badge, because there is no source to name. The refusal below
+          // says what happened; a `live` here would contradict it and a
+          // `fixture` here would be a different untruth.
+          <Badge tone="quiet">NOTHING READ</Badge>
         ) : (
           <Badge tone="positive">live</Badge>
         )}
       </div>
       <p className="mt-2 max-w-prose text-[11px] leading-relaxed text-muted">
-        {STATE_HINTS[state]}
+        {refusing
+          ? NO_DATABASE_HINT
+          : coordinatesRefused
+            ? REFUSED_COORDINATE_HINT
+            : STATE_HINTS[state]}
       </p>
     </aside>
   );
 }
 
+/**
+ * The read did not happen, for one of three reasons, and this is the whole
+ * screen.
+ *
+ * `claim` says WHICH of the three, and it is the same word the state bar used:
+ *
+ *   fixture     `?state=error`, a synthesised failure, badged as drawn
+ *   live        a real read of a real book that failed
+ *   unreadable  there is no database. The panel carries NO badge, because the
+ *               state bar above it already carries the screen's one claim and
+ *               a second badge here is a second claim a reader has to reconcile.
+ *
+ * The retry control is dropped when the failure says it is not retryable. A
+ * button offering to re-run a read that cannot succeed sits next to the words
+ * "retryable: no" and contradicts them; a refresh does not configure a
+ * database.
+ */
 function ErrorPanel({
   error,
-  fixture,
+  claim,
   liveHref,
 }: {
-  readonly error: { readonly code: string; readonly message: string };
-  readonly fixture: boolean;
+  readonly error: ErrorShape;
+  readonly claim: "fixture" | "live" | "unreadable";
   readonly liveHref: string;
 }) {
+  const refusing = claim === "unreadable";
+  const retry = isRetryable(error);
+
   return (
     <Panel
-      title="This point could not be read"
-      description="A read failure. Nothing moved — this screen only ever issues SELECTs and the journal is append-only."
-      actions={fixture ? <Badge tone="quiet">fixture</Badge> : <Badge tone="negative">live</Badge>}
+      title={refusing ? "This screen cannot see the book" : "This point could not be read"}
+      description={
+        refusing
+          ? "No database is configured for this deployment, so no point in time was resolved and no day is drawn. Nothing here is a reading of an empty book."
+          : "A read failure. Nothing moved — this screen only ever issues SELECTs and the journal is append-only."
+      }
+      {...(refusing
+        ? {}
+        : {
+            actions:
+              claim === "fixture" ? (
+                <Badge tone="quiet">fixture</Badge>
+              ) : (
+                <Badge tone="negative">live</Badge>
+              ),
+          })}
     >
       <div className="px-5 py-6">
         <TableScroll>
@@ -333,11 +461,19 @@ function ErrorPanel({
                 </th>
                 <td className={`${TD_CLASS} max-w-prose`}>{error.message}</td>
               </tr>
+              <tr>
+                <th scope="row" className={`${TH_CLASS} text-left`}>
+                  Retryable
+                </th>
+                <td className={`${TD_CLASS} font-mono text-xs`}>
+                  {retry ? "yes" : "no"}
+                </td>
+              </tr>
             </tbody>
           </table>
         </TableScroll>
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <RetryButton />
+          {retry ? <RetryButton /> : null}
           <Link
             href={liveHref}
             className={`text-sm underline underline-offset-4 ${FOCUS_RING}`}

@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { FOCUS_RING } from "@/components/ui/primitives";
+import { isRetryable } from "@/components/ui/error-detail";
 import { RetryButton } from "@/components/ui/RetryButton";
 import type { ErrorShape } from "@/lib/result";
 
@@ -17,8 +18,29 @@ import type { ErrorShape } from "@/lib/result";
  * wrote a `statement` row or wrote nothing — `corgi_app` has `INSERT` and no
  * `UPDATE`, so there is not even a shape for a partially-issued document to
  * take. Retrying is safe, and the panel says why rather than asking for trust.
+ *
+ * `title` and `description` default to the failed-read wording and are
+ * overridden for the cause that is not a failed read — no database configured
+ * at all. Both refuse identically: no reading, no document, no hash. The
+ * screen used to answer that cause with the `default` FIXTURE instead, which
+ * drew a complete statement — a named business, a closing balance read twice,
+ * a day close, a version history and the words HASH REPRODUCED — on a
+ * deployment that had opened no connection; see `./unreadable.ts`.
+ *
+ * The retry control is dropped when the failure says it is not retryable. A
+ * button offering to re-run a read that cannot succeed sits next to the words
+ * "retryable: no" and contradicts them, and a refresh does not configure a
+ * database.
  */
-export function StatementsErrorPanel({ error }: { readonly error: ErrorShape }) {
+export function StatementsErrorPanel({
+  error,
+  title = "The statement could not be loaded",
+  description = "This is a read failure. No money moved, no document was issued and no day was closed — rendering a statement is a query, and the published rows it reads are append-only. There is no half-issued statement to unpick either: a publish is a single transaction, and the application role holds INSERT and no UPDATE.",
+}: {
+  readonly error: ErrorShape;
+  readonly title?: string;
+  readonly description?: string;
+}) {
   return (
     <section
       aria-labelledby="statements-error-title"
@@ -29,14 +51,10 @@ export function StatementsErrorPanel({ error }: { readonly error: ErrorShape }) 
           id="statements-error-title"
           className="text-sm font-semibold tracking-tight text-negative"
         >
-          The statement could not be loaded
+          {title}
         </h2>
         <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
-          This is a read failure. No money moved, no document was issued and no
-          day was closed — rendering a statement is a query, and the published
-          rows it reads are append-only. There is no half-issued statement to
-          unpick either: a publish is a single transaction, and the application
-          role holds <code>INSERT</code> and no <code>UPDATE</code>.
+          {description}
         </p>
       </div>
 
@@ -47,10 +65,13 @@ export function StatementsErrorPanel({ error }: { readonly error: ErrorShape }) 
 
           <dt className="text-xs uppercase tracking-[0.08em] text-muted">Message</dt>
           <dd className="max-w-prose text-sm">{error.message}</dd>
+
+          <dt className="text-xs uppercase tracking-[0.08em] text-muted">Retryable</dt>
+          <dd className="font-mono text-xs">{isRetryable(error) ? "yes" : "no"}</dd>
         </dl>
 
         <div className="mt-5 flex flex-wrap items-center gap-3">
-          <RetryButton />
+          {isRetryable(error) ? <RetryButton /> : null}
           <Link
             href="/statements"
             className={`rounded px-2 py-1.5 text-xs text-muted underline underline-offset-4 hover:text-text ${FOCUS_RING}`}

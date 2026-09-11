@@ -10,6 +10,8 @@ import {
   Panel,
 } from "@/components/ui/primitives";
 
+import { isRetryable } from "@/components/ui/error-detail";
+
 import type { PotsDataSource } from "./data-contract";
 import { IdentityPanel } from "./IdentityPanel";
 import { InvariantPanel } from "./InvariantPanel";
@@ -25,13 +27,21 @@ import { potsHref, type PotsFilter } from "./view-state";
  * behind a real Suspense boundary and the skeleton on screen is the skeleton a
  * slow database actually produces. The page owns the boundary; this owns the
  * content and the error branch.
+ *
+ * `noDatabase` is resolved ONCE, in `page.tsx`, and handed to the state bar as
+ * well. It is not re-derived here. Two predicates answering three-quarters of
+ * the same question is how a screen ends up badging LIVE above a board badging
+ * FIXTURE. The flag chooses the refusal's wording and nothing else: the
+ * refusal itself arrives as a failed read, from `./unreadable.ts`.
  */
 export async function PotsView({
   source,
   filter,
+  noDatabase = false,
 }: {
   readonly source: PotsDataSource;
   readonly filter: PotsFilter;
+  readonly noDatabase?: boolean;
 }) {
   const result = await source.load({
     businessId: filter.businessId,
@@ -39,16 +49,28 @@ export async function PotsView({
   });
 
   if (!result.ok) {
+    // The retry control is dropped when the failure says it is not retryable.
+    // A button offering to re-run a read that cannot succeed sits next to the
+    // words "retryable: no" and contradicts them; a refresh does not configure
+    // a database.
+    const retry = isRetryable(result.error);
     return (
       <Panel
-        title="The pots read failed"
-        description="Nothing was posted. This path only reads."
-        actions={<RetryButton />}
+        title={noDatabase ? "This screen cannot see the pots" : "The pots read failed"}
+        description={
+          noDatabase
+            ? "No database is configured for this deployment, so no pot, no balance and no transfer was read. Nothing was posted, and nothing below is drawn in place of what was not read."
+            : "Nothing was posted. This path only reads."
+        }
+        {...(retry ? { actions: <RetryButton /> } : {})}
       >
         <div className="space-y-3 px-5 py-4">
           <p className="max-w-prose text-sm">{result.error.message}</p>
           <p className="text-xs text-muted">
             code <span className="money">{result.error.code}</span>
+          </p>
+          <p className="text-xs text-muted">
+            retryable <span className="money">{retry ? "yes" : "no"}</span>
           </p>
           {result.error.details === undefined ? null : (
             <p className="text-xs text-muted">
@@ -58,13 +80,23 @@ export async function PotsView({
             </p>
           )}
           <Note title="What a customer would see">
-            <p>
-              The balance they can act on is unknown right now, which is
-              different from wrong. No pot was opened, no transfer was posted,
-              and the entries already in the journal are unaffected — a read
-              failing cannot change what is written, because nothing on this path
-              writes.
-            </p>
+            {noDatabase ? (
+              <p>
+                Nothing. This is a console with no book behind it, not a
+                customer-facing failure. No pot was opened, no transfer was
+                posted, and no figure on this screen was read from anything —
+                which is why the identity between the pot total and the deposit
+                liability is not shown as holding. It was not checked.
+              </p>
+            ) : (
+              <p>
+                The balance they can act on is unknown right now, which is
+                different from wrong. No pot was opened, no transfer was posted,
+                and the entries already in the journal are unaffected — a read
+                failing cannot change what is written, because nothing on this
+                path writes.
+              </p>
+            )}
           </Note>
         </div>
       </Panel>

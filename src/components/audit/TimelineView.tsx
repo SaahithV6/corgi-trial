@@ -8,7 +8,9 @@ import { AuditErrorPanel } from "./AuditErrorPanel";
 import { CompletenessPanel } from "./CompletenessPanel";
 import { TimelineTable } from "./TimelineTable";
 import type { AuditDataSource } from "./contract";
+import { AuditUnreadableError } from "./unreadable";
 import { AXIS_LABEL, auditHref, type AuditFilter, type TimeAxis } from "./view-state";
+import type { ErrorShape } from "@/lib/result";
 
 /**
  * `/audit`'s body: one business, everything that happened to it, in order.
@@ -17,6 +19,15 @@ import { AXIS_LABEL, auditHref, type AuditFilter, type TimeAxis } from "./view-s
  * loading state and this file never has to model one. The error state is
  * caught here rather than thrown, because a screen whose job is to answer
  * "what happened" must be able to say "the read failed" without a crash page.
+ *
+ * WHETHER THERE IS A DATABASE IS NOT ASKED HERE, AND THAT IS THE POINT. It is
+ * resolved once, in `page.tsx`, which uses it to pick the source and hands the
+ * same value to the state bar. This component learns the answer from the
+ * failure it is handed — `AuditUnreadableError` is thrown by one source and
+ * one source only — so there is no second predicate on this screen that could
+ * answer three-quarters of the same question. That is how a screen ends up
+ * with a state note reading "read live from the book" above a board badging
+ * `fixture`, which is exactly what this one did.
  */
 export async function TimelineView({
   source,
@@ -28,8 +39,21 @@ export async function TimelineView({
   let result;
   try {
     result = await source.load(filter);
-  } catch (error) {
-    return <AuditErrorPanel message={error instanceof Error ? error.message : String(error)} />;
+  } catch (thrown) {
+    // Not swallowed: every branch renders the failure, with its code, and the
+    // no-database cause renders different words because it is a different
+    // fact. `AuditUnreadableError` carries its own shape; anything else is a
+    // genuine read failure and retrying it is worth a try.
+    if (thrown instanceof AuditUnreadableError) {
+      return (
+        <AuditErrorPanel
+          error={thrown.shape}
+          title="This screen cannot see the trail"
+          description="No database is configured for this deployment, so no store was projected and no action is listed. Nothing here says a business had a quiet week; nothing here could."
+        />
+      );
+    }
+    return <AuditErrorPanel error={readFailure(thrown)} />;
   }
 
   const { business, actions, matched, total, byKind, bySource, completeness } = result;
@@ -250,4 +274,21 @@ function FacetLink({
       {kind === null ? "All actors" : ACTOR_KIND_LABEL[kind]} · {count.toLocaleString()}
     </Link>
   );
+}
+
+/**
+ * A thrown read failure, as the shape the panel prints.
+ *
+ * The code is `AUDIT_READ_FAILED` rather than the thrown message, so a reader
+ * has something stable to quote, and `retryable` is left unset — which
+ * `isRetryable` reads as yes. That is the right default here: a query that
+ * timed out or a connection that dropped is worth trying again, and only a
+ * failure that explicitly says otherwise loses the button.
+ */
+function readFailure(thrown: unknown): ErrorShape {
+  return {
+    code: "AUDIT_READ_FAILED",
+    message: thrown instanceof Error ? thrown.message : String(thrown),
+    details: { retryable: true, source: "audit.view", operation: "the audit trail" },
+  };
 }

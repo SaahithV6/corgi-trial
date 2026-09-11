@@ -71,6 +71,47 @@ export const REFUSAL_CODES = [
 
 export type RefusalCode = (typeof REFUSAL_CODES)[number];
 
+/**
+ * The code the DATABASE raises when a write would leave a pot below zero.
+ *
+ * ============================================================================
+ * THIS IS NOT A THIRD BRANCH OF `decideMove()`. IT IS THE FLOOR UNDER IT.
+ *
+ * `INSUFFICIENT_POT` above is this module's answer, decided behind
+ * `lock_business_deposits()` on figures nobody can move, and it is the refusal
+ * a customer should ever see. Migration 0057 puts a DEFERRABLE constraint
+ * trigger on `journal_line` — population `account_id IN (SELECT account_id FROM
+ * pot)`, a fact about the chart — that refuses the COMMIT outright.
+ *
+ * The two exist for different reasons and neither replaces the other.
+ * `decideMove()` reaches a person: it names the pot, the figures and the
+ * shortfall before anything is written. The trigger reaches every writer,
+ * including ones this file has never heard of, because `corgi_app` holds
+ * `INSERT` on `journal_line` and a guard living in a function is a guard whose
+ * reach is the set of callers who choose to call it.
+ *
+ * So seeing `POT_WOULD_GO_NEGATIVE` in production is itself information: it
+ * means the write did NOT come through `movePotFunds()`, because if it had,
+ * `INSUFFICIENT_POT` would have caught it first and nothing would have been
+ * offered to the ledger at all.
+ * ============================================================================
+ */
+export const POT_NEGATIVE_CODE = "POT_WOULD_GO_NEGATIVE";
+
+/**
+ * Was this database error the 0057 guard?
+ *
+ * Matched on the CODE TOKEN, which the trigger raises as the first word of the
+ * message and again as the error's `constraint_name` — never on the prose
+ * around it, which is a sentence written for a human and may be reworded. This
+ * is `openPot`'s `pot_name_unique` test one layer up: a database refusal
+ * becomes a named refusal by naming itself, not by being pattern-matched on
+ * punctuation.
+ */
+export function isPotNegativeRefusal(message: string): boolean {
+  return message.includes(POT_NEGATIVE_CODE);
+}
+
 export type MoveDecision =
   | { readonly kind: "allow"; readonly amountCents: bigint }
   | {

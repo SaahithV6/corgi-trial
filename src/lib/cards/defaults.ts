@@ -22,6 +22,40 @@
  * 6000 ms ceiling — but almost no card was under it, so the real-time decision
  * path was mute on nearly every authorisation it saw.
  *
+ * ─── RE-MEASURED LATER THE SAME DAY, AND THE NUMBERS MOVED ──────────────────
+ *
+ * The figures above are kept because they are what this file was written
+ * against, not because they are current. Re-run after the live-fire suites had
+ * driven more traffic through the same book:
+ *
+ *     63 provider-lane approvals
+ *       44  no_controls_configured
+ *       11  card_not_under_control
+ *        8  within_controls
+ *
+ *     936 cards — under_control 45, member_only 137, uncontrolled 756.
+ *
+ * The share barely moved (94% → 87%) and the ABSOLUTE count of unjudged
+ * approvals went UP, from 48 to 55, because every suite that registers a card
+ * directly through `registerCard()` adds another uncontrolled one. Two things
+ * that matter follow. First, a figure in a comment is a measurement with a
+ * timestamp, not a fact — re-measure before quoting. Second, "p50 14.2 ms" is
+ * NOT reproducible over the whole provider lane: `decision_latency_us` across
+ * all 81 provider rows has a p50 of 125 ms and a p95 of 508 ms, because the
+ * lane includes the deliberate fail-closed rows that sat out the full 600 ms
+ * budget. 14.2 ms was a true statement about one burst of ten transactions.
+ *
+ * ─── AND THE HALF OF THE FINDING THIS FILE DID NOT CLOSE ────────────────────
+ *
+ * Applying a default to NEW cards does nothing about the approvals ALREADY in
+ * the log, and until 2026-09-11 every one of them said `outcome: 'approve'` and
+ * nothing else — so a reader counting approvals as evidence that card controls
+ * work counted 63 when the honest number was 8. That is fixed separately and
+ * deliberately without touching a single decision: every verdict now carries
+ * `judged`, defined in `UNJUDGED_RULES` in `./types.ts`, derived for historic
+ * rows from the `rule` column they already carry, and mirrored in SQL by
+ * migration 0053. See `./judged.test.ts`.
+ *
  * THE CAUSE IS NOT `decide()`. Rule 15, `no_controls_configured`, is
  * deliberate, documented, unit-tested and correct: the read SUCCEEDED and told
  * us the truth, which is that nobody has said anything about this card, so it
@@ -171,54 +205,29 @@ import "server-only";
 
 import { sql } from "@/lib/ledger/db";
 
-import type { CardControlsDraft } from "./types";
+import { DEFAULT_CONTROLS, DEFAULT_CONTROL_ACTOR_ID, DEFAULT_CONTROL_NOTE } from "./default-controls";
 
 /* -------------------------------------------------------------------------- */
-/* 1. The default itself                                                      */
+/* 1. The default itself — re-exported from a module with no database in it   */
 /* -------------------------------------------------------------------------- */
 
 /**
- * The per-transaction ceiling every newly-issued card is born under.
+ * The figures live in `./default-controls.ts` and are re-exported here so that
+ * every caller of `@/lib/cards/defaults` is unchanged.
  *
- * DELIBERATELY EQUAL to `CARD_SPEND_LIMIT_CENTS` in
- * `src/app/(app)/accounts/actions.ts` and `src/lib/team/lifecycle.ts`, which is
- * the `spend_limit` both issuance paths already declare to Lithic with
- * `spend_limit_duration: "TRANSACTION"`. The equality is the whole argument for
- * the default being safe, so `defaults.test.ts` asserts it rather than trusting
- * a comment — if somebody raises the provider-side limit and not this one, the
- * default stops being behaviour-neutral and a test says so before a cardholder
- * does.
+ * THE SPLIT IS NOT TIDINESS. This module imports `server-only` and
+ * `@/lib/ledger/db`, which parses the environment at module scope and throws
+ * when it is absent; a test that imported these constants from here threw while
+ * being LOADED on every machine without credentials, and a suite that throws on
+ * import is counted in neither the passed number nor the skipped number. The
+ * argument is written out at the top of `./default-controls.ts`.
  */
-export const DEFAULT_PER_TXN_LIMIT_CENTS = 5_000_00n;
-
-/**
- * The note on version 1. Mandatory in the schema, and read first in a dispute,
- * so it says what happened and who did not choose it.
- */
-export const DEFAULT_CONTROL_NOTE =
-  "Program default, applied when this card was issued. A per-transaction " +
-  "ceiling of $5,000.00 only — the same figure this system already declares to " +
-  "Lithic as the card's own spend_limit, so it declines nothing the issuer " +
-  "would not already have declined. No daily limit, no monthly limit, no " +
-  "blocked categories: those are a person's decision, made on this screen, as " +
-  "version 2. Nobody chose these figures; the program did.";
-
-/** Version 1 of every card issued through a path that applies the default. */
-export const DEFAULT_CONTROLS: CardControlsDraft = {
-  cardState: "active",
-  perTxnLimitCents: DEFAULT_PER_TXN_LIMIT_CENTS,
-  dailyLimitCents: null,
-  monthlyLimitCents: null,
-  blockedMccs: [],
-  note: DEFAULT_CONTROL_NOTE,
-};
-
-/**
- * The `system` actor version 1 is attributed to. Created by migration 0051,
- * with the id the seed's own `uuid5("actor:system.card-controls")` produces, so
- * a rebuilt book and this one agree.
- */
-export const DEFAULT_CONTROL_ACTOR_ID = "b23a047b-e495-5f80-bf40-cd6396b77280";
+export {
+  DEFAULT_CONTROLS,
+  DEFAULT_CONTROL_ACTOR_ID,
+  DEFAULT_CONTROL_NOTE,
+  DEFAULT_PER_TXN_LIMIT_CENTS,
+} from "./default-controls";
 
 /* -------------------------------------------------------------------------- */
 /* 2. Applying it                                                             */

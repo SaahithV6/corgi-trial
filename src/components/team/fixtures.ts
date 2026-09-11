@@ -35,20 +35,23 @@ export const EMPTY_TEAM: TeamScreen = {
   members: [],
   businesses: [...BUSINESSES],
   balance: { ledgerCents: 250_000n, holdsCents: 0n, availableCents: 250_000n },
-  invariants: [
-    {
-      view: "v_approved_auth_for_dead_member",
-      claim:
-        "no purchase was approved under member terms that were suspended or removed at the instant it was decided",
-      rows: 0,
-    },
-    {
-      view: "v_member_approval_without_right",
-      claim:
-        "no payment was approved by a member whose role, at that instant, did not carry approve_payment",
-      rows: 0,
-    },
-  ],
+  /**
+   * EMPTY, AND THAT IS THE POINT OF THIS LINE.
+   *
+   * It used to carry `v_approved_auth_for_dead_member` and
+   * `v_member_approval_without_right`, each with `rows: 0`, which `TeamView`
+   * draws as two GREEN badges under the caption "2 invariants, counted on this
+   * request". Nothing was counted on that request; this file runs no query and
+   * cannot. A green nought in that column is how this console says a guard
+   * held, and "no purchase was approved under member terms that were suspended
+   * at the instant it was decided" is a statement about a book — the strongest
+   * one on the screen. A fixture may draw a team. It may not certify one.
+   *
+   * The panel's caption is derived from `live` as well, so this state says
+   * plainly that it counted none rather than leaving a reader to notice an
+   * empty table.
+   */
+  invariants: [],
   asOf: "2026-09-11T00:00:00.000Z",
   live: false,
 };

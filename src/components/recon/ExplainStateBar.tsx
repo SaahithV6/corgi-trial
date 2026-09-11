@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { FOCUS_RING } from "@/components/ui/primitives";
+import { Badge, FOCUS_RING } from "@/components/ui/primitives";
 
 import {
   EXPLAIN_STATES,
@@ -9,6 +9,18 @@ import {
   explainQuery,
   type ExplainFilter,
 } from "./explain-view-state";
+
+/**
+ * What the state bar says when there is nothing to read.
+ *
+ * One sentence, used in two places — the line under the links, and the tooltip
+ * on the state that would otherwise have read the ledger. The tooltip matters:
+ * the `default` hint reads "Live from the ledger", and leaving that hoverable
+ * over a screen badged NO DATABASE is a second claim about the data source. One
+ * screen, one claim, includes the claims a reader has to hover to find.
+ */
+const NO_DATABASE_HINT =
+  "No database is configured for this deployment. No settlement file was read, no journal entry was fetched and no correction is classified below — the absence of a break on this screen is not a statement that there is none.";
 
 /**
  * Live switch between `/breaks`'s five states.
@@ -26,8 +38,23 @@ import {
  * `default` is the only state that reads the database. The other four are
  * fixtures even when a database is configured, so the state the planted break
  * has to be found in is unambiguously the live one.
+ *
+ * ONE SCREEN, ONE CLAIM ABOUT ITS DATA SOURCE. `noDatabase` comes from
+ * `page.tsx`, which resolved it once with `hasDatabase()` and handed the same
+ * value to `ExplainedBreaksView`. When it is set, this bar carries the screen's
+ * only source badge — the board below it is a refusal and badges nothing — and
+ * the `default` hint is replaced rather than left standing over a screen that
+ * read nothing.
  */
-export function ExplainStateBar({ filter }: { readonly filter: ExplainFilter }) {
+export function ExplainStateBar({
+  filter,
+  noDatabase = false,
+}: {
+  readonly filter: ExplainFilter;
+  readonly noDatabase?: boolean;
+}) {
+  const refusing = noDatabase && filter.state === "default";
+
   return (
     <aside
       aria-label="Demo states"
@@ -49,7 +76,11 @@ export function ExplainStateBar({ filter }: { readonly filter: ExplainFilter }) 
                 // emptiness with the wrong reason.
                 href={`/breaks${explainQuery({ state })}`}
                 aria-current={current ? "page" : undefined}
-                title={EXPLAIN_STATE_HINTS[state]}
+                title={
+                  noDatabase && state === "default"
+                    ? NO_DATABASE_HINT
+                    : EXPLAIN_STATE_HINTS[state]
+                }
                 className={`rounded px-2 py-1 text-xs ${FOCUS_RING} ${
                   current
                     ? "bg-surface-raised font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border-strong)]"
@@ -61,10 +92,12 @@ export function ExplainStateBar({ filter }: { readonly filter: ExplainFilter }) 
             );
           })}
         </div>
+
+        {refusing ? <Badge tone="negative">NO DATABASE</Badge> : null}
       </div>
 
       <p className="mt-2 max-w-prose text-[11px] leading-relaxed text-muted">
-        {EXPLAIN_STATE_HINTS[filter.state]}
+        {refusing ? NO_DATABASE_HINT : EXPLAIN_STATE_HINTS[filter.state]}
       </p>
     </aside>
   );

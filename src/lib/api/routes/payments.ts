@@ -167,7 +167,18 @@ const bodySchema = z
     // policy requires ZERO approvals, which would make it the one rail on this
     // surface where a queued instruction could be released with no human
     // having approved anything. See docs/API.md §Refused operations.
-    rail: z.enum(["ach", "usdc", "wire"]),
+    //
+    // THE MESSAGE IS ATTACHED, for the reason §A5 gives and zod does not.
+    // Measured on 2026-09-11: `"rail": "internal"` answered
+    // `Invalid option: expected one of "ach"|"usdc"|"wire"`, which reads like
+    // a typo rather than like a refusal — the same failure mode
+    // docs/AGENT-LIMITS.md records about `unknown tool "approve_payment"`,
+    // and an integrator who reads it as a typo tries `internal_transfer`
+    // next rather than reading A5.
+    rail: z.enum(["ach", "usdc", "wire"], {
+      error:
+        'rail is one of "ach", "usdc" or "wire". "internal" is REFUSED rather than missing: the seeded internal policy is threshold 0, required_approvals 0, so it is the one rail on which a queued instruction could be released with no human having approved anything — see GET /api/v1/limits, refusal A5. "card" is not an origination rail at all; a card movement starts at a network, not at a person.',
+    }),
     // The message is attached to the TYPE check as well as the pattern,
     // deliberately. Sending `"amount_cents": 125000` as a JSON number is the
     // single most likely integration mistake on this endpoint, and zod's

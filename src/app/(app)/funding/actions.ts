@@ -415,6 +415,11 @@ export async function fundFromExternalBankAction(
       institutionId: SANDBOX_INSTITUTION_ID,
       ...(webhook === null ? {} : { webhook }),
       client,
+      // Migration 0056. The Item, its access token and its accounts survive
+      // this request, so the funding source is re-readable and `/api/health`
+      // can report whether it still works — which it could not while the
+      // token was dropped on the floor at the end of this call.
+      persist: { businessId: account.businessId, conn: sql },
     });
   } catch (thrown) {
     const body = plaidErrorBody(thrown);
@@ -703,6 +708,7 @@ export async function linkExternalBankAction(
       institutionId: SANDBOX_INSTITUTION_ID,
       ...(webhook === null ? {} : { webhook }),
       client,
+      persist: { businessId, conn: sql },
     });
     const calls = toCallViews(link.calls);
 

@@ -551,6 +551,12 @@ export interface CardDecisionRow {
   readonly outcome: DecisionOutcome;
   readonly resultCode: string;
   readonly rule: string;
+  /**
+   * Whether a control was compared with this authorisation and could have
+   * refused it. See `UNJUDGED_RULES` in `@/lib/cards/types`. An agent counting
+   * approvals as evidence that limits work must subtract the unjudged ones.
+   */
+  readonly judged: boolean;
   readonly reason: string;
   readonly controlVersion: number | null;
   readonly decisionLatencyUs: number;

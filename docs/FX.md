@@ -1253,3 +1253,167 @@ $ pnpm typecheck && pnpm lint --max-warnings=0 && pnpm test && pnpm build
 deployment is commit `0fa057d`; everything in §13 that describes the *database*,
 the *chain* and the *CLI* was observed against the live system, and the two
 screen fixes are source changes awaiting a deploy this work did not make.
+
+---
+
+## 14. The hold an acceptance places — §6 and §11.2, closed
+
+*Appended 2026-09-11. §6 named the missing memo hold and §11.2 named its
+consequence — "a customer can accept five quotes against one balance and the
+gate will clear all five" — and both left it as week-two work. This is that
+work. Migration `db/migrations/0053_fx_commitment_hold.sql`, module
+`src/lib/fx/hold.ts`.*
+
+### The defect, observed before it was fixed
+
+Two quotes, one customer, each for 60% of the available balance, both accepted,
+both put to the payout gate. Against the code as it stood, in a transaction
+that was rolled back:
+
+```
+SUBJECT   Ridgeline Robotics, Inc.
+          2100 account   a0c41a37-2be1-5c30-bfe9-03455f048fac
+          ledger         $61,876.11
+          AVAILABLE      $35,514.93   <- ledger_availability(), the one definition
+
+PLAN      two quotes of $21,308.95 each = $42,617.90, against $35,514.93 available
+
+QUOTE 1   FXQ-2896RMDZ  sell $21,308.95  deliver 35832785 MXN minor units
+QUOTE 2   FXQ-0BF9XKXM  sell $21,308.95  deliver 35832785 MXN minor units
+
+ACCEPT 1  FXQ-2896RMDZ  ACCEPTED  state=accepted
+ACCEPT 2  FXQ-0BF9XKXM  ACCEPTED  state=accepted
+
+AFTER     available $35,514.93   holds $410.00
+
+GATE 1    FXQ-2896RMDZ  CLEARS — $21,308.95 may leave
+GATE 2    FXQ-0BF9XKXM  CLEARS — $21,308.95 may leave
+
+TOTAL     $42,617.90 cleared against $35,514.93 available
+```
+
+`AFTER available` is the line that matters: **unmoved**. Acceptance wrote one
+row in `fx_quote_acceptance` and reserved nothing, so both commitments stood
+against the same dollars and the gate — which asks only whether a quote was
+accepted — was right to clear both.
+
+### The same run, after
+
+```
+SUBJECT   Ridgeline Robotics, Inc.
+          AVAILABLE      $35,368.13
+
+PLAN      two quotes of $21,220.87 each = $42,441.74, against $35,368.13 available
+
+ACCEPT 1  FXQ-TC6E89X9  ACCEPTED  state=accepted
+ACCEPT 2  FXQ-M1WMG9J9  REFUSED   FX_COMMITMENT_EXCEEDS_AVAILABLE
+          Accepting FXQ-M1WMG9J9 would commit $21,220.87 and only $14,147.26 is
+          available, so the commitment was refused and nothing was written — no
+          acceptance, no hold, no rate locked. […] Fund the account, or settle or
+          let lapse a commitment already standing, and quote again at /payouts.
+
+AFTER     available $14,147.26   holds $21,630.87
+
+GATE 1    FXQ-TC6E89X9  CLEARS — $21,220.87 may leave
+GATE 2    FXQ-M1WMG9J9  REFUSED FX_QUOTE_NOT_ACCEPTED
+
+TOTAL     $21,220.87 cleared against $35,368.13 available
+```
+
+Availability fell by exactly `sell_cents`, the second acceptance was refused at
+acceptance time rather than at payout time, and the gate then refuses the second
+quote for the honest reason: nobody accepted it, because nothing was written.
+
+### It is the existing hold model, not a new reservation
+
+An accepted commitment is an ordinary `hold` row of kind `manual`, on the
+customer's own 2100 leaf, with its memo leg posted through `ledger_append()`
+like every other posting. `ledger_availability()` — **the one definition, five
+terms, migration 0022** — subtracts it through its existing hold term. Nothing
+in this feature computes an availability of its own; a second way to withhold
+money would be a sixth definition of available balance, which is the defect 0022
+exists to have ended.
+
+The memo leaf is **`9300 Holds — accepted FX commitments`**, the account §6
+named before it existed. It is a HOUSE account rather than one leaf per customer
+and 0053 §1 argues the trade-off rather than hiding it: both `v_hold_state` and
+`ledger_availability()` read a hold's memo balance keyed on the HOLD, never on
+the account alone, so two customers sharing one leaf cannot contaminate each
+other's availability — what is lost is a statement line, not a number.
+
+### Closed, and terminally closed
+
+A commitment comes off in two ways and **only one of them writes a row**.
+
+| | condition | releases the money | writes `hold_closure` |
+| --- | --- | --- | --- |
+| settled | `fx_quote_settlement` has a row | yes | **yes**, `source = 'fx_settlement'` |
+| lapsed | `now() >= accepted_at + settlement_window_seconds` | yes | **no** |
+
+**Settlement is terminal.** `quote_id` is that table's PRIMARY KEY and the table
+is append-only at both layers (§0017 §7), so "this quote settled" is an EXISTS
+over a growing set and an EXISTS never un-fires. That is the monotonicity
+`terminallyClosed` demands.
+
+**A lapse is not**, and the reason is not monotonicity — the clock is monotone,
+and `expired` is monotone in the card model and does write a row. The reason is
+that a closure row is a **permanent claim about why**, and that claim can be
+overtaken: §5 of `src/lib/fx/settle.ts` says in terms that a lapsed commitment
+still posts on the `--settle` recovery path, because the USDC may already have
+left before anybody noticed the window had closed. A row written by the clock
+would then stand for ever saying the hold was freed because the customer ran out
+of time, on a commitment that in fact settled — and the correction to an
+append-only row is another row (`hold_closure_reversal`), so the audit trail
+becomes three rows saying what one row should have said.
+
+So the lapse releases **from the clock**, derived, at the parameterised instant,
+writing nothing. `hold.available_at` carries `settle_by`, and 0053 §3 widened one
+predicate in `v_hold_state` and `ledger_availability()`:
+
+```
+-  OR (h.kind = 'uncleared_credit' AND now() >= h.available_at)
++  OR (h.available_at IS NOT NULL  AND now() >= h.available_at)
+```
+
+That is a **provable no-op on every row that existed** when it shipped — measured
+immediately before: `available_at` was non-null on all 101 `uncleared_credit`
+holds and null on all 986 `card_auth` ones, so old and new predicate had the same
+truth value on all 1,087 rows. The `IS NOT NULL` is load-bearing: both bodies wrap
+the disjunction in `NOT (...)`, `NULL >= x` is NULL, and a bare comparison would
+treat every card authorisation as released.
+
+The memo book still has to be flattened after a lapse, which is bookkeeping and
+not a repair — the customer is already right. `sweepLapsedCommitments()` does it,
+it books at `book_date(available_at)` rather than at the run date, and it is the
+fourth sweep on `/api/cron/holds`.
+
+### The invariant
+
+`v_fx_commitment_unheld` — **must return zero rows.** Every commitment still
+standing (accepted, unsettled, inside its window, made under the 0053 regime) is
+withholding exactly its committed price, and a row says which of three things
+went wrong: `no_hold_placed`, `released_early`, `wrong_amount`.
+
+It ranges over acceptances at or after `fx_commitment_regime.effective_from`,
+which is a row rather than a sentence — and migration `0054` makes that row
+append-only against the table OWNER as well as against `corgi_app`, because a
+watermark somebody can walk forward is an invariant somebody can switch off. The 35 quotes accepted before this
+migration hold nothing, are outside the guard by construction, and are counted in
+`v_fx_commitment_census` — backfilling holds for them would move availability on
+a live book to make a view green, which is repairing the measurement.
+
+Made to fail on purpose, in a transaction that was rolled back: an acceptance
+written with no hold behind it takes the view from **0 rows to 1**, `finding =
+no_hold_placed`, and back to 0 on rollback.
+
+### Still unfixed
+
+**The rate is still not under maker-checker.** §11.1's binding — an `fx_quote_id`
+column on `payment_instruction`, folded into `content_hash` with the version tag
+bumped to `corgi.payment.v2` — is not built. A second human approving a
+cross-border payout above threshold still approves an amount and a beneficiary
+and not the price. Nothing in §14 changes that.
+
+**Acceptance itself has no maker-checker.** `accepted_by` is still one actor.
+
+**There is still no off-ramp and no hedge.** §7 is unchanged.

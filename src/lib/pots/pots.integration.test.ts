@@ -151,6 +151,17 @@ d("pots, against the live database", () => {
   let potId: string;
   let potAccountId: string;
   let mainAccountId: string;
+  /**
+   * The book entity every account in this suite hangs off.
+   *
+   * Captured from the `book_entity` row `beforeAll` already reads, rather than
+   * asked of `account` again at each call site. That is not micro-optimisation:
+   * `src/lib/ledger/boundary.test.ts` counts `FROM account` as a reach into the
+   * ledger and ratchets on the number, and three fresh lookups for one constant
+   * would have raised this file's bill from 18 to 21 for nothing. The ratchet
+   * caught it; this is paying it rather than raising it.
+   */
+  let entityId: string;
 
   /** Unique per run, so the moves that must POST actually post. */
   const run = Date.now();
@@ -212,6 +223,7 @@ d("pots, against the live database", () => {
     // whatever it happens to be.
     const { postEntry } = await import("@/lib/ledger/post");
     const [entity] = await sql<{ id: string }[]>`SELECT id FROM book_entity LIMIT 1`;
+    entityId = entity?.id ?? "";
     const [cash] = await sql<{ id: string }[]>`
       SELECT id FROM account WHERE code = '1110' AND business_id IS NULL LIMIT 1`;
     const actorId = await store.ledgerPosterActorId(sql);
@@ -678,5 +690,434 @@ d("pots, against the live database", () => {
     // The generalised view agrees with the subtree, which is why it is empty.
     const drift = await sql`SELECT * FROM v_deposit_control_drift`;
     expect(drift.length).toBe(0);
+  });
+
+  /* ======================================================================== */
+  /* 10-13  Migration 0057: the negative pot is PREVENTED, not just reported  */
+  /* ======================================================================== */
+  //
+  // Test 6 above proves `decideMove()` refuses an overdraw. That is a refusal
+  // by the ONE MODULE THAT CALLS IT. These four are about the floor underneath
+  // it: a write offered straight to `ledger_append()`, with no `pot:` key, no
+  // cover check and no `lock_business_deposits()` — the shape `postEntry()`
+  // accepts from any module, correctly, because it takes an account id and
+  // asks no questions.
+  //
+  // ─── WHY EVERY ONE OF THEM SAYS `SET CONSTRAINTS … IMMEDIATE` ─────────────
+  //
+  // The guard is `DEFERRABLE INITIALLY DEFERRED`, so it is evaluated at COMMIT
+  // — and this suite never commits (see the header). `SET CONSTRAINTS
+  // journal_line_pot_not_negative IMMEDIATE` forces the pending check to be
+  // evaluated at that point, which is exactly what COMMIT would do to it.
+  // Inside a savepoint, so the setting unwinds with everything else.
+  //
+  // Nothing is relaxed by this: the rows are real, the trigger is the one the
+  // product commits through, and the refusal is raised by it.
+
+  /**
+   * Run a statement on a savepoint and return the message the database refused
+   * it with, or null if it was ALLOWED.
+   *
+   * `expectRefusal` above asserts only that something was refused. These tests
+   * need the refusal to be the RIGHT one — a guard that fires for the wrong
+   * reason is a guard that will stop firing when that reason changes — so the
+   * message comes back for inspection.
+   */
+  async function refusalOf(
+    statement: (scoped: typeof SqlHandle) => Promise<unknown>,
+  ): Promise<string | null> {
+    let message: string | null = null;
+    try {
+      await (sql as unknown as Scoped).savepoint(async (scoped) => {
+        await statement(scoped as typeof SqlHandle);
+        // ALWAYS roll back, including when nothing was refused. postgres.js
+        // RELEASEs a savepoint whose body resolves, and a released savepoint
+        // KEEPS its rows — so an ACCEPTED probe would leave two unlabelled
+        // foreign writes sitting in the suite transaction for the tests after
+        // it. That is not hypothetical: it is what the first version of this
+        // did, and test 13 caught it by reading `v_pot_line_provenance` = 2.
+        // Which is the 0052 guard doing exactly its job, on this suite's own
+        // scaffolding.
+        throw new Error(ROLLBACK);
+      });
+    } catch (thrown) {
+      const thrownMessage = thrown instanceof Error ? thrown.message : String(thrown);
+      if (thrownMessage !== ROLLBACK) message = thrownMessage;
+    }
+    return message;
+  }
+
+  /**
+   * A pot move posted the way a FOREIGN module would post it: straight through
+   * `ledger_append()` as the application role, two balanced lines, rail
+   * `internal`, and an idempotency key that makes no `pot:` claim at all.
+   *
+   * `amountCents` is a DEBIT on the pot account, so a positive figure takes
+   * money OUT of the pot (a pot is a credit-normal liability; see
+   * `transferLegs`). Nothing here calls `decideMove()` and nothing takes
+   * `lock_business_deposits()`.
+   */
+  async function foreignPotWrite(
+    scoped: typeof SqlHandle,
+    amountCents: bigint,
+    label: string,
+  ): Promise<void> {
+    const actorId = await store.ledgerPosterActorId(sql);
+    await scoped.unsafe(
+      `SELECT ledger_append(
+         $1::uuid, current_date, 'financial'::account_book, 'original'::entry_type,
+         $2, $3, $4::uuid,
+         jsonb_build_array(
+           jsonb_build_object('account_id', $5::text, 'amount_cents', $6::text,
+                              'currency', 'USD', 'memo', 'pots suite 0057'),
+           jsonb_build_object('account_id', $7::text, 'amount_cents', $8::text,
+                              'currency', 'USD', 'memo', 'pots suite 0057')),
+         'internal'::rail, NULL, NULL, NULL, NULL, NULL)`,
+      [
+        entityId,
+        `pots suite 0057: ${label}`,
+        `pots-suite-0057:${label}:${run}`,
+        actorId,
+        potAccountId,
+        amountCents.toString(),
+        mainAccountId,
+        (-amountCents).toString(),
+      ],
+    );
+  }
+
+  /**
+   * Force the deferred guard to be judged NOW, exactly as COMMIT would, and
+   * then put it back to DEFERRED.
+   *
+   * The second statement is not tidiness. `SET CONSTRAINTS` is a property of
+   * the transaction, and test 12 is only a proof of order-independence if the
+   * check it runs under is the deferred one the product commits through. The
+   * savepoint unwinds the mode too, but that is a second guarantee and not a
+   * reason to leave the first one unstated. If the first statement raises, the
+   * second never runs and the rollback does it.
+   */
+  const asIfCommitted = async (scoped: typeof SqlHandle): Promise<void> => {
+    await scoped.unsafe(`SET CONSTRAINTS journal_line_pot_not_negative IMMEDIATE`);
+    await scoped.unsafe(`SET CONSTRAINTS journal_line_pot_not_negative DEFERRED`);
+  };
+
+  /* ---- 10 --------------------------------------------------------------- */
+
+  it("REFUSES the write that used to post cleanly, by name", async () => {
+    // Test 7 moved out exactly what test 2 moved in, so the pot arrives here
+    // holding EXACTLY $0.00 — which is instance 27's own starting state, and
+    // the tightest place to probe from. One cent out of an empty pot is the
+    // smallest write that breaks the invariant, and the one a guard written
+    // with `<= 0` or with a tolerance would get wrong.
+    const empty = await figures();
+    expect(empty.pot).toBe(0n);
+
+    const fromEmpty = await refusalOf(async (scoped) => {
+      await foreignPotWrite(scoped, 1n, "one-cent-from-empty");
+      await asIfCommitted(scoped);
+    });
+    expect(fromEmpty, "one cent out of an empty pot was ALLOWED").toContain(
+      "POT_WOULD_GO_NEGATIVE",
+    );
+
+    // Now fund it and run the probe at the scale it was measured at.
+    const funded = await transfer.movePotFunds(
+      {
+        potId,
+        direction: "in",
+        amountCents: 1_200_00n,
+        reference: `suite-0057-fund-${run}`,
+      },
+      sql,
+    );
+    expect(funded.kind).toBe("posted");
+
+    const before = await figures();
+    expect(before.pot).toBe(1_200_00n);
+
+    // The probe, verbatim in shape: $1,000,000.00 more than the pot holds,
+    // released out of it, with every trigger armed and nothing disabled.
+    const overdraw = before.pot + 1_000_000_00n;
+    const message = await refusalOf(async (scoped) => {
+      await foreignPotWrite(scoped, overdraw, "probe-negative");
+      await asIfCommitted(scoped);
+    });
+
+    expect(message, "the database ALLOWED a negative pot").not.toBeNull();
+    // The CODE, not the prose. The prose is written for a human and may be
+    // reworded; the token is the contract.
+    expect(message).toContain("POT_WOULD_GO_NEGATIVE");
+    // ...and it says what the pot would have held, so the refusal carries its
+    // own arithmetic exactly as `decideMove()`'s do.
+    expect(message).toContain((-1_000_000_00n).toString());
+
+    // Nothing moved, and the detector agrees with the preventer.
+    expect(await figures()).toEqual(before);
+    expect((await sql`SELECT * FROM v_pot_negative`).length).toBe(0);
+  });
+
+  /* ---- 11 --------------------------------------------------------------- */
+
+  it("ZERO IS LEGAL — a pot drained to exactly $0.00 is accepted", async () => {
+    // Test 10 funded it; this one takes every cent back out.
+    const before = await figures();
+    expect(before.pot).toBe(1_200_00n);
+
+    // Off-by-one here refuses ordinary use: instance 27 was found on a pot
+    // sitting at exactly zero, and `dbcheck --prove` keeps landing on one.
+    // Drained to the cent, through the product's own path.
+    const drained = await transfer.movePotFunds(
+      {
+        potId,
+        direction: "out",
+        amountCents: before.pot,
+        reference: `suite-drain-to-zero-${run}`,
+      },
+      sql,
+    );
+    expect(drained.kind).toBe("posted");
+
+    const empty = await figures();
+    expect(empty.pot).toBe(0n);
+    expect(empty.total).toBe(before.total);
+    expect((await sql`SELECT * FROM v_pot_negative`).length).toBe(0);
+
+    // And the guard agrees when it is actually asked: a zero pot commits.
+    const refusal = await refusalOf((scoped) => asIfCommitted(scoped));
+    expect(refusal, "a pot at exactly $0.00 was refused").toBeNull();
+
+    // ONE CENT past zero is the other side of the same line.
+    const past = await refusalOf(async (scoped) => {
+      await foreignPotWrite(scoped, 1n, "one-cent-past-zero");
+      await asIfCommitted(scoped);
+    });
+    expect(past).toContain("POT_WOULD_GO_NEGATIVE");
+
+    // Put it back, so tests 12 and 13 run against the balance they expect.
+    const restored = await transfer.movePotFunds(
+      {
+        potId,
+        direction: "in",
+        amountCents: before.pot,
+        reference: `suite-refill-${run}`,
+      },
+      sql,
+    );
+    expect(restored.kind).toBe("posted");
+    expect((await figures()).pot).toBe(before.pot);
+  });
+
+  /* ---- 12 --------------------------------------------------------------- */
+
+  it("NO ARRIVAL ORDER IS A SPECIAL CASE — negative mid-transaction, legal at the end", async () => {
+    const before = await figures();
+
+    // `H(E) = 0 if closed(E) else max(A(E) − C(E), 0)` is a pure function of an
+    // event SET precisely so that no arrival order is a special case. A guard
+    // that judged rows as they landed would contradict that one table over: the
+    // same two entries would be refused in one order and accepted in the other.
+    //
+    // So: the release arrives FIRST and takes the pot $5,000.00 BELOW zero, and
+    // the earmark that covers it arrives SECOND. The deferred check judges the
+    // end state, which is the balance the pot started at.
+    const dip = before.pot + 5_000_00n;
+    const message = await refusalOf(async (scoped) => {
+      await foreignPotWrite(scoped, dip, "order-out-first");
+
+      // Mid-transaction, the pot really is negative. The view says so — which
+      // is the point: the state exists, and it is the COMMIT that is judged.
+      const midway = await scoped<{ balance_cents: bigint }[]>`
+        SELECT balance_cents FROM v_pot_balance WHERE account_id = ${potAccountId}::uuid`;
+      expect(midway[0]?.balance_cents).toBe(-5_000_00n);
+
+      await scoped.unsafe(
+        `SELECT ledger_append(
+           $1::uuid,
+           current_date, 'financial'::account_book, 'original'::entry_type,
+           'pots suite 0057: earmark, arriving second',
+           $2, $3::uuid,
+           jsonb_build_array(
+             jsonb_build_object('account_id', $4::text, 'amount_cents', '500000',
+                                'currency', 'USD', 'memo', 'pots suite 0057'),
+             jsonb_build_object('account_id', $5::text, 'amount_cents', '-500000',
+                                'currency', 'USD', 'memo', 'pots suite 0057')),
+           'internal'::rail, NULL, NULL, NULL, NULL, NULL)`,
+        [
+          entityId,
+          `pots-suite-0057:order-in-second:${run}`,
+          await store.ledgerPosterActorId(sql),
+          mainAccountId,
+          potAccountId,
+        ],
+      );
+
+      await asIfCommitted(scoped);
+    });
+
+    expect(
+      message,
+      "the guard is ORDER-DEPENDENT: a release arriving before the earmark that covers it was refused",
+    ).toBeNull();
+
+    // The savepoint rolled it back, so the book is where it was.
+    expect(await figures()).toEqual(before);
+  });
+
+  /* ---- 13 --------------------------------------------------------------- */
+
+  it("the guard is on the TABLE, armed, and deferred — and says so when it is not", async () => {
+    // Where it lives is the whole argument. `corgi_app` holds INSERT on
+    // `journal_line`, so a guard inside `ledger_append()` would be a guard the
+    // writer can walk around with two INSERTs. This one is on the table.
+    const [trigger] = await sql<
+      {
+        tgname: string;
+        enabled: string;
+        deferrable: boolean;
+        initdeferred: boolean;
+      }[]
+    >`
+      SELECT t.tgname,
+             t.tgenabled::text AS enabled,
+             t.tgdeferrable    AS deferrable,
+             t.tginitdeferred  AS initdeferred
+        FROM pg_trigger t
+        JOIN pg_class   c ON c.oid = t.tgrelid
+       WHERE c.relname = 'journal_line'
+         AND t.tgname  = 'journal_line_pot_not_negative'`;
+
+    expect(trigger?.tgname).toBe("journal_line_pot_not_negative");
+    expect(trigger?.enabled).toBe("O"); // origin: ordinary writes reach it
+    expect(trigger?.deferrable).toBe(true);
+    expect(trigger?.initdeferred).toBe(true); // test 12 depends on this
+
+    // Prevention does not retire detection, and this is the third state: the
+    // guard switched off. A view over the money cannot see it, so this one
+    // reads pg_trigger.
+    expect((await sql`SELECT * FROM v_pot_guard_disarmed`).length).toBe(0);
+    expect((await sql`SELECT * FROM v_pot_negative`).length).toBe(0);
+
+    // ======================================================================
+    // v_pot_line_provenance READS 2 ON THIS BOOK, AND 0057'S AUTHOR PUT THEM
+    // THERE. This is not an allowance and it is not a tolerance.
+    // ======================================================================
+    //
+    // Proving the guard closes the check-then-act race between two writers
+    // needs one of them to COMMIT — a rolled-back probe is invisible to the
+    // other transaction, so it proves nothing. That probe committed TWO
+    // unlabelled foreign pot writes to the live book:
+    //
+    //   booking_seq 11785  race-1789147074432-A        the winner's release
+    //   booking_seq 11787  race-1789147074432-restore  putting the money back
+    //
+    // It worked — the loser was refused POT_WOULD_GO_NEGATIVE while blocked on
+    // the lock the winner held — and it cost this. The money is net zero and
+    // every balance invariant is still green, but both entries moved pot money
+    // WITHOUT a `pot:` key, which is exactly the shape 0052 exists to report.
+    // The ledger is append-only, `pot` is append-only, and `idempotency_key` is
+    // immutable, so there is no repair: they are on this book for good.
+    //
+    // THE PROBE SHOULD HAVE POSTED THE WINNER THROUGH `movePotFunds()`. Only
+    // the loser had to be foreign, and the loser was refused, so it would have
+    // left nothing. That is the lesson and it belongs here rather than in a
+    // commit message.
+    //
+    // What is asserted is therefore NOT "at most two" — a count is a tolerance
+    // and tolerances absorb the next mistake silently. It is these two
+    // IMMUTABLE entry ids and nothing else. A third row fails this test, and
+    // `scripts/dbcheck.mjs` goes on reporting all of them to everybody.
+    const KNOWN_DAMAGE = [
+      "ae4eb87a-173d-4a0e-bfdf-487dad1391eb",
+      "8cf85c29-105a-4d39-a0a3-2aaaf086170f",
+    ];
+    const provenance = await sql<{ entry_id: string; idempotency_key: string }[]>`
+      SELECT entry_id, idempotency_key FROM v_pot_line_provenance ORDER BY booking_seq`;
+    expect(
+      provenance
+        .filter((row) => !KNOWN_DAMAGE.includes(row.entry_id))
+        .map((row) => row.idempotency_key),
+      "a pot-touching entry that is not a pot operation, and not one of the two the 0057 race probe left behind",
+    ).toEqual([]);
+  });
+
+  /* ---- 14 --------------------------------------------------------------- */
+
+  it("POT TO POT still passes — two pots in one entry, both ends judged", async () => {
+    // A prevention that refuses correct behaviour is worse than the detection
+    // it replaced, and the shape most likely to be got wrong is the one with
+    // TWO pot lines in a single entry: the trigger fires once per line, so it
+    // judges both ends, and it must accept when both ends are solvent.
+    //
+    // There is no `movePotFunds` for this — a pot move is main↔pot — so a pot
+    // to pot transfer is either two of them, or one entry written by a module
+    // that knows what it is doing. Both are exercised.
+    const before = await figures();
+    expect(before.pot).toBeGreaterThan(0n);
+
+    // (a) the composed form: an earmark and the release that undoes it, both
+    //     through the product's own path, net zero across the pair.
+    const earmarked = await transfer.movePotFunds(
+      { potId, direction: "in", amountCents: 900_00n, reference: `suite-p2p-in-${run}` },
+      sql,
+    );
+    expect(earmarked.kind).toBe("posted");
+    const released = await transfer.movePotFunds(
+      { potId, direction: "out", amountCents: 900_00n, reference: `suite-p2p-out-${run}` },
+      sql,
+    );
+    expect(released.kind).toBe("posted");
+    expect((await figures()).pot).toBe(before.pot);
+
+    // (b) the single-entry form: everything this pot holds, moved straight
+    //     into a second pot of the same customer, as ONE entry with two pot
+    //     lines. The trigger fires once per line, so it judges both ends —
+    //     the source, which lands on exactly $0.00, and the destination.
+    //
+    //     The second pot is opened inside the probe, which also proves a pot
+    //     with no journal lines at all (balance $0.00 by absence rather than
+    //     by arithmetic) is accepted.
+    const accepted = await refusalOf(async (scoped) => {
+      const opened = await transfer.openPot(
+        {
+          businessId: TEST_BUSINESS_ID,
+          name: `Pot-to-pot destination ${run}`,
+          purpose: "the far end of the 0057 two-pot probe",
+        },
+        nested(scoped),
+      );
+      if (opened.kind !== "opened") throw new Error(`openPot refused: ${opened.reason}`);
+
+      const [destination] = await sql<{ account_id: string }[]>`
+        SELECT account_id FROM pot WHERE id = ${opened.potId}::uuid`;
+
+      await scoped.unsafe(
+        `SELECT ledger_append(
+           $1::uuid, current_date, 'financial'::account_book, 'original'::entry_type,
+           'pots suite 0057: one entry, two pots', $2, $3::uuid,
+           jsonb_build_array(
+             jsonb_build_object('account_id', $4::text, 'amount_cents', $5::text,
+                                'currency', 'USD', 'memo', 'pots suite 0057'),
+             jsonb_build_object('account_id', $6::text, 'amount_cents', $7::text,
+                                'currency', 'USD', 'memo', 'pots suite 0057')),
+           'internal'::rail, NULL, NULL, NULL, NULL, NULL)`,
+        [
+          entityId,
+          `pots-suite-0057:pot-to-pot:${run}`,
+          await store.ledgerPosterActorId(sql),
+          potAccountId,
+          before.pot.toString(), // debit the source: it lands on exactly $0.00
+          destination?.account_id ?? "",
+          (-before.pot).toString(), // credit the destination
+        ],
+      );
+      await asIfCommitted(scoped);
+    });
+    expect(accepted, "a solvent pot-to-pot move was refused").toBeNull();
+
+    // Nothing left behind, and both detectors agree with the preventer.
+    expect(await figures()).toEqual(before);
+    expect((await sql`SELECT * FROM v_pot_negative`).length).toBe(0);
+    expect((await sql`SELECT * FROM v_pot_identity_drift`).length).toBe(0);
   });
 });

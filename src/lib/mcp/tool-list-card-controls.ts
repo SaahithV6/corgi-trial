@@ -188,6 +188,7 @@ const outputSchema: JsonSchemaObject = {
           outcome: { type: "string", enum: ["approve", "decline"] },
           result_code: { type: "string", description: "What the network was told, verbatim from the provider's enum — CARD_PAUSED, UNAUTHORIZED_MERCHANT, VELOCITY_EXCEEDED, APPROVED." },
           rule: { type: "string", enum: [...DECISION_RULES], description: "Which rule decided it. Evaluation order is fixed in code and is not the display order." },
+          judged: { type: "boolean", description: "Whether any control this book holds was compared with the authorisation and could have refused it. FALSE on an approve means nothing was judged — the card had no controls and no holder, or the token is not one this book issues controls for. An unjudged approval is not evidence that a control worked, and must not be counted as one." },
           reason: { type: "string", description: "One sentence, safe to read to a cardholder." },
           control_version: { type: ["integer", "null"], description: "The exact control version this decision was made under." },
           decision_latency_ms: { type: "integer", description: "How long our answer took. The provider's ASA window is measured in seconds and a slow answer is a decline by default." },
@@ -206,6 +207,7 @@ const outputSchema: JsonSchemaObject = {
           "outcome",
           "result_code",
           "rule",
+          "judged",
           "reason",
           "control_version",
           "decision_latency_ms",
@@ -303,6 +305,7 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
     outcome: d.outcome,
     result_code: d.resultCode,
     rule: d.rule,
+    judged: d.judged,
     reason: d.reason,
     control_version: d.controlVersion,
     // Microseconds on the row; milliseconds is the unit a person reads a
@@ -316,6 +319,11 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
   const uncontrolled = cards.filter((c) => c.controls === null).length;
   const declines = decisions.filter((d) => d.outcome === "decline").length;
   const lastDecline = decisions.find((d) => d.outcome === "decline");
+  // THE TWO NUMBERS AN AGENT WOULD OTHERWISE CONFLATE. `approvals` alone reads
+  // as "the controls approved this much"; on the live book 55 of 63 of them
+  // were approved by a rule that compared the authorisation with nothing.
+  const approvals = decisions.filter((d) => d.outcome === "approve").length;
+  const unjudgedApprovals = decisions.filter((d) => d.outcome === "approve" && !d.judged).length;
 
   const data = {
     business: { id: ctx.grant.businessId, legal_name: ctx.grant.businessLegalName },
@@ -328,6 +336,8 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
       without_controls: uncontrolled,
       decisions: decisions.length,
       declines,
+      approvals,
+      unjudged_approvals: unjudgedApprovals,
     },
     truncated: page.cards.length > cardRows.length,
     note:
@@ -346,6 +356,9 @@ async function run(args: Args, ctx: ToolContext): Promise<ToolOutcome> {
           )
           .join("; ") +
         `. ${decisions.length} recent authorisation decision(s), ${declines} declined` +
+        (unjudgedApprovals === 0
+          ? ""
+          : `; ${unjudgedApprovals} of the ${approvals} approval(s) were approved WITHOUT any control being compared (judged: false) — a card with no controls, or a token this book does not issue controls for, so they are not evidence that a limit held`) +
         (lastDecline === undefined
           ? ""
           : `; the most recent decline was ${lastDecline.amount.display} at ${lastDecline.merchant ?? "an unnamed merchant"} on ${lastDecline.decided_at}, rule ${lastDecline.rule}, network result ${lastDecline.result_code} — ${lastDecline.reason}`) +

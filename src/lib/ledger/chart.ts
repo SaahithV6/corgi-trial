@@ -406,6 +406,25 @@ export const CHART: readonly ChartAccount[] = [
     why: "Control account for funds-availability holds on inbound credits, one leaf per business: credited when an ACH or USDC credit posts to the ledger before it is safe to spend, and debited when the policy's availability moment passes or the credit is returned.",
   },
   {
+    // Added by migration 0053, and named by docs/FX.md §6 before it existed.
+    //
+    // NOT `perBusiness`, unlike its two siblings, and the trade-off is written
+    // down in 0053 §1 rather than left to be discovered: both `v_hold_state`
+    // and `ledger_availability()` read a hold's memo balance keyed on the HOLD
+    // (`e.hold_id = h.id AND l.account_id = h.memo_account_id`), never on the
+    // account alone, so two customers' commitments sharing one leaf cannot
+    // contaminate each other's availability. What is lost is a statement line:
+    // `listLedgerLines` renders memo activity from the customer's own
+    // 9100/9200 leaves, and a commitment hold is not on one of those.
+    code: "9300",
+    name: "Holds — accepted FX commitments",
+    type: "liability",
+    book: "memo",
+    parent: "9000",
+    postable: true,
+    why: "Where an accepted FX quote's commitment is withheld: credited for the committed price the moment a customer accepts a rate, and debited when the payout settles or the settlement window closes, so a customer who accepts five quotes against one balance cannot have all five clear.",
+  },
+  {
     code: "9900",
     name: "Memo contra",
     type: "asset",

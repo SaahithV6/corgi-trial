@@ -7,9 +7,10 @@ import {
   endMembershipAction,
   issueMemberCardAction,
   setTermsAction,
-  TEAM_IDLE,
-  type TeamActionResult,
 } from "@/app/(app)/team/actions";
+// Not from the action module: a `"use server"` file exports only server
+// references, so importing a plain object from one hands the client a stub.
+import { TEAM_IDLE, type TeamActionResult } from "@/components/team/action-result";
 import { TEAM_ROLES, ROLE_SUMMARY } from "@/lib/team/roles";
 import type { TeamMemberDetail } from "@/lib/team/types";
 import { Badge, FOCUS_RING, Note, Panel } from "@/components/ui/primitives";

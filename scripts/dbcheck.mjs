@@ -425,6 +425,218 @@ const INVARIANT_VIEWS = [
   ["v_pot_identity_drift", "main plus every pot equals the whole subtree — nothing hides under a customer's 2100"],
   ["v_pot_negative", "no pot holds less than nothing"],
   ["v_pot_orphan", "no pot sub-account exists without the pot that names it"],
+  // ---- 0052's one, and the gap in the four above --------------------------
+  //
+  // THE STRUCTURAL POT GUARD. Every one of the four above compares a BALANCE
+  // (identity drift, negative), a fact about the CHART (orphan), or a shape
+  // over a population THE WRITER SELECTED ITSELF INTO (impure, whose predicate
+  // is `rail = 'internal' AND idempotency_key LIKE 'pot:%'`). A pot line
+  // written by the wrong writer for the right amount passes all four, and that
+  // is not a hypothesis: docs/POTS.md §10.3 measured it, in a rolled-back
+  // transaction — $50.00 posted out of Ridgeline's "Sales tax" pot into
+  // `1000 Cash at bank`, a real asset account on a real rail, under an `ach:`
+  // key. The pot fell $3,250.00 to $3,200.00 and `v_internal_transfer_impure`,
+  // `v_pot_identity_drift` AND `v_deposit_control_drift` all stayed at 0.
+  //
+  // Each missed it for its own reason and all three reasons are structural:
+  // impure was never in the population (no `pot:` key), identity drift stayed
+  // equal because the money genuinely LEFT the subtree so both sides fell
+  // together, and control drift counts the same subtree on both of its sides
+  // so money leaving it keeps them equal.
+  //
+  // 0052 keys on `journal_line.account_id IN (SELECT account_id FROM pot)` — a
+  // fact about the chart, on a UNIQUE NOT NULL append-only column, which no
+  // writer can opt out of by choosing a different key, rail or entry type. The
+  // populations overlap with impure's ON PURPOSE, which is the arrangement
+  // 0043 §11.6 argues for: two guards agreeing is the only way to notice when
+  // one of them stops ranging over something.
+  //
+  // GREEN ON ARRIVAL, over 20 pot-touching entries, and made to fail by
+  // re-running §10.3's own probe — see `--prove` below.
+  ["v_pot_line_provenance", "every journal line on a pot account is traceable to a pot operation"],
+  // ---- 0054's two: instance 27, generalised past the pot table ---------
+  //
+  // 0052 closed the pot case and wrote down the rule that made it closable:
+  // A BALANCE GUARD CATCHES A FOREIGN WRITE ONLY WHEN THE AMOUNT HAPPENS TO
+  // BREAK A BALANCE. All thirty-one views were then read — the SQL body, not
+  // the summary — and classified in docs/INVARIANTS.md. Fifteen turn on a
+  // quantity; eleven of those fifteen are dodgeable, and every dodge was
+  // CONSTRUCTED against this database in a rolled-back transaction rather
+  // than reasoned about. These two close the worst two.
+  //
+  // v_deposit_cross_customer is the more serious by a distance.
+  // `v_deposit_control_drift` is the only invariant ranging over the whole
+  // customer deposit subtree, and BOTH OF ITS SIDES COUNT THE SAME ACCOUNTS
+  // — every customer `2100` is a child of the house `2100`, so it is in the
+  // recursive walk, and it carries a business_id, so it is in the report.
+  // A movement inside that population moves both sides equally and the
+  // difference stays zero FOR ANY AMOUNT. Measured: $250,000.00 moved from
+  // one customer's `2100` to another's, through `ledger_append()` as
+  // corgi_app, and v_deposit_control_drift, v_book_not_zero,
+  // v_entry_unbalanced, v_balance_definition_drift, v_pot_identity_drift,
+  // v_pot_line_provenance and v_value_date_unexplained ALL stayed where
+  // they were. Nine balance guards green on the clearest theft this book
+  // can express.
+  //
+  // v_memo_line_placement closes the same shape one book over.
+  // `v_hold_state`'s fold reads `l.account_id = h.memo_account_id`, so a
+  // memo line anywhere else is in NEITHER side of v_hold_drift's
+  // comparison. Measured: $85,000.00 of withholding posted to another
+  // customer's memo account under a live hold's id, and all eight hold and
+  // balance guards stayed flat.
+  //
+  // Both are anchored on facts corgi_app cannot write: `account` is SELECT
+  // only (so the parent chain and the customer attribution are outside the
+  // writer's reach), `hold` is INSERT/SELECT append-only (so
+  // `memo_account_id` cannot be repointed), and `je_memo_has_hold` CHECKs
+  // that every memo entry names a hold — which is what makes the memo
+  // population TOTAL rather than merely large.
+  //
+  // BOTH GREEN ON ARRIVAL and both made to fail by re-running their own
+  // measured dodge — see `--prove` below.
+  ["v_deposit_cross_customer", "no single entry moves money between two customers, or onto the house control account"],
+  ["v_memo_line_placement", "every memo line lies where the hold it names says it does"],
+  // ---- 0055's one: hole 1, and the whitelist that would have faked it -
+  //
+  // 0054 ranked what it left open and this was #1: a customer's money
+  // moved out to a house account that is not the `2100` control. One
+  // customer, one entry, so `v_deposit_cross_customer` passes it — it IS
+  // one customer. Measured (dodge I): $500,000.00 from a customer's `2100`
+  // into house `1000 Cash at bank`, and TWELVE guards stayed green.
+  //
+  // THE NEAR MISS IS THE PART WORTH READING. `1000 Cash at bank` receives
+  // no legitimate traffic on this book, so a whitelist of the ten house
+  // accounts that DO receive customer money would have reported dodge I,
+  // and this would have shipped green with a passing proof attached. It
+  // would have been worthless: dodge I-PRIME is the identical $500,000.00
+  // theft moved one account over, into `1110 Cash — FBO settlement
+  // account at sponsor bank` — an asset, real money, and an account any
+  // whitelist MUST contain because 145 legitimate entries use it. Every
+  // guard stayed green, and so would the whitelist. An account-code
+  // whitelist is `v_internal_transfer_impure`'s defect in a different
+  // column: satisfied by the writer choosing the right label.
+  //
+  // So the guard asks for PROVENANCE, and ranks the anchors because they
+  // are not equally good: an FK citation from an operational record
+  // (2,663 — unfakeable, the row must exist in another table), a retained
+  // provider webhook (8), a declared fixture row this migration wrote
+  // once (49), or `external_ref` alone (364 — A LABEL, and named as the
+  // weakest anchor everywhere it appears).
+  //
+  // ITS HONEST BOUNDARY, because a guard whose limits are not written
+  // down gets over-trusted: this catches a writer that FORGOT, not an
+  // attacker that LIED. The attacker-resistant form is the FK arm alone,
+  // which is RED at 406 rows — 303 of them card settlements whose
+  // provenance is real but has no foreign key in this schema. That red is
+  // not shipped: it is a finding, it is written up with its numbers in
+  // docs/INVARIANTS.md, and it belongs to whoever owns the card book.
+  // Manufacturing a red that is mostly correct behaviour teaches people
+  // to ignore reds, which is the same disease from the other end.
+  //
+  // GREEN ON ARRIVAL over 3,066 outflow entries, and made to fail by
+  // re-running BOTH dodges — see `--prove` below.
+  ["v_deposit_outflow_unexplained", "customer money never leaves for a house account with nothing saying anybody asked"],
+  // ---- 0053/0054's FX commitment guard, wired in from another agent ----
+  //
+  // Built by the agent that owns `src/lib/fx/**`, which can write neither
+  // this file nor `src/lib/chaos/invariants.ts`. Wired here rather than
+  // left in a side array, for the reason this file has now recorded six
+  // times: an unrun invariant is a comment.
+  //
+  // WHAT IT IS FOR. Accepting an FX quote used to reserve NOTHING.
+  // Measured on the live book in a rolled-back transaction: two
+  // acceptances of $21,308.95 each against $35,514.93 available left
+  // availability UNMOVED, and the payout gate cleared both — $42,617.90
+  // out of $35,514.93. The repair places an ordinary `manual` hold on the
+  // customer's 2100 leaf through the existing hold model, memo leg on
+  // house `9300`. No second definition of availability was created, which
+  // is the constraint that matters: `ledger_availability()` is still the
+  // one definition and the commitment simply became a hold like any other.
+  //
+  // THE POPULATION IS A ROW, NOT A SENTENCE, and I checked that claim
+  // adversarially rather than reading it, because choosing the population
+  // is exactly where this book's defect lives. The guard ranges over
+  // acceptances at or after `fx_commitment_regime.effective_from`; the 35
+  // that predate it hold nothing and are outside by construction.
+  // Backfilling holds for them would move availability on a live book to
+  // make a view green, which is the wrong direction entirely.
+  //
+  // So: can the watermark be walked forward to empty the guard? EIGHT
+  // ATTEMPTS, ALL REFUSED — UPDATE, DELETE, TRUNCATE and a second regime
+  // row, as `corgi_app` AND as the OWNER. `corgi_app` holds SELECT only;
+  // the owner is stopped by `ledger_row_is_immutable()` triggers on
+  // UPDATE/DELETE/TRUNCATE, which is the layer that counts since
+  // privileges never bind the table owner. And the neat part:
+  // `singleton boolean PRIMARY KEY CHECK (singleton)` makes a SECOND row
+  // impossible, so the boundary cannot be widened by addition either —
+  // and the `CROSS JOIN fx_commitment_regime` in both views cannot
+  // multiply rows. The watermark is unwalkable. No finding.
+  //
+  // GREEN, AND OVER AN EMPTY POPULATION TODAY — 0 standing commitments of
+  // 35 acceptances. GUARD REACH prints EMPTY for it, exactly as it does
+  // for `v_accrual_month_drift`: a book with no standing FX commitment has
+  // none to get wrong, which is not a failure and is not the evidence the
+  // tick looks like either. `--prove` is what makes it mean something.
+  ["v_fx_commitment_unheld", "every standing FX commitment withholds exactly the price it committed"],
+  // ---- 0056's one: hole 3, the far side of a threshold -----------------
+  //
+  // `v_advice_delta_unsound` asks whether an advice's implied base is
+  // BELOW ZERO. 13 advices on this book; ONE fires; the other TWELVE have
+  // a base of zero or more and are never questioned again, by this guard
+  // or any other — no other view on this build reads an advice payload.
+  // 12 of 13 unexamined, because the predicate asks about a number's SIGN
+  // and stops. A base of 0 is as unexamined as a base of 4,000.
+  //
+  // The question that is not a threshold: the base is not merely supposed
+  // to be non-negative, it is supposed to be A PARTICULAR NUMBER — the
+  // authorisation's own net immediately before the event. The stored
+  // delta is sound exactly when it turns the state this book already had
+  // into the state the network reported. One right-hand side, computed
+  // from rows; there is no smaller number that satisfies it.
+  //
+  // THE FOLD IS TAKEN OVER EVERY `card_auth_event`, not only those
+  // carrying a result row. An earlier revision inner-joined the result
+  // table and silently dropped every event whose verdict was never
+  // recorded — which is the exact state 98 events were in when 0026
+  // shipped a guard that excluded its own bug. The wrong fold and the
+  // right one disagree about this book, so the defect this migration is
+  // about was one SQL revision away from being reproduced inside it.
+  //
+  // DELIBERATELY SCOPED, AND THE EXCLUSION IS THE PART TO CHECK. The
+  // negative-base and missing-payload arms are left to 0043's guard,
+  // which is RED on the single row they cover — event a299ea01-…, already
+  // on RED_REGISTER. Firing here too would put ONE defect on the board
+  // TWICE and take the failure count to five while the number of findings
+  // stayed at four. Inflating a red is the same disservice as suppressing
+  // one. 0056's own migration asserts the owner still reports every row
+  // this guard declines, so the exclusion cannot rot into a blind spot
+  // with a citation.
+  ["v_advice_base_drift", "an advice's stored delta reconstructs the authorisation net that stood before it"],
+  // ---- 0057's THIRD STATE, and the first invariant on this book that
+  // ---- reads the CATALOGUE rather than the money.
+  //
+  // Every view above asks a question about rows. This one asks whether the
+  // guard that PREVENTS a row is still switched on. 0057 shipped the first
+  // prevention on this build — a `DEFERRABLE INITIALLY DEFERRED` constraint
+  // trigger refusing any transaction that leaves a pot below zero — and a
+  // prevention has a failure mode detection does not: it can be turned off,
+  // and a view over the money would go on reading green while it was.
+  //
+  // The three ways past it are all owner-level — `DISABLE TRIGGER`,
+  // `session_replication_role = replica`, or dropping it outright — and
+  // `corgi_app` can do none of them (ALTER TABLE requires ownership and is
+  // not grantable). What is NOT acceptable is for one of them to happen and
+  // leave no trace, so this view reports the guard whenever it is not armed
+  // for origin writes, INCLUDING THE ABSENT CASE: a view that only inspects
+  // rows it finds cannot report a trigger that was dropped, which is how a
+  // guard goes quiet without going red, so 0057's second arm is a NOT EXISTS
+  // over `pg_trigger` that fires on nothing at all.
+  //
+  // It does not retire `v_pot_negative`, three rows up. Prevention and
+  // detection are not substitutes: the trigger refuses the write, the view
+  // says so if the refusal ever stopped happening, and THIS one says so if
+  // the refusal was switched off rather than defeated.
+  ["v_pot_guard_disarmed", "the 0057 negative-pot guard is present and armed for ordinary writes"],
 ];
 
 // ---------------------------------------------------------------------
@@ -709,6 +921,177 @@ const INVARIANT_VIEWS = [
 // array is added in ONE place and all three consumers pick it up.
 const GATED_INVARIANTS = [...INVARIANT_VIEWS];
 
+// ---- 7b. THE REGISTER — why each standing red is still red -------------
+//
+// THE DEFECT THIS FIXES, NAMED BY docs/EVALUATION.md §III (line 149):
+//
+//   "Three of the four print an indented rationale under the FAIL.
+//    `v_hold_expiry_drift` prints none. Its own `--prove` and
+//    `rebuild.mjs` both explain it, but on the `dbcheck` scoreboard —
+//    the surface a grader will actually read — it is indistinguishable
+//    from an alarm."
+//
+// Four views on this book were red when this block was written and every
+// one of them was red ON PURPOSE, each with an argument written down
+// before the row existed.
+//
+// THERE ARE FIVE NOW, and the fifth breaks that sentence in the one way
+// that matters: `v_pot_line_provenance` is red because THIS BUILD PUT THE
+// ROWS THERE, in a probe, hours ago — not found, not decided in advance,
+// not zero-exposure by design but by luck of the arithmetic. It is on the
+// register anyway, with the admission written out in full and no
+// "changes it" clause, because the alternative was the thing the register
+// exists to make impossible: a red with no argument, sitting next to four
+// that have one, collecting their credibility by adjacency. A register
+// that only ever explains the failures somebody else caused is a press
+// release.
+// That argument lived in five documents and none of it reached the
+// scoreboard, so the output said FAIL ×4 and a reader could not tell a
+// decided condition from a fire. A red that cannot say why it is red
+// gets treated as noise, and a red treated as noise is worth exactly as
+// much as no guard at all.
+//
+// WHAT THIS IS NOT. It does not suppress, downgrade or recolour
+// anything: every one of these still goes through `bad()`, still counts
+// against the tally, and this script still exits 1. The fix is that a
+// failure says what it is, not that it stops being a failure.
+//
+// NOTHING HERE IS INVENTED. Every clause below is quoted or condensed
+// from a document that predates this block, and the `cited` line names
+// the file and section so a reader can check the argument rather than
+// take it. A red that is NOT in this table prints "NOT ON THE REGISTER"
+// — the same rule the /chaos screen follows (docs/DASHBOARD.md §"Drill-
+// through": a red view not on the list "gets no drill-through at all,
+// and the card says exactly that"). A new red must never inherit an old
+// red's excuse by being printed next to one.
+const RED_REGISTER = {
+  v_refused_auth_hold: {
+    rows:
+      "authorisation events on holds that are still withholding money and carry no APPROVED " +
+      "verdict. On this book every row is `unanswered` — not a recorded refusal, but no verdict " +
+      "observed at all — so the withheld money stands behind events the provider never answered.",
+    stands:
+      "0032 repaired the `refused` half (12 holds, $600.00) by closing and reversing at the " +
+      "original value date. An `unanswered` event cannot be repaired the same way, because the " +
+      "repair would be inventing the verdict nobody recorded. Narrowing the view to require a " +
+      "recorded verdict is precisely the INNER JOIN + `r.result IS NOT NULL` that 0026 shipped " +
+      "and 0032 removed — the guard excluding by construction the exact state the bug produces.",
+    changes:
+      "a verdict arriving from the provider for these events, which either repairs or clears each " +
+      "one; or any row appearing under `verdict = 'refused'`, which IS repairable and must be.",
+    cited: "docs/DASHBOARD.md §'The four on the register'; docs/COMPLIANCE.md §5.1; docs/CUT-LIST.md row 16",
+  },
+  v_hold_expiry_drift: {
+    rows:
+      "card holds whose expiry is stored twice and disagrees: `hold.expires_at`, which " +
+      "`ledger_availability()` reads, against `card_authorization.expires_at`, which " +
+      "`v_card_auth_hold` reads. Every row is a fixture that bypassed `ensureAuthorization()` and " +
+      "ran two separate `now() + interval '7 days'` statements, so each row kept its own `now()` — " +
+      "135–158 ms apart. All of them are closed and released: exposure is ZERO CENTS.",
+    stands:
+      "repairing them means rewriting `expires_at` on rows in two append-only tables, which is the " +
+      "one thing this system does not do. `WHERE external_ref NOT LIKE 'lithic:team-test-%'` would " +
+      "make the view pass and would be an exclusion shaped like the failure — the sentence 0032 " +
+      "wrote about `v_refused_auth_hold`. Recording the reasoning is the repair.",
+    changes:
+      "a row that is not a fixture, or any row still withholding money — either turns a recorded " +
+      "convention into live exposure, and the two columns then need a constraint rather than an " +
+      "agreement inside one function. Growth (9 → 12) is expected while fixtures keep writing two " +
+      "clocks; it is the COMPOSITION of the rows that matters, not the count.",
+    cited: "docs/HOLDS.md §10.5; docs/DASHBOARD.md §'The four on the register'; docs/EVALUATION.md §III",
+  },
+  v_advice_delta_unsound: {
+    rows:
+      "advices whose base, recovered as `payload absolute − stored signed delta` from two sources " +
+      "neither of which is computed from the other, is a value an authorised amount cannot take. " +
+      "One advice on this book was converted against A = −7340. Its hold is closed and released, " +
+      "H is 0 either way, and the exposure is zero cents.",
+    stands:
+      "the CONVERSION is already fixed — `base = max(A, 0)` — so no future advice can take this " +
+      "shape. The stored ROW is not repairable: there is no `card_auth_event_reversal`, and the " +
+      "only compensation available is appending an `authorization_reversal 7340`, which would be a " +
+      "SECOND fact the network never sent. That is the sin being corrected, not a cure for it.",
+    changes:
+      "a `negative_base` row on an OPEN hold, which is live exposure rather than a closed " +
+      "historical record; or a `no_retained_payload` row — an advice whose base cannot be checked " +
+      "at all, reported rather than excluded, because 0026 shipped the opposite of that rule.",
+    cited: "docs/HOLDS.md §11.4; docs/DASHBOARD.md §'The four on the register'; docs/FUZZ.md §'the fuzzer was attacking the wrong function'",
+  },
+  v_hold_closure_unexplained: {
+    rows:
+      "standing, unreversed card-auth closures over authorisations the fold still calls OPEN, where " +
+      "the network is not on record as having refused any step. It ranges over EVERY card-auth " +
+      "closure with no source filter; the one subtraction is demonstrated per row, not declared per " +
+      "source. All four survivors are `test_harness` — $132.00 the fold says is still authorised. " +
+      "A test fabricated them; nothing refused them.",
+    stands:
+      "both repairs were priced against the live book and both are worse. A synthetic `expiry` event " +
+      "is a false statement in an append-only table — their clocks run to 2026-09-17 and have not " +
+      "run out. A closure reversal plus completion would RE-WITHHOLD $132.00 this book has already, " +
+      "deliberately, given back: each of the four carries two memo entries, opened AND released, so " +
+      "§9's incomplete-posting diagnosis does not apply to them at all.",
+    changes:
+      "a row with any `closure_source` other than `test_harness` — no fixture argument covers that " +
+      "one. And the date: on 2026-09-17 the real clock reaches `expires_at`, `is_closed` and " +
+      "`is_released` both flip, and these four land on `v_hold_release_drift` until a sweep that " +
+      "nothing currently schedules is run (decision 046).",
+    cited: "docs/HOLDS.md §11.5 and §11.6; docs/DASHBOARD.md §'The four on the register'",
+  },
+  // ---- THE FIFTH, AND THE ONLY ONE THIS BUILD INFLICTED ON ITSELF ------
+  //
+  // The four above were FOUND. This one was WRITTEN, today, by the agent
+  // that shipped 0057, and the register earns its keep precisely here: the
+  // rule is that a red carries an argument or it carries the words NOT ON
+  // THE REGISTER, and the rule does not bend because the author of the red
+  // is us. What follows is the admission, not a defence — there is no
+  // "changes it" clause, because nothing changes it, ever.
+  v_pot_line_provenance: {
+    rows:
+      "two journal entries — booking_seq 11785 `race-1789147074432-A` and 11787 " +
+      "`race-1789147074432-restore`, entry ids ae4eb87a-… and 8cf85c29-… — each moving pot money " +
+      "on the internal rail under a key with NO `pot:` prefix. One customer, one currency, two " +
+      "lines, netting to zero, and together netting to zero as a pair: the money released out of " +
+      "the pot by the first was put straight back by the second. Exposure is ZERO CENTS and every " +
+      "balance invariant on this book — v_pot_negative, v_pot_identity_drift, v_pot_orphan, " +
+      "v_internal_transfer_impure, v_deposit_control_drift — is green over them, which is exactly " +
+      "the blindness 0052 built this view to cover. WE WROTE THEM. 0057's concurrency claim is " +
+      "that two writers racing one pot cannot both commit, and a rolled-back probe is invisible " +
+      "to a concurrent transaction, so proving it needed a writer that actually COMMITS. The " +
+      "probe committed the WINNER's release foreign, and then a second foreign entry to restore " +
+      "the pot. The claim it proved is true — the loser blocked on the lock the winner held and " +
+      "was refused POT_WOULD_GO_NEGATIVE — and this is what it cost.",
+    stands:
+      "there is no repair and this view is reporting correctly: IT CAUGHT US. `journal_entry` and " +
+      "`journal_line` are append-only (0001 §13 revokes UPDATE and DELETE from corgi_app and " +
+      "PUBLIC, `ledger_row_is_immutable()` refuses them for everyone else), `pot` is append-only " +
+      "(0015 §1), and `idempotency_key` is immutable — so the two rows cannot be deleted, and the " +
+      "key that would have made them legible cannot be written onto them afterwards. A " +
+      "compensating pair would be two MORE unlabelled entries and would take this view to four. " +
+      "The other two exits are worse and both are forbidden by name: an exemption in 0052, or " +
+      "filtering these ids out of the view, is migration 0026's anti-pattern — a guard amended to " +
+      "exclude the bug it just found — and this build has catalogued that pattern 28 times, " +
+      "starting there. Excluding our own defect from the one guard that saw it would retire the " +
+      "guard to save the scoreboard. THE PROBE'S OWN DIAGNOSIS, which is the part worth keeping: " +
+      "it should have posted the WINNER through `movePotFunds()` and left only the LOSER foreign. " +
+      "The loser was refused, and a refused write leaves no residue — so the identical proof was " +
+      "available at a cost of nothing. If a probe must COMMIT, every leg that succeeds goes " +
+      "through the real application path.",
+    changes:
+      "NOTHING, EVER. This is the one entry on the register with no repair condition and no " +
+      "expiry: the ledger is append-only, so these two rows are on this book permanently and this " +
+      "view is permanently at 2. What must NOT change is the count — a THIRD row is a new foreign " +
+      "pot write and has nothing to do with these two. That is asserted rather than trusted: " +
+      "`src/lib/pots/pots.integration.test.ts` test 13 pins the two ENTRY IDS (immutable primary " +
+      "keys, not a count, because a count is a tolerance and tolerances absorb the next mistake " +
+      "silently) and fails on any row that is not one of them. This register entry does not " +
+      "duplicate that assertion; it cites it.",
+    cited:
+      "src/lib/pots/pots.integration.test.ts test 13 ('the guard is on the TABLE, armed, and " +
+      "deferred'), which holds the two entry ids; docs/INVARIANTS.md §'The fifth red'; " +
+      "db/migrations/0052_pot_line_provenance.sql for what the view is and why it is not narrowable",
+  },
+};
+
 console.log("\nINVARIANT VIEWS — each MUST return zero rows\n");
 for (const [view, claim] of GATED_INVARIANTS) {
   try {
@@ -717,12 +1100,48 @@ for (const [view, claim] of GATED_INVARIANTS) {
     if (n === 0) ok(`${view} is empty`, claim);
     else {
       bad(`${view} is empty`, `${n} row(s) — ${claim}`);
+      // The argument first, directly beneath the FAIL, because that is
+      // the line that says WHICH KIND of red this is. The per-class
+      // breakdown from explain() follows it as the evidence.
+      for (const line of registerLines(view)) console.log(`        ${line}`);
       for (const line of await explain(view)) console.log(`        ${line}`);
     }
   } catch (e) {
     // A view this role cannot read is not a pass. Say which, and fail.
     bad(`${view} is empty`, `could not be read: ${String(e.message).split("\n")[0].slice(0, 70)}`);
   }
+}
+
+/**
+ * The written argument for a standing red, or the admission that there is none.
+ *
+ * Returns the indented block printed directly under a FAIL. A view with no
+ * entry in RED_REGISTER gets one line saying so — never silence, and never
+ * somebody else's rationale by adjacency.
+ */
+function registerLines(view) {
+  const r = RED_REGISTER[view];
+  if (r === undefined) {
+    return [
+      "NOT ON THE REGISTER — no written argument covers this red. It was not one of the four",
+      "decided failures when this block was written, so nothing here excuses it: diagnose it,",
+      "repair it, or argue it in writing and add it to RED_REGISTER in this file.",
+    ];
+  }
+  const out = [
+    "ON THE REGISTER — a standing red with a written argument. Still a FAIL, still counted.",
+  ];
+  for (const [label, text] of [
+    ["rows", r.rows],
+    ["stands", r.stands],
+    ["changes it", r.changes],
+    ["argued in", r.cited],
+  ]) {
+    const body = wrap(text, 76);
+    out.push(`${`${label}:`.padEnd(12)}${body[0]}`);
+    for (const cont of body.slice(1)) out.push(`${" ".repeat(12)}${cont}`);
+  }
+  return out;
 }
 
 /**
@@ -749,6 +1168,32 @@ async function explain(view) {
         (r.finding === "negative_base"
           ? `  <- converted against A < 0. e.g. ${r.example}. The conversion is fixed (base = max(A,0)); the ROW is not repairable — the only compensation is a second event the network never sent.`
           : `  <- the payload is no longer retained, so the base cannot be checked. Reported rather than excluded: an unverifiable advice is not a pass.`),
+      );
+    } catch { return []; }
+  }
+  // 0040's. It printed NOTHING under its FAIL until now — named as a defect
+  // by docs/EVALUATION.md §III — so the register above is its first subline.
+  // This is the measurement UNDER that argument: the register CLAIMS every
+  // row is a released fixture withholding zero cents, and this counts them,
+  // so the claim is checkable on the same screen rather than on trust.
+  if (view === "v_hold_expiry_drift") {
+    try {
+      const rows = await sql.unsafe(`
+        SELECT CASE WHEN external_ref LIKE 'lithic:team-test-%'
+                      OR external_ref LIKE 'lithic:completion-%-bypass'
+                    THEN 'fixture' ELSE 'NOT a fixture' END AS origin,
+               count(*)::int                                      AS n,
+               count(*) FILTER (WHERE NOT is_released)::int        AS live,
+               COALESCE(SUM(active_hold_cents), 0)::text          AS cents,
+               (min(gap))::text                                   AS min_gap,
+               (max(gap))::text                                   AS max_gap
+          FROM v_hold_expiry_drift GROUP BY 1 ORDER BY 1`);
+      return rows.map((r) =>
+        `${String(r.origin).padEnd(19)} ${String(r.n).padStart(3)} hold(s), ${usd(r.cents)} withheld, ` +
+        `${r.live} still live, clocks ${r.min_gap}–${r.max_gap} apart` +
+        (r.origin === "fixture" && r.live === 0 && BigInt(r.cents) === 0n
+          ? `  <- two clock reads at insert time. Zero exposure: the defect is that the two readers COULD disagree, not that they cost anything here.`
+          : `  <- NOT covered by the register's argument. This is exposure, or a non-fixture writer, or both.`),
       );
     } catch { return []; }
   }
@@ -830,12 +1275,44 @@ const REACH = [
   ["v_standing_order_double_fire", "standing-order occurrences", "SELECT count(*)::int AS n FROM standing_order_occurrence"],
   ["v_dispute_ledger_double_count", "dispute ledger lines", "SELECT count(*)::int AS n FROM v_dispute_ledger"],
   ["v_balance_definition_drift", "accounts with a balance", "SELECT count(*)::int AS n FROM v_available_balance"],
+  // THE THIRD COLUMN IS NEW, AND IT IS THE POINT OF THE ROW.
+  //
+  // This line used to print a single number — "304 auth events on holds
+  // withholding money" — which is an honest description of what the guard
+  // ranges over and says nothing at all about what it does not. The view's
+  // first predicate is `hs.active_hold_cents > 0`: A BALANCE GATE ASKED
+  // BEFORE THE STRUCTURAL QUESTION. It decides whether to look at the
+  // provider's verdict by checking whether the hold still withholds money.
+  //
+  // That is 0052's finding in the card book, and the exclusion is not
+  // small. Measured on this database:
+  //
+  //   seen      257 auth events, $19,654.27, not recorded as APPROVED
+  //   INVISIBLE 338 auth events, $20,159.93, not recorded as APPROVED
+  //
+  // More than half the non-APPROVED population is outside the guard, and
+  // 87 of those 338 sit on holds the fold still calls OPEN — they are at
+  // active_hold_cents = 0 rather than closed. 60 of them are outright
+  // DECLINED, $3,000.00. None of it is exposure, because a hold at zero
+  // withholds nothing, and that is exactly why nothing ever surfaced it:
+  // the guard's own gate made the gap look like emptiness.
+  //
+  // The total below is the same population WITHOUT the balance gate, so
+  // the third column prints the exclusion as a percentage instead of
+  // leaving it to be discovered. The guard is NOT widened here — it is one
+  // of the four known reds and widening it would fold a new finding into
+  // an old excuse. The finding is written up in docs/INVARIANTS.md and
+  // ranked #2 of what 0054 left open.
   ["v_refused_auth_hold", "auth events on holds withholding money",
     `SELECT count(*)::int AS n FROM v_hold_state hs
        JOIN card_authorization ca ON ca.hold_id = hs.hold_id
        JOIN card_auth_event ev ON ev.auth_id = ca.id
       WHERE hs.active_hold_cents > 0
-        AND ev.kind IN ('authorization','incremental_authorization')`],
+        AND ev.kind IN ('authorization','incremental_authorization')`,
+    `SELECT count(*)::int AS n FROM v_hold_state hs
+       JOIN card_authorization ca ON ca.hold_id = hs.hold_id
+       JOIN card_auth_event ev ON ev.auth_id = ca.id
+      WHERE ev.kind IN ('authorization','incremental_authorization')`],
   // REACH IS THE VIEW'S OWN PREDICATE, NOT THE TABLE'S SIZE.
   //
   // This line read `SELECT count(*) FROM hold_closure` and printed 228, while
@@ -860,6 +1337,212 @@ const REACH = [
   ["v_pot_identity_drift", "pots", "SELECT count(*)::int AS n FROM pot"],
   ["v_pot_negative", "pots", "SELECT count(*)::int AS n FROM pot"],
   ["v_pot_orphan", "pot sub-accounts", "SELECT count(*)::int AS n FROM pot"],
+
+  // ---- 0052's one ------------------------------------------------------
+  //
+  // THE REACH IS THE POPULATION, AND HERE THE POPULATION IS THE WHOLE POINT.
+  // The four rows above measure `count(*) FROM pot` — three pots — which is
+  // the right reach for a guard about pots and the wrong one for a guard
+  // about LINES. This one ranges over journal ENTRIES, selected by a fact
+  // about the chart: the entry has at least one line on an account the `pot`
+  // table names. That column is UNIQUE, NOT NULL and append-only (0015 §1),
+  // so nothing a writer chooses — key, rail, book, entry type, description —
+  // can move an entry out of this count.
+  //
+  // Three columns rather than four, for 0047's reason: the entries that do
+  // NOT touch a pot account are not "outside this guard by construction" in
+  // any way worth a percentage. They are simply not about pots, and a fourth
+  // column would print 4,853 of 4,873 as though a pot guard owed the whole
+  // journal an explanation.
+  //
+  // WHAT THIS GUARD EXAMINES: every entry with a line on a pot account, on
+  // ANY rail, in ANY book, under ANY idempotency key, of ANY entry type —
+  // including the shapes no module writes today. Each is judged against six
+  // conditions and `v_pot_line_entry` prints which one it failed first.
+  // `SELECT provenance, count(*) FROM v_pot_line_entry GROUP BY 1` is the
+  // breakdown, and it reads `pot operation  20` on this book.
+  //
+  // WHAT IT DOES NOT EXAMINE, each owned by a named neighbour rather than
+  // left implied:
+  //
+  //   * An entry keyed `pot:` that touches NO pot account. That is
+  //     `v_internal_transfer_impure`'s population and the two overlap on
+  //     purpose (0043 §11.6). 0 on this book.
+  //   * Money under a customer's 2100 that is in a child account no `pot`
+  //     row names — a ghost leaf has no pot account, so no line of it lands
+  //     here. `v_pot_identity_drift` is the guard that sees it, by balance.
+  //   * Whether a pot SHOULD have been moved: authorisation, sufficiency and
+  //     the negative floor. `decideMove()` and `v_pot_negative` own those.
+  //     This view asks only who wrote the line, never whether the amount was
+  //     a good idea.
+  ["v_pot_line_provenance",
+    "journal entries with a line on a pot account — the structural population, whatever the writer called the entry",
+    `SELECT count(*)::int AS n FROM v_pot_line_entry`],
+
+  // ---- 0054's two ------------------------------------------------------
+  //
+  // v_deposit_cross_customer. THE REACH IS THE WHOLE CUSTOMER BOOK, and
+  // that is the difference between this guard and the one it companions.
+  // `v_deposit_control_drift`'s reach line above reads "11 accounts inside
+  // the 2100 deposit subtree the walk reaches" — eleven, and true, and it
+  // is a count of ACCOUNTS. This one counts the ENTRIES that touch them:
+  // 3,053. The gap between those two numbers is where a quarter of a
+  // million dollars moved between two customers without a single guard
+  // changing its reading.
+  //
+  // Three columns, not four, for the reason 0052's row gives: the entries
+  // that touch no customer deposit account are not "outside this guard by
+  // construction" in any way worth a percentage — they are simply not
+  // about customer deposits, and a fourth column would print 1,800-odd of
+  // 4,900 as though a deposit guard owed the memo book an explanation.
+  //
+  // WHAT IT EXAMINES: every entry with a line inside a customer's deposit
+  // subtree, reached by the parent chain from the deposit control account.
+  // `account` is SELECT-only to corgi_app, so neither `parent_id` nor
+  // `business_id` is writable by the application and no writer can move an
+  // entry out of this count by choosing a different key, rail, book or
+  // entry type. `SELECT reach, count(*) FROM v_deposit_entry_customers
+  // GROUP BY 1` is the breakdown and reads `one customer  3053`.
+  //
+  // WHAT IT DOES NOT EXAMINE, each owned by a name rather than left implied:
+  //
+  //   * A customer's money moved out to a HOUSE account that is not the
+  //     `2100` control — `1000 Cash at bank`, say. One customer, one entry,
+  //     and this guard passes it. `v_pot_line_provenance` reports exactly
+  //     that shape for pot accounts and NOTHING reports it for a plain
+  //     `2100`. Open, ranked #3 in docs/INVARIANTS.md.
+  //   * Whether the amount was authorised or sufficient.
+  //     `ledger_availability()` and the approval guards own that; this view
+  //     asks only how far the entry reaches.
+  ["v_deposit_cross_customer",
+    "journal entries with a line inside a customer's deposit subtree — the entries, not the eleven accounts v_deposit_control_drift counts",
+    `SELECT count(*)::int AS n FROM v_deposit_entry_customers`],
+
+  // v_memo_line_placement. THE REACH IS TOTAL, and it is total by CHECK
+  // constraint rather than by convention: `je_memo_has_hold` is
+  // `CHECK (book = 'financial' OR hold_id IS NOT NULL)`, so every memo
+  // entry names a hold and the census's join to `hold` drops nothing.
+  //
+  // BOTH COLUMNS ARE GIVEN EVEN THOUGH THEY ARE EQUAL TODAY, and that is
+  // the whole reason to give them. While they match, this collapses to
+  // the plain `reach` line — "ALL of them". The moment a memo entry
+  // appears that the census cannot reach, the row switches to the
+  // "ranges over N of M — X rows are OUTSIDE this guard by construction"
+  // form on its own, with no edit here. A guard silently narrowing is
+  // exactly what this section exists to catch, and it would be a poor
+  // joke for the repair written against instance 27 to acquire instance
+  // 28 because its reach was typed as a single number.
+  //
+  // 0054's migration asserts the same equality in its `DO $$` block, so
+  // it is checked at commit as well as printed at run time.
+  //
+  // WHAT IT EXAMINES: every line in the memo book, judged against the
+  // `memo_account_id` of the hold its entry names. `hold` is INSERT/SELECT
+  // to corgi_app, so that column is fixed at creation and cannot be
+  // repointed at whatever the writer happened to post to.
+  //
+  // WHAT IT DOES NOT EXAMINE:
+  //
+  //   * Whether the withholding should exist at all. `v_refused_auth_hold`
+  //     asks that, and only of holds still withholding money — see its own
+  //     reach line above, which now prints how much that gate excludes.
+  //   * Memo postings on a hold that is already closed. 271 of those on
+  //     this book, and they are ordinary settlement traffic, so "no memo
+  //     posting after closure" is NOT a true claim here and is not made.
+  //     Open, ranked #4.
+  //   * The AMOUNT. Two memo entries netting to zero on the correct
+  //     account conform here and are invisible to the balance guards too.
+  //     That is dodge C; open, ranked #4.
+  ["v_memo_line_placement",
+    "memo entries, ALL of them — je_memo_has_hold CHECKs that a memo entry names a hold, so the census reaches every one",
+    `SELECT count(*)::int AS n FROM v_memo_line_placed`,
+    `SELECT count(DISTINCT id)::int AS n FROM journal_entry WHERE book = 'memo'`],
+
+  // ---- 0055's one -----------------------------------------------------
+  //
+  // THE REACH IS THE POPULATION AND THE POPULATION IS TWO CHART FACTS AT
+  // ONCE: this entry has a line inside a customer's deposit subtree AND a
+  // line on a house account outside it. Money crossing out of the customer
+  // book into ours. `account` is SELECT-only to corgi_app, so neither half
+  // is a key, a rail, a description or anything else a writer chooses.
+  //
+  // Three columns, not four, for 0052's and 0054's reason: entries that
+  // move no customer money out of the book are not "outside this guard by
+  // construction" in any way worth a percentage.
+  //
+  // THE ANCHOR DISTRIBUTION IS PRINTED SEPARATELY, below the table, and
+  // that is not decoration. This guard accepts four anchors of very
+  // different strength and one of them — `external_ref` — is free text.
+  // A single "0 of 3,066" would read as though all 3,066 were vouched for
+  // by something unfakeable, and 364 of them are vouched for by a string.
+  // The breakdown is the honest form of the tick.
+  //
+  // WHAT IT DOES NOT EXAMINE, named rather than left implied:
+  //
+  //   * An attacker who fills in `external_ref`. Arm 4 is a label; this
+  //     catches a writer that forgot, not one that lied.
+  //   * Whether the instruction that exists was AUTHORISED —
+  //     `v_member_approval_without_right` owns that. This asks only
+  //     whether an instruction exists at all.
+  //   * Money moving inside one customer's subtree (no house line, so not
+  //     in the population), or between two customers — 0054's
+  //     `v_deposit_cross_customer`, overlapping on purpose.
+  ["v_deposit_outflow_unexplained",
+    "journal entries taking customer deposit money out to a house account — two chart facts at once, neither of them a label",
+    `SELECT count(*)::int AS n FROM v_deposit_outflow_entry`],
+
+  // ---- the FX commitment guard's reach --------------------------------
+  //
+  // THE POPULATION IS DELIBERATELY NOT "EVERY ACCEPTED QUOTE", and the
+  // third column is here so that choice is printed rather than assumed —
+  // the same reason `v_refused_auth_hold`'s row above now carries one.
+  // 35 acceptances predate the regime and hold nothing; backfilling holds
+  // for them would move availability on a live book to make a view green.
+  //
+  // WHAT MAKES THAT DEFENSIBLE RATHER THAN CONVENIENT is that the
+  // boundary is a ROW — `fx_commitment_regime.effective_from` — and the
+  // row cannot be moved. Verified by attacking it, not by reading it:
+  // UPDATE, DELETE, TRUNCATE and a second regime row, as `corgi_app` and
+  // as the OWNER, eight attempts, eight refusals. `corgi_app` has SELECT
+  // only; the owner is stopped by `ledger_row_is_immutable()` triggers,
+  // which is the layer that counts because privileges never bind the
+  // table owner; and `singleton boolean PRIMARY KEY CHECK (singleton)`
+  // makes a second row impossible, so the population cannot be widened by
+  // addition either. A watermark that can be walked forward is a
+  // population the writer chooses, and this one cannot be.
+  //
+  // It will print EMPTY today — 0 standing of 35 — and that is the honest
+  // reading: green because there is nothing yet to be green about.
+  ["v_fx_commitment_unheld",
+    "FX commitments still standing under the 0053 regime — accepted, unsettled, inside their window",
+    `SELECT COALESCE(SUM(quotes), 0)::int AS n FROM v_fx_commitment_census
+      WHERE commitment_scope = 'standing'`,
+    `SELECT count(*)::int AS n FROM fx_quote_acceptance`],
+
+  // ---- 0056's one -----------------------------------------------------
+  //
+  // BOTH COLUMNS, BECAUSE THIS GUARD DECLINES ROWS ON PURPOSE and a
+  // deliberate exclusion that is not printed is indistinguishable from a
+  // blind spot. It reads "12 of 13": the thirteenth is the negative-base
+  // advice that `v_advice_delta_unsound` reports, red, in this same run,
+  // four lines up the FAIL list.
+  //
+  // That is the only form of exclusion this file accepts — one whose
+  // owner is named, is on the same gate, and is actually firing. 0056's
+  // migration asserts exactly that at commit: every declined row must
+  // still appear in `v_advice_delta_unsound`, or it refuses to apply.
+  //
+  // WHAT NEITHER GUARD EXAMINES, because a shared blind spot is worth
+  // more words than a shared population: both draw their population from
+  // `card_auth_event_result.provider_step`, which INGEST WRITES. An
+  // advice mislabelled at the front door is invisible to both, and no
+  // reach line can show that — 0026's bug was exactly a front-door loss.
+  ["v_advice_base_drift",
+    "advices with a retained payload and a non-negative base — the twelve 0043's `< 0` threshold passes over in silence",
+    `SELECT count(*)::int AS n FROM v_advice_base
+      WHERE finding IN ('the delta reconstructs the fold',
+                        'the delta does not reconstruct the fold')`,
+    `SELECT count(*)::int AS n FROM v_advice_base`],
 ["v_wire_availability_drift", "uncleared-credit holds with a wire memo entry",
     `SELECT count(*)::int AS n FROM hold h
       WHERE h.kind = 'uncleared_credit'
@@ -1087,6 +1770,45 @@ const REACH = [
   // column's sentence would say the opposite of what is true.
   ["v_value_date_unexplained", "entries whose value date is OUT OF BAND — the candidates this guard could report, every one of them accounted for",
     `SELECT count(*)::int AS n FROM v_value_date_out_of_band`],
+
+  // ---- 0057's third state ---------------------------------------------
+  //
+  // THE REACH OF THIS ONE IS A NUMBER THAT SHOULD EMBARRASS US, and it is
+  // printed rather than smoothed over. `journal_line` carries four
+  // triggers — `journal_line_balanced`, `journal_line_no_update_delete`,
+  // `journal_line_no_truncate` and 0057's `journal_line_pot_not_negative`
+  // — and this view watches exactly ONE of them, BY NAME, because 0057
+  // wrote it for its own guard. So the row prints "ranges over 1 of 4".
+  //
+  // The three it does not watch are the oldest structural guarantees on
+  // this book: that every entry balances, that no line is ever updated or
+  // deleted, that the table cannot be truncated. Every argument 0057 §10
+  // makes for watching its own trigger applies to all three verbatim — an
+  // owner can disable any of them, and nothing on this build would say so.
+  // `v_entry_unbalanced` would eventually notice a disabled
+  // `journal_line_balanced` because the state it permits is visible in the
+  // money; `journal_line_no_update_delete` being off is invisible in the
+  // money by construction, which is the worse case and the unwatched one.
+  //
+  // Not widened here. A view is 0057's, named in its migration and pinned
+  // by `pots.integration.test.ts` test 13; widening it to a general
+  // "constraint triggers on journal_line that are not armed" is a new
+  // migration's work, and a REACH comment is not the place to quietly
+  // redefine a guard. The fraction is the finding, and it is ranked with
+  // the rest in docs/INVARIANTS.md.
+  ["v_pot_guard_disarmed",
+    "the ONE trigger this view names — of the four on journal_line; a guard that watches one guard",
+    `SELECT count(*)::int AS n FROM pg_trigger t
+       JOIN pg_class c ON c.oid = t.tgrelid
+       JOIN pg_namespace ns ON ns.oid = c.relnamespace
+      WHERE ns.nspname = 'public' AND c.relname = 'journal_line'
+        AND NOT t.tgisinternal
+        AND t.tgname = 'journal_line_pot_not_negative'`,
+    `SELECT count(*)::int AS n FROM pg_trigger t
+       JOIN pg_class c ON c.oid = t.tgrelid
+       JOIN pg_namespace ns ON ns.oid = c.relnamespace
+      WHERE ns.nspname = 'public' AND c.relname = 'journal_line'
+        AND NOT t.tgisinternal`],
 ];
 
 // ---- the driver, and why it no longer walks REACH ---------------------
@@ -1245,6 +1967,46 @@ try {
   );
 } catch (e) {
   console.log(`  ????? v_auth_over_reversed could not be read: ${String(e.message).split("\n")[0].slice(0, 60)}`);
+}
+
+// ---- 8b2. WHAT THE DEPOSIT OUTFLOW GUARD IS ACTUALLY TRUSTING ----------
+//
+// `v_deposit_outflow_unexplained` reads 0 of 3,088, and a single number
+// like that reads as though all 3,088 were vouched for by something
+// unfakeable. They are not. The guard accepts four anchors of very
+// different strength and one of them — `external_ref` — is free text the
+// writer fills in.
+//
+// So the tick is printed as a DISTRIBUTION rather than a zero. The top arm
+// is a foreign key from an operational record: the row has to exist in
+// another table and the database checks it, so a writer cannot talk its
+// way in. The bottom arm is a string. Both are "green"; only one is
+// evidence, and the gap between them is exactly the kind of thing this
+// build has spent twenty-seven instances failing to notice.
+//
+// If the `external reference only` row ever reaches zero, arm 4 is dead
+// code and the guard is stronger than its own migration claims — 0055's
+// DO block raises a NOTICE saying so.
+try {
+  const rows = await sql.unsafe(`
+    SELECT anchor, count(*)::int AS n, COALESCE(SUM(customer_cents), 0)::text AS cents
+      FROM v_deposit_outflow_entry
+     GROUP BY anchor ORDER BY n DESC`);
+  const tot = rows.reduce((a, r) => a + r.n, 0);
+  console.log(`\n  v_deposit_outflow_unexplained — ${tot} deposit outflow(s), BY THE ANCHOR EACH CARRIES`);
+  for (const r of rows) {
+    const weak = r.anchor === "external reference only" ? "  <- A LABEL: free text the writer fills in" : "";
+    console.log(`      ${r.anchor.padEnd(32)} ${String(r.n).padStart(5)}  ${usd(r.cents).padStart(16)}${weak}`);
+  }
+  console.log(
+    `      the top arm is a FOREIGN KEY from an operational record — accrual, interest, dispute,` +
+    `\n      payment instruction, interchange, FX, recon, outbound event or a reversal. The row has to` +
+    `\n      exist in another table. The bottom arm is a string. This guard catches a writer that` +
+    `\n      FORGOT, not an attacker that LIED; the attacker-resistant form is the top arm alone,` +
+    `\n      which is RED at 406 rows and is argued in docs/INVARIANTS.md rather than shipped.`,
+  );
+} catch (e) {
+  console.log(`  ????? v_deposit_outflow_entry could not be read: ${String(e.message).split("\n")[0].slice(0, 60)}`);
 }
 
 // ---- 8c. EVERY CARD-AUTH CLOSURE DECLARES ITS WRITER --------------------
@@ -1436,6 +2198,27 @@ if (process.argv.includes("--prove")) {
    * removal actually is, so the fixture says so and the proof goes back to
    * asserting exactly one row.
    */
+  /**
+   * A pot that actually HOLDS the $50.00 0052's proofs move, picked in a
+   * total order so two runs cannot draw two different pots.
+   *
+   * See the pot-provenance block below for why this is not just tidiness: the
+   * unordered `LIMIT 1` the 0015 proofs use drew an emptied pot and turned a
+   * provenance proof into an accidental balance proof.
+   */
+  const FUNDED_POT = `
+    SELECT p.id AS pot_id, p.account_id, p.business_id, a.entity_id,
+           b.balance_cents
+      FROM pot p
+      JOIN account a      ON a.id = p.account_id
+      JOIN v_pot_balance b ON b.pot_id = p.id
+     WHERE b.balance_cents >= 5000
+     ORDER BY b.balance_cents DESC, p.id
+     LIMIT 1`;
+  const NO_FUNDED_POT =
+    "no pot on this book holds the $50.00 this probe moves — seed one, or the proof would " +
+    "be measuring v_pot_negative instead of provenance";
+
   const STAFF = `(SELECT id FROM actor WHERE kind='human' AND business_id IS NULL
                     AND NOT EXISTS (SELECT 1 FROM team_member tm WHERE tm.actor_id = actor.id)
                   ORDER BY created_at LIMIT 1)`;
@@ -1842,20 +2625,49 @@ if (process.argv.includes("--prove")) {
     {
       view: "v_pot_negative",
       how: "a pot holding less than nothing",
-      // The view DETECTS and does not PREVENT: the probe posts cleanly through
-      // ledger_append() with every trigger armed, and `decideMove()` is the
-      // only thing standing between the book and a negative pot. That is a
-      // finding, and this proof is where it is visible.
+      // WHAT THIS PROOF MEANT BEFORE 0057, AND WHAT IT MEANS NOW.
+      //
+      // It used to read: the view DETECTS and does not PREVENT — the probe
+      // posts cleanly through `ledger_append()` with every trigger armed, and
+      // `decideMove()` is the only thing between the book and a negative pot.
+      // That sentence was a finding, and 0057 acted on it.
+      //
+      // The probe below still posts, and the delta is still 0 -> 1, because
+      // `journal_line_pot_not_negative` is DEFERRABLE INITIALLY DEFERRED and
+      // this transaction never commits: the view is read while the deferred
+      // check is still pending. So on its own this now proves something WEAKER
+      // than it looks — that the view detects a state the database will no
+      // longer let anybody commit.
+      //
+      // `andAlso` is the other half, and it is `v_entry_unbalanced`'s exact
+      // shape one guard over: `SET CONSTRAINTS ... IMMEDIATE` forces the
+      // pending check to be evaluated at that point, which is precisely what
+      // COMMIT would do. Together the two lines say the whole truth — the view
+      // would see it, and the write can never get that far.
       as: "app",
+      note:
+        "0 -> 1 is read with the deferred check still PENDING, so this delta alone proves only " +
+        "that the view detects the state — not that the state is reachable. It is not: the " +
+        "`and the deferred constraint refuses it too` line below is the same write with the " +
+        "check forced IMMEDIATE, which is what COMMIT does. Detection and prevention are both " +
+        "kept because they fail differently, and `v_pot_guard_disarmed` is the third state.",
       async run(tx) {
+        // PINNED TO `a.parent_id`, and pinned in a total order.
+        //
+        // This used to draw the main leaf with `code = '2100' LIMIT 1` over
+        // the pot's ENTITY, which can return the non-postable HOUSE rollup
+        // (`95dd10cd-…`, `is_postable = false`) rather than the pot's own
+        // customer leaf. That write trips `assert_entry_balanced()` and the
+        // proof measures a different guard entirely — 0052's lesson, latent
+        // here and fixed by taking the leaf the pot actually hangs off.
+        // 0057 §11.2 states the same rule in SQL.
         const seed = await one(tx, `
-          SELECT p.account_id, a.entity_id, p.business_id
-            FROM pot p JOIN account a ON a.id = p.account_id LIMIT 1`);
+          SELECT p.account_id, a.parent_id AS main_id, a.entity_id, p.business_id
+            FROM pot p JOIN account a ON a.id = p.account_id
+           ORDER BY p.id LIMIT 1`);
         if (!seed) return "no pot on this book to model the proof on";
-        const main = await one(tx, `
-          SELECT id FROM account WHERE entity_id = '${seed.entity_id}'::uuid
-             AND code = '2100' LIMIT 1`);
-        if (!main) return "no 2100 leaf for that pot's entity";
+        const main = seed.main_id ? { id: seed.main_id } : null;
+        if (!main) return "that pot's sub-account has no parent 2100 leaf to move the money to";
         await tx.unsafe(`
           SELECT ledger_append(
             '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
@@ -1868,6 +2680,53 @@ if (process.argv.includes("--prove")) {
               jsonb_build_object('account_id', '${main.id}', 'amount_cents', '-100000000',
                                  'currency', 'USD', 'memo', 'dbcheck --prove')),
             'internal'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+      /** The other half: 0057's deferred guard refuses the same state. */
+      async andAlso(tx) {
+        try {
+          await tx.unsafe("SET CONSTRAINTS journal_line_pot_not_negative IMMEDIATE");
+          return { refused: false, message: "the database ALLOWED the negative pot" };
+        } catch (err) {
+          return { refused: true, message: String(err.message).split("\n")[0] };
+        }
+      },
+    },
+
+    // ---- 0057's third state: the guard switched off --------------------
+    //
+    // TWO PROOFS, because the view has two arms and they fail differently.
+    // The first is the one `--prove`'s `disable:` machinery performs anyway;
+    // the second is the arm that exists because a view which only inspects
+    // rows it FINDS cannot report a row somebody DROPPED.
+    {
+      view: "v_pot_guard_disarmed",
+      label: "v_pot_guard_disarmed(the guard DISABLED)",
+      how: "ALTER TABLE journal_line DISABLE TRIGGER journal_line_pot_not_negative",
+      as: "owner",
+      disable: [["journal_line", "journal_line_pot_not_negative"]],
+      note:
+        "the proof IS the disable — nothing else is written, and the view goes 0 -> 1 on the " +
+        "catalogue alone. `corgi_app` cannot reach this state: ALTER TABLE requires ownership " +
+        "and is not grantable (0001 §13), so the owner connection is not a convenience here, it " +
+        "is the whole population of writers who could ever do this.",
+      async run() {
+        return undefined;
+      },
+    },
+    {
+      view: "v_pot_guard_disarmed",
+      label: "v_pot_guard_disarmed(the guard DROPPED)",
+      how: "DROP TRIGGER journal_line_pot_not_negative — the arm a row-inspecting view cannot have",
+      as: "owner",
+      note:
+        "this is the arm worth proving. A view written as `SELECT ... FROM pg_trigger WHERE " +
+        "tgenabled <> 'O'` reports a guard that was switched off and is SILENT about a guard " +
+        "that was removed — the failure is indistinguishable from the healthy state, because " +
+        "both return no rows. 0057's second arm is a NOT EXISTS that fires on nothing at all, " +
+        "and this proof is the only thing that can tell the two designs apart.",
+      async run(tx) {
+        await tx.unsafe(`DROP TRIGGER journal_line_pot_not_negative ON journal_line`);
         return undefined;
       },
     },
@@ -1899,6 +2758,230 @@ if (process.argv.includes("--prove")) {
               jsonb_build_object('account_id', '${seed.account_id}', 'amount_cents', '5000',
                                  'currency', 'USD', 'memo', 'dbcheck --prove'),
               jsonb_build_object('account_id', '${house.id}', 'amount_cents', '-5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'internal'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+
+    // ---- 0052's, and why there are four of them ---------------------------
+    //
+    // WRITTEN AGAINST THE VIEW'S SQL, LINE BY LINE, NOT AGAINST ITS SUMMARY.
+    // That rule is in this file because the proof two entries up was written
+    // twice against the wrong thing: `v_pot_identity_drift`'s one-liner says
+    // "every pot is exactly one sub-account", which describes OWNERSHIP, and
+    // the view compares BALANCES — a duplicate pot row moved no money and the
+    // proof read 0 -> 0.
+    //
+    // `v_pot_line_provenance` is a CASE over nine conditions evaluated in
+    // order, and the proofs below are addressed to specific arms of it:
+    //
+    //   1  `rail <> 'internal'`          §10.3's own measured probe
+    //   2  the same probe, counting 0015's three instead — the BLINDNESS
+    //   3  `NOT key_names_a_touched_pot` the arm nothing else comes near
+    //   4  a conforming move, which must stay OUT
+    //
+    // The second and fourth are the ones worth reading. A guard that fires on
+    // the defect is half a claim; that 0015's three stay at 0 on the same
+    // write is the measurement that says this view was worth adding at all,
+    // and that a legitimate pot move does NOT fire is the other half 0043
+    // §11.7 insists on.
+    //
+    // ---- AND THE SEED IS PART OF THE PROOF -------------------------------
+    //
+    // THE FIRST VERSION OF THE BLINDNESS PROOF FAILED, AND IT WAS RIGHT TO.
+    // It seeded on `SELECT ... FROM pot LIMIT 1` — the same unordered pick
+    // the four proofs above use — and drew "Payroll — integration suite",
+    // a pot this book has already drained to $0.00. Moving $50.00 OUT of an
+    // empty pot takes it to −$5,000 cents, so `v_pot_negative` went 0 -> 1
+    // and the proof's claim that 0015's three are blind was false.
+    //
+    // That is not a counter-example to docs/POTS.md §10.3, and reading it as
+    // one would be the mistake. §10.3's probe drew Ridgeline's "Sales tax"
+    // pot, which held $3,250.00, so it stayed positive and `v_pot_negative`
+    // correctly reported nothing. What the accident demonstrates is the
+    // NARROWER truth, which is worth more than the broad one: a balance guard
+    // catches a foreign write only when the amount happens to break a
+    // balance. Drain the pot first, or move less than it holds, and the same
+    // write is invisible again — because `v_pot_negative` is asking about the
+    // number, and nothing in 0015 is asking who wrote the line.
+    //
+    // So the seed is pinned: a pot that HOLDS the money being moved, chosen
+    // deterministically so the proof cannot flip between runs on an unordered
+    // `LIMIT 1`. If no pot on the book holds $50.00 the proof BLOCKS by name
+    // rather than quietly proving something else.
+    {
+      view: "v_pot_line_provenance",
+      how: "$50.00 moved out of a pot into `1000 Cash at bank` on the ACH rail under an `ach:` key",
+      as: "app",
+      note:
+        "docs/POTS.md §10.3's own probe, re-run. The entry is two balanced lines and every " +
+        "trigger on this book accepts it — `postEntry()` takes an account id and asks no " +
+        "questions, correctly. It lands here because the population is `journal_line.account_id " +
+        "IN (SELECT account_id FROM pot)`, a fact about the chart that the writer cannot opt out " +
+        "of by choosing a different key. Reported as: posted on the ach rail, not internal.",
+      async run(tx) {
+        const seed = await one(tx, FUNDED_POT);
+        if (!seed) return NO_FUNDED_POT;
+        const house = await one(tx, `
+          SELECT id FROM account WHERE entity_id = '${seed.entity_id}'::uuid
+             AND code = '1000' LIMIT 1`);
+        if (!house) return "no 1000 cash leaf for that entity";
+        // The pot is credit-normal (normal_side = -1), so +5000 on the pot is
+        // a DEBIT and its balance FALLS by $50.00 — money leaving the
+        // customer's earmark, which is the direction §10.3 measured.
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: pot money paid out under an ach key',
+            'ach:dbcheck-prove-provenance:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.account_id}', 'amount_cents', '5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${house.id}', 'amount_cents', '-5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'ach'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      // THE MEASUREMENT THAT JUSTIFIES THE VIEW. Same write as above, counted
+      // against 0015's three balance-and-shape guards instead of this one.
+      // Each stays at 0 for its own structural reason, and all three reasons
+      // survive any amount of care in the writer:
+      //
+      //   impure          the entry carries no `pot:` key, so it was never in
+      //                   the population — `rail = 'internal' AND
+      //                   idempotency_key LIKE 'pot:%'`.
+      //   identity drift  the money genuinely LEFT the subtree, so main + Σ
+      //                   pots and the recursive walk fall by the same $50.00
+      //                   and stay equal.
+      //   negative        the pot had the money; it is smaller, not below zero.
+      //
+      // (`v_deposit_control_drift` is blind for a fourth reason — both of its
+      // sides count the same subtree — and is not in this count only because
+      // it is not one of 0015's pot four.)
+      view: "v_pot_line_provenance",
+      label: "v_pot_line_provenance(0015's three are BLIND to the same write)",
+      how: "the identical probe, counted against v_internal_transfer_impure + v_pot_identity_drift + v_pot_negative",
+      as: "app",
+      expect: 0,
+      count: `SELECT (SELECT count(*) FROM v_internal_transfer_impure)
+                   + (SELECT count(*) FROM v_pot_identity_drift)
+                   + (SELECT count(*) FROM v_pot_negative) AS n`,
+      note:
+        "0 -> 0 is the PASS here, and it is the whole argument for this migration: a pot line " +
+        "written by the wrong writer for the right amount satisfies every balance the four " +
+        "existing pot guards compare. No amount of balance comparison can answer 'which code " +
+        "wrote this line', which is why the new guard keys on the chart instead.",
+      async run(tx) {
+        const seed = await one(tx, FUNDED_POT);
+        if (!seed) return NO_FUNDED_POT;
+        const house = await one(tx, `
+          SELECT id FROM account WHERE entity_id = '${seed.entity_id}'::uuid
+             AND code = '1000' LIMIT 1`);
+        if (!house) return "no 1000 cash leaf for that entity";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: pot money paid out, counted against the old guards',
+            'ach:dbcheck-prove-blindspot:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.account_id}', 'amount_cents', '5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${house.id}', 'amount_cents', '-5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'ach'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      // THE ARM NO OTHER GUARD COMES NEAR. Internal rail, financial book, two
+      // lines, one currency, netting to zero, wholly inside ONE customer's
+      // deposit subtree, under a well-formed `pot:` key — every condition
+      // `v_internal_transfer_impure` checks is satisfied, and it stays at 0.
+      // The key names a DIFFERENT pot from the one the money actually moved
+      // in and out of, so the writer's own label does not agree with the
+      // chart. `bool_or(key LIKE 'pot:' || p.id || ':%')` is false and the
+      // entry is reported as: the pot: key names a pot this entry does not
+      // touch.
+      view: "v_pot_line_provenance",
+      label: "v_pot_line_provenance(a pot: key naming a pot it does not touch)",
+      how: "a clean internal pot move stamped with ANOTHER pot's key",
+      as: "app",
+      note:
+        "this is the condition that makes the guard about PROVENANCE rather than shape. Every " +
+        "other predicate in the view has a neighbour that overlaps it; this one holds the " +
+        "writer's declaration to the chart, and nothing else on this book does.",
+      async run(tx) {
+        const seed = await one(tx, FUNDED_POT);
+        if (!seed) return NO_FUNDED_POT;
+        const main = await one(tx, `
+          SELECT id FROM account
+           WHERE business_id = '${seed.business_id}'::uuid
+             AND code = '2100' AND book = 'financial' LIMIT 1`);
+        if (!main) return "no 2100 deposit leaf for that pot's business";
+        // Another real pot if this book has one, so the key names something
+        // that genuinely exists; a fresh uuid otherwise, which is the same
+        // finding against a book with a single pot.
+        const other = await one(tx, `
+          SELECT COALESCE((SELECT p2.id FROM pot p2
+                            WHERE p2.id <> '${seed.pot_id}'::uuid LIMIT 1),
+                          gen_random_uuid()) AS id`);
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: a pot move stamped with another pot''s key',
+            'pot:' || '${other.id}' || ':in:dbcheck-prove-mismatch-' || gen_random_uuid()::text,
+            ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.account_id}', 'amount_cents', '-5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${main.id}', 'amount_cents', '5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'internal'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      // THE OTHER HALF, 0043 §11.7's rule: a guard that fires on the defect is
+      // half a claim, and a guard that stays quiet on the legitimate case that
+      // looks identical is the rest of it. This writes a REAL pot move — the
+      // shape `movePotFunds()` produces — and asserts the view does not move.
+      // Without it, "posted on the ach rail" and "key names another pot" would
+      // both be satisfied by a view that simply fires on everything.
+      view: "v_pot_line_provenance",
+      label: "v_pot_line_provenance(a conforming pot move is OUT)",
+      how: "a real earmark: two lines, one customer, internal rail, keyed to the pot it touches",
+      as: "app",
+      expect: 0,
+      note:
+        "the same two accounts and the same $50.00 as the probe above, moved the way the product " +
+        "moves it. All nine conditions hold, the census calls it `pot operation`, and the guard " +
+        "does not fire — so the two reds above are the predicate discriminating, not the view " +
+        "being indiscriminate.",
+      async run(tx) {
+        const seed = await one(tx, FUNDED_POT);
+        if (!seed) return NO_FUNDED_POT;
+        const main = await one(tx, `
+          SELECT id FROM account
+           WHERE business_id = '${seed.business_id}'::uuid
+             AND code = '2100' AND book = 'financial' LIMIT 1`);
+        if (!main) return "no 2100 deposit leaf for that pot's business";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: a conforming earmark into a pot',
+            'pot:' || '${seed.pot_id}' || ':in:dbcheck-prove-conforming-' || gen_random_uuid()::text,
+            ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.account_id}', 'amount_cents', '-5000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${main.id}', 'amount_cents', '5000',
                                  'currency', 'USD', 'memo', 'dbcheck --prove')),
             'internal'::rail, NULL, NULL, NULL, NULL, NULL)`);
         return undefined;
@@ -2749,6 +3832,601 @@ if (process.argv.includes("--prove")) {
                       'memo', 'dbcheck --prove') ORDER BY l.ordinal)
                FROM journal_line l WHERE l.entry_id = '${seed.entry_id}'::uuid),
             NULL, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+
+    // ---- 0054: instance 27, generalised past the pot table -------------
+    //
+    // THE SEEDS ARE PINNED IN A TOTAL ORDER, and the reason is 0052's, not
+    // tidiness. Its provenance probe drew a pot on an unordered `LIMIT 1`,
+    // got one this book had already drained to $0.00, and moving $50.00 out
+    // of an empty pot fired `v_pot_negative` instead — a provenance proof
+    // that accidentally proved a balance. So: `ORDER BY balance_cents DESC,
+    // id` for the source, the same order reversed for the destination, and
+    // the probe BLOCKS BY NAME if no account holds the money it moves.
+    //
+    // The amount is chosen to be AFFORDABLE for exactly that reason. It is
+    // not that an overdrawn `2100` would be refused — nothing on this book
+    // refuses it, which is its own finding — it is that a probe whose write
+    // trips some other guard is no longer measuring this one.
+    {
+      view: "v_deposit_cross_customer",
+      how: "$250,000.00 moved from one customer's `2100` straight into another customer's",
+      as: "app",
+      note:
+        "nothing is disabled and nothing is impersonated. This is `ledger_append()` through the " +
+        "front door as corgi_app: two balanced lines, one currency, one entity, today's value " +
+        "date, both accounts inside the deposit subtree. Every trigger on this book accepts it, " +
+        "because `postEntry()` takes an account id and asks no questions — correctly. It lands " +
+        "here because the population is the parent chain from the deposit control account, and " +
+        "`account` is SELECT-only to this role, so the writer cannot argue with it.",
+      async run(tx) {
+        const ends = await one(tx, `
+          WITH ranked AS (
+            SELECT a.id, a.entity_id, a.business_id, v.balance_cents,
+                   row_number() OVER (ORDER BY v.balance_cents DESC, a.id) AS hi,
+                   row_number() OVER (ORDER BY v.balance_cents ASC,  a.id) AS lo
+              FROM account a
+              JOIN v_ledger_balance v ON v.account_id = a.id
+             WHERE a.code = '2100' AND a.business_id IS NOT NULL
+               AND a.book = 'financial')
+          SELECT src.id AS src, dst.id AS dst, src.entity_id, src.balance_cents
+            FROM ranked src CROSS JOIN ranked dst
+           WHERE src.hi = 1 AND dst.lo = 1 AND src.id <> dst.id`);
+        if (!ends) return "this book has fewer than two customer deposit accounts to move money between";
+        if (Number(ends.balance_cents) < 25000000)
+          return "the richest customer deposit account on this book holds less than the $250,000.00 " +
+                 "this probe moves — the probe would be measuring an overdraft, not provenance";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${ends.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: one customer''s money paid into another customer''s account',
+            'ach:dbcheck-prove-cross-customer:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${ends.src}', 'amount_cents', '25000000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${ends.dst}', 'amount_cents', '-25000000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'ach'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      // THE MEASUREMENT THAT JUSTIFIES THE VIEW, in 0052's shape: the same
+      // write, counted against the balance guards that range over the same
+      // money. 0 -> 0 is the PASS, and it is the whole argument.
+      //
+      // Each is blind for its own structural reason, and no amount of care
+      // in the writer changes any of them:
+      //
+      //   deposit control drift  BOTH of its sides count the same accounts.
+      //                          Every customer `2100` is a child of the
+      //                          house `2100`, so it is in the recursive
+      //                          walk, and it carries a business_id, so it
+      //                          is in the report. A movement inside the
+      //                          population moves both sides equally.
+      //   book not zero          one entity, two lines, netting to zero.
+      //   entry unbalanced       likewise, and by construction.
+      //   balance definition     ledger_balance and available_cents fall
+      //                          and rise together; the identity holds.
+      //   pot identity drift     main + Sigma pots against the subtree walk
+      //                          — neither customer's pots moved.
+      //   pot line provenance    correctly silent: no pot account is
+      //                          touched. 0052 closed the pot case and only
+      //                          the pot case.
+      //   value date unexplained the value date is today.
+      view: "v_deposit_cross_customer",
+      label: "v_deposit_cross_customer(seven balance guards are BLIND to the same write)",
+      how: "the identical $250,000.00 probe, counted against the seven guards that range over that money",
+      as: "app",
+      expect: 0,
+      count: `SELECT (SELECT count(*) FROM v_deposit_control_drift)
+                   + (SELECT count(*) FROM v_book_not_zero)
+                   + (SELECT count(*) FROM v_entry_unbalanced)
+                   + (SELECT count(*) FROM v_balance_definition_drift)
+                   + (SELECT count(*) FROM v_pot_identity_drift)
+                   + (SELECT count(*) FROM v_pot_line_provenance)
+                   + (SELECT count(*) FROM v_value_date_unexplained) AS n`,
+      note:
+        "0 -> 0 is the PASS. A quarter of a million dollars leaves one customer and arrives at " +
+        "another, and not one of these moves. `v_deposit_control_drift` is the only invariant " +
+        "on this book that ranges over the whole customer deposit subtree, and it is not loosely " +
+        "calibrated — it is structurally incapable of seeing a movement INSIDE the population it " +
+        "counts, for any amount whatsoever. That is 0052's sentence with the word `pot` removed.",
+      async run(tx) {
+        const ends = await one(tx, `
+          WITH ranked AS (
+            SELECT a.id, a.entity_id, v.balance_cents,
+                   row_number() OVER (ORDER BY v.balance_cents DESC, a.id) AS hi,
+                   row_number() OVER (ORDER BY v.balance_cents ASC,  a.id) AS lo
+              FROM account a
+              JOIN v_ledger_balance v ON v.account_id = a.id
+             WHERE a.code = '2100' AND a.business_id IS NOT NULL
+               AND a.book = 'financial')
+          SELECT src.id AS src, dst.id AS dst, src.entity_id, src.balance_cents
+            FROM ranked src CROSS JOIN ranked dst
+           WHERE src.hi = 1 AND dst.lo = 1 AND src.id <> dst.id`);
+        if (!ends) return "this book has fewer than two customer deposit accounts to move money between";
+        if (Number(ends.balance_cents) < 25000000)
+          return "the richest customer deposit account holds less than the $250,000.00 this probe moves";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${ends.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: cross-customer, counted against the balance guards',
+            'ach:dbcheck-prove-cross-blindspot:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${ends.src}', 'amount_cents', '25000000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${ends.dst}', 'amount_cents', '-25000000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'ach'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      // THE OTHER ARM OF THE SAME GUARD, and the one the null-swallow
+      // lesson is about. A posting straight onto the HOUSE `2100` control
+      // account reads as ONE customer to `count(DISTINCT business_id)`,
+      // because house accounts carry `business_id IS NULL` and DISTINCT
+      // skips nulls. `house_deposit_lines` is asked for separately, with
+      // its own FILTER, which is why this is reported rather than waved
+      // through — exactly as 0052's `house_lines` column reported a pot
+      // drained into the house `2100` while `v_internal_transfer_impure`
+      // read 0.
+      view: "v_deposit_cross_customer",
+      label: "v_deposit_cross_customer(a posting straight onto the house control account)",
+      how: "$250,000.00 moved from a customer's `2100` onto the HOUSE `2100` control account",
+      as: "app",
+      note:
+        "the house side carries `business_id IS NULL`, so `count(DISTINCT business_id)` sees one " +
+        "customer and nothing else. This arm exists because the count that looks like it asks " +
+        "'how many parties' does not, and a guard that trusted it would pass a customer's money " +
+        "into the bank's own control account as a one-customer entry.",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT cust.id AS src, house.id AS dst, cust.entity_id, v.balance_cents
+            FROM account cust
+            JOIN v_ledger_balance v ON v.account_id = cust.id
+            JOIN account house ON house.code = '2100' AND house.business_id IS NULL
+                              AND house.book = 'financial'
+           WHERE cust.code = '2100' AND cust.business_id IS NOT NULL
+             AND cust.book = 'financial'
+           ORDER BY v.balance_cents DESC, cust.id
+           LIMIT 1`);
+        if (!seed) return "this book has no customer deposit account beneath a house 2100 control account";
+        if (Number(seed.balance_cents) < 25000000)
+          return "the richest customer deposit account holds less than the $250,000.00 this probe moves";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: a customer''s money posted onto the control account',
+            'ach:dbcheck-prove-house-control:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.src}', 'amount_cents', '25000000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${seed.dst}', 'amount_cents', '-25000000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'ach'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      // THE MEMO ARM. `v_hold_state`'s fold reads
+      //
+      //     WHERE e.hold_id = h.id AND l.account_id = h.memo_account_id
+      //
+      // so withholding written to any OTHER memo account is in NEITHER
+      // side of `v_hold_drift`'s comparison — not the memo balance, not
+      // the card-event target. Two derivations that both exclude the same
+      // money agree perfectly, which is all a drift view measures. That
+      // sentence is 0026's, re-earned one book over.
+      //
+      // The FIRST form of this probe posted a memo entry with `hold_id`
+      // NULL and the database refused it: `je_memo_has_hold` is
+      // `CHECK (book = 'financial' OR hold_id IS NOT NULL)`. Layer 1 was
+      // already there. The probe was rewritten to do what the constraint
+      // permits — name a real hold, and put the money somewhere the hold
+      // does not name — and that the constraint has nothing to say about.
+      view: "v_memo_line_placement",
+      how: "$85,000.00 of withholding posted to ANOTHER customer's memo account, under a live hold's id",
+      as: "app",
+      note:
+        "nothing disabled, nothing impersonated, and `je_memo_has_hold` is satisfied: the entry " +
+        "names a real, live, still-withholding hold. Only the account is wrong. The memo book " +
+        "now carries $85,000.00 that no hold's balance contains, and the count below is the only " +
+        "thing on this book that says so.",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT h.id AS hold_id, ha.entity_id,
+                 (SELECT a2.id FROM account a2
+                   WHERE a2.book = 'memo' AND a2.business_id IS NOT NULL
+                     AND a2.business_id IS DISTINCT FROM ha.business_id
+                   ORDER BY a2.id LIMIT 1) AS foreign_memo
+            FROM hold h
+            JOIN account ha ON ha.id = h.memo_account_id
+            JOIN v_hold_state hs ON hs.hold_id = h.id
+           WHERE NOT hs.is_released
+           ORDER BY hs.active_hold_cents DESC, h.id
+           LIMIT 1`);
+        if (!seed) return "this book has no live hold to post foreign withholding against";
+        if (!seed.foreign_memo)
+          return "this book has only one customer with a memo account, so there is no OTHER " +
+                 "customer's memo account to park withholding on";
+        const contra = await one(tx, `
+          SELECT id FROM account
+           WHERE book = 'memo' AND business_id IS NULL AND code = '9900'
+           ORDER BY id LIMIT 1`);
+        if (!contra) return "this book has no house memo contra account";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'memo'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: withholding parked where no hold counts it',
+            'hold:dbcheck-prove-memo-placement:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.foreign_memo}', 'amount_cents', '-8500000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${contra.id}', 'amount_cents', '8500000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'ach'::rail, NULL, NULL, '${seed.hold_id}'::uuid, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      // The same write, counted against the eight guards that range over
+      // holds and the memo book. 0 -> 0 is the PASS.
+      view: "v_memo_line_placement",
+      label: "v_memo_line_placement(eight hold and balance guards are BLIND to the same write)",
+      how: "the identical $85,000.00 probe, counted against the eight guards over holds and the memo book",
+      as: "app",
+      expect: 0,
+      // PINNED TO THE ROWS THE PROBE TOUCHES, NOT TRIMMED UNTIL QUIET.
+      //
+      // `runProof` re-reads this count AFTER the rollback and fails if it
+      // does not match the reading taken before — the right check, because
+      // a probe that leaves residue is worse than no probe. But a GLOBAL
+      // sum is sensitive to anything else committing to this book while
+      // the proof runs, and several agents are writing to it. This proof
+      // failed exactly once on "the rollback did NOT clean up", with every
+      // view reading 0 either side. The write was not this probe's.
+      //
+      // The first fix was to DROP the two noisiest views, which bought
+      // quiet by narrowing the claim — the move this entire catalogue is
+      // about. The right fix is the opposite: keep all eight and scope the
+      // volatile ones to the SEED THIS PROBE ACTUALLY TOUCHES, so another
+      // agent creating or releasing a hold elsewhere cannot move the
+      // reading. `v_hold_drift`, `v_hold_release_drift`,
+      // `v_hold_closure_not_terminal` and `v_wire_availability_drift` are
+      // restricted to the seeded hold; `v_balance_definition_drift` to
+      // that hold's own account.
+      //
+      // The remaining three are left global BECAUSE THEY CANNOT MOVE:
+      // `v_entry_unbalanced` and `v_book_not_zero` are enforced by a
+      // DEFERRABLE constraint trigger at COMMIT, so a row can only exist
+      // inside an open transaction, and `v_line_denorm_drift`'s columns
+      // are trigger-maintained. A view that no committed state can
+      // populate is stable by construction, which is worth saying out
+      // loud rather than discovering twice.
+      count: `WITH seed AS (
+                SELECT h.id AS hold_id, h.account_id
+                  FROM hold h
+                  JOIN account ha ON ha.id = h.memo_account_id
+                  JOIN v_hold_state hs ON hs.hold_id = h.id
+                 WHERE NOT hs.is_released
+                 ORDER BY hs.active_hold_cents DESC, h.id
+                 LIMIT 1)
+              SELECT (SELECT count(*) FROM v_hold_drift d
+                       WHERE d.hold_id = (SELECT hold_id FROM seed))
+                   + (SELECT count(*) FROM v_hold_release_drift d
+                       WHERE d.hold_id = (SELECT hold_id FROM seed))
+                   + (SELECT count(*) FROM v_hold_closure_not_terminal d
+                       WHERE d.hold_id = (SELECT hold_id FROM seed))
+                   + (SELECT count(*) FROM v_wire_availability_drift d
+                       WHERE d.hold_id = (SELECT hold_id FROM seed))
+                   + (SELECT count(*) FROM v_balance_definition_drift d
+                       WHERE d.account_id = (SELECT account_id FROM seed))
+                   + (SELECT count(*) FROM v_book_not_zero)
+                   + (SELECT count(*) FROM v_entry_unbalanced)
+                   + (SELECT count(*) FROM v_line_denorm_drift) AS n`,
+      note:
+        "0 -> 0 is the PASS, and the reason is one line of SQL: `v_hold_state` folds only " +
+        "`l.account_id = h.memo_account_id`. Money on any other memo account is in neither side " +
+        "of the drift comparison, so the two derivations agree exactly — about an amount that " +
+        "excludes the write. A drift view can only ever measure agreement between what it reads.",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT h.id AS hold_id, ha.entity_id,
+                 (SELECT a2.id FROM account a2
+                   WHERE a2.book = 'memo' AND a2.business_id IS NOT NULL
+                     AND a2.business_id IS DISTINCT FROM ha.business_id
+                   ORDER BY a2.id LIMIT 1) AS foreign_memo
+            FROM hold h
+            JOIN account ha ON ha.id = h.memo_account_id
+            JOIN v_hold_state hs ON hs.hold_id = h.id
+           WHERE NOT hs.is_released
+           ORDER BY hs.active_hold_cents DESC, h.id
+           LIMIT 1`);
+        if (!seed) return "this book has no live hold to post foreign withholding against";
+        if (!seed.foreign_memo) return "this book has only one customer with a memo account";
+        const contra = await one(tx, `
+          SELECT id FROM account
+           WHERE book = 'memo' AND business_id IS NULL AND code = '9900'
+           ORDER BY id LIMIT 1`);
+        if (!contra) return "this book has no house memo contra account";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'memo'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: foreign withholding, counted against the hold guards',
+            'hold:dbcheck-prove-memo-blindspot:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.foreign_memo}', 'amount_cents', '-8500000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${contra.id}', 'amount_cents', '8500000',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'ach'::rail, NULL, NULL, '${seed.hold_id}'::uuid, NULL, NULL)`);
+        return undefined;
+      },
+    },
+
+    // ---- 0055: hole 1, and the whitelist that would have faked it -----
+    //
+    // TWO PROBES, AND THE SECOND IS THE ARGUMENT. The first moves money
+    // to `1000 Cash at bank`, which receives no legitimate traffic on
+    // this book — so a whitelist of the ten house accounts that DO
+    // receive customer money would also report it, and a reviewer seeing
+    // only this probe could reasonably conclude a whitelist was enough.
+    //
+    // The second moves the identical theft one account over, into
+    // `1110 Cash — FBO settlement account at sponsor bank`: an asset,
+    // real money, and an account any whitelist MUST contain because 145
+    // legitimate entries use it. The whitelist passes it. This guard does
+    // not. That pair is why the population is provenance and not a list
+    // of account codes.
+    //
+    // THE AMOUNT IS DRAWN FROM THE SEED, NOT TYPED AS A CONSTANT, and
+    // that is a correction rather than a flourish. Both probes first
+    // carried a literal $500,000.00, which is what the dodge measured —
+    // and they went BLOCKED within the hour, because other suites commit
+    // against this live book and the richest customer deposit account
+    // fell from $527,828.87 to $494,469.33 underneath them. A probe
+    // pinned to a number the book can move past is a probe that reports
+    // "could not build the violating state" for a reason that has
+    // nothing to do with the guard. Pinning the SEED in a total order is
+    // 0052's lesson; pinning the AMOUNT to that seed's own balance is the
+    // same lesson one column over. It empties the account, so it is
+    // always affordable and always deterministic given the seed.
+    {
+      view: "v_deposit_outflow_unexplained",
+      how: "a customer's ENTIRE deposit balance moved into house `1000 Cash at bank`",
+      as: "app",
+      note:
+        "nothing disabled, nothing impersonated: `ledger_append()` through the front door as " +
+        "corgi_app, two balanced lines, one currency, today's value date. Side by side with a " +
+        "REAL cited ACH payout it differs in nothing a balance or a chart shape can see — a " +
+        "legitimate payout and a theft are the same transaction. What it lacks is an operational " +
+        "record, a webhook, a fixture row and an external reference: nothing anywhere in this " +
+        "database says anybody asked for it. Reported as: unexplained.",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT cust.id AS src, cust.entity_id, v.balance_cents,
+                 (SELECT h.id FROM account h
+                   WHERE h.code = '1000' AND h.business_id IS NULL LIMIT 1) AS dst
+            FROM account cust
+            JOIN v_ledger_balance v ON v.account_id = cust.id
+           WHERE cust.code = '2100' AND cust.business_id IS NOT NULL
+             AND cust.book = 'financial'
+           ORDER BY v.balance_cents DESC, cust.id
+           LIMIT 1`);
+        if (!seed || !seed.dst) return "this book has no customer 2100 and house 1000 to move between";
+        if (Number(seed.balance_cents) <= 0)
+          return "the richest customer deposit account on this book holds nothing, so there is no " +
+                 "outflow to post — the probe would be measuring an overdraft, not provenance";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: customer money paid out to house cash, unasked',
+            'ach:dbcheck-prove-outflow:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.src}', 'amount_cents', '${seed.balance_cents}',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${seed.dst}', 'amount_cents', '-${seed.balance_cents}',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'ach'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+    {
+      view: "v_deposit_outflow_unexplained",
+      label: "v_deposit_outflow_unexplained(the same theft into an account a whitelist MUST contain)",
+      how: "the identical amount, moved instead into `1110 Cash — FBO settlement account at sponsor bank`",
+      as: "app",
+      note:
+        "THIS is the probe that decides the design. `1110` carries 145 legitimate entries, so any " +
+        "list of permitted destination accounts contains it, and any guard built on such a list " +
+        "passes this write. An account-code whitelist is `v_internal_transfer_impure`'s defect in " +
+        "a different column — satisfied by the writer choosing the right label. The guard fires " +
+        "here for the same reason it fired above, and the destination is irrelevant to it.",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT cust.id AS src, cust.entity_id, v.balance_cents,
+                 (SELECT h.id FROM account h
+                   WHERE h.code = '1110' AND h.business_id IS NULL LIMIT 1) AS dst
+            FROM account cust
+            JOIN v_ledger_balance v ON v.account_id = cust.id
+           WHERE cust.code = '2100' AND cust.business_id IS NOT NULL
+             AND cust.book = 'financial'
+           ORDER BY v.balance_cents DESC, cust.id
+           LIMIT 1`);
+        if (!seed || !seed.dst) return "this book has no house 1110 FBO settlement account";
+        if (Number(seed.balance_cents) <= 0)
+          return "the richest customer deposit account on this book holds nothing to move";
+        await tx.unsafe(`
+          SELECT ledger_append(
+            '${seed.entity_id}'::uuid, current_date, 'financial'::account_book,
+            'original'::entry_type,
+            'dbcheck --prove: the same theft, into an account real traffic uses',
+            'ach:dbcheck-prove-outflow-fbo:' || gen_random_uuid()::text, ${ACTOR},
+            jsonb_build_array(
+              jsonb_build_object('account_id', '${seed.src}', 'amount_cents', '${seed.balance_cents}',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove'),
+              jsonb_build_object('account_id', '${seed.dst}', 'amount_cents', '-${seed.balance_cents}',
+                                 'currency', 'USD', 'memo', 'dbcheck --prove')),
+            'ach'::rail, NULL, NULL, NULL, NULL, NULL)`);
+        return undefined;
+      },
+    },
+
+    // ---- the FX commitment guard --------------------------------------
+    //
+    // NO TRIGGER IS DISABLED, and that is the finding rather than a
+    // convenience: the violating state is writable through the live path
+    // as `corgi_app`, because `fx_quote_acceptance` carries INSERT and
+    // nothing in the schema ties an acceptance to a hold. That is exactly
+    // why this needed a GUARD and could not have been a constraint — the
+    // hold is placed by application code, and application code is what
+    // was not doing it.
+    //
+    // The quote is cloned from an existing one in a pinned total order so
+    // two runs cannot draw two different quotes, with the settlement
+    // window forced wide enough that `now()` is inside it. Otherwise the
+    // probe would land in the census's `lapsed` arm and prove nothing —
+    // 0052's lesson, in the shape this view offers it.
+    {
+      view: "v_fx_commitment_unheld",
+      how: "an FX quote accepted with no commitment hold behind it",
+      as: "app",
+      note:
+        "the acceptance is INSERTed directly, as the application role, with every trigger on this " +
+        "book in place — which is the whole point: accepting a quote reserved nothing, and no " +
+        "constraint could have said otherwise, because the reservation is an act the code performs " +
+        "rather than a shape the row has. Reported as: no_hold_placed.",
+      async run(tx) {
+        const q = await one(tx, `
+          SELECT id FROM fx_quote ORDER BY created_at, id LIMIT 1`);
+        if (!q) return "this book has no fx_quote to model the probe on";
+        const actor = await one(tx, `
+          SELECT id FROM actor WHERE kind = 'system' AND display_name = 'ledger-poster' LIMIT 1`);
+        if (!actor) return "this book has no ledger-poster system actor";
+        // Clone the quote so the probe cannot collide with a real
+        // acceptance, and widen the settlement window so `now()` is
+        // inside it — a lapsed commitment is outside this guard and the
+        // probe would be measuring the census's `lapsed` arm instead.
+        //
+        // Cloned by explicit column list. An earlier revision tried an
+        // hstore trick with a fallback, and the fallback was unreachable:
+        // the first statement's error ABORTS the transaction, so every
+        // later statement in it fails too. A `try/catch` around one
+        // statement inside a transaction is not a retry, it is a way to
+        // report the wrong error — which is worth a comment, because it
+        // is the same mistake as a guard whose exclusion hides its own
+        // failure.
+        //
+        // `fee_cents`, `customer_rate_scaled` and `buy_minor` are OMITTED
+        // because they are GENERATED ALWAYS — the price of a quote is
+        // derived by the database from its inputs, never supplied. Worth
+        // noticing rather than working around: it means a probe cannot
+        // fabricate a quote whose fee disagrees with its own terms, which
+        // is one fewer thing this guard has to ask.
+        //
+        // The clone also has to SATISFY THE QUOTE'S OWN CHECKS, which is
+        // a small demonstration of how much of this table is real: the
+        // reference must match `^FXQ-[0-9A-HJKMNP-TV-Z]{8}$` (Crockford
+        // base32, so uppercase hex fits), the quote must expire within
+        // fifteen minutes of creation, and the settlement window must be
+        // between a minute and a week. A probe that could not meet those
+        // would not be modelling an acceptance. What NONE of them says is
+        // that accepting the quote has to reserve anything — which is the
+        // gap the guard fills, and the reason it is a view and not a
+        // constraint.
+        const clone = await one(tx, `
+          INSERT INTO fx_quote (id, entity_id, business_id, quote_ref, sell_currency,
+            sell_cents, fee_flat_cents, fee_bps, spread_bps, observation_id,
+            mid_rate_scaled, rate_scale, buy_currency, buy_exponent, rail,
+            beneficiary_ref, destination_address,
+            created_at, created_by, expires_at, settlement_window_seconds)
+          SELECT gen_random_uuid(), entity_id, business_id,
+                 'FXQ-' || upper(substr(md5(gen_random_uuid()::text), 1, 8)), sell_currency,
+                 sell_cents, fee_flat_cents, fee_bps, spread_bps, observation_id,
+                 mid_rate_scaled, rate_scale, buy_currency, buy_exponent, rail,
+                 beneficiary_ref, destination_address,
+                 now(), created_by, now() + interval '5 minutes', 86400
+            FROM fx_quote WHERE id = '${q.id}'::uuid
+          RETURNING id`);
+        if (!clone) return "could not clone an fx_quote for the probe";
+        await tx.unsafe(`
+          INSERT INTO fx_quote_acceptance (quote_id, accepted_at, accepted_by, reference)
+          VALUES ('${clone.id}'::uuid, now(), '${actor.id}'::uuid, 'dbcheck --prove')`);
+        return undefined;
+      },
+    },
+
+    // ---- 0056: an advice whose delta no longer reconstructs its fold ---
+    //
+    // THE PROBE MOVES THE FOLD, NOT THE PAYLOAD, and that is the honest
+    // way round. Fabricating a webhook payload would prove the view can
+    // read JSON; what needs proving is that the view notices when the
+    // STORED HISTORY and the NETWORK'S REPORT stop agreeing.
+    //
+    // So it appends one `incremental_authorization` to the same
+    // authorisation, timestamped BEFORE the advice, through the ordinary
+    // INSERT path as `corgi_app` with every trigger in place. The
+    // advice's own row is untouched: same delta, same retained absolute
+    // amount. Only `auth_net_before_cents` moves — and the base the
+    // conversion claimed no longer equals it.
+    //
+    // That is exactly the shape of the defect 0043 repaired in
+    // `lithic-events.ts`: a delta computed against the wrong base. Here
+    // the base is made wrong underneath a correct delta, which is the
+    // same disagreement seen from the other side, and it is the one no
+    // threshold on the sign of a number can reach.
+    //
+    // The seed is pinned in a total order (`ORDER BY event_id`) so two
+    // runs cannot draw two different advices — 0052's lesson — and the
+    // probe BLOCKS BY NAME if this book has no conforming advice to
+    // disturb.
+    {
+      view: "v_advice_base_drift",
+      how: "one earlier authorisation event appended under a conforming advice, moving the fold beneath it",
+      as: "app",
+      note:
+        "nothing disabled and nothing impersonated: `card_auth_event` carries INSERT for this role " +
+        "and an event timestamped in the past is an ordinary late-arriving webhook. The advice row " +
+        "is not edited — it could not be, the table is append-only. What changes is the history " +
+        "the advice is read against, and the guard reports the disagreement the `< 0` threshold " +
+        "cannot see because the base stays comfortably positive throughout.",
+      async run(tx) {
+        const seed = await one(tx, `
+          SELECT b.event_id FROM v_advice_base b
+           WHERE b.finding = 'the delta reconstructs the fold'
+           ORDER BY b.event_id
+           LIMIT 1`);
+        if (!seed)
+          return "this book has no advice that currently reconstructs its fold — there is nothing " +
+                 "conforming to disturb, so the probe would be measuring a book that is already red";
+        // `received_at` and `value_date` are read back INSIDE the INSERT
+        // rather than round-tripped through the driver. An earlier
+        // revision interpolated the timestamp and Postgres refused it —
+        // `time zone "gmt-0700" not recognized` — because a JS Date
+        // stringifies with a zone name the server does not parse. A probe
+        // that fails on its own plumbing reports the wrong thing, which
+        // is this catalogue's whole subject in miniature.
+        await tx.unsafe(`
+          INSERT INTO card_auth_event
+                 (id, auth_id, kind, amount_cents, is_final, value_date,
+                  provider_event_id, inbox_id, received_at)
+          SELECT gen_random_uuid(), e.auth_id,
+                 'incremental_authorization'::card_event_kind, 1234, false,
+                 e.value_date,
+                 'dbcheck-prove-advice-' || gen_random_uuid()::text, NULL,
+                 e.received_at - interval '1 second'
+            FROM card_auth_event e
+           WHERE e.id = '${seed.event_id}'::uuid`);
         return undefined;
       },
     },

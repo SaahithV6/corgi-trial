@@ -656,10 +656,17 @@ async function readProcessing(conn: Sql, now: Date): Promise<WebhookProcessingHe
 /* The source                                                                 */
 /* -------------------------------------------------------------------------- */
 
-export function hasDatabase(): boolean {
-  const url = process.env["APP_DATABASE_URL"];
-  return typeof url === "string" && url.length > 0;
-}
+/**
+ * Re-exported, never defined here.
+ *
+ * `./has-database.ts` imports nothing, because the caller that needs it —
+ * `page.tsx`, deciding whether there is a book to read — cannot import THIS
+ * module to ask. Evaluating this file reaches `@/lib/env`, which throws when
+ * `APP_DATABASE_URL` is absent. A page that asked the question through this
+ * import got the exception instead of the answer. The re-export is here so
+ * there is one definition of the predicate rather than two that can drift.
+ */
+export { hasDatabase } from "./has-database";
 
 export type LiveTriageOptions = { readonly conn?: Sql };
 

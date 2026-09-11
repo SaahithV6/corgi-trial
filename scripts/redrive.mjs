@@ -106,6 +106,23 @@ const SUPERSEDED_REASONS = [
   },
 ];
 
+/**
+ * A dead letter that died of an exhausted PARK LADDER rather than of failure.
+ *
+ * Kept verbatim in step with `refusalDeathSql('w')` in
+ * src/lib/webhooks/deadletters.ts — that module carries the argument for every
+ * clause, and `deadletters.test.ts` reads THIS FILE and asserts the two
+ * strings are identical, so they cannot drift. A `.mjs` script cannot import
+ * the `.ts` module, so the duplication is checked rather than wished away.
+ *
+ * The short version: a refusal is `park_attempts` exhausted with a named
+ * referent and the failure budget untouched. Everything else is a fault, and
+ * fault is the default, so anything this predicate cannot positively prove
+ * stays in the alarm.
+ */
+const REFUSAL_DEATH =
+  "(w.parked_on_ref is not null and w.park_attempts >= 12 and w.attempts - w.park_attempts < 8)";
+
 // ---------------------------------------------------------------------------
 // Connection — as the APPLICATION role, never the owner
 // ---------------------------------------------------------------------------
@@ -136,6 +153,89 @@ async function stateCounts() {
 function printCounts(label, rows) {
   console.log(`\n  ${label}`);
   for (const r of rows) console.log(`    ${r.provider.padEnd(10)} ${r.state.padEnd(8)} ${String(r.n).padStart(5)}`);
+}
+
+/**
+ * Step 6, extracted so it runs on EVERY path.
+ *
+ * A row should say why it is stuck TODAY. Three corrections, and the third is
+ * new:
+ *
+ *   6a  parked rows   `park()` writes `parked_reason`; a stale
+ *                     `processing_error` beside it is a second, contradicting
+ *                     opinion about the same row. The parked reason is the
+ *                     current one and the only one.
+ *
+ *   6b  dead rows     anything still dead quoting a reason this build has
+ *                     since fixed is restamped with what is true now.
+ *
+ *   6c  REFUSALS      a dead letter whose park ladder ran out carries the
+ *                     dispatcher's machine summary — `parked 12 times waiting
+ *                     for inbound_ach_account_mapping:sandbox_inbound_ach_…;
+ *                     referent never arrived` — in `processing_error`, which
+ *                     is the field /api/health publishes, while the
+ *                     consumer's own sentence sits unread in `parked_reason`.
+ *                     On 2026-09-11 that machine summary was the entire public
+ *                     account of a $10,000.00 inbound ACH credit this system
+ *                     deliberately declined to attribute; the reason beside it
+ *                     named the amount, the account number, that NOTHING WAS
+ *                     POSTED, and what an operator has to do about it.
+ *
+ *                     This puts the consumer's sentence first and keeps the
+ *                     machine summary in brackets behind it — the same shape
+ *                     `dispatch.ts` now writes for every future park death, so
+ *                     the rows written before that change and the rows written
+ *                     after it read identically. It is a correction to a
+ *                     SENTENCE and to no other column: no state moves, no row
+ *                     is deleted, no count changes, and no verdict is softened
+ *                     by it. The only thing that changes is whether the
+ *                     degraded reason on /api/health can be understood.
+ */
+async function makeReasonsCurrent(startedAt) {
+  if (!APPLY) {
+    const [{ n }] = await sql`
+      SELECT count(*)::int AS n FROM webhook_inbox w
+       WHERE w.state = 'dead' AND ${sql.unsafe(REFUSAL_DEATH)}
+         AND ${PROVIDER ? sql`w.provider = ${PROVIDER}` : sql`true`}
+         AND w.parked_reason IS NOT NULL
+         AND (w.processing_error IS NULL OR left(w.processing_error, 40) <> left(w.parked_reason, 40))`;
+    console.log(`\n  dry run: ${n} refusal dead letter(s) would have their recorded reason made current.`);
+    return;
+  }
+
+  const clearedParks = await sql`
+    UPDATE webhook_inbox
+       SET processing_error = null
+     WHERE state = 'parked'
+       AND ${PROVIDER ? sql`provider = ${PROVIDER}` : sql`true`}
+       AND processing_error IS NOT NULL
+       AND parked_reason IS NOT NULL
+    RETURNING id, provider`;
+  console.log(`\n  cleared a stale processing_error beside a current parked_reason on ${clearedParks.length} parked row(s)`);
+
+  const restamped = await sql`
+    UPDATE webhook_inbox
+       SET processing_error = ${`redriven ${startedAt.toISOString()} and died again; see parked_reason / the consumer's own error. Original: `} || left(coalesce(processing_error, ''), 160)
+     WHERE state = 'dead'
+       AND ${PROVIDER ? sql`provider = ${PROVIDER}` : sql`true`}
+       AND processing_error LIKE ${SUPERSEDED_REASONS[0].like}
+    RETURNING id`;
+  if (restamped.length > 0) {
+    console.log(`  restamped ${restamped.length} dead letter(s) whose reason was superseded`);
+  }
+
+  const spoken = await sql`
+    UPDATE webhook_inbox w
+       SET processing_error = w.parked_reason || ' [' || coalesce(w.processing_error, '(no recorded error)') || ']'
+     WHERE w.state = 'dead'
+       AND ${sql.unsafe(REFUSAL_DEATH)}
+       AND ${PROVIDER ? sql`w.provider = ${PROVIDER}` : sql`true`}
+       AND w.parked_reason IS NOT NULL
+       AND (w.processing_error IS NULL OR left(w.processing_error, 40) <> left(w.parked_reason, 40))
+    RETURNING w.id, w.provider`;
+  console.log(
+    `  gave ${spoken.length} refusal dead letter(s) back their own recorded reason (was: the dispatcher's park summary)`,
+  );
 }
 
 /** Ask the DEPLOYMENT which consumers it has, rather than assuming. */
@@ -186,12 +286,13 @@ const candidates = await sql`
    ORDER BY received_at`;
 
 const stillDead = await sql`
-  SELECT provider, processing_error, count(*)::int AS n
-    FROM webhook_inbox
-   WHERE state = 'dead'
-     AND ${PROVIDER ? sql`provider = ${PROVIDER}` : sql`true`}
-     AND (processing_error IS NULL OR NOT (processing_error LIKE ANY (${PATTERNS})))
-   GROUP BY 1, 2 ORDER BY 3 DESC`;
+  SELECT w.provider, w.processing_error, count(*)::int AS n,
+         ${sql.unsafe(REFUSAL_DEATH)} AS refusal
+    FROM webhook_inbox w
+   WHERE w.state = 'dead'
+     AND ${PROVIDER ? sql`w.provider = ${PROVIDER}` : sql`true`}
+     AND (w.processing_error IS NULL OR NOT (w.processing_error LIKE ANY (${PATTERNS})))
+   GROUP BY 1, 2, 4 ORDER BY 3 DESC`;
 
 console.log(`\n  ${candidates.length} dead letter(s) carry a reason this build has since fixed:`);
 {
@@ -206,14 +307,48 @@ console.log(`\n  ${candidates.length} dead letter(s) carry a reason this build h
 }
 
 if (stillDead.length > 0) {
-  console.log(`\n  and ${stillDead.reduce((s, r) => s + r.n, 0)} dead letter(s) are NOT redriven, because nobody has fixed their reason:`);
-  for (const r of stillDead) {
+  // SPLIT BY CAUSE, because "we lost this" and "we refused this and said why"
+  // are different jobs for different people and used to print as one list.
+  //
+  //   faults    a delivery we accepted, verified, retried to the failure
+  //             budget and abandoned. Somebody must fix a bug and redrive.
+  //   refusals  a consumer that would not guess whose money this was, said so
+  //             in full, and waited out the whole park ladder for a referent
+  //             that never came. Nothing was lost. Redriving one without
+  //             creating the referent first just restarts the five-hour wait.
+  const faults = stillDead.filter((r) => !r.refusal);
+  const refusals = stillDead.filter((r) => r.refusal);
+  const total = (rows) => rows.reduce((s, r) => s + r.n, 0);
+
+  console.log(
+    `\n  ${total(faults)} dead letter(s) are FAULTS not redriven, because nobody has fixed their reason:`,
+  );
+  if (faults.length === 0) console.log("    (none — nothing in this inbox was retried to exhaustion and abandoned)");
+  for (const r of faults) {
     console.log(`    ${String(r.n).padStart(4)}  ${r.provider} — ${String(r.processing_error ?? "(none)").slice(0, 120)}`);
+  }
+
+  console.log(
+    `\n  ${total(refusals)} dead letter(s) are REFUSALS — the park ladder ran out waiting for a referent that` +
+      `\n  never arrived. These are unbooked and need a PERSON, not a redrive; they were not lost:`,
+  );
+  const byProvider = new Map();
+  for (const r of refusals) byProvider.set(r.provider, (byProvider.get(r.provider) ?? 0) + r.n);
+  for (const [p, n] of [...byProvider].sort((a, b) => b[1] - a[1])) {
+    console.log(`    ${String(n).padStart(4)}  ${p}`);
   }
 }
 
 if (candidates.length === 0) {
-  console.log("\n  nothing to redrive.\n");
+  console.log("\n  nothing to redrive.");
+  // ...but the reasons still have to be made current. This used to exit here,
+  // so step 6 — the pass that stops a row carrying two contradicting opinions
+  // about itself — only ever ran on a day something happened to be
+  // redriveable. 90 dead letters were publishing a machine string to
+  // /api/health while their own recorded reason sat unread beside them.
+  await makeReasonsCurrent(new Date());
+  printCounts("inbox after", await stateCounts());
+  console.log("");
   await sql.end();
   process.exit(0);
 }
@@ -325,32 +460,7 @@ for (const e of posted) {
 // 6. Make every recorded reason current
 // ---------------------------------------------------------------------------
 
-// 6a. A parked row's current reason is `parked_reason`. One row, one opinion:
-//     the stale `processing_error` beside it is cleared.
-const clearedParks = await sql`
-  UPDATE webhook_inbox
-     SET processing_error = null
-   WHERE state = 'parked'
-     AND ${PROVIDER ? sql`provider = ${PROVIDER}` : sql`true`}
-     AND processing_error IS NOT NULL
-     AND parked_reason IS NOT NULL
-  RETURNING id, provider`;
-console.log(`\n  cleared a stale processing_error beside a current parked_reason on ${clearedParks.length} parked row(s)`);
-
-// 6b. Anything still dead carrying a superseded reason is restamped with what
-//     is true today. A dead letter that quotes a fault nobody has had for five
-//     hours is archaeology, and archaeology in an alarm field is how an alarm
-//     stops being read.
-const restamped = await sql`
-  UPDATE webhook_inbox
-     SET processing_error = ${`redriven ${startedAt.toISOString()} and died again; see parked_reason / the consumer's own error. Original: `} || left(coalesce(processing_error, ''), 160)
-   WHERE state = 'dead'
-     AND ${PROVIDER ? sql`provider = ${PROVIDER}` : sql`true`}
-     AND processing_error LIKE ${SUPERSEDED_REASONS[0].like}
-  RETURNING id`;
-if (restamped.length > 0) {
-  console.log(`  restamped ${restamped.length} dead letter(s) whose reason was superseded`);
-}
+await makeReasonsCurrent(startedAt);
 
 const after = await stateCounts();
 printCounts("inbox after", after);

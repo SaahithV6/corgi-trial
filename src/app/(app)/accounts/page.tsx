@@ -15,7 +15,6 @@ import {
   TableScroll,
 } from "@/components/ui/primitives";
 import { DEMO_ACCOUNTS } from "@/components/account/fixtures";
-import { listLiveAccounts } from "@/components/account/live-data-source";
 import { DEMO_STATE_LABELS, demoQuery } from "@/components/account/demo-state";
 
 import {
@@ -32,7 +31,11 @@ import {
 } from "@/components/accounts/console-state";
 import { CardControlsPanel } from "@/components/accounts/CardControlsPanel";
 import { fixtureConsole, holdOpenForLoadingState } from "@/components/accounts/fixtures";
-import { loadConsole } from "@/components/accounts/live-source";
+import { ACCOUNTS_NO_DATABASE, unreadableConsole } from "@/components/accounts/unreadable";
+import { isLiveControlView, parseControlView } from "@/lib/cards/view-state";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 import { systemClock } from "@/lib/timetravel/clock";
 import {
@@ -47,12 +50,6 @@ import { TimeTravelBar } from "@/components/timetravel/TimeTravelBar";
 import { CutNotice } from "@/components/timetravel/CutNotice";
 
 import { TimeTravelUnavailableNote, TravelledDirectory } from "./time-travel";
-import {
-  drainAction,
-  issueCardAction,
-  simulateAuthorizeAction,
-  simulateClearingAction,
-} from "./actions";
 
 export const metadata: Metadata = {
   title: "Accounts · Corgi ops console",
@@ -145,7 +142,27 @@ export default async function AccountsPage({
 }) {
   const resolvedSearchParams = await searchParams;
   const view = parseConsoleView(resolvedSearchParams);
-  const live = isLiveConsole(view);
+
+  // ==========================================================================
+  // ONE VALUE PER REGION, RESOLVED ONCE, HANDED TO BOTH THE LABEL AND THE READ.
+  // ==========================================================================
+  //
+  // This page is three regions with three sources, and it used to make three
+  // INDEPENDENT claims about them: `isLiveConsole(view)` badged the whole page,
+  // the deposit directory badged itself `live ledger` unconditionally while
+  // really reading live, and the card-control panel badged itself from
+  // `isLiveControlView` on a different query axis. On `?state=edge` the top of
+  // the screen read "nothing here was read from or written to the database,
+  // and the controls are inert" above a live directory and live write forms.
+  //
+  // `hasDatabase()` imports nothing, so asking it cannot be the thing that
+  // crashes the page for not having one — see its header. Each `…Live` below
+  // is computed once, badged by `ProvenanceLine` and used by the component
+  // that reads. There is nothing left for them to disagree with.
+  const noDatabase = !hasDatabase();
+  const consoleLive = isLiveConsole(view) && !noDatabase;
+  const controlsLive =
+    isLiveControlView(parseControlView(resolvedSearchParams)) && !noDatabase;
 
   // ONE CLOCK, TAKEN ONCE. Nothing below calls `new Date()`.
   const parsed = parseTimeTravelParams(resolvedSearchParams, systemClock.now());
@@ -178,9 +195,18 @@ export default async function AccountsPage({
         </p>
       </header>
 
-      <ProvenanceLine live={live} />
+      <ProvenanceLine
+        provenance={{
+          console: consoleLive,
+          // The directory has no fixture. It reads the whole book or it
+          // refuses; `?state=` does not pose it.
+          directory: !noDatabase,
+          controls: controlsLive,
+        }}
+        noDatabase={noDatabase}
+      />
 
-      {travelling ? (
+      {travelling && !noDatabase ? (
         <Suspense fallback={null}>
           <TimeTravelSection request={parsed.request} basePath={basePath} liveHref={liveHref} />
         </Suspense>
@@ -194,11 +220,11 @@ export default async function AccountsPage({
         key={`${view.state}:${view.businessId ?? "default"}`}
         fallback={<ConsoleSkeleton />}
       >
-        <ConsoleSection view={view} />
+        <ConsoleSection view={view} noDatabase={noDatabase} />
       </Suspense>
 
       <Suspense fallback={null}>
-        <AccountDirectory />
+        <AccountDirectory noDatabase={noDatabase} />
       </Suspense>
 
       <DemoAccountDirectory />
@@ -214,7 +240,11 @@ export default async function AccountsPage({
         face whether the provider is actually calling us rather than implying
         it.
       */}
-      <CardControlsPanel searchParams={resolvedSearchParams} businessId={view.businessId} />
+      <CardControlsPanel
+        searchParams={resolvedSearchParams}
+        businessId={view.businessId}
+        noDatabase={noDatabase}
+      />
     </div>
   );
 }
@@ -231,16 +261,32 @@ export default async function AccountsPage({
  * on card creation, so a double-submitted form returns the card the first
  * submission created instead of putting a second one on the program.
  */
-async function ConsoleSection({ view }: { readonly view: ConsoleViewState }) {
-  const live = isLiveConsole(view);
+async function ConsoleSection({
+  view,
+  noDatabase,
+}: {
+  readonly view: ConsoleViewState;
+  readonly noDatabase: boolean;
+}) {
+  const live = isLiveConsole(view) && !noDatabase;
 
   // The loading state is not a mock of a slow read; it IS a slow read, and the
   // page's Suspense boundary shows the real skeleton for as long as it takes.
   await holdOpenForLoadingState(view.state);
 
-  const result = live ? await loadConsole(view.businessId) : fixtureConsole(view.state);
+  const result = await loadSection(view, noDatabase);
 
-  if (isErr(result)) return <ConsoleErrorPanel error={result.error} />;
+  if (isErr(result)) {
+    return noDatabase && isLiveConsole(view) ? (
+      <ConsoleErrorPanel
+        error={result.error}
+        title="The console could not be read"
+        description="No database is configured for this deployment. No business was selected, no card was listed, no hold was folded and no balance was taken."
+      />
+    ) : (
+      <ConsoleErrorPanel error={result.error} />
+    );
+  }
 
   const { businesses, snapshot } = result.value;
 
@@ -266,6 +312,12 @@ async function ConsoleSection({ view }: { readonly view: ConsoleViewState }) {
     );
   }
 
+  // The actions reach `@/lib/ledger/db` through their own module graph, so
+  // they are imported on the branch that has already established a database
+  // exists. A drawn state gets `null`, which is what its inert forms say in
+  // the type rather than only in a `disabled` attribute.
+  const actions = live ? await consoleActions() : null;
+
   return (
     <ConsoleView
       snapshot={snapshot}
@@ -273,14 +325,51 @@ async function ConsoleSection({ view }: { readonly view: ConsoleViewState }) {
       view={view}
       businesses={businesses}
       formKey={randomUUID()}
-      actions={{
-        issueCard: issueCardAction,
-        authorize: simulateAuthorizeAction,
-        clearing: simulateClearingAction,
-        drain: drainAction,
-      }}
+      actions={actions}
     />
   );
+}
+
+/**
+ * Live for `default` and `loading`, fixture for the other three — and a
+ * REFUSAL for the live states when there is no database to read.
+ *
+ * The live module is imported dynamically because importing it evaluates
+ * `@/lib/ledger/balances` -> `@/lib/ledger/db` -> `@/lib/env`, which refuses to
+ * load without a full set of keys. That is the right behaviour for the app and
+ * the wrong behaviour for a page that must be able to render the words "no
+ * database configured" — so the import happens only on the branch that has
+ * already established there is a database to read.
+ *
+ * A drawn state stays a fixture whether or not a database is configured: those
+ * three are drawn on purpose, and "no database" does not make a drawing any
+ * more or less drawn.
+ */
+async function loadSection(
+  view: ConsoleViewState,
+  noDatabase: boolean,
+): Promise<ReturnType<typeof fixtureConsole>> {
+  if (!isLiveConsole(view)) return fixtureConsole(view.state);
+  if (noDatabase) return unreadableConsole();
+
+  const { loadConsole } = await import("@/components/accounts/live-source");
+  return await loadConsole(view.businessId);
+}
+
+/** The four server actions, reached only where there is a book to write to. */
+async function consoleActions() {
+  const {
+    drainAction,
+    issueCardAction,
+    simulateAuthorizeAction,
+    simulateClearingAction,
+  } = await import("./actions");
+  return {
+    issueCard: issueCardAction,
+    authorize: simulateAuthorizeAction,
+    clearing: simulateClearingAction,
+    drain: drainAction,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -295,14 +384,41 @@ async function ConsoleSection({ view }: { readonly view: ConsoleViewState }) {
  * from the same fold that screen renders, so a row here and the page it links
  * to cannot quote different numbers.
  */
-async function AccountDirectory() {
+async function AccountDirectory({ noDatabase }: { readonly noDatabase: boolean }) {
+  // THE BADGE ON THIS PANEL USED TO BE `<Badge tone="positive">live ledger</Badge>`
+  // WITH NO CONDITION ON IT AT ALL. It was true whenever the read succeeded and
+  // it was printed whenever the read did not, including over the failure block
+  // below — a panel saying "live ledger" above the words "the account list
+  // could not be read". And on a deployment with no database it sat under a
+  // page-wide line claiming nothing here was read from the database, over a
+  // function that really did open a connection.
+  //
+  // There is no third state to badge. This panel has no fixture: it reads the
+  // whole book or it says it could not.
+  if (noDatabase) {
+    return (
+      <ConsoleErrorPanel
+        error={ACCOUNTS_NO_DATABASE}
+        title="Every deposit account could not be read"
+        description="No database is configured for this deployment. No deposit account was listed and no balance was folded. An empty directory here does not mean no customer has an account."
+      />
+    );
+  }
+
+  const { listLiveAccounts } = await import("@/components/account/live-data-source");
   const live = await listLiveAccounts();
 
   return (
     <Panel
       title="Every deposit account"
       description="The whole book, folded at request time. Each row links to that account's own screen: postings on both clocks, holds, and the bitemporal statement."
-      actions={<Badge tone="positive">live ledger</Badge>}
+      actions={
+        isErr(live) ? (
+          <Badge tone="negative">not read</Badge>
+        ) : (
+          <Badge tone="positive">live ledger</Badge>
+        )
+      }
     >
       {isErr(live) ? (
         <div className="px-5 py-8">

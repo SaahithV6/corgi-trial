@@ -60,6 +60,7 @@ import {
   quietAfterSeconds,
   type DeliverySql,
 } from '@/lib/integrations/delivery-health';
+import { faultDeathSql } from '@/lib/webhooks/deadletters';
 
 // ---------------------------------------------------------------------------
 // 1. The vocabulary
@@ -108,6 +109,47 @@ import {
  *                   and it comes straight back the moment a delivery dies
  *                   after a success.
  *
+ *   refused         Deliveries were dead-lettered recently, and every one of
+ *                   the recent ones died of an EXHAUSTED PARK LADDER: a
+ *                   consumer looked at the delivery, understood it, declined
+ *                   to act on it in writing, and waited out the full ladder
+ *                   for a referent that never arrived.
+ *
+ *                   THIS IS THE SECOND NARROWING OF `dropping` AND IT IS
+ *                   MEASURED. On 2026-09-11 this endpoint degraded the
+ *                   deployment on Increase with 1 of 37 dead letters
+ *                   "abandoned AFTER the last delivery this provider
+ *                   consumed". All 37 — and all 53 of Lithic's — had
+ *                   `park_attempts = 12` and `attempts - park_attempts` in
+ *                   1..4. Not one had spent the 8-failure budget. There was
+ *                   no delivery in this system that had been retried to
+ *                   exhaustion and abandoned, which is what `dropping` says.
+ *
+ *                   The tell was that the SAME FACT read two ways: Lithic's
+ *                   53 park-exhaustions (newest 111s old) read `backlogged`
+ *                   and did not degrade; Increase's 37 (newest 117s old) read
+ *                   `dropping` and did. The only discriminator was
+ *                   `dead_lettered_at > max(processed_at)` — whether
+ *                   unrelated deliveries happened to be consumed in between.
+ *                   Lithic is busy; the Increase feed went quiet at 14:52. A
+ *                   verdict about a provider that flips on that provider's
+ *                   traffic VOLUME is computed from an input that cannot
+ *                   express what it claims to measure.
+ *
+ *                   The narrowing is arithmetic on the row's own counters,
+ *                   never a match on the recorded sentence — see
+ *                   `src/lib/webhooks/deadletters.ts`, which argues every
+ *                   clause and is the single definition both this endpoint
+ *                   and `scripts/redrive.mjs` use. `fault` is the DEFAULT:
+ *                   anything that cannot be positively proven a refusal
+ *                   stays in `dropping`.
+ *
+ *                   It does NOT degrade, and it does not claim the money is
+ *                   fine. These deliveries are unbooked and need a person.
+ *                   The claim is only that they were not LOST: accepted,
+ *                   verified, classified, declined in writing, and filed in
+ *                   `v_webhook_dead_letter` where staff look.
+ *
  *   never_consumed  Deliveries have arrived and not one has ever been
  *                   consumed. Distinct from `idle` for the same reason
  *                   delivery-health keeps `never` and `stale` apart: "the
@@ -131,6 +173,7 @@ export type ProcessingVerdict =
   | 'consuming'
   | 'backlogged'
   | 'dropping'
+  | 'refused'
   | 'superseded'
   | 'never_consumed'
   | 'idle'
@@ -141,6 +184,7 @@ export const PROCESSING_VERDICTS: readonly ProcessingVerdict[] = [
   'consuming',
   'backlogged',
   'dropping',
+  'refused',
   'superseded',
   'never_consumed',
   'idle',
@@ -175,6 +219,19 @@ export interface ProcessingRow {
    * "superseded, nothing to see" from a comparison of the newest of each.
    */
   readonly deadSinceConsumedCount: number;
+  /**
+   * Of `deadSinceConsumedCount`, the ones that are NOT refusals — a delivery
+   * retried to the failure budget and abandoned. This is the number `dropping`
+   * is actually about. See `src/lib/webhooks/deadletters.ts`.
+   */
+  readonly deadDroppedSinceConsumedCount: number;
+  /**
+   * `MAX(dead_lettered_at)` over FAULT deaths only. `dropping` has always been
+   * "recent AND unsuperseded"; once the count is narrowed the recency test has
+   * to be narrowed with it, or a fresh refusal would keep an old fault's alarm
+   * alight.
+   */
+  readonly deadFaultNewestAt: Date | null;
 }
 
 export type ProcessingRead =
@@ -244,7 +301,20 @@ export async function readWebhookProcessing(
                  and w.dead_lettered_at > coalesce(
                        (select max(d.processed_at) from webhook_inbox d
                          where d.provider = p.provider and d.state = 'done'),
-                       '-infinity'::timestamptz)) as dead_since_consumed
+                       '-infinity'::timestamptz)) as dead_since_consumed,
+             -- The same count with REFUSALS removed: deaths that spent the
+             -- failure budget rather than the park ladder. faultDeathSql() is
+             -- the one definition of that line, shared with redrive.mjs.
+             (select count(*) from webhook_inbox w
+               where w.provider = p.provider and w.state = 'dead'
+                 and ${sql.unsafe(faultDeathSql('w'))}
+                 and w.dead_lettered_at > coalesce(
+                       (select max(d.processed_at) from webhook_inbox d
+                         where d.provider = p.provider and d.state = 'done'),
+                       '-infinity'::timestamptz)) as dead_dropped_since_consumed,
+             (select max(w.dead_lettered_at) from webhook_inbox w
+               where w.provider = p.provider and w.state = 'dead'
+                 and ${sql.unsafe(faultDeathSql('w'))}) as dead_fault_newest_at
         from unnest(${providers}::text[]) as p(provider)
     `;
     const result = (await Promise.race([query, timeout])) as readonly unknown[];
@@ -280,6 +350,8 @@ function toRow(raw: unknown): ProcessingRow {
     deadOldestAt: toDate(row['dead_oldest_at']),
     deadReason: typeof reason === 'string' && reason !== '' ? reason.slice(0, 200) : null,
     deadSinceConsumedCount: toCount(row['dead_since_consumed']),
+    deadDroppedSinceConsumedCount: toCount(row['dead_dropped_since_consumed']),
+    deadFaultNewestAt: toDate(row['dead_fault_newest_at']),
   };
 }
 
@@ -327,6 +399,13 @@ export interface ProviderProcessingHealth {
      * success: they are a backlog to redrive, not evidence of current loss.
      */
     readonly sinceLastConsumed: number;
+    /**
+     * Of `sinceLastConsumed`, how many were a FAULT rather than a refusal —
+     * retried to the failure budget and abandoned, rather than declined in
+     * writing with the park ladder run out. This is the number that degrades
+     * the deployment, published so nobody has to take the verdict on trust.
+     */
+    readonly droppedSinceLastConsumed: number;
     /**
      * True when there are dead letters and none of them is `sinceLastConsumed`.
      * Published beside `reason` on purpose: it is the flag that says the
@@ -412,6 +491,7 @@ function reportFor(
         oldestAgeSeconds: null,
         reason: null,
         sinceLastConsumed: 0,
+        droppedSinceLastConsumed: 0,
         supersededByConsumption: false,
         clearedBy: null,
       },
@@ -444,24 +524,55 @@ function reportFor(
   // being counted is a backlog nobody clears.
   const superseded = row.deadCount > 0 && row.deadSinceConsumedCount === 0;
 
-  const verdict: ProcessingVerdict =
-    // Recent AND unsuperseded. Either half alone over-alarms: a death from
-    // last night is history, and a death that a later success has overtaken is
-    // a row to redrive.
-    row.deadSinceConsumedCount > 0 && deadNewestAge !== null && deadNewestAge <= alarmWindow
-      ? 'dropping'
-      : row.lastDeliveryAt !== null && row.lastConsumedAt === null
-        ? 'never_consumed'
+  // THE NARROWING FAILS CLOSED, and the fallback is the whole of why.
+  //
+  // `deadDroppedSinceConsumedCount` is what takes deaths OUT of the alarm, so
+  // the question that matters is what happens when it is not there — an older
+  // row shape, a deploy where the new column has not landed, a caller that
+  // built a `ProcessingRow` by hand. Coalescing it to 0 would mean "absent
+  // evidence of a fault" reads as "proven refusal", and every death in the
+  // system would quietly leave the alarm. That is this repo's signature
+  // failure, one layer down from the verdict it is fixing.
+  //
+  // So an absent count falls back to EVERY unsuperseded death, and an absent
+  // fault timestamp to the newest death of any kind. Unmeasured means
+  // `dropping`. A refusal is only ever excluded when the database has
+  // positively counted it as one.
+  const droppedSinceConsumed = row.deadDroppedSinceConsumedCount ?? row.deadSinceConsumedCount;
+  const refusedSinceConsumed = Math.max(0, row.deadSinceConsumedCount - droppedSinceConsumed);
+  const deadFaultNewestAge = ageSeconds(now, row.deadFaultNewestAt ?? row.deadNewestAt);
+
+  // Recent, unsuperseded, AND A FAULT. Each of the three alone over-alarms: a
+  // death from last night is history, a death a later success has overtaken is
+  // a row to redrive, and a death that is a written refusal is a row for a
+  // person — none of the three is a delivery we lost.
+  const dropping =
+    droppedSinceConsumed > 0 &&
+    deadFaultNewestAge !== null &&
+    deadFaultNewestAge <= alarmWindow;
+
+  // The refusals, measured on the same two axes so one cannot mask the other.
+  const refusedRecently =
+    refusedSinceConsumed > 0 &&
+    deadNewestAge !== null &&
+    deadNewestAge <= alarmWindow;
+
+  const verdict: ProcessingVerdict = dropping
+    ? 'dropping'
+    : row.lastDeliveryAt !== null && row.lastConsumedAt === null
+      ? 'never_consumed'
+      : refusedRecently
+        ? 'refused'
         : row.parkedCount > 0 && parkedAge !== null && parkedAge > staleAfterSeconds
-          ? // Parking is the live state and it outranks a cleared backlog:
-            // `backlogged` is the early warning for the next drop, while
-            // `superseded` is a receipt for the last one.
-            'backlogged'
-          : superseded
-            ? 'superseded'
-            : consumedAge !== null && consumedAge <= staleAfterSeconds
-              ? 'consuming'
-              : 'idle';
+        ? // Parking is the live state and it outranks a cleared backlog:
+          // `backlogged` is the early warning for the next drop, while
+          // `superseded` is a receipt for the last one.
+          'backlogged'
+        : superseded
+          ? 'superseded'
+          : consumedAge !== null && consumedAge <= staleAfterSeconds
+            ? 'consuming'
+            : 'idle';
 
   // ---------------------------------------------------------------------
   // WHAT IS ALLOWED TO MAKE THE DEPLOYMENT `degraded`
@@ -499,6 +610,15 @@ function reportFor(
   // condition that trains people to stop reading it. The alarm is not being
   // softened: it comes back the instant `sinceLastConsumed` is non-zero, and
   // that number is on the row for anyone who wants to check.
+  // `refused` does NOT degrade, and this is the judgement call. A refusal is
+  // the system working: it read the delivery, could not say whose money it
+  // was, declined to guess, wrote down why, and put the row in front of a
+  // person. Degrading on it would mean a deployment reads red for as long as
+  // anyone declines to guess — which trains people to stop reading the field,
+  // and is how a REAL drop arriving into a permanently red field gets missed.
+  // The rows are still counted in full, `droppedSinceLastConsumed` is on the
+  // row for anyone who wants to check the narrowing, and the alarm comes
+  // straight back the instant one death fails the refusal test.
   const degradesDeployment = verdict === 'dropping' || verdict === 'never_consumed';
 
   return {
@@ -514,12 +634,16 @@ function reportFor(
       oldestAgeSeconds: deadOldestAge,
       reason: row.deadReason,
       sinceLastConsumed: row.deadSinceConsumedCount,
+      droppedSinceLastConsumed: droppedSinceConsumed,
       supersededByConsumption: superseded,
       clearedBy: row.deadCount > 0 ? 'node scripts/redrive.mjs --apply' : null,
     },
     verdict,
     degradesDeployment,
-    note: noteFor(verdict, row, staleAfterSeconds, deadNewestAge),
+    note: noteFor(verdict, row, staleAfterSeconds, deadNewestAge, deadFaultNewestAge, {
+      dropped: droppedSinceConsumed,
+      refused: refusedSinceConsumed,
+    }),
   };
 }
 
@@ -537,6 +661,8 @@ function noteFor(
   row: ProcessingRow,
   staleAfterSeconds: number,
   deadNewestAge: number | null,
+  deadFaultNewestAge: number | null,
+  split: { readonly dropped: number; readonly refused: number },
 ): string {
   /** Appended wherever a cleared backlog would otherwise be invisible. */
   const supersededClause =
@@ -548,9 +674,16 @@ function noteFor(
   switch (verdict) {
     case 'dropping':
       return (
-        `${row.deadSinceConsumedCount} of ${row.deadCount} dead letter(s) were abandoned AFTER the last delivery this provider consumed` +
-        `${deadNewestAge === null ? '' : `, the newest ${deadNewestAge}s ago`} — ` +
+        `${split.dropped} of ${row.deadCount} dead letter(s) were RETRIED TO EXHAUSTION AND ABANDONED after the last delivery this provider consumed` +
+        `${deadFaultNewestAge === null ? '' : `, the newest ${deadFaultNewestAge}s ago`} — ` +
         `arrival is not processing, and these were never booked` +
+        (row.deadReason === null ? '' : `: ${row.deadReason}`)
+      );
+    case 'refused':
+      return (
+        `${split.refused} of ${row.deadCount} dead letter(s) were DECLINED IN WRITING and then timed out by the park ladder` +
+        `${deadNewestAge === null ? '' : `, the newest ${deadNewestAge}s ago`}; none was retried to exhaustion, so nothing here was lost. ` +
+        `They are unbooked and need a person, not a redrive` +
         (row.deadReason === null ? '' : `: ${row.deadReason}`)
       );
     case 'superseded':

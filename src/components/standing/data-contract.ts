@@ -185,3 +185,32 @@ export type StandingQuery = {
 export interface StandingDataSource {
   load(query: StandingQuery): Promise<Result<StandingView, ErrorShape>>;
 }
+
+/* -------------------------------------------------------------------------- */
+/* What the authorise / stop forms need                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One account a mandate may be paid from.
+ *
+ * The currency is carried because it is the ACCOUNT's, not the form's: a
+ * mandate is written in the currency of the account it debits, so the form
+ * shows it rather than offering it as a choice somebody could get wrong.
+ *
+ * This list is a convenience, not a control. `createStandingOrderAction`
+ * re-reads the same accounts and refuses an id that is not among them.
+ */
+export type MandateAccountOption = {
+  readonly accountId: string;
+  readonly legalName: string;
+  readonly accountName: string;
+  readonly currency: string;
+};
+
+/** One live mandate, as the stop form lists it. */
+export type CancellableMandate = {
+  readonly id: string;
+  readonly reference: string;
+  readonly cadence: string;
+  readonly nextDueDate: string | null;
+};

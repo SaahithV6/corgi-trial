@@ -45,6 +45,7 @@ import type {
 } from "./data-contract";
 import type { DemoState, DemoView } from "./demo-state";
 import { createLiveAccountDataSource } from "./live-data-source";
+import { createUnreadableAccountSource } from "./unreadable";
 
 /**
  * The instant every fixture is read as-of.
@@ -485,10 +486,28 @@ export function isLiveView(view: DemoView): boolean {
  * reads `src/lib/ledger/queries.ts` and nothing on this screen knows the
  * difference, because both sides are the same interface. Every other view is a
  * fixture, and the fixture DATA below is kept for exactly that reason.
+ *
+ * AND THE THIRD ANSWER, WHICH THIS FUNCTION USED NOT TO HAVE. `isLiveView`
+ * asks one question — did the URL ask for a demo — and `noDatabase` asks the
+ * other one, which no amount of looking at the URL can answer. Without it the
+ * bare URL selected the live source on a deployment with no database,
+ * `ledgerConnection()` threw inside `context()`, and the catch turned that
+ * into `LEDGER_READ_FAILED` with `retryable: true`: a generic failed read,
+ * with a Retry button, for a query that was never issued.
+ *
+ * A REFUSAL IS NOT A FIXTURE, and this is why the no-database branch does not
+ * fall through to `createFixtureSource(view)`. The default fixture draws a
+ * funded operating account with live holds and uncleared credits. Drawing that
+ * for a deployment that read nothing would be the worse half of the same
+ * defect: not a crash, a balance.
  */
-export function getAccountDataSource(view: DemoView): AccountDataSource {
-  if (isLiveView(view)) return createLiveAccountDataSource();
-  return createFixtureSource(view);
+export function getAccountDataSource(
+  view: DemoView,
+  noDatabase: boolean,
+): AccountDataSource {
+  if (!isLiveView(view)) return createFixtureSource(view);
+  if (noDatabase) return createUnreadableAccountSource();
+  return createLiveAccountDataSource();
 }
 
 /**

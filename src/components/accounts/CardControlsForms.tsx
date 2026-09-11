@@ -31,10 +31,56 @@ import {
   type CardControlsActionResult,
 } from "@/lib/cards/view-state";
 
-import {
-  replayAuthorizationAction,
-  setCardControlsAction,
-} from "./CardControlsActions";
+/**
+ * A card-controls server action, as this file sees one.
+ *
+ * The actions ARRIVE AS PROPS and are no longer imported here, for two
+ * reasons that turned out to be the same reason.
+ *
+ * The mechanical one: `./CardControlsActions` value-imports
+ * `@/lib/cards/store`, which value-imports `sql` from `@/lib/ledger/db`, which
+ * reads `@/lib/env` at module scope and throws without `APP_DATABASE_URL`. A
+ * static import here made this file — the FORMS — one of the chains that
+ * killed the whole `/accounts` page module on a deployment with no database.
+ *
+ * The honest one: on the fixture states there IS no action, and saying that in
+ * the type is better than disabling a button that is still wired to one.
+ * `action: null` and a disabled submit are the same fact stated twice, which
+ * is what a control that must not fire should look like.
+ */
+export type CardControlsAction = (
+  previous: CardControlsActionResult,
+  formData: FormData,
+) => Promise<CardControlsActionResult>;
+
+/**
+ * What a fixture row answers if a submission ever reaches it.
+ *
+ * Belt and braces behind the disabled button: the truthful answer to
+ * "append a control version to a drawing" is that it is a drawing, not
+ * `NOTE_REQUIRED`. That was the real defect here — the button was pressable on
+ * `?controls=empty` and `?controls=edge`, it dispatched a real server action
+ * against the fixture card id, and the action answered with a form-validation
+ * complaint that read as though the row were one field away from being written.
+ */
+const FIXTURE_REFUSAL: CardControlsActionResult = {
+  status: "failed",
+  intent: null,
+  code: "FIXTURE_ROW",
+  message:
+    "This card is a fixture, selected by ?controls= in the URL. There is no card to append a control version to and no book to append it in. Drop the parameter to work on this customer's real cards.",
+  facts: [],
+  cardId: null,
+  at: "",
+};
+
+function refuseFixtureWrite(): Promise<CardControlsActionResult> {
+  return Promise.resolve(FIXTURE_REFUSAL);
+}
+
+/** The one sentence a disabled control owes the reader: why. */
+const FIXTURE_NOTE =
+  "This card is a fixture, so nothing here can be submitted. It reads nothing and writes nothing; the URL is the only thing that selected it.";
 
 const INPUT_CLASS =
   "w-full rounded border border-border-strong bg-surface px-2.5 py-1.5 text-sm placeholder:text-muted";
@@ -64,16 +110,38 @@ function Field({
   );
 }
 
+/**
+ * The submit button, with its own pending copy and its own inertness.
+ *
+ * `disabled` is the fix for the finding this file carried. Every FIELD on
+ * these forms honoured `props.live` — the limits, the category box, the note,
+ * the freeze toggle, the quick-block buttons — and this button did not take
+ * `live` at all, so on `?controls=empty` and `?controls=edge` the fields were
+ * greyed out and "Append control version" was fully pressable, dispatching a
+ * real server action against a fixture card id.
+ *
+ * `aria-disabled` as well as `disabled`, which is what `ConsoleForms.tsx`,
+ * `DecisionForm.tsx` and `PaymentForm.tsx` already do: a disabled button is
+ * removed from the tab order, and the attribute is what tells a screen reader
+ * the control exists and is currently unavailable rather than simply vanishing.
+ */
 function Submit({
   label,
   pendingLabel,
+  disabled = false,
 }: {
   readonly label: string;
   readonly pendingLabel: string;
+  readonly disabled?: boolean;
 }) {
   const status = useFormStatus();
   return (
-    <button type="submit" disabled={status.pending} className={`${BUTTON_CLASS} ${FOCUS_RING}`}>
+    <button
+      type="submit"
+      disabled={status.pending || disabled}
+      aria-disabled={status.pending || disabled}
+      className={`${BUTTON_CLASS} ${FOCUS_RING}`}
+    >
       {status.pending ? pendingLabel : label}
     </button>
   );
@@ -128,10 +196,15 @@ export type ControlsFormProps = {
   readonly frozen: boolean;
   /** False on the fixture states, which must not be able to write. */
   readonly live: boolean;
+  /** `null` on the fixture states: there is no action, not a disabled one. */
+  readonly action: CardControlsAction | null;
 };
 
 export function CardControlsForm(props: ControlsFormProps) {
-  const [result, action] = useActionState(setCardControlsAction, IDLE_CONTROL_RESULT);
+  const [result, action] = useActionState(
+    props.action ?? refuseFixtureWrite,
+    IDLE_CONTROL_RESULT,
+  );
   const ids = useId();
   // Local state only so the quick-block buttons can add to the textarea. The
   // authoritative value is whatever the field holds at submit; nothing here is
@@ -254,10 +327,15 @@ export function CardControlsForm(props: ControlsFormProps) {
       </Field>
 
       <div className="flex items-center gap-3">
-        <Submit label="Append control version" pendingLabel="Appending…" />
-        <span className="text-[11px] leading-relaxed text-muted">
-          Appends a new version. Nothing is edited and nothing is deleted — the
-          version a past decision cited still says what it said.
+        <Submit
+          label="Append control version"
+          pendingLabel="Appending…"
+          disabled={!props.live}
+        />
+        <span className="max-w-prose text-[11px] leading-relaxed text-muted">
+          {props.live
+            ? "Appends a new version. Nothing is edited and nothing is deleted — the version a past decision cited still says what it said."
+            : FIXTURE_NOTE}
         </span>
       </div>
 
@@ -274,10 +352,15 @@ export type ReplayFormProps = {
   readonly cardId: string;
   readonly cardToken: string;
   readonly live: boolean;
+  /** `null` on the fixture states: there is no action, not a disabled one. */
+  readonly action: CardControlsAction | null;
 };
 
 export function ReplayAuthorizationForm(props: ReplayFormProps) {
-  const [result, action] = useActionState(replayAuthorizationAction, IDLE_CONTROL_RESULT);
+  const [result, action] = useActionState(
+    props.action ?? refuseFixtureWrite,
+    IDLE_CONTROL_RESULT,
+  );
   const ids = useId();
 
   return (
@@ -322,9 +405,18 @@ export function ReplayAuthorizationForm(props: ReplayFormProps) {
         </Field>
       </div>
 
-      <div className="flex items-center gap-3">
-        <Submit label="Replay through the decision function" pendingLabel="Deciding…" />
+      <div className="flex flex-wrap items-center gap-3">
+        <Submit
+          label="Replay through the decision function"
+          pendingLabel="Deciding…"
+          disabled={!props.live}
+        />
         <Badge tone="quiet">harness — not a provider call</Badge>
+        {props.live ? null : (
+          <span className="max-w-prose text-[11px] leading-relaxed text-muted">
+            {FIXTURE_NOTE}
+          </span>
+        )}
       </div>
 
       <ResultPanel result={result} />

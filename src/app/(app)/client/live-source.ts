@@ -440,6 +440,7 @@ export async function readCardsScreen(
       lastFour: d.lastFour,
       memberName: d.memberName ?? null,
       rule: d.rule,
+      judged: d.judged,
       reason: d.reason,
       source: d.source,
     }));
@@ -468,6 +469,60 @@ function toPolicyLine(policy: ApprovalPolicy): PolicyLine | null {
 }
 
 /**
+ * The version of each rail's rule that would actually judge a payment today.
+ *
+ * ===========================================================================
+ * `listPolicies()` RETURNS EVERY VERSION, AND THIS SCREEN USED TO SHOW THEM ALL
+ * ===========================================================================
+ *
+ * `approval_policy` is effective-dated: a rail keeps its superseded rows so a
+ * payment raised last March can still be read under the rule that judged it.
+ * `listPolicies()` says so in its own header — *"Every version, newest first"*
+ * — and both readers below handed the whole list to the customer under the
+ * heading "When somebody else has to approve", as though every row were in
+ * force at once.
+ *
+ * Measured on this book on 2026-09-11: `wire` carries two rows, `2026-01-01`
+ * and `2026-09-11`. So `/client/pay` offered **"Wire" twice** in its "How
+ * should it go?" dropdown — two options a customer cannot tell apart, one of
+ * them a rule that stopped applying that morning — and `/client/approvals`
+ * printed two Wire lines in the thresholds table with different notes.
+ *
+ * That is this codebase's recurring failure in its usual shape: the population
+ * on screen was chosen by *every row in the table* rather than by the question
+ * the screen claims to answer. The question is "which rule applies to a payment
+ * I send now", and `effectivePolicyFor()` — the function `requestPayment()`
+ * uses to pin a version onto the instruction — answers it with `effective_from
+ * <= $asOf ORDER BY effective_from DESC LIMIT 1`. This applies exactly that
+ * selection, per rail, over the list already in hand.
+ *
+ * A rail with no row effective yet drops out rather than falling back to a
+ * future one, because `effectivePolicyFor()` returns `null` in that case and
+ * `requestPayment()` then refuses the rail. A dropdown offering a rail the
+ * server will refuse is worse than one that does not offer it.
+ *
+ * The SUPERSEDED versions are not lost, and this screen is not where they
+ * belong: `/client/approvals` prints the version pinned onto the payment being
+ * judged — `ach@2026-01-01` — beside its threshold, read off the instruction
+ * rather than off this list, so a payment raised under an older rule still
+ * shows the rule it was raised under.
+ */
+function inForceToday(
+  policies: readonly ApprovalPolicy[],
+  today: string,
+): readonly ApprovalPolicy[] {
+  const best = new Map<string, ApprovalPolicy>();
+  for (const policy of policies) {
+    if (policy.effectiveFrom > today) continue;
+    const held = best.get(policy.rail);
+    if (held === undefined || policy.effectiveFrom > held.effectiveFrom) {
+      best.set(policy.rail, policy);
+    }
+  }
+  return [...best.values()];
+}
+
+/**
  * Everything the form needs BEFORE anybody types.
  *
  * THE GATE READ HERE IS A PREVIEW, NOT THE CONTROL, and the customer is told
@@ -484,6 +539,11 @@ export async function readPayScreen(
     const subject = await resolveSubject(businessId, conn);
     if (!subject.ok) return subject;
     const { header } = subject.value;
+
+    // One date, used twice: the form's default value date, and the as-of that
+    // decides which version of each rail's rule is in force. They have to be
+    // the same day or the screen offers a rule it will not be judged under.
+    const today = bankingToday();
 
     const [gate, policies, payees, availability] = await Promise.all([
       transactGateForBusiness(header.businessId, { conn }),
@@ -517,9 +577,14 @@ export async function readPayScreen(
                 "Your business has passed its checks, so a payment from this account reaches the approvals queue.",
             }
           : { allowed: false, code: gate.code, message: gate.message },
-        policies: policies.map(toPolicyLine).filter((p): p is PolicyLine => p !== null),
+        // The rule in force TODAY, per rail — not every version ever written.
+        // See `inForceToday`: this list is what the "How should it go?" select
+        // is built from, and it offered Wire twice until it was narrowed.
+        policies: inForceToday(policies, today)
+          .map(toPolicyLine)
+          .filter((p): p is PolicyLine => p !== null),
         payees: payeeLines,
-        today: bankingToday(),
+        today,
         availableCents: availability.availableCents,
       },
     };
@@ -584,7 +649,11 @@ export async function readApproveScreen(
     if (!subject.ok) return subject;
     const { header } = subject.value;
 
-    const policies = await listPolicies(conn);
+    // The rule in force today, per rail. See `inForceToday`: `listPolicies()`
+    // returns every version ever written, and this table printed Wire twice
+    // until it was narrowed. The version a payment was JUDGED under is read off
+    // the instruction below (`policyVersion`), never off this list.
+    const policies = inForceToday(await listPolicies(conn), bankingToday());
 
     const policyLines = policies
       .map(toPolicyLine)

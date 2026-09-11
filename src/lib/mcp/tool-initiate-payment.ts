@@ -90,7 +90,19 @@ const usdcDestination = z.strictObject({
 const argsSchema = z
   .strictObject({
     // `card` and `internal` are absent on purpose; see the schema note below.
-    rail: z.enum(["ach", "usdc", "wire"]),
+    //
+    // THE MESSAGE IS ATTACHED BECAUSE THE DEFAULT ONE IS THE `approve_payment`
+    // MISTAKE AGAIN. Measured on 2026-09-11: `rail: "internal"` came back as
+    // `Invalid option: expected one of "ach"|"usdc"|"wire"`, which reads like
+    // a typo rather than like a refusal, and a model that reads it as a typo
+    // tries `internal_transfer` next. `internal` is not missing — it is the
+    // one rail whose seeded policy is `threshold 0, required_approvals 0`,
+    // so an instruction on it could be released with no human having approved
+    // anything, which is the property this whole tool exists to preserve.
+    rail: z.enum(["ach", "usdc", "wire"], {
+      error:
+        'rail is one of "ach", "usdc" or "wire". "internal" is REFUSED rather than missing: its seeded approval policy is threshold 0, required_approvals 0, so an instruction raised on it could be released with nobody having approved it — the one property this tool exists to preserve. "card" is not an origination rail at all; a card movement starts at a network, not at a person. Moving money between this business\'s own accounts or pots is docs/AGENT-LIMITS.md §15, and it is done by a person in the console.',
+    }),
     amount_cents: centsString,
     currency: z.literal("USD").optional(),
     destination: z.discriminatedUnion("type", [achDestination, wireDestination, usdcDestination]),

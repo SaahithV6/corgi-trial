@@ -967,7 +967,31 @@ run("settlement records what the commitment cost", () => {
 /* ========================================================================== */
 
 run("a quote is not a transaction", () => {
-  it("writes not one journal entry, in the whole of this feature", async () => {
+  /**
+   * ── THIS ASSERTION CHANGED, AND WHAT IT CLAIMS DID NOT ─────────────────────
+   *
+   * It used to count `journal_entry` across BOTH books and assert the number
+   * did not move: "writes not one journal entry, in the whole of this feature".
+   *
+   * Migration 0053 made that literally false and left the claim intact.
+   * Accepting a quote now places a memo hold for the price it commits — the
+   * overdraft fix, `src/lib/fx/hold.ts` — so one entry IS written, in the MEMO
+   * book, exactly as a card authorisation writes one. The claim was never
+   * "nothing is recorded"; it was "the customer's money has not moved", and
+   * the memo book is off balance sheet precisely so that recording an
+   * obligation is not recording a transfer. `v_book_not_zero` holds the two
+   * books to zero independently; `9300` is under `9000`, not under `1000`.
+   *
+   * So the count is now taken PER BOOK, and each half is a stronger statement
+   * than the single number was:
+   *
+   *   financial   did not move. Not by one. An acceptance is not a transfer
+   *               and there is no code path from one to a financial posting.
+   *   memo        moved by EXACTLY ONE, and that one is the hold. Before this
+   *               change an acceptance moved neither, which is what let a
+   *               customer accept five commitments against one balance.
+   */
+  it("moves the FINANCIAL book not one entry, and the memo book by exactly the hold", async () => {
     /**
      * REPEATABLE READ, and it is what makes this assertion mean anything.
      *
@@ -981,7 +1005,14 @@ run("a quote is not a transaction", () => {
      * starts meaning "we wrote nothing", which is the claim.
      */
     await rolledBack(async (tx) => {
-      const before = await tx<{ n: bigint }[]>`SELECT count(*) AS n FROM journal_entry`;
+      const count = async (): Promise<{ financial: bigint; memo: bigint }> => {
+        const rows = await tx<{ financial: bigint; memo: bigint }[]>`
+          SELECT count(*) FILTER (WHERE book = 'financial') AS financial,
+                 count(*) FILTER (WHERE book = 'memo')      AS memo
+            FROM journal_entry`;
+        return { financial: rows[0]?.financial ?? 0n, memo: rows[0]?.memo ?? 0n };
+      };
+      const before = await count();
 
       const created = await store.createQuote(
         {
@@ -995,10 +1026,19 @@ run("a quote is not a transaction", () => {
       );
       expect(created.ok).toBe(true);
       if (!created.ok) return;
-      await store.acceptQuote({ quoteRef: created.value.quoteRef }, tx);
 
-      const after = await tx<{ n: bigint }[]>`SELECT count(*) AS n FROM journal_entry`;
-      expect(after[0]?.n).toBe(before[0]?.n);
+      // Raising the offer writes NOTHING to either book. An offer is not even
+      // an obligation.
+      const afterQuote = await count();
+      expect(afterQuote.financial).toBe(before.financial);
+      expect(afterQuote.memo).toBe(before.memo);
+
+      const accepted = await store.acceptQuote({ quoteRef: created.value.quoteRef }, tx);
+      expect(accepted.ok).toBe(true);
+
+      const afterAcceptance = await count();
+      expect(afterAcceptance.financial).toBe(before.financial);
+      expect(afterAcceptance.memo).toBe(before.memo + 1n);
     }, "isolation level repeatable read");
   });
 

@@ -78,6 +78,30 @@ export const SCREENS: readonly Screen[] = [
     external: false,
   },
   {
+    href: "/client/pots",
+    title: "Your pots",
+    summary:
+      "Sub-accounts the customer opens and moves money between — pure ledger moves, no rail, no settlement.",
+    why: "A pot cannot go negative and the DATABASE refuses it, not the form: migration 0057 added a deferred constraint trigger on journal_line, so a writer that skips movePotFunds() is refused too. It is deferred rather than immediate so a release and an earmark in one entry are judged on the END STATE \u2014 an immediate check would accept or refuse the same pair depending which line was inserted first, making arrival order a special case. Zero is legal; one cent past it is not. The two balance tiles say \u201cin your account today\u201d and \u201cevery entry\u201d because they legitimately differ by future-dated credits, and the page says which is which rather than hiding one.",
+    external: false,
+  },
+  {
+    href: "/client/disputes",
+    title: "Your disputes",
+    summary:
+      "The customer raises a claim on a settled card charge, in plain language, and watches it move.",
+    why: "Intake is the customer's half; deciding is the operator's. There is NO amount field \u2014 the claim is netCharge minus alreadyClaimed, derived server-side at the moment of the write. The filer is resolved to an actor WITH a business_id, and assert_dispute_lifecycle() demands business_id IS NULL for an authoriser, so the schema itself bars a customer from authorising their own advance. Filing twice on one charge returns the existing case rather than opening a second.",
+    external: false,
+  },
+  {
+    href: "/client/payouts",
+    title: "Send money abroad",
+    summary:
+      "A live FX quote the customer accepts before anything moves \u2014 and the money is reserved the moment they do.",
+    why: "The form posts a quote reference, never a rate: fee_cents, customer_rate_scaled and buy_minor are GENERATED ALWAYS \u2026 STORED, so a commitment cannot disagree with the rate it claims. Accepting places a real hold, and availability falls by exactly sell_cents \u2014 measured on the live book at $470,373.99 down to $1.00. Before that hold existed, two acceptances of $21,308.95 each against $35,514.93 available BOTH cleared. The second one is now refused with FX_COMMITMENT_EXCEEDS_AVAILABLE, and the refusal names the three ways out.",
+    external: false,
+  },
+  {
     href: "/onboarding",
     title: "Onboarding",
     summary:

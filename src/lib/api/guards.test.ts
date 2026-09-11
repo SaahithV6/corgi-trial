@@ -377,7 +377,12 @@ describe("the refusal register describes the surface that exists", () => {
     // accepted rail, because its seeded policy requires zero approvals and it
     // would be the one instruction here releasable with nobody having approved.
     const payments = readFileSync(join(LIB, "routes", "payments.ts"), "utf8");
-    const railEnum = /rail:\s*z\.enum\(\[([^\]]*)\]\)/.exec(payments)?.[1] ?? "";
+    // The trailing `)` is deliberately NOT anchored: `z.enum([...])` may carry
+    // a second argument (the custom `error` message that tells an integrator
+    // `internal` is refused rather than misspelt), and a regex that required
+    // `])` went red for the message rather than for the rail list — a guard
+    // failing about its own regex instead of about the thing it stands for.
+    const railEnum = /rail:\s*z\.enum\(\[([^\]]*)\]/.exec(payments)?.[1] ?? "";
     expect(railEnum).not.toBe("");
     expect(railEnum).not.toContain("internal");
     expect(railEnum).not.toContain("card");

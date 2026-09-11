@@ -23,13 +23,22 @@ export { ReconSkeleton };
  * `ReconDataSource` and knows nothing about where the numbers come from — live
  * query or fixture — except for the one thing it always shows: which of the
  * two it is looking at.
+ *
+ * `noDatabase` is resolved ONCE, in `page.tsx`, and handed to the state bar as
+ * well. It is not re-derived here. Two predicates answering three-quarters of
+ * the same question is how a screen ends up badging LIVE above a board badging
+ * FIXTURE, which is what `/dashboard` was doing until an hour ago. The flag
+ * chooses the refusal's wording and nothing else: the refusal itself arrives
+ * as a failed read, from `./unreadable.ts`, down the path below.
  */
 export async function ReconView({
   source,
   filter,
+  noDatabase = false,
 }: {
   readonly source: ReconDataSource;
   readonly filter: BreakFilter;
+  readonly noDatabase?: boolean;
 }) {
   const result = await source.load({
     ...(filter.runId === null ? {} : { runId: filter.runId }),
@@ -40,7 +49,15 @@ export async function ReconView({
     return (
       <div className="space-y-6">
         <Header />
-        <ReconErrorPanel error={result.error} />
+        {noDatabase ? (
+          <ReconErrorPanel
+            error={result.error}
+            title="This screen cannot see the file or the book"
+            description="No database is configured for this deployment, so no run was read and no break list is drawn. Nothing here says the file reconciled; nothing here could. An empty break table would have said exactly that, which is why one is not shown."
+          />
+        ) : (
+          <ReconErrorPanel error={result.error} />
+        )}
       </div>
     );
   }

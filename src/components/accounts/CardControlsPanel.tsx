@@ -22,8 +22,17 @@ import {
 import { FIXTURE_CONTROLS } from "@/lib/cards/fixtures";
 import { describeMcc } from "@/lib/cards/mcc";
 import { readAsaEnrollment, type AsaEnrollment } from "@/lib/cards/provider";
-import { readControlCoverage, type ControlCoverage } from "@/lib/cards/defaults";
-import { listCardsWithControls, listDecisions, type CardWithControls } from "@/lib/cards/store";
+// TYPE-ONLY, AND THAT IS LOAD-BEARING. `@/lib/cards/defaults` and
+// `@/lib/cards/store` both value-import `sql` from `@/lib/ledger/db`, which
+// reads `@/lib/env` at module scope and throws `EnvironmentError` without
+// `APP_DATABASE_URL`. Importing either one's FUNCTIONS here made this panel a
+// chain that killed the entire `/accounts` page module while it was being
+// loaded — including the four states on it that read nothing. The functions
+// are now reached by `await import(...)` inside `loadControls`, on the branch
+// that has already established a database exists. A type import is erased and
+// evaluates nothing.
+import type { ControlCoverage } from "@/lib/cards/defaults";
+import type { CardWithControls } from "@/lib/cards/store";
 import type { CardControls, DecisionRecord } from "@/lib/cards/types";
 import {
   CONTROL_LOADING_MS,
@@ -38,7 +47,23 @@ import {
 import { ledgerConnection } from "@/lib/ledger/queries";
 
 import { CardControlsForm, ReplayAuthorizationForm } from "./CardControlsForms";
-import { listConsoleBusinesses } from "./live-source";
+import type { CardControlsAction } from "./CardControlsForms";
+import { ConsoleErrorPanel } from "./ConsoleChrome";
+import { ACCOUNTS_NO_DATABASE } from "./unreadable";
+
+/**
+ * The two server actions this panel's forms dispatch, handed down as props.
+ *
+ * `null` on every branch that must not write: the four drawn states, and any
+ * state at all on a deployment with no database. They are reached by
+ * `await import("./CardControlsActions")` rather than imported at the top of
+ * this file, because that module value-imports `@/lib/cards/store` ->
+ * `@/lib/ledger/db` -> `@/lib/env`, which throws without `APP_DATABASE_URL`.
+ */
+type ControlActions = {
+  readonly setControls: CardControlsAction;
+  readonly replay: CardControlsAction;
+};
 
 /**
  * Card controls, enforced inside the provider's authorisation timeout.
@@ -78,16 +103,30 @@ import { listConsoleBusinesses } from "./live-source";
 export function CardControlsPanel({
   searchParams,
   businessId = null,
+  noDatabase = false,
 }: {
   readonly searchParams: Record<string, string | string[] | undefined>;
   /** Which customer. `null` = the same default the console above picks. */
   readonly businessId?: string | null;
+  /**
+   * Resolved ONCE in `page.tsx` by `hasDatabase()` and handed to this panel
+   * and to the provenance line above it, so the badge on this panel and the
+   * badge at the top of the screen cannot disagree about what was read.
+   */
+  readonly noDatabase?: boolean;
 }) {
   const view = parseControlView(searchParams);
 
   return (
     <div className="space-y-4">
-      <header>
+      {/*
+        The anchor the five panel-state links point at. Every one of them was
+        `/accounts?controls=…#card-controls` and no element in the repository
+        carried that id, so all five scrolled nowhere — on the one panel that
+        sits below a full console and a full directory, which is exactly where
+        a fragment link is load-bearing.
+      */}
+      <header id="card-controls" className="scroll-mt-4">
         <h2 className="text-base font-semibold tracking-tight">
           Card controls, decided inside the provider&rsquo;s timeout
         </h2>
@@ -111,7 +150,7 @@ export function CardControlsPanel({
       </Suspense>
 
       <Suspense key={`controls:${view}:${businessId ?? "default"}`} fallback={<ControlsSkeleton />}>
-        <ControlsSection view={view} businessId={businessId} />
+        <ControlsSection view={view} businessId={businessId} noDatabase={noDatabase} />
       </Suspense>
     </div>
   );
@@ -343,6 +382,14 @@ type ControlsData =
 
 async function loadControls(businessId: string | null): Promise<ControlsData> {
   try {
+    // Reached only from the branch that has already established a database is
+    // configured. Both of these modules value-import `@/lib/ledger/db`, and
+    // `./live-source` reaches it too; importing any of them at the top of this
+    // file is what used to kill the page before it rendered a line.
+    const { readControlCoverage } = await import("@/lib/cards/defaults");
+    const { listCardsWithControls, listDecisions } = await import("@/lib/cards/store");
+    const { listConsoleBusinesses } = await import("./live-source");
+
     const conn = await ledgerConnection();
     const businesses = await listConsoleBusinesses(conn);
     const target = businessId ?? businesses[0]?.businessId ?? null;
@@ -382,6 +429,19 @@ async function loadControls(businessId: string | null): Promise<ControlsData> {
  * note on `readControlCoverage()`. The uncontrolled figure is deliberately the
  * loud one: it is the only one that means an authorisation will be approved
  * without being judged.
+ *
+ * ─── AND WHAT THIS PANEL STILL COULD NOT TELL YOU ───────────────────────────
+ *
+ * It counts CARDS. The finding was about DECISIONS, and the two are different
+ * populations: this panel could read "45 of 938 under control" while the table
+ * at the bottom of the screen showed a page of green `approve` badges, and a
+ * reader would have no way to connect them. So the decision history below now
+ * carries `judged` on every row and says, above the table, how many of the
+ * approvals on the screen were actually judged. Re-measured 2026-09-11, later
+ * the same day: 63 provider-lane approvals, 55 of them unjudged; 936 cards,
+ * 45 under control, 137 member-only, 756 uncontrolled. The share moved from
+ * 94% to 87% and the absolute count went UP, because every suite that
+ * registers a card directly adds another uncontrolled one.
  */
 function CoveragePanel({
   coverage,
@@ -464,12 +524,29 @@ function CoverageCount({
   );
 }
 
+/**
+ * ONE PREDICATE FOR THE SOURCE AND FOR THE BADGE.
+ *
+ * `isLiveControlView(view)` alone was the third of three independent source
+ * claims on this screen: it decided whether to read the book AND what the
+ * decision-history badge said, but it knew nothing about whether a book
+ * existed. With no database it selected the live branch, `loadControls` threw
+ * inside `ledgerConnection()`, and the panel reported a read failure with a
+ * driver message for a deployment that had never had anything to read.
+ *
+ * `noDatabase` comes from `page.tsx`, resolved once by `hasDatabase()`, and is
+ * the same value the provenance line at the top of the screen badges. So the
+ * two cannot disagree, and there is exactly one thing on this page that can
+ * make the claim "a book was read".
+ */
 async function ControlsSection({
   view,
   businessId,
+  noDatabase,
 }: {
   readonly view: ControlViewState;
   readonly businessId: string | null;
+  readonly noDatabase: boolean;
 }) {
   // The loading state is not a mock of a slow read; it IS a slow read, and the
   // Suspense boundary above shows the real skeleton for as long as it takes.
@@ -478,6 +555,20 @@ async function ControlsSection({
   }
 
   if (!isLiveControlView(view)) return <FixtureSection view={view} />;
+
+  // A drawn state stays drawn without a database; a LIVE state cannot be.
+  // "No control version on this card" and "I never opened a card store" are
+  // different sentences, and the coverage panel below turns the first into
+  // three numbers a reader takes as a census of an estate.
+  if (noDatabase) {
+    return (
+      <ConsoleErrorPanel
+        error={ACCOUNTS_NO_DATABASE}
+        title="Card controls could not be read"
+        description="No database is configured for this deployment. No card, no control version and no authorisation decision was read, so no coverage figure is drawn: a nought here would be a census of an estate nobody counted."
+      />
+    );
+  }
 
   const data = await loadControls(businessId);
 
@@ -510,11 +601,24 @@ async function ControlsSection({
     );
   }
 
+  // Same reason as the reads above: `./CardControlsActions` is a `"use server"`
+  // module that value-imports `@/lib/cards/store` -> `@/lib/ledger/db`. It is
+  // reached here, on the branch that has a database, and handed to the forms
+  // as props — which is also what lets the fixture forms hold `null` and mean
+  // it rather than holding a live action behind a disabled button.
+  const { setCardControlsAction, replayAuthorizationAction } = await import(
+    "./CardControlsActions"
+  );
+  const actions: ControlActions = {
+    setControls: setCardControlsAction,
+    replay: replayAuthorizationAction,
+  };
+
   return (
     <div className="space-y-4">
       <CoveragePanel coverage={data.coverage} live />
       {data.cards.map((card) => (
-        <CardPanel key={card.cardId} card={card} live />
+        <CardPanel key={card.cardId} card={card} live actions={actions} />
       ))}
       <DecisionHistory decisions={data.decisions} live />
     </div>
@@ -564,9 +668,12 @@ function dollarsField(cents: bigint | null): string {
 function CardPanel({
   card,
   live,
+  actions,
 }: {
   readonly card: CardWithControls;
   readonly live: boolean;
+  /** `null` on a drawn row. There is no action, not a disabled one. */
+  readonly actions: ControlActions | null;
 }) {
   const c = card.controls;
   const label = card.nickname ?? `card ••${card.lastFour ?? "????"}`;
@@ -601,6 +708,7 @@ function CardPanel({
           blockedMccs={c?.blockedMccs ?? []}
           frozen={c?.cardState === "frozen"}
           live={live}
+          action={actions?.setControls ?? null}
         />
 
         <details className="rounded border border-border bg-surface px-3 py-2">
@@ -622,6 +730,7 @@ function CardPanel({
               cardId={card.cardId}
               cardToken={card.providerCardToken}
               live={live}
+              action={actions?.replay ?? null}
             />
           </div>
         </details>
@@ -704,6 +813,45 @@ function LimitRow({
 /* The decision history                                                       */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The badge tone for one decision's outcome.
+ *
+ * THREE TONES FOR TWO OUTCOMES, because `approve` covers two different facts.
+ * An approval a control cleared is `positive`. An approval NO control was
+ * consulted for — rules 1 to 4 and 15, see `UNJUDGED_RULES` in
+ * `@/lib/cards/types` — is `quiet`: it is not a failure and painting it red
+ * would be a second false claim, but it is not evidence that anything worked
+ * either, and it had been wearing the same green badge as an approval that was
+ * judged. A decline stays `negative` whether or not it was judged; the
+ * unjudged ones are the fail-closed rows and the table names the rule.
+ */
+function outcomeTone(d: DecisionRecord): "positive" | "negative" | "quiet" {
+  if (d.outcome === "decline") return "negative";
+  return d.judged ? "positive" : "quiet";
+}
+
+/**
+ * How many of these approvals were actually judged.
+ *
+ * Counted over the rows ON THE SCREEN and not over the book, deliberately: the
+ * table under it is the population, so a reader can check the number by
+ * counting badges. The estate-wide figure is the coverage panel's job.
+ */
+function judgedSummary(decisions: readonly DecisionRecord[]): string | null {
+  const approvals = decisions.filter((d) => d.outcome === "approve");
+  if (approvals.length === 0) return null;
+  const judged = approvals.filter((d) => d.judged).length;
+  if (judged === approvals.length) {
+    return `All ${approvals.length} approval(s) below were judged against a control.`;
+  }
+  return (
+    `${judged} of ${approvals.length} approval(s) below were judged against a control. ` +
+    `The other ${approvals.length - judged} were approved by a rule that compared the ` +
+    `authorisation with nothing — a card with no controls, or a token this book does not ` +
+    `issue controls for. They are approvals; they are not evidence that a control worked.`
+  );
+}
+
 function DecisionHistory({
   decisions,
   live,
@@ -711,12 +859,18 @@ function DecisionHistory({
   readonly decisions: readonly DecisionRecord[];
   readonly live: boolean;
 }) {
+  const summary = judgedSummary(decisions);
   return (
     <Panel
       title="Every decision, with the rule that fired and how long it took"
       description="Append-only. A decline a customer disputes in March has to be explainable in September, so each row keeps the rule, the figures it compared, the control version it was judged under, and the latency in microseconds."
       actions={<Badge tone={live ? "positive" : "quiet"}>{live ? "live" : "fixture"}</Badge>}
     >
+      {summary === null ? null : (
+        <p className="border-b border-border px-5 py-3 max-w-prose text-[13px] leading-relaxed text-muted">
+          {summary}
+        </p>
+      )}
       {decisions.length === 0 ? (
         <p className="px-5 py-8 max-w-prose text-sm text-muted">
           No authorisation decisions on this customer&rsquo;s cards yet. Either
@@ -759,8 +913,18 @@ function DecisionHistory({
                   </td>
                   <td className={`${TD_CLASS} font-mono text-xs`}>{d.mcc ?? "—"}</td>
                   <td className={TD_CLASS}>
-                    <Badge tone={d.outcome === "approve" ? "positive" : "negative"}>
-                      {d.outcome}
+                    {/*
+                      AN UNJUDGED APPROVAL IS NOT A GREEN TICK, and this cell is
+                      where that stops being a comment and starts being visible.
+                      55 of the 63 provider-lane approvals in this book were
+                      produced by a rule that compared the authorisation with
+                      nothing, and every one of them rendered here in the same
+                      positive badge as an approval a limit had actually
+                      cleared. `quiet` rather than `negative`: nothing went
+                      wrong, and saying it did would be the opposite over-claim.
+                    */}
+                    <Badge tone={outcomeTone(d)}>
+                      {d.outcome === "approve" && !d.judged ? "approve · unjudged" : d.outcome}
                     </Badge>
                     <span className="mt-0.5 block font-mono text-[11px] text-muted">
                       {d.resultCode}
@@ -822,7 +986,9 @@ function FixtureSection({ view }: { readonly view: ControlViewState }) {
   };
 
   const decisions: readonly DecisionRecord[] =
-    view === "empty" ? [] : [FAIL_CLOSED_DECISION, DECLINED_FUEL_DECISION, APPROVED_DECISION];
+    view === "empty"
+      ? [UNJUDGED_APPROVAL_DECISION]
+      : [FAIL_CLOSED_DECISION, DECLINED_FUEL_DECISION, APPROVED_DECISION];
 
   // The fixture states carry a fixture coverage figure for the same reason the
   // rest of this section does: a state that silently dropped a panel the live
@@ -836,7 +1002,7 @@ function FixtureSection({ view }: { readonly view: ControlViewState }) {
   return (
     <div className="space-y-4">
       <CoveragePanel coverage={coverage} live={false} />
-      <CardPanel card={card} live={false} />
+      <CardPanel card={card} live={false} actions={null} />
       <DecisionHistory decisions={decisions} live={false} />
     </div>
   );
@@ -864,6 +1030,9 @@ const FAIL_CLOSED_DECISION: DecisionRecord = {
   outcome: "decline",
   resultCode: "VELOCITY_EXCEEDED",
   rule: "control_store_unavailable",
+  // Nothing was compared: the read never came back. A decline, and an UNJUDGED
+  // one — `judged` is orthogonal to `outcome` for exactly this row.
+  judged: false,
   reason:
     "The card control store did not answer inside its deadline, so the controls on this card could not be honoured. This system declines rather than guesses.",
   inputs: {
@@ -892,9 +1061,57 @@ const DECLINED_FUEL_DECISION: DecisionRecord = {
   outcome: "decline",
   resultCode: "UNAUTHORIZED_MERCHANT",
   rule: "mcc_blocked",
+  judged: true,
   reason: "Merchant category 5542 is blocked on this card (control version 3).",
   inputs: { blocked_mccs: "5542,7995", matched_mcc: "5542", amount_cents: "5000" },
   decisionLatencyUs: 7_431,
+  source: "harness",
+};
+
+/**
+ * THE ROW THIS WHOLE DISTINCTION IS ABOUT, and the reason `?controls=empty` no
+ * longer shows an empty decision table.
+ *
+ * `empty` is the card that has never had a control set. It used to render the
+ * card panel saying so and then a decision table with nothing in it, which made
+ * the state look harmless — the one screen in the build whose entire subject is
+ * an uncontrolled card showed none of what an uncontrolled card actually does.
+ * What it does is approve, at the terminal, in 4 ms, with `APPROVED` on the
+ * wire, having compared the authorisation with nothing. On the live book that
+ * was 44 of 63 provider-lane approvals.
+ *
+ * So the empty state shows one, and it is the only fixture row that carries
+ * `judged: false` on an `approve`.
+ */
+const UNJUDGED_APPROVAL_DECISION: DecisionRecord = {
+  id: "fixture-unjudged-approval",
+  decidedAt: "2026-09-10T18:22:09.000Z",
+  provider: "lithic",
+  providerAuthToken: "c9e4a310-55bd-4f21-8a70-2c963f66afa6",
+  providerCardToken: "fixture-card-token",
+  cardId: "00000000-0000-4000-8000-00000000c0de",
+  lastFour: "2081",
+  nickname: "Contractor card, just issued",
+  controlVersion: null,
+  amountCents: 5_000n,
+  mcc: "5542",
+  merchantDescriptor: "CORGI FUEL PUMP 14",
+  requestStatus: "AUTHORIZATION",
+  outcome: "approve",
+  resultCode: "APPROVED",
+  rule: "no_controls_configured",
+  judged: false,
+  reason:
+    "No controls have been set on this card and it belongs to no member. Approved. A card with no controls is not a card with a control that failed.",
+  inputs: {
+    card_id: "00000000-0000-4000-8000-00000000c0de",
+    amount_cents: "5000",
+    mcc: "5542",
+    control_version: null,
+    member_id: null,
+    judged: false,
+  },
+  decisionLatencyUs: 4_118,
   source: "harness",
 };
 
@@ -915,6 +1132,7 @@ const APPROVED_DECISION: DecisionRecord = {
   outcome: "approve",
   resultCode: "APPROVED",
   rule: "within_controls",
+  judged: true,
   reason: "Within every control on this card (control version 3).",
   inputs: {
     daily_limit_cents: "5000",

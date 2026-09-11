@@ -1425,3 +1425,158 @@ gate with the node runtime pinned and caching off, that exactly one route export
 `POST` and none exports `PUT`/`PATCH`/`DELETE`, and that every endpoint A1–A8
 claims is absent really is absent — by **method and path**, so a refusal cannot
 quietly become a lie.
+
+---
+
+## Audit log — 2026-09-11, every endpoint driven by a real call
+
+This section is a measurement, not a description. Each row below was produced by
+an actual HTTP request; nothing here is inferred from reading the handler. Where
+a thing was **not** reached it says so, because a skip is not a pass.
+
+Local runs were against `next dev` on `127.0.0.1:3117` with a probe grant minted
+for this audit (one business, one non-approving actor — the `API_TOKENS` shape in
+`.env.example`). Production runs were against
+`https://corgi-trial-psi.vercel.app`, unauthenticated only, because the
+production credential is not held by the person running the audit and because a
+read that needs a token is not a read to guess at.
+
+### The public surface
+
+| method | path | auth | happy path (measured) | refusals seen, by code |
+| --- | --- | --- | --- | --- |
+| GET | `/api/v1` | bearer | `200` — index, echoes the grant's business and `can_approve: false` | `MISSING_BEARER_TOKEN` 401, `UNKNOWN_TOKEN` 401, `ACTOR_MAY_APPROVE` 403 |
+| GET | `/api/v1/accounts` | bearer | `200` — 2100 plus pot leaves, each with `payable` and a `payable_note` | `UNKNOWN_QUERY_PARAMETER` 400 (on `?business_id=`) |
+| GET | `/api/v1/accounts/{code}` | bearer | `200` | `ACCOUNT_NOT_FOUND` 404 (`9999`) |
+| GET | `/api/v1/accounts/{code}/balance` | bearer | `200` — ledger, available, and the difference itemised into three named terms | — |
+| GET | `/api/v1/accounts/{code}/balance?as_of_…` | bearer | `200` on both time axes | — |
+| GET | `/api/v1/transactions` | bearer | `200` — cursor-paged | — |
+| POST | `/api/v1/payments` | bearer | `201 queued_for_human_approval`, `money_moved: false` | see the write table below |
+| GET | `/api/v1/payments/{id}` | bearer | `200` — instruction plus its event stream | `NO_SUCH_INSTRUCTION` 404 |
+| GET | `/api/v1/payees` | bearer | `200` — 50 entries with findings, freshness and acknowledgement | — |
+| GET | `/api/v1/statements` | bearer | `200` — closed days with watermarks | — |
+| GET | `/api/v1/statements/{business_date}` | bearer | `200` — published AND recomputed, `reproduced: true` with both hashes equal | `NO_STATEMENT_PUBLISHED` 404, `INVALID_DATE` 400 |
+| GET | `/api/v1/reconciliation/breaks` | bearer | `200` — open breaks with severity and ageing | — |
+| GET | `/api/v1/limits` | bearer | `200` — the refusal list, served live | — |
+
+**A note on the statement endpoint, because it nearly went down as unverified.**
+Against the business used for most of this audit, every closed day the index
+offered answered `NO_STATEMENT_PUBLISHED` — `versions_published: 0` on all
+sixteen. That is a state and not a failure (a day can close with nothing
+published), but it also means the success path could not be reached from there,
+and "the handler looks right" is not a measurement. It was reached instead
+against a business that does hold published versions: `200`, with the stored
+`content_hash` and the `recomputed_hash` equal and `reproduced: true` — recomputed
+at request time against the open ledger, which is the distinction that matters,
+because a reproduction claim made with nothing to reproduce from is the exact
+defect this audit was commissioned over.
+
+**Genuinely not reached**, and therefore claims of the code rather than
+measurements: the whole `KYB_*` family (every business used here is approved),
+`PAYEE_STANDING_CHECK_UNAVAILABLE`, `INVALID_CURSOR`, `POLICY_MISSING`,
+`UNAVAILABLE` and `INTERNAL_ERROR`. Reaching the last three means breaking the
+database on purpose under a live book, which was judged the wrong trade.
+
+### Every refusal `POST /api/v1/payments` produced, measured
+
+| sent | got |
+| --- | --- |
+| no `Idempotency-Key` | `400 IDEMPOTENCY_KEY_REQUIRED` |
+| `"amount_cents": 100` as a JSON number | `400 INVALID_ARGUMENTS`, naming the double |
+| `"rail": "internal"` | `400 INVALID_ARGUMENTS` — **see the finding below** |
+| $100 on a token capped at $1 | `422 ABOVE_TOKEN_CEILING`, both figures in `details` |
+| a warned payee nobody has signed for | `422 PAYEE_WARNING_UNACKNOWLEDGED`, carrying `/payees?payee=<id>&sign=1` |
+| a clean payee, first time | `201`, `money_moved: false`, `state: requested` |
+| the same key, byte-identical body | `200`, `replayed: true`, `idempotency-replayed: true`, **same instruction id** |
+| the same key, a different amount | `409 IDEMPOTENCY_KEY_REUSED`, both content hashes in `details` |
+| a seventh write inside one minute | `429 WRITE_RATE_LIMITED`, `retry_after_seconds: 3` |
+
+The idempotency claim was checked against the table afterwards and not only
+against the two response bodies: **one** `payment_instruction` row exists for
+that key. The 409 wrote nothing.
+
+### The scheduled routes
+
+Every one of the five, by both `GET` and `POST`, with no credential, with a
+forged `x-vercel-cron: 1`, and with a bearer that matches nothing — thirty
+requests locally and ten against production. **All thirty-one distinct
+combinations answered `401 UNAUTHORISED`.**
+
+```
+for p in /api/drain /api/cron/accrual /api/cron/holds /api/cron/outbound /api/cron/standing; do
+  curl -s -o /dev/null -w "%{http_code} $p\n"                      https://corgi-trial-psi.vercel.app$p
+  curl -s -o /dev/null -w "%{http_code} $p (forged)\n" -H 'x-vercel-cron: 1' https://corgi-trial-psi.vercel.app$p
+done
+```
+
+Production answered `401` to all ten, and every response carried
+
+```
+x-stripped-request-headers: x-vercel-cron
+```
+
+which is `src/middleware.ts` proving from outside the deployment that the header
+was deleted before any handler saw it. That is the one control on this list that
+can be demonstrated by a stranger with curl.
+
+`CRON_SECRET` is now set on the Vercel project (created four hours before the
+check; the live production deployment is two hours old, so the running build
+carries it). The **accepting** path in production is deliberately not
+demonstrated: proving it means making a money-posting cron run on the real book
+on demand, and `src/app/api/cron/_auth.test.ts` proves the same predicate
+locally for nothing.
+
+### Copy-pasteable, against the deployed URL
+
+```bash
+BASE=https://corgi-trial-psi.vercel.app
+TOKEN=...                      # the grant issued for your business
+
+# No anonymous read exists. This is the first thing to check.
+curl -i  $BASE/api/v1
+
+# The index, the accounts, one balance with its difference itemised.
+curl -s  -H "authorization: Bearer $TOKEN" $BASE/api/v1
+curl -s  -H "authorization: Bearer $TOKEN" $BASE/api/v1/accounts
+curl -s  -H "authorization: Bearer $TOKEN" $BASE/api/v1/accounts/2100/balance
+curl -s  -H "authorization: Bearer $TOKEN" "$BASE/api/v1/transactions?limit=5"
+curl -s  -H "authorization: Bearer $TOKEN" $BASE/api/v1/payees
+curl -s  -H "authorization: Bearer $TOKEN" $BASE/api/v1/statements
+curl -s  -H "authorization: Bearer $TOKEN" "$BASE/api/v1/reconciliation/breaks?limit=5"
+curl -s  -H "authorization: Bearer $TOKEN" $BASE/api/v1/limits
+
+# A scope-widening parameter is REFUSED rather than ignored.
+curl -s  -H "authorization: Bearer $TOKEN" "$BASE/api/v1/accounts?business_id=$(uuidgen)"
+
+# The write. This queues a request for a human; it moves no money and cannot.
+curl -i -X POST $BASE/api/v1/payments \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -H 'idempotency-key: INV-2026-0041' \
+  -d '{"rail":"ach","amount_cents":"12500",
+       "destination":{"type":"ach","holder_name":"Northwind Industrial LLC",
+                      "routing_number":"011401533","account_number_last4":"7742",
+                      "account_type":"checking"},
+       "reason":"invoice 2026-0041"}'
+
+# Send it a SECOND time, byte-identical: 200, replayed:true, the same id, no new row.
+# Send it a THIRD time with a different amount_cents: 409 IDEMPOTENCY_KEY_REUSED.
+
+# Every scheduled route, unauthenticated and with the forgeable platform header.
+curl -i $BASE/api/drain
+curl -i $BASE/api/drain -H 'x-vercel-cron: 1'     # note x-stripped-request-headers
+```
+
+### One finding this audit fixed, and one it only records
+
+**Fixed.** `rail: "internal"` came back as
+`Invalid option: expected one of "ach"|"usdc"|"wire"` — a message
+indistinguishable from a typo, for a rail that is refused on purpose and for a
+reason (its seeded policy is `threshold 0, required_approvals 0`, so an
+instruction raised on it could be released with nobody having approved
+anything). Both schemas — `src/lib/api/routes/payments.ts` for HTTP and
+`src/lib/mcp/tool-initiate-payment.ts` for the agent surface — now carry that
+sentence and point at A5, which already held the argument in prose.
+
+**Recorded, not fixed.** `GET /api/v1/statements/{business_date}` has no
+measured success path; see above.

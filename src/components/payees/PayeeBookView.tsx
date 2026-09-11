@@ -29,6 +29,13 @@ export { PayeeSkeleton };
  * attached and a row at the end of it; a render is not one, and a page that
  * called two third-party providers because somebody hit reload would be both
  * a bill and a lie about when the check happened.
+ *
+ * `noDatabase` is resolved ONCE, in `page.tsx`, and handed to the state bar as
+ * well. It is not re-derived here. Two predicates answering three-quarters of
+ * the same question is how a screen ends up badging one thing above a board
+ * badging another. The flag chooses the refusal's wording and nothing else:
+ * the refusal itself arrives as a failed read, from `./unreadable.ts`, down
+ * the path below.
  */
 export async function PayeeBookView({
   source,
@@ -43,10 +50,20 @@ export async function PayeeBookView({
    * FIXTURE DATA would break it worse.
    */
   businesses = [],
+  /**
+   * No database is configured for this deployment.
+   *
+   * Not a sixth demo state — it is what this deployment is, and the URL cannot
+   * ask for it. It only changes the refusal's wording; the refusal arrives as
+   * a failed read like any other, so there is no second path on which this
+   * screen could be drawn from nothing.
+   */
+  noDatabase = false,
 }: {
   readonly source: PayeeDataSource;
   readonly filter: PayeeFilter;
   readonly businesses?: readonly BusinessChoice[];
+  readonly noDatabase?: boolean;
 }) {
   const writable = businesses.length > 0;
   const result = await source.load(
@@ -57,7 +74,16 @@ export async function PayeeBookView({
     return (
       <div className="space-y-6">
         <Header />
-        <PayeeErrorPanel error={result.error} />
+        {noDatabase ? (
+          <PayeeErrorPanel
+            error={result.error}
+            title="This screen cannot see the payee book"
+            description="No database is configured for this deployment, so no payee was read, no check was found and no signature was counted. Nothing here says a destination was confirmed; nothing here could. An empty book would have said the customer has no beneficiaries, which is why one is not drawn."
+            note="This is not a payment gate that is down. The check digit is arithmetic that runs inside the payment transaction, and an impossible routing number cannot be stored as a payee in the first place — that is a CHECK constraint. But a deployment with no database has no payee to pay and no transaction to run the arithmetic in, so nothing here is a reassurance about an outbound payment either."
+          />
+        ) : (
+          <PayeeErrorPanel error={result.error} />
+        )}
       </div>
     );
   }
@@ -98,9 +124,10 @@ export async function PayeeBookView({
 
       {view.source === "fixture" ? (
         <p className="max-w-prose text-xs leading-relaxed text-muted">
-          These rows are a fixture. Either a demo state other than <code>default</code> is
-          selected, or no database is configured — see the state bar above. Nothing on this
-          screen is a statement about a real payee.
+          These rows are a fixture, because a demo state other than <code>default</code> is
+          selected. That is now the only reason one is drawn: the default state reads the
+          database, and where there is none it refuses rather than falling back to this.
+          Nothing on this screen is a statement about a real payee.
         </p>
       ) : null}
 
@@ -141,12 +168,22 @@ export async function PayeeBookView({
             the payment — a warning is overridable, by anybody, in one step. It is a refusal to
             let the override be implicit.
           </p>
-          <p className="mt-2">
-            Open one below. The signature form names the findings it answers, and the row it
-            writes cannot be edited or withdrawn. A refused payment links straight to it:{" "}
-            <code>/payees?payee=&lt;id&gt;&amp;sign=1</code> is the URL{" "}
-            <code>PAYEE_WARNING_UNACKNOWLEDGED</code> now carries.
-          </p>
+          {writable ? (
+            <p className="mt-2">
+              Open one below. The signature form names the findings it answers, and the row it
+              writes cannot be edited or withdrawn. A refused payment links straight to it:{" "}
+              <code>/payees?payee=&lt;id&gt;&amp;sign=1</code> is the URL{" "}
+              <code>PAYEE_WARNING_UNACKNOWLEDGED</code> now carries.
+            </p>
+          ) : (
+            <p className="mt-2">
+              The signature form is on the live screen. This state hands the book no business
+              ids, so it is read-only and there is no form here to open — the same reason the
+              row below gives. A refused payment links straight to the real one:{" "}
+              <code>/payees?payee=&lt;id&gt;&amp;sign=1</code> is the URL{" "}
+              <code>PAYEE_WARNING_UNACKNOWLEDGED</code> carries.
+            </p>
+          )}
         </Note>
       ) : null}
 

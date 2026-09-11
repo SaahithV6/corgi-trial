@@ -160,10 +160,12 @@ const LIVE_PREFIXES = [
  * old commit either. AF5 is precommit.sh's rule applied to the one place
  * precommit.sh structurally cannot look.
  */
+const WEBHOOK_SECRET_SHAPE = ["whsec", "_[A-Za-z0-9+/]{20,}"].join("");
+
 const HISTORY_SHAPES = [
   ["access", "-(sandbox|development|production)-[a-f0-9]{8}-"].join(""),
   ["access", "-token-[a-f0-9]{8}-"].join(""),
-  ["whsec", "_[A-Za-z0-9+/]{20,}"].join(""),
+  WEBHOOK_SECRET_SHAPE,
   ["npg", "_[A-Za-z0-9]{16,}"].join(""),
   // A live prefix followed by KEY MATERIAL. The bare prefix is a pattern, not
   // a key: DECISIONS.md, docs/EVALUATION.md and .secretscanignore all print it
@@ -185,6 +187,82 @@ const KNOWN_PUBLIC = [
   // proves the environment layer refuses a live key at boot.
   [LIVE_PREFIXES[0], "abc123"].join(""),
 ];
+
+/**
+ * A `whsec_` string that CANNOT BE A SIGNING KEY, decided from the string
+ * itself rather than from where it lives.
+ *
+ * THE FALSE POSITIVES THIS REMOVES, AND WHY A FILENAME EXEMPTION WOULD BE THE
+ * WRONG SHAPE. AF5's history scan flagged three of them:
+ * `src/lib/chaos/sign.ts`, `src/lib/chaos/sign.test.ts` and
+ * `src/lib/cards/asa.test.ts`. Every `whsec_` value those files have EVER held
+ * across all 110 commits is one of four strings: base64 of
+ * `chaos-mode-development-only-not-a-real-secret`, base64 of
+ * `not-the-chaos-key`, and forty-three `A`s and forty-three `B`s. Exempting
+ * the three files would have switched the guard off for the two modules that
+ * do webhook signature verification — the exact place a real `whsec_` would
+ * one day be pasted.
+ *
+ * So the test is the property that makes a webhook secret a secret: ENTROPY. A
+ * Standard Webhooks key is base64 of random bytes. Two things cannot be that:
+ *
+ *   a. a body that is one character repeated — zero bits, whatever its length;
+ *   b. a body that base64-decodes to a readable ASCII PHRASE of three or more
+ *      hyphen- or underscore-separated words AND SAYS IT IS NOT A SECRET. The
+ *      phrase alone is not enough: a human-chosen signing secret is also a
+ *      phrase, and `base64("my-shared-webhook-secret")` must stay red. So the
+ *      decoded text has to carry a disclaiming word — not, never, fake,
+ *      fixture, dummy, sample, example, placeholder, test, dev/development
+ *      only. Both fixtures here do: `not-the-chaos-key` and
+ *      `chaos-mode-development-only-not-a-real-secret`. A real key cannot
+ *      become exempt by being renamed, and a passphrase cannot become exempt
+ *      by being a passphrase.
+ *
+ * `whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw` — the published test vector, and
+ * the closest thing here to a real key — decodes to non-printable bytes and is
+ * NOT exempted by this function; it is in KNOWN_PUBLIC below, by value, for a
+ * different reason.
+ */
+function isFabricatedWebhookSecret(value) {
+  const body = value.replace(/^whsec_/, "").replace(/=+$/, "");
+  if (body.length === 0) return false;
+  if (/^(.)\1*$/.test(body)) return true;
+  let decoded;
+  try {
+    decoded = Buffer.from(body, "base64").toString("utf8");
+  } catch {
+    return false;
+  }
+  if (!/^[ -~]+$/.test(decoded)) return false;
+  if (!/^[A-Za-z0-9]+(?:[ _.-][A-Za-z0-9]+){2,}$/.test(decoded)) return false;
+  return /\b(no|not|never|fake|dummy|fixture|sample|example|placeholder|test|dev|development)\b/i.test(decoded);
+}
+
+/**
+ * THE RED REGISTER — the reds that are known, argued and still red.
+ *
+ * Keyed by the exact `file :: shape` pair AF5's history scan prints. A pair on
+ * this register prints its written argument beside it; a pair that is NOT on it
+ * prints, in those words, that no written argument covers it.
+ *
+ * IT EXEMPTS NOTHING. The assertion fails either way — this is a report, not an
+ * allowlist — and that is the point: an exception list that silently absorbs a
+ * member nobody wrote an argument for is the failure mode this whole pass
+ * exists to remove. A new secret committed next to an old one must not inherit
+ * the old one's excuse by standing near it.
+ *
+ * The shape is borrowed from the RED_REGISTER a sibling pass added for
+ * dbcheck's four known invariant reds, deliberately, so the two read alike.
+ */
+const RED_REGISTER = new Map([
+  [
+    ["docs/EVALUATION.md :: access", "-(sandbox|development|"].join(""),
+    "DECISIONS 023. Our own evaluator quoted a Plaid sandbox token while reporting it; the tip is scrubbed and " +
+      "the token returns INVALID_ACCESS_TOKEN, so it authenticates nothing. Step 3 of that decision — purging the " +
+      "history — is NOT DONE and is BLOCKED: filter-branch plus a force push is irreversible and needs an explicit " +
+      "call from the repo owner. Red until that call is taken.",
+  ],
+]);
 
 /** Files the tree scans skip, with the reason printed in the evidence. */
 const SCAN_EXEMPT = new Map([
@@ -422,6 +500,29 @@ function readIfPresent(rel) {
   }
 }
 
+/**
+ * The named (table, column) pairs scripts/dbcheck.mjs exempts from "no stored
+ * balance column", read out of that file rather than retyped here.
+ *
+ * Returns null when the list cannot be read, and every caller must treat null
+ * as UNKNOWN rather than as "there are no exemptions": a parse that silently
+ * returns an empty list would turn a paid-for exemption into a violation, and
+ * one that silently returns everything would turn a violation into a pass.
+ *
+ * The precedent is src/lib/chaos/invariants.test.ts, which parses dbcheck's
+ * invariant array out of the same file for the same reason — two lists that
+ * must agree, held in one place.
+ */
+function storedBalanceExceptions() {
+  const src = readIfPresent("scripts/dbcheck.mjs");
+  if (src === null) return null;
+  const block = src.match(/const STORED_BALANCE_EXCEPTIONS\s*=\s*\[([\s\S]*?)\n\];/);
+  if (block === null) return null;
+  const pairs = [...block[1].matchAll(/\[\s*"([A-Za-z0-9_]+)"\s*,\s*"([A-Za-z0-9_]+)"\s*\]/g)]
+    .map((m) => [m[1], m[2]]);
+  return pairs.length > 0 ? pairs : null;
+}
+
 /** Strip the obvious comment forms so a prose mention is not read as code. */
 function isCommentLine(line) {
   const t = line.trim();
@@ -509,6 +610,151 @@ const CHECKS = [];
 const define = (section, id, title, run) => CHECKS.push({ section, id, title, run });
 
 /* -------------------------------------------------------------------------- */
+/* CHECK REACH — the population each check ranges over                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * WHAT EACH CHECK LOOKS AT, AND WHAT IT DELIBERATELY DOES NOT.
+ *
+ * scripts/dbcheck.mjs §8 is the precedent and the argument: a guard whose
+ * PREDICATE is fine but whose POPULATION is narrower than the claim printed
+ * beside it converts an unexamined risk into a green tick, and a green tick is
+ * believed. `v_standing_order_double_fire` could not return a row under any
+ * state of the database, and its emptiness was quoted in a test, a document and
+ * in THIS FILE as proof that a scheduled payment cannot fire twice.
+ *
+ * So every check states its reach in its own evidence, under its own heading,
+ * where a reader is already looking — not in a document somebody has to find.
+ * Two strings: what it examines, and what it does not.
+ *
+ * COVERAGE IS COMPUTED FROM CHECKS, NEVER FROM THIS MAP. A check with no entry
+ * here is a hard FAILURE of that check, by the same recorder as everything
+ * else — because the cheapest way out of writing a difficult reach line must
+ * never be to leave the line out.
+ */
+const CHECK_REACH = new Map([
+  ["AF1", [
+    "the origin under test (scheme and host), all 11 STATIC console routes answering from it, and every tracked .md for a loopback URL — localhost, 127.0.0.1, 0.0.0.0 or [::1], with a scheme or a port — on a line about the deployment or the submission",
+    "the dynamic routes /accounts/[accountId] and /accounts/holds/[holdId], which need an id coreloop.mjs creates; *.local.md; a document that claims local-only running in PROSE without printing a loopback URL, which this check can be dodged by and the 'deployed URL is named in README and DEMO' assertion below is what holds that line; and the submission email, the one place a video could still stand in for the URL",
+  ]],
+  ["AF2", [
+    "every integration slot /api/health enumerates, read three times seconds apart, plus every tracked .md diffed against that endpoint by audit-claims.mjs",
+    "whether the provider sandbox is itself telling the truth, and any integration the endpoint does not enumerate — an omitted slot cannot be audited by reading the endpoint",
+  ]],
+  ["AF3", [
+    "all 35 money tables: every tracked .ts/.tsx/.mjs/.js/.sql/.sh file for an UPDATE/DELETE/TRUNCATE naming one, corgi_app's effective privileges and its information_schema grants, the append-only triggers read from pg_trigger, a real refused UPDATE on statement/payment_instruction/pot, and the append-only half of scripts/dbcheck.mjs",
+    "webhook_inbox, which is the provider's testimony rather than our books and holds the one sanctioned column-level UPDATE grant; mutation performed by the table OWNER or by a migration, which privileges never bind; SQL assembled at runtime from fragments no single line contains; the 4 SCAN_EXEMPT files; and dbcheck's non-mutation failures, which are attributed to G2",
+  ]],
+  ["AF4", [
+    "every .env key with a decisive shape or base URL, all tracked files for a live prefix followed by key material, and the deployed /api/health evidence",
+    "Vercel's own environment, observable only through what /api/health reports; opaque provider keys with no test/live marker, where the base URL is what settles it; and whether a seeded identity belongs to a real person, which is not decidable mechanically",
+  ]],
+  ["AF5", [
+    "every commit on every ref, every file in each, against five credential shapes; plus every secret-shaped value currently in .env, pickaxed with git log -S",
+    "objects unreachable from any ref; a secret that was never in .env and matches none of the five shapes — a provider whose keys are opaque strings can be committed here unnoticed; whether a flagged string still authenticates, except for a Plaid token readable at the tip; and the SCAN_EXEMPT files",
+  ]],
+  ["AF6", [
+    "every non-test module under src/lib/ for a file header, DECISIONS.md's timestamps and their order, and the git history of DECISIONS.md",
+    "whether the author can explain any given line, which is the rule itself and is why this check is UNKNOWN by construction; src/app, scripts/ and the tests",
+  ]],
+  ["NN1", [
+    "the deployed console's role switch with and without the corgi_demo_role cookie, the seeded staff actors in the database, and docs/DEMO.md",
+    "whether a human can log in with the published credentials, and roles scoped to a business rather than to Corgi staff",
+  ]],
+  ["NN2", [
+    "the triggers on journal_entry and journal_line, both clock columns, the three balance views, and one real bitemporal as-of call to the deployed MCP surface",
+    "the arithmetic of the entries themselves — dbcheck's trial balance, run by AF3, is what proves that — and any past-date balance not reachable through get_balance",
+  ]],
+  ["NN3", [
+    "every slot /api/health enumerates, and the subset the brief marks Must be live",
+    "whether a live slot is pointed at a sandbox (AF4) and whether any document contradicts it (AF2)",
+  ]],
+  ["NN4", [
+    "an unsigned POST to each deployed webhook route, the uniqueness constraint on webhook_inbox, the inbox state vocabulary, receipts per provider in the live book, and the existence of the drain endpoint",
+    "a genuinely signed replay and the out-of-order path itself — livefire attacks 8 and 4, cited rather than run",
+  ]],
+  ["NN5", [
+    "the entry_type vocabulary, the live book's reversal count, and reversals whose value_date precedes their booking_time",
+    "whether any particular correction is arithmetically right, which journal_entry_reversal_exact and dbcheck carry",
+  ]],
+  ["NN6", [
+    "the maker-checker trigger, the deployed source of assert_maker_checker(), and every agent actor's can_approve",
+    "the refusal happening under a real request — livefire attack 5, cited",
+  ]],
+  ["NN7", [
+    "the deployed /reconciliation screen, the recon views, break kinds in the live book, and the USDC puller's existence",
+    "whether a break is correctly aged or ever resolved, and the reconciliation run itself (coreloop leg 7, cited)",
+  ]],
+  ["NN8", [
+    "the deployed MCP tool list and its annotations, an unauthenticated call, docs/AGENT-LIMITS.md, and whether docs/MCP.md publishes a bearer token",
+    "what a write tool does when called — only tools/list and reads are issued from here — and limits enforced at runtime rather than declared",
+  ]],
+  ["NN9", [
+    "every base-table column type in the deployed schema, every CREATE TABLE body in db/migrations, and every non-test .ts/.tsx under src/ for a decimal-creating operation on a money-named expression",
+    "view columns, where SUM(bigint) is an exact numeric rather than a float; test files and scripts/; and float arithmetic on values not named like money",
+  ]],
+  ["NN10", [
+    "DECISIONS.md's entry count, its timestamps, and whether it records assumptions and cuts",
+    "whether any entry is true, and the 'as you go' half, which is AF6's git-history proxy",
+  ]],
+  ["G1", [
+    "every balance-shaped column on every BASE TABLE in the deployed schema, against the named (table, column) exemptions read from scripts/dbcheck.mjs",
+    "views, which is where a derived balance is supposed to live; a stored balance under a column name containing neither 'balance' nor 'available_cents', which this check and dbcheck's check 5 are both blind to by the same predicate; and whether an exempt figure re-derives — dbcheck check 5b, cited",
+  ]],
+  ["G2", [
+    "the card_event_kind vocabulary, v_hold_release_drift, and every card-hold invariant scripts/dbcheck.mjs runs",
+    "the lifecycle driven end to end against production — livefire attack 2, cited",
+  ]],
+  ["G3", [
+    "the settlement event kinds and the row count of rail_event_semantics",
+    "whether any specific provider event is mapped correctly, and the force-post case Lithic's sandbox will not produce (docs/RAIL-SEMANTICS.md)",
+  ]],
+  ["G4", [
+    "the webhook_inbox_state vocabulary and the two columns that distinguish a park from a failure",
+    "the matcher's behaviour on a real out-of-order delivery — livefire attack 4, cited",
+  ]],
+  ["G5", [
+    "the rail vocabulary and ACH return/reversal entries in the live book",
+    "the return CODES themselves, which the ACH adapter carries and docs/RAIL-SEMANTICS.md maps",
+  ]],
+  ["G6", [
+    "both clock columns on both money tables, and entries where the two clocks genuinely diverge",
+    "the as-of query itself: NN2 makes one, and livefire attack 3 is cited for the statement",
+  ]],
+  ["G7", [
+    "book_day, statement and v_statement_version existing in the deployed schema",
+    "re-rendering a published statement and comparing it byte for byte — coreloop leg 6, cited",
+  ]],
+  ["G8", [
+    "the standing-order tables and v_standing_order_double_fire",
+    "firing across a real restart, and the reach of that view, which dbcheck's GUARD REACH states",
+  ]],
+  ["G9", [
+    "the break_kind CHECK constraint, the break kinds the differ has actually produced against real data, and the aging columns on the breaks view",
+    "the age of any specific break and whether anybody chased it — livefire attack 6, cited",
+  ]],
+  ["G10", [
+    "approval_policy rows and every agent actor's can_approve",
+    "the refusal under a real request — NN6 reads the function, livefire attack 5 is cited",
+  ]],
+  ["LF1", ["the existence of the attack's test file under src/test/livefire/", "the attack itself, which drives production and the provider sandboxes — CITED, never run from here"]],
+  ["LF2", ["the existence of the attack's test file under src/test/livefire/", "the attack itself, which drives production and the provider sandboxes — CITED, never run from here"]],
+  ["LF3", ["the existence of the attack's test file under src/test/livefire/", "the attack itself, which drives production and the provider sandboxes — CITED, never run from here"]],
+  ["LF4", ["the existence of the attack's test file under src/test/livefire/", "the attack itself, which drives production and the provider sandboxes — CITED, never run from here"]],
+  ["LF5", ["the existence of the attack's test file under src/test/livefire/", "the attack itself, which drives production and the provider sandboxes — CITED, never run from here"]],
+  ["LF6", ["the existence of the attack's test file under src/test/livefire/", "the attack itself, which drives production and the provider sandboxes — CITED, never run from here"]],
+  ["LF7", ["the existence of the attack's test file under src/test/livefire/", "the attack itself, which drives production and the provider sandboxes — CITED, never run from here"]],
+  ["SP1", ["whether docs/DEMO.md leads with the deployed host", "whether the credentials work, which NN1 drives at the origin"]],
+  ["SP2", ["nothing: no part of this is observable from the repo", "GitHub collaborator state, which lives in the repo's Settings and not in its contents"]],
+  ["SP3", ["whether DECISIONS.md is at the repo root", "its timestamps and its history, which AF6 and NN10 measure"]],
+  ["SP4", ["docs/VIDEO-SCRIPT.md, and any video link in a tracked .md", "the submission email, the video's length, and whether the link in it is the one that got recorded"]],
+  ["SP5", ["docs/EVIDENCE-PACK.md and whether it covers the webhook delivery log", "whether folder or dashboard access has actually been granted, which is provider account state"]],
+  ["SP6", ["the existence of seed.mjs, dbreset.mjs and migrate.mjs", "whether a from-zero run succeeds today: running them would write to the database, which this tool must not do"]],
+  ["SP7", ["every key in .env against .env.example, and whether .env is tracked", "keys only Vercel holds, and whether a documented key is still used by any code path"]],
+  ["SP8", ["docs/CUT-LIST.md and whether it says what week two would be", "whether the cut list is complete — nothing here can know what was forgotten"]],
+]);
+
+/* -------------------------------------------------------------------------- */
 /* SECTION A — THE SIX AUTOMATIC FAILS                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -548,6 +794,30 @@ define(AF, "AF1", '"Localhost only, or a video in place of a URL."', async (r) =
   // instruction that says `pnpm dev # http://localhost:3000` is not that, so
   // the rule is contextual: localhost on a line that is also talking about the
   // deployment, the submission, or the URL we hand over.
+  //
+  // AND THE WORD MUST BE IN URL POSITION. This check flagged
+  // `docs/EVENTS.md:460`, the row of the webhook SSRF table that REFUSES
+  // `localhost`, `*.localhost`, `*.local`, `*.internal` — it matched only
+  // because the sentence explaining why single-label names are refused says
+  // "the deployment's own search domain". Nothing on that line is a URL and
+  // nothing on it is handed to a grader.
+  //
+  // The rule this check exists for is "a localhost URL is offered as the
+  // product", and a URL has a scheme in front of it or a port behind it. So
+  // the match is narrowed to that shape rather than to a filename: a
+  // `localhost` that is being discussed cannot match, a `localhost` that is
+  // being OFFERED still does. The narrowing is exactly the one NN9 made when
+  // `'x-real-ip'` tripped the float rule — require the syntax that makes the
+  // word the thing, not the word.
+  //
+  // The SPELLINGS are widened at the same time, because a narrowing that can
+  // be dodged by typing the same thing differently is not a narrowing. The old
+  // rule knew `localhost` and `127.0.0.1` only; `http://0.0.0.0:3000` and
+  // `http://[::1]:3000` are the same claim and sailed past it. Neither appears
+  // in any tracked document today, so this costs nothing and closes the hole
+  // while it is still empty.
+  const LOOPBACK = String.raw`localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]`;
+  const LOCALHOST_URL = new RegExp(`\\bhttps?://(?:${LOOPBACK})|(?:${LOOPBACK}):\\d{2,5}\\b`, "i");
   const docs = state.allFiles.filter((f) => f.endsWith(".md") && !f.endsWith(".local.md"));
   const offenders = [];
   for (const file of docs) {
@@ -555,7 +825,7 @@ define(AF, "AF1", '"Localhost only, or a video in place of a URL."', async (r) =
     const text = readIfPresent(file);
     if (text === null) continue;
     text.split("\n").forEach((line, i) => {
-      if (!/localhost|127\.0\.0\.1/.test(line)) return;
+      if (!LOCALHOST_URL.test(line)) return;
       if (!/deployed|deployment|submission|submit|the url we|live url|production url|demo credentials/i.test(line)) return;
       // A line that WARNS AGAINST localhost is the rule being stated, not a
       // claim that localhost is the deployment. This exemption had to be
@@ -570,7 +840,7 @@ define(AF, "AF1", '"Localhost only, or a video in place of a URL."', async (r) =
   r.assert(
     offenders.length === 0,
     offenders.length === 0
-      ? `no tracked .md presents localhost as the deployment (${docs.length} files scanned)`
+      ? `no tracked .md offers a localhost URL as the deployment (${docs.length} files scanned for a localhost URL on a line about the deployment or the submission)`
       : `presents localhost as the deployment: ${offenders.join(" | ")}`,
   );
 
@@ -680,6 +950,80 @@ define(AF, "AF2", '"A simulated integration presented as live."', async (r) => {
   }
   r.assert(res.status === 0, `scripts/audit-claims.mjs exit ${res.status} — ${tail}`);
 });
+
+/* -------------------------------------------------------------------------- */
+/* THE DELEGATED GATE — run once, and ATTRIBUTED rather than folded in whole   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * scripts/dbcheck.mjs is two things at once: the proof that the money tables
+ * refuse UPDATE/DELETE/TRUNCATE (which is AF3's rule, and the reason this file
+ * delegates to it at all) and a set of invariant views about holds, interest,
+ * pots and reconciliation (which are not).
+ *
+ * THE SIZE OF THAT SET IS NOT WRITTEN DOWN HERE. This paragraph said "thirty"
+ * and was wrong within the day, because 0052 added `v_pot_line_provenance` and
+ * dbcheck went to thirty-one. A count copied into prose is a claim about
+ * another file that nothing re-checks, which is the same species of defect as
+ * a guard that misstates its own reach — so the tally below is parsed from
+ * dbcheck's own output on every run, and no number about dbcheck is asserted
+ * from memory anywhere in this file.
+ *
+ * AF3 USED TO FOLD IN THE WHOLE EXIT CODE, AND THAT WAS WRONG. dbcheck exited
+ * 1 because four card-hold invariant views were non-empty; AF3 printed
+ * `"UPDATE or DELETE on money rows. Anywhere. Ever." FAIL` with
+ * `dbcheck exit 1` under it. Every mutation assertion in AF3 was green at the
+ * time. A reader is told the automatic fail has been tripped and given, as the
+ * evidence, a fact about hold expiry. That is the same defect this repo
+ * catalogued 26 times: a guard that misleads about what it covers.
+ *
+ * The fix is the one scripts/audit-claims.mjs made when its `N of 7` rule was
+ * scoped to claims about liveness: the delegation is SCOPED, not deleted and
+ * not softened. Each failing check dbcheck reports is attributed to the rule it
+ * is actually about, and NOTHING IS DROPPED — a failure this table cannot
+ * attribute defaults to AF3, the strictest owner, and says so.
+ */
+// Built from an escape so no control character sits in this source file, and
+// so it cannot match a bare `[0m` that is genuinely part of a line of prose.
+const ANSI = new RegExp("\\u001b\\[[0-9;]*m", "g");
+
+let dbcheckResult;
+function dbcheck() {
+  if (dbcheckResult !== undefined) return dbcheckResult;
+  const res = spawnSync(process.execPath, [resolve(ROOT, "scripts/dbcheck.mjs")], {
+    cwd: ROOT, encoding: "utf8", timeout: 180_000, env: process.env,
+  });
+  if (res.error || res.status === null) {
+    dbcheckResult = { ran: false, why: String(res.error?.message ?? "no exit status") };
+    return dbcheckResult;
+  }
+  const stdout = String(res.stdout ?? "").replace(ANSI, "");
+  dbcheckResult = {
+    ran: true,
+    status: res.status,
+    tally: (stdout.match(/\d+ passed, \d+ failed/) ?? ["no tally printed"])[0],
+    failures: [...stdout.matchAll(/^\s*FAIL\s+(.+?)\s*$/gm)].map((m) => m[1]),
+  };
+  return dbcheckResult;
+}
+
+/**
+ * Who owns a failing dbcheck check. Ordered: the mutation vocabulary wins, so
+ * a refusal check that also mentions a hold stays with AF3.
+ */
+const DBCHECK_OWNERS = [
+  // The mutation half, which is AF3's actual rule. dbcheck names those checks
+  // with the SQL verb in capitals — "UPDATE journal_entry is refused",
+  // "grants on journal_line" — so the verbs are matched CASE-SENSITIVELY and
+  // the word `refus` is not matched at all. The first version of this line had
+  // a bare /refus/ and routed `v_refused_auth_hold` — a check about holds
+  // standing against unapproved authorisations — to the automatic fail, which
+  // is the same misattribution this table exists to end, one level down.
+  [/\b(UPDATE|DELETE|TRUNCATE)\b/, "AF3"],
+  [/append-only|immutab|privilege|\bgrants? on\b|\bmutat|\bwritable\b/i, "AF3"],
+  [/hold|auth|advice|closure|\bcard\b/i, "G2"],
+];
+const dbcheckOwner = (failure) => (DBCHECK_OWNERS.find(([re]) => re.test(failure)) ?? [null, "AF3"])[1];
 
 define(AF, "AF3", '"UPDATE or DELETE on money rows. Anywhere. Ever."', async (r) => {
   /* ---- Layer 0: the source tree ---------------------------------------- */
@@ -809,17 +1153,34 @@ define(AF, "AF3", '"UPDATE or DELETE on money rows. Anywhere. Ever."', async (r)
   //
   // DELEGATED for journal_entry / journal_line: scripts/dbcheck.mjs already
   // attempts UPDATE, DELETE and TRUNCATE on both and asserts the refusal. This
-  // runs it and folds the exit code in, then EXTENDS rather than duplicates by
-  // attempting the same forbidden statement on three tables dbcheck does not
-  // cover, so the demonstration reaches past the ledger core.
-  const dbres = spawnSync(process.execPath, [resolve(ROOT, "scripts/dbcheck.mjs")], {
-    cwd: ROOT, encoding: "utf8", timeout: 180_000, env: process.env,
-  });
-  if (dbres.error || dbres.status === null) {
-    r.unknown(`scripts/dbcheck.mjs could not be run: ${String(dbres.error?.message ?? "no exit status")}`);
+  // runs it and folds in THE MUTATION HALF of its result — see DBCHECK_OWNERS
+  // above for why the whole exit code is not folded in — then EXTENDS rather
+  // than duplicates by attempting the same forbidden statement on three tables
+  // dbcheck does not cover, so the demonstration reaches past the ledger core.
+  const run = dbcheck();
+  if (!run.ran) {
+    r.unknown(`scripts/dbcheck.mjs could not be run: ${run.why}`);
   } else {
-    const tally = String(dbres.stdout ?? "").match(/(\d+) passed, (\d+) failed/);
-    r.assert(dbres.status === 0, `scripts/dbcheck.mjs exit ${dbres.status} — ${tally ? tally[0] : "no tally printed"}`);
+    const mutation = run.failures.filter((f) => dbcheckOwner(f) === "AF3");
+    const elsewhere = run.failures.filter((f) => dbcheckOwner(f) !== "AF3");
+    r.assert(
+      mutation.length === 0,
+      mutation.length === 0
+        ? `scripts/dbcheck.mjs exit ${run.status} — ${run.tally}; NO failing check of its is about mutation` +
+          `${elsewhere.length === 0 ? "" : ` (the ${elsewhere.length} that failed are attributed below)`}`
+        : `scripts/dbcheck.mjs reports a MUTATION failure — this is the automatic fail: ${mutation.join(" | ")}`,
+    );
+    for (const failure of elsewhere) {
+      r.note(`  dbcheck FAIL carried by ${dbcheckOwner(failure)}, not by AF3: ${failure}`);
+    }
+    if (elsewhere.length > 0) {
+      r.note(
+        `AF3 folds in dbcheck's APPEND-ONLY half only. Its other ${elsewhere.length} failing check(s) are red, are ` +
+          "not hidden, and are asserted under the rule they are actually about — a non-empty hold-expiry view is " +
+          "not evidence that a money row was updated, and printing it under this heading would teach a reader to " +
+          "scroll past the automatic fail. A failure this tool cannot attribute stays here, with AF3.",
+      );
+    }
   }
 
   for (const table of ["statement", "payment_instruction", "pot"]) {
@@ -959,6 +1320,7 @@ define(AF, "AF5", '"Secrets committed to the repo." — GIT HISTORY, not just th
   // in an old object.
   const pattern = HISTORY_SHAPES.join("|");
   const found = new Map(); // "file :: shape" -> Set(rev)
+  const fabricated = new Set(); // matched the shape, carries no key material
   let scanned = 0;
   for (let i = 0; i < revList.length; i += 120) {
     const chunk = revList.slice(i, i + 120);
@@ -975,6 +1337,17 @@ define(AF, "AF5", '"Secrets committed to the repo." — GIT HISTORY, not just th
       const [, rev, file, , text] = m;
       if (SCAN_EXEMPT.has(file)) continue;
       if (KNOWN_PUBLIC.some((k) => text.includes(k))) continue;
+      // A line whose ONLY credential shape is a `whsec_` carrying no key
+      // material is a fixture, not a secret. See isFabricatedWebhookSecret.
+      const webhookSecrets = text.match(new RegExp(WEBHOOK_SECRET_SHAPE, "g")) ?? [];
+      if (
+        webhookSecrets.length > 0 &&
+        webhookSecrets.every(isFabricatedWebhookSecret) &&
+        !HISTORY_SHAPES.some((s) => s !== WEBHOOK_SECRET_SHAPE && new RegExp(s).test(text))
+      ) {
+        fabricated.add(`${file} :: ${webhookSecrets.length} fixture whsec_ value(s) with no key material`);
+        continue;
+      }
       const shape = HISTORY_SHAPES.find((s) => new RegExp(s).test(text)) ?? "(unknown shape)";
       const key = `${file} :: ${shape.slice(0, 28)}`;
       if (!found.has(key)) found.set(key, new Set());
@@ -985,12 +1358,20 @@ define(AF, "AF5", '"Secrets committed to the repo." — GIT HISTORY, not just th
   r.assert(
     found.size === 0,
     found.size === 0
-      ? `no credential-shaped string in any of ${scanned} commits`
-      : `credential-shaped strings alive in git history (${found.size} file/shape pairs)`,
+      ? `no credential-shaped string carrying key material in any of ${scanned} commits` +
+        `${fabricated.size === 0 ? "" : ` (${fabricated.size} fixture file/shape pair(s) named below and not counted)`}`
+      : `credential-shaped strings carrying key material are alive in git history ` +
+        `(${found.size} file/shape pair(s), named below). A shape match here means the string is readable in an ` +
+        `old object whatever the tip now says.`,
   );
   for (const [key, revsFound] of [...found.entries()].slice(0, 12)) {
     const list = [...revsFound];
     r.note(`  ${key} — in ${list.length} commit(s): ${list.slice(0, 5).join(", ")}${list.length > 5 ? ", …" : ""}`);
+    const argument = RED_REGISTER.get(key);
+    r.note(`      ${argument ?? "NOT ON THE REGISTER — no written argument covers this red. Treat it as new."}`);
+  }
+  for (const key of [...fabricated].slice(0, 12)) {
+    r.note(`  NOT counted — ${key}: base64 of a readable phrase, or one character repeated. No entropy, no key.`);
   }
 
   // The strongest form of the check: is a value CURRENTLY in .env alive in any
@@ -1628,16 +2009,56 @@ gauntlet("G1", "Ledger balance versus available balance — derived, never a sec
       SELECT table_name FROM information_schema.views
        WHERE table_schema='public' AND table_name IN ('v_ledger_balance','v_available_balance','v_hold_state')`;
     r.assert(v.length === 3, `available is a view: ${v.map((x) => x.table_name).join(", ")}`);
+
+    // THE EXEMPTIONS ARE NAMED (TABLE, COLUMN) PAIRS, AND THEY ARE READ FROM
+    // scripts/dbcheck.mjs RATHER THAN RETYPED HERE.
+    //
+    // This check used to exclude the whole `statement` TABLE and flagged
+    // `interest_posting.basis_balance_cents`, which dbcheck check 5 passes and
+    // pays for with check 5b. Two of this build's own tools returned opposite
+    // verdicts on one column, and the one that reasoned about it was the one a
+    // grader is less likely to run. Both halves of that were wrong:
+    //
+    //   - a whole-table exclusion is the pattern-shaped exemption dbcheck's own
+    //     header forbids — `statement.available_cents` would have walked
+    //     through it. Naming the two pairs is STRICTER than what stood here.
+    //   - and a second opinion held privately is not a second opinion. Reading
+    //     the list from dbcheck means the two cannot drift apart: widening the
+    //     exemption now takes an edit to the file whose check 5b has to pay
+    //     for it.
+    //
+    // Unparseable is UNKNOWN, never a pass: a missing list must not read as
+    // "no exemptions were needed".
+    const exceptions = storedBalanceExceptions();
+    if (exceptions === null) {
+      r.unknown(
+        "STORED_BALANCE_EXCEPTIONS could not be read out of scripts/dbcheck.mjs, so this check cannot tell a " +
+          "paid-for exemption from a new stored balance. Not a pass.",
+      );
+      return;
+    }
     const stored = await sql`
       SELECT c.table_name, c.column_name FROM information_schema.columns c
         JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name
        WHERE c.table_schema='public' AND t.table_type='BASE TABLE'
-         AND (c.column_name LIKE '%balance%' OR c.column_name = 'available_cents')
-         AND c.table_name <> 'statement'`;
-    r.assert(stored.length === 0, stored.length === 0
-      ? "no base table stores a balance; there is no second number that can drift"
-      : `stored balance columns: ${stored.map((s) => `${s.table_name}.${s.column_name}`).join(", ")}`);
-    r.note("statement.opening/closing_balance_cents is the deliberate exception: a published artefact must stay queryable exactly as published. dbcheck.mjs check 5 carries the argument.");
+         AND (c.column_name LIKE '%balance%' OR c.column_name = 'available_cents')`;
+    const offenders = stored.filter(
+      (s) => !exceptions.some(([t, c]) => t === s.table_name && c === s.column_name),
+    );
+    r.assert(offenders.length === 0, offenders.length === 0
+      ? `no base table stores a balance outside the ${exceptions.length} named exemptions; there is no second number that can drift ` +
+        `(${stored.length} balance-shaped column(s) on base tables, each accounted for)`
+      : `stored balance columns with no named exemption: ${offenders.map((s) => `${s.table_name}.${s.column_name}`).join(", ")}`);
+    for (const [t, c] of exceptions) {
+      r.note(`  exempt by NAMED PAIR, read from scripts/dbcheck.mjs: ${t}.${c}`);
+    }
+    r.note(
+      "statement.opening/closing_balance_cents is the published-artefact axis: the figure asserted that day must stay " +
+        "queryable exactly as published. interest_posting.basis_balance_cents is the balance a day of interest was " +
+        "PRICED ON, frozen by the watermark stored beside it — docs/ACCRUAL.md §16.1.",
+    );
+    r.cite("scripts/dbcheck.mjs check 5b (run by AF3)",
+      "every stored interest basis re-derives from the journal through ledger_settled_cents() at the watermark the row itself recorded — the price of that exemption");
   },
   [["scripts/livefire.mjs attack 1", "a $50 fuel-pump auth drops AVAILABLE by 5000 and does not move LEDGER"]]);
 
@@ -1648,6 +2069,22 @@ gauntlet("G2", "The authorisation lifecycle — every transition an event; the h
     r.assert(set.length >= 5, `card_auth_event models the lifecycle as events: {${set.join(", ")}}`);
     const drift = await sql`SELECT count(*)::int AS n FROM v_hold_release_drift`;
     r.assert(drift[0].n === 0, `v_hold_release_drift is empty (${drift[0].n} rows) — no released hold is still withholding memo money`);
+
+    // The card-hold half of scripts/dbcheck.mjs lands HERE rather than under
+    // AF3, which is where its exit code used to be folded in whole. Same run,
+    // same red, attributed to the rule it is about. See DBCHECK_OWNERS.
+    const run = dbcheck();
+    if (!run.ran) {
+      r.unknown(`scripts/dbcheck.mjs could not be run, so its card-hold invariants are unchecked here: ${run.why}`);
+    } else {
+      const mine = run.failures.filter((f) => dbcheckOwner(f) === "G2");
+      r.assert(
+        mine.length === 0,
+        mine.length === 0
+          ? `every card-hold invariant in scripts/dbcheck.mjs holds (exit ${run.status} — ${run.tally})`
+          : `${mine.length} card-hold invariant(s) in scripts/dbcheck.mjs are RED: ${mine.join(" | ")}`,
+      );
+    }
   },
   [["scripts/livefire.mjs attack 2", "a $73.40 capture releases the hold exactly once and does not clamp available"]]);
 
@@ -2028,6 +2465,7 @@ async function main() {
   const failures = [];
   const unknowns = [];
   let section = null;
+  let reachDeclared = 0;
 
   for (const check of selected) {
     if (check.section !== section) {
@@ -2044,6 +2482,27 @@ async function main() {
     } catch (error) {
       r.unknown(`the check threw and could not complete: ${String(error?.message ?? error).split("\n")[0]}`);
     }
+
+    // THE REACH DECLARATION, AND THE FAILURE FOR NOT HAVING ONE.
+    //
+    // Computed from CHECKS, not from CHECK_REACH — coverage read off the list
+    // of things that happen to be covered is the bug dbcheck §8 was written to
+    // end. A check that will not say what it examines FAILS, through the same
+    // recorder as every other assertion, and the reach is printed first so a
+    // reader meets the population before the evidence drawn from it.
+    const reach = CHECK_REACH.get(check.id);
+    if (reach === undefined) {
+      r.assert(
+        false,
+        `${check.id} declares no reach. Its evidence does not say what population it ranges over, so a ` +
+          "green tick from it would mean nothing more than that nobody looked. Add it to CHECK_REACH.",
+      );
+    } else {
+      r.lines.unshift({ kind: "reach", text: `does NOT cover: ${reach[1]}` });
+      r.lines.unshift({ kind: "reach", text: `covers: ${reach[0]}` });
+      reachDeclared += 1;
+    }
+
     const verdict = r.verdict();
     totals[verdict] += 1;
     if (verdict === "FAIL") failures.push({ check, r });
@@ -2054,10 +2513,28 @@ async function main() {
     const padding = Math.max(1, WIDTH - 6 - head.length);
     console.log(`${head}${" ".repeat(padding)}${BADGE[verdict]()}`);
     for (const line of r.lines) {
-      const mark = { ok: "  ok ", bad: RED(" !! "), warn: YELLOW("  ~ "), unknown: YELLOW("  ? "), note: DIM("    "), cite: BLUE("  → ") }[line.kind];
+      const mark = { ok: "  ok ", bad: RED(" !! "), warn: YELLOW("  ~ "), unknown: YELLOW("  ? "), note: DIM("    "), cite: BLUE("  → "), reach: DIM("  · ") }[line.kind];
       const body = wrap(line.text, WIDTH - 14, 0);
       body.forEach((seg, i) => console.log(`      ${i === 0 ? mark : "    "} ${i === 0 ? seg : `  ${seg}`}`));
     }
+  }
+
+  /* ---- Reach ------------------------------------------------------------ */
+  //
+  // The tally is a completeness assertion, not a summary: the gaps have
+  // already failed their own checks above, and this line is where a reader
+  // sees whether every check said what it covers.
+  console.log("");
+  console.log(THIN);
+  const gaps = selected.filter((c) => !CHECK_REACH.has(c.id));
+  console.log(
+    `  CHECK REACH — ${reachDeclared} of ${selected.length} checks state the population they range over ` +
+    `(a missing one is a ${gaps.length === 0 ? "FAILURE" : RED("FAILURE")}, not a blank)`,
+  );
+  console.log(THIN);
+  console.log(DIM("  printed under each check above, as `covers` and `does NOT cover`, next to the evidence drawn from it."));
+  for (const gap of gaps) {
+    console.log(RED(`  FAILURE  ${gap.id} declares no reach — see its evidence above`));
   }
 
   /* ---- Scoreboard ------------------------------------------------------ */

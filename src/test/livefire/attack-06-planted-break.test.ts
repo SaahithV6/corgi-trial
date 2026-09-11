@@ -102,10 +102,34 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
    */
   const businessDate = daysFromToday(365 + (stamp % 90));
 
-  /** Last night's file: four inbound ACH settlements, all of them booked. */
+  /**
+   * Last night's file: four inbound ACH settlements, all of them booked.
+   *
+   * FOUR rows, because the control has to be able to fail: a file of one row
+   * cannot distinguish "found the deleted row" from "reports everything as a
+   * break". Three survive the deletion and must stay silent.
+   *
+   * The amounts are SMALL, and that is a deliberate change from the $213-$254
+   * this file used to book. Nothing here reads their magnitude:
+   *
+   *   - matching is by `externalRef`, and every amount comparison in
+   *     `src/lib/recon/explain.ts` is exact equality with no tolerance band,
+   *     so all four need to be is DISTINCT and non-zero — 13 cents apart is
+   *     as discriminating as 1,357;
+   *   - `severityOf()` only consults magnitude at `MATERIAL_BREAK_CENTS`
+   *     ($1,000.00), and $2.13 and $213.57 are both under it, so the break
+   *     still grades `open` on the same forward-dated bucket it always did;
+   *   - no floor suppresses a small break — `severityOf()` has no lower bound.
+   *
+   * Money tables are append-only and this suite runs against PRODUCTION, so
+   * every run leaves its postings on the book for ever. At the old amounts
+   * that was $935.70 of permanently future-dated credit per run accumulating
+   * on a demo business; at these it is $5.30. The attack proves exactly what
+   * it proved before — this is residue, not evidence.
+   */
   const fullFile: readonly RenderRow[] = [1, 2, 3, 4].map((n) => ({
     externalRef: `LF6-${tag}-${n}`,
-    amountCents: BigInt(20_000 + n * 1_357),
+    amountCents: BigInt(100 + n * 13),
     valueDate: businessDate,
     descriptor: `LIVEFIRE SETTLE ${n}`,
   }));
@@ -142,13 +166,32 @@ d(`ATTACK ${ATTACK} — ${NAME}`, () => {
     achReceivableId = receivable.id;
   });
 
-  /** An inbound ACH settlement: DR 1130 receivable, CR the customer's 2100. */
+  /**
+   * An inbound ACH settlement: DR 1130 receivable, CR the customer's 2100.
+   *
+   * THE DESCRIPTION NAMES THE FORWARD DATE, and it has to, because no view
+   * will. `v_value_date_out_of_band`'s band is
+   * [min(book_entity.created_at) - 1 year, book_date(now()) + 18 months] —
+   * 2028-03-11 as of this writing — and `businessDate` is at most today + 455
+   * days, so these entries land INSIDE the band and that view never sees them.
+   * 0047 lists `LF6-` as a declared writer, but that registration only reaches
+   * the handful of 2002-dated entries left by an earlier revision of this
+   * file; it says nothing about the forward-dated ones.
+   *
+   * So the only thing on the book that can tell an operator this date was
+   * chosen on purpose is the row itself. Without this, a 2027 value date on a
+   * demo business is indistinguishable from a misdating by inspection, which
+   * is the one thing a ledger must never make a reader guess at.
+   */
   async function book(row: RenderRow): Promise<string> {
     return postEntry({
       entityId,
       valueDate: businessDate,
       book: "financial",
-      description: `Live-fire settlement ${row.externalRef}`,
+      description:
+        `Live-fire recon settlement ${row.externalRef} — synthetic business date ` +
+        `${businessDate}, forward-dated on purpose so the run is reachable from ` +
+        `the breaks screen. src/test/livefire/attack-06-planted-break.test.ts`,
       idempotencyKey: `livefire:${tag}:${row.externalRef}`,
       actorId,
       rail: "ach",

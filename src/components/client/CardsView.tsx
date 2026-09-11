@@ -6,7 +6,9 @@ import {
   Panel,
 } from "@/components/ui/primitives";
 import { describeMcc } from "@/lib/cards/mcc";
+import { formatUsd } from "@/lib/format/money";
 
+import { CardControlsForm, type CardControlsDefaults } from "./CardControlsForm";
 import type { CardLine, CardsScreen, DecisionLine } from "./contract";
 import { ClientHeaderBar } from "./Chrome";
 import type { ClientView } from "./view-state";
@@ -87,7 +89,7 @@ export function CardsView({
         ) : (
           <ul className="divide-y divide-border">
             {cards.map((card) => (
-              <CardRow key={card.cardId} card={card} />
+              <CardRow key={card.cardId} card={card} businessId={header.businessId} />
             ))}
           </ul>
         )}
@@ -163,7 +165,43 @@ function limitSentence(label: string, cents: bigint | null) {
   );
 }
 
-function CardRow({ card }: { readonly card: CardLine }) {
+/**
+ * The current rules, as the characters the form should open with.
+ *
+ * `null` becomes `""` — no limit of this kind — and `0` becomes `"0.00"`, which
+ * means the card spends nothing. The two are opposite instructions and this is
+ * the point on the round trip where collapsing them would be easiest and worst.
+ *
+ * Formatted WITHOUT grouping: a field pre-filled with "2,500.00" round-trips to
+ * a parse failure, which is the exact pressure that puts a float back on the
+ * path. `PayView` makes the same choice for the same reason.
+ */
+function limitField(cents: bigint | null): string {
+  return cents === null ? "" : formatUsd(cents, { symbol: false, group: false });
+}
+
+function controlDefaults(card: CardLine, businessId: string): CardControlsDefaults {
+  return {
+    cardId: card.cardId,
+    businessId,
+    perTxn: limitField(card.perTxnCents),
+    daily: limitField(card.dailyCents),
+    monthly: limitField(card.monthlyCents),
+    blockedMccs: card.blockedMccs.join(", "),
+    frozen: card.state === "frozen",
+    // `null` is "nobody has ever set a control version", which is not the same
+    // as "active with no limits" — the card is not governed at all.
+    ungoverned: card.state === null,
+  };
+}
+
+function CardRow({
+  card,
+  businessId,
+}: {
+  readonly card: CardLine;
+  readonly businessId: string;
+}) {
   return (
     <li className="px-5 py-4">
       <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
@@ -225,6 +263,15 @@ function CardRow({ card }: { readonly card: CardLine }) {
           </div>
         </div>
       </div>
+
+      <CardControlsForm
+        defaults={controlDefaults(card, businessId)}
+        cardLabel={
+          card.holderName ??
+          card.nickname ??
+          (card.lastFour === null ? "this card" : `the card ending ${card.lastFour}`)
+        }
+      />
     </li>
   );
 }
@@ -238,8 +285,19 @@ function DecisionRow({ decision }: { readonly decision: DecisionLine }) {
           <div className="flex flex-wrap items-center gap-2">
             {declined ? (
               <Badge tone="negative">declined</Badge>
-            ) : (
+            ) : decision.judged ? (
               <Badge tone="positive">approved</Badge>
+            ) : (
+              // APPROVED, AND NOTHING CHECKED IT. Not a failure and not painted
+              // as one — but not the same green badge as an approval a limit
+              // cleared, which is what it wore until now. The recorded sentence
+              // below already says why; this stops the badge contradicting it.
+              <Badge
+                tone="quiet"
+                title="Approved because no control applied to this card, not because a control allowed it. Nothing was compared."
+              >
+                approved · nothing checked it
+              </Badge>
             )}
             <span className="text-sm font-medium">{decision.merchant}</span>
             {decision.lastFour === null ? null : (

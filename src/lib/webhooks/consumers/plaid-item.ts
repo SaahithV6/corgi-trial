@@ -1,40 +1,59 @@
 /**
- * The Plaid consumer: item health, and the honest limit of what this build can
- * do with it.
+ * The Plaid consumer: item health, and what is now done with it.
  *
- * ─── THE DECISION, AND THE ARGUMENT FOR IT ──────────────────────────────────
+ * ─── WHAT THIS FILE USED TO SAY, AND WHY IT CHANGED ─────────────────────────
  *
- * Three verified Plaid deliveries were dead-lettered as "no consumer
- * registered". All three are `ITEM`/`ERROR` with `ITEM_LOGIN_REQUIRED`: the
- * linked bank account needs the customer to log in again. No money moves on a
- * Plaid webhook in this build — funding posts from
- * `rails/plaid/adapter.ts` at the moment the customer funds, and Plaid is the
- * open-banking slot, not a payment rail.
+ * Three verified Plaid deliveries reached this consumer. All three are
+ * `ITEM`/`ERROR` with `ITEM_LOGIN_REQUIRED`: the linked bank account needs the
+ * customer to log in again. No money moves on a Plaid webhook in this build —
+ * funding posts from `rails/plaid/adapter.ts` at the moment the customer
+ * funds, and Plaid is the open-banking slot, not a payment rail.
  *
- * SO WHAT SHOULD AN `ITEM_LOGIN_REQUIRED` DO? The answer this build is allowed
- * to give is constrained by a fact in the schema rather than by taste:
+ * Until migration 0056 the honest answer to "what should an
+ * `ITEM_LOGIN_REQUIRED` do" was constrained by a fact in the schema rather
+ * than by taste: THERE WAS NO `plaid_item` TABLE, so the `item_id` in the
+ * delivery named something that existed only inside the request that created
+ * it. There was no row to mark unhealthy and nothing a reconciliation would
+ * notice. This file therefore recognised those three deliveries, wrote a
+ * sentence about them to the log, and returned `ignored`.
  *
- *   THERE IS NO `plaid_item` TABLE. The adapter says so in its own header — an
- *   access token is never persisted, and `/funding` links a FRESH Item on every
- *   run. So the `item_id` in this delivery names something that exists only
- *   inside the request that created it. There is no row to mark unhealthy, no
- *   customer to route a "reconnect your bank" prompt to, and nothing a
- *   reconciliation would notice.
+ * THE SENTENCE WENT NOWHERE. `markProcessed()` takes `(id, now)` and sets
+ * `processing_error` to NULL, so the reason string never reached the database.
+ * Measured on 2026-09-11: all three rows are `state = 'done'` with no
+ * `processing_error`, which is INDISTINGUISHABLE from "a consumer acted on
+ * this". Three times, Plaid told this system a funding source was broken, the
+ * system understood, and then forgot.
  *
- * Given that, the choice was between leaving these dead-lettering and
- * acknowledging them with a reason. This file acknowledges them, for the same
- * reason the Stripe consumer does: the dead-letter screen is an ALARM. An alarm
- * that rings for an event nobody can act on is an alarm an operator learns to
- * silence, and the next thing it rings for is a returned payment.
+ * ─── WHAT IT DOES NOW ───────────────────────────────────────────────────────
  *
- * WHAT IT REFUSES TO DO IS PRETEND. It does not post, does not invent an item
- * store, and does not mark anything "handled" that it has not looked at: an
- * unrecognised Plaid webhook type PARKS rather than being waved through,
- * because the one that is waved through will be the one Plaid adds next, and
- * `TRANSFER`/`ITEM` are not the same kind of news.
+ * 0056 gives item state somewhere to live, so the item-health branch APPENDS
+ * to `plaid_item_event` before it returns. The health surface then reads the
+ * provider's own words instead of a probe standing in for them.
+ *
+ * The write is idempotent BY INDEX: `plaid_item_event_one_per_delivery` is a
+ * UNIQUE on `inbox_id`, which is exactly what this consumer's contract
+ * requires — "the same event may be handed to you again after a crash, a lease
+ * expiry, or a park/unpark round trip … Make the effect a function of a set (a
+ * unique key on the write), not an increment."
+ *
+ * IT IS STILL `ignored`, NOT `processed`, and that distinction is deliberate.
+ * `processed` means money was booked. Nothing here books money: an
+ * `ITEM_LOGIN_REQUIRED` is news about a funding source, not a transaction. The
+ * row is now recorded AND the word stays honest.
+ *
+ * WHAT IT STILL REFUSES TO DO IS PRETEND. An unrecognised Plaid webhook type
+ * PARKS rather than being waved through, because the one that is waved through
+ * will be the one Plaid adds next, and `TRANSFER`/`ITEM` are not the same kind
+ * of news.
  */
 
 import "server-only";
+
+import { sql, type Sql } from "@/lib/ledger/db";
+import {
+  recordItemObservation,
+  type RecordObservationArgs,
+} from "@/lib/rails/plaid/item-store";
 
 import {
   consumers,
@@ -78,6 +97,7 @@ export interface PlaidWebhookFacts {
   readonly webhookCode: string;
   readonly itemId: string | null;
   readonly errorCode: string | null;
+  readonly errorType: string | null;
   readonly errorMessage: string | null;
 }
 
@@ -90,6 +110,7 @@ export function asPlaidFacts(payload: Record<string, unknown>): PlaidWebhookFact
     webhookCode,
     itemId: readString(payload, ["item_id"]),
     errorCode: readString(payload, ["error", "error_code"]),
+    errorType: readString(payload, ["error", "error_type"]),
     errorMessage: readString(payload, ["error", "error_message"]),
   };
 }
@@ -129,18 +150,48 @@ export function describeItemEvent(facts: PlaidWebhookFacts): string {
   }
 }
 
-/** The sentence appended to every item-health outcome. It is the whole reason. */
-const NO_ITEM_STORE =
-  "This deployment persists no Plaid Item — there is no plaid_item table and the access token is " +
-  "never stored, so /funding links a fresh Item per run and this id refers to nothing durable. " +
-  "The delivery is recorded in webhook_inbox and that is the whole of what can honestly be done " +
-  "with it until an item store exists.";
+/**
+ * The sentence appended to every item-health outcome that was RECORDED.
+ *
+ * It names the table, because the previous version of this constant named the
+ * table's absence and was the most-quoted sentence in the build's own
+ * documentation of what Plaid could not do.
+ */
+const ITEM_STATE_RECORDED =
+  "Recorded in plaid_item_event (migration 0056), so /api/health reports this item's state from " +
+  "Plaid's own words rather than from a credential probe standing in for them. No money is " +
+  "affected and nothing posted.";
 
-export function createPlaidItemConsumer(): WebhookConsumer {
+/**
+ * THE RECORDER IS INJECTED, NOT THE CONNECTION.
+ *
+ * `plaid_item_event.inbox_id` is a real foreign key to `webhook_inbox`, which
+ * is exactly right in production — an observation cites the delivery it was
+ * read out of, and a citation of a row that does not exist is not provenance.
+ * It also means a unit test cannot hand this consumer a synthetic delivery id
+ * without either inserting a real inbox row first or stubbing a Postgres
+ * driver's tagged template, and neither of those is a test of THIS file.
+ *
+ * So the seam is the function, and the default is the real one bound to the
+ * real connection. `item-store.test.ts` proves the write against a live
+ * database; the tests here prove the DECISIONS — which webhook families are
+ * recognised, what an operator is told, and that a redelivery is not written
+ * twice — with no database at all.
+ */
+export type ItemObservationRecorder = (args: RecordObservationArgs) => Promise<boolean>;
+
+export interface PlaidItemConsumerDeps {
+  readonly record?: ItemObservationRecorder | undefined;
+  readonly conn?: Sql | undefined;
+}
+
+export function createPlaidItemConsumer(deps: PlaidItemConsumerDeps = {}): WebhookConsumer {
+  const record: ItemObservationRecorder =
+    deps.record ?? ((args) => recordItemObservation(args, deps.conn ?? sql));
   return {
     provider: PLAID_WEBHOOK_PROVIDER,
 
-    handle(event: InboxEvent, ctx: ConsumerContext): ConsumerResult {
+    async handle(event: InboxEvent, ctx: ConsumerContext): Promise<ConsumerResult> {
       const payload = readStoredPayload(event.payload);
       if (payload === null) return ignored("payload is not a JSON object");
 
@@ -151,18 +202,55 @@ export function createPlaidItemConsumer(): WebhookConsumer {
 
       if (facts.webhookType === "ITEM" && ITEM_CODES.has(facts.webhookCode)) {
         const description = describeItemEvent(facts);
+
+        // A delivery with no `item_id` cannot be recorded against an item, and
+        // inventing a placeholder id would put a row in the state view that
+        // refers to nothing. Say so rather than writing it.
+        if (facts.itemId === null) {
+          ctx.logger.warn("plaid.item.health", {
+            inboxId: event.id,
+            webhookCode: facts.webhookCode,
+            errorCode: facts.errorCode,
+            recorded: false,
+          });
+          return ignored(
+            `${description} It carries no item_id, so there is nothing to record it against.`,
+          );
+        }
+
+        // THE APPEND. Idempotent by `UNIQUE (inbox_id)`, so a redelivery of
+        // this same row writes nothing and returns false. No `catch` that
+        // swallows: a failure here must fail the delivery so the dispatcher
+        // retries it, because an item-health event we silently dropped is
+        // exactly the thing this file was rewritten to stop.
+        const recorded = await record({
+          itemId: facts.itemId,
+          source: "webhook",
+          webhookCode: facts.webhookCode,
+          errorCode: facts.errorCode,
+          errorType: facts.errorType,
+          errorMessage: facts.errorMessage,
+          inboxId: event.id,
+          observedAt: ctx.now,
+        });
+
         ctx.logger.warn("plaid.item.health", {
           inboxId: event.id,
           itemId: facts.itemId,
           webhookCode: facts.webhookCode,
           errorCode: facts.errorCode,
           errorMessage: facts.errorMessage,
+          recorded,
           description,
         });
-        // `ignored`, not `processed`: the row's life ends either way, and the
-        // word is the difference between "we acted on this" and "we recognised
-        // it and deliberately did not". Nothing was acted on.
-        return ignored(`${description} ${NO_ITEM_STORE}`);
+
+        // `ignored`, not `processed`: `processed` means money was booked and
+        // none was. The word stays honest; the row is now durable either way.
+        return ignored(
+          recorded
+            ? `${description} ${ITEM_STATE_RECORDED}`
+            : `${description} Already recorded on an earlier delivery of this same webhook; nothing was written twice.`,
+        );
       }
 
       // Anything else — a family this build has never decided about. PARK.

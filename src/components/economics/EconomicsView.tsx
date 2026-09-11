@@ -21,17 +21,21 @@
  *   7. THE GUARDS    whether this page's own invariants hold, counted live
  */
 
-import {
-  formatBps,
-  portfolioTotals,
-  type CategoryRow,
-  type EconomicsDataSource,
-  type EconomicsView as EconomicsViewData,
-  type GuardRow,
-  type RateCardRow,
-  type SettlementRow,
-  type UnitEconomicsRow,
-  type UnpricedRow,
+// TYPES ONLY from the lib, which is the rule every other screen's
+// `data-contract.ts` states: nothing under `src/components/**` reaches into its
+// `src/lib/<feature>/*` for anything but types. This file used to take
+// `formatBps` and `portfolioTotals` from here as VALUES, and that import alone
+// took the whole page module down on a deployment with no database — see
+// `./arithmetic.ts` for the measurement and for where they live now.
+import type {
+  CategoryRow,
+  EconomicsDataSource,
+  EconomicsView as EconomicsViewData,
+  GuardRow,
+  RateCardRow,
+  SettlementRow,
+  UnitEconomicsRow,
+  UnpricedRow,
 } from "@/lib/interchange/screen";
 import { Money } from "@/components/ui/Money";
 import {
@@ -45,6 +49,9 @@ import {
   TH_CLASS,
 } from "@/components/ui/primitives";
 
+import { formatBps, portfolioTotals } from "./arithmetic";
+import { EconomicsRefusal } from "./EconomicsRefusal";
+import { economicsReadFailed } from "./unreadable";
 import { economicsHref, type EconomicsFilter } from "./view-state";
 
 export async function EconomicsView({
@@ -719,26 +726,22 @@ function EconomicsEmpty({ data }: { readonly data: EconomicsViewData }) {
   );
 }
 
+/**
+ * A read that failed, through the same panel the no-database refusal uses.
+ *
+ * One component, two causes, told apart by their code and their words. It used
+ * to be a panel of its own that printed the thrown message under the heading
+ * "What failed" with no machine-readable code beside it, and offered a bare
+ * `Retry` link unconditionally — which on the cause this screen could not
+ * previously reach at all, no database configured, would have been an offer to
+ * refresh a deployment into having one.
+ */
 function EconomicsError({ error }: { readonly error: unknown }) {
-  const message = error instanceof Error ? error.message : String(error);
   return (
-    <Panel
+    <EconomicsRefusal
+      error={economicsReadFailed(error)}
       title="The economics could not be read"
       description="Nothing is shown rather than a stale or partial number."
-    >
-      <div className="space-y-4 px-5 py-5">
-        <Note emphasis title="What failed">
-          <code className="money text-xs">{message}</code>
-        </Note>
-        <p className="max-w-prose text-xs leading-relaxed text-muted">
-          The ledger is unaffected: this page only reads. Every figure it shows is derived from
-          journal lines at query time, so there is no cached total to have gone stale and nothing
-          to repair — the read can simply be retried.
-        </p>
-        <a className="inline-block text-sm underline underline-offset-2" href={economicsHref({})}>
-          Retry
-        </a>
-      </div>
-    </Panel>
+    />
   );
 }

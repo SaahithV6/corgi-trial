@@ -38,13 +38,21 @@ export { StatementsSkeleton };
  *
  * A reader who stops after (1) has the answer. A reader who reads to (5) can
  * check it.
+ *
+ * `noDatabase` is resolved ONCE, in `page.tsx`, and handed to the state bar as
+ * well. It is not re-derived here. Two predicates answering three-quarters of
+ * the same question is how a screen ends up badging LIVE above a document
+ * badging FIXTURE. The flag chooses the refusal's wording and nothing else:
+ * the refusal itself arrives as a failed read, from `./unreadable.ts`.
  */
 export async function StatementsView({
   source,
   filter,
+  noDatabase = false,
 }: {
   readonly source: StatementsScreenSource;
   readonly filter: StatementFilter;
+  readonly noDatabase?: boolean;
 }) {
   const result = await source.load({
     ...(filter.accountId === null ? {} : { accountId: filter.accountId }),
@@ -58,7 +66,15 @@ export async function StatementsView({
     return (
       <div className="space-y-6">
         <Header />
-        <StatementsErrorPanel error={result.error} />
+        {noDatabase ? (
+          <StatementsErrorPanel
+            error={result.error}
+            title="This screen cannot see the book"
+            description="No database is configured for this deployment, so no value date was read, neither reading was derived and no hash was recomputed. Nothing here reproduces anything. A drawn statement claiming to have been re-derived on this page load would be the most misleading artefact this repository could produce, so none is drawn."
+          />
+        ) : (
+          <StatementsErrorPanel error={result.error} />
+        )}
       </div>
     );
   }

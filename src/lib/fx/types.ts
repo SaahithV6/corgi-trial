@@ -229,6 +229,23 @@ export const FX_REFUSAL_CODES = [
   "FX_QUOTE_ALREADY_SETTLED",
   /** The payout does not match the quote it claims: wrong amount, wrong destination. */
   "FX_QUOTE_MISMATCH",
+  /**
+   * The acceptance was refused because the customer does not have the money.
+   *
+   * Raised at ACCEPTANCE, not at the payout — which is the point of it. Every
+   * code above is a payout-time refusal; this one fires two steps earlier,
+   * because an accepted quote now reserves the price it commits (migration
+   * 0053) and a commitment nobody can fund is a commitment we should never
+   * have made. Nothing is written when it fires: no acceptance, no hold, no
+   * rate locked.
+   */
+  "FX_COMMITMENT_EXCEEDS_AVAILABLE",
+  /**
+   * The customer has no 2100 deposit leaf, or the chart has no 9300 memo leaf,
+   * so the commitment cannot be withheld. FAILS CLOSED: an acceptance whose
+   * hold cannot be placed is an acceptance that does not happen.
+   */
+  "FX_COMMITMENT_NO_ACCOUNT",
 ] as const;
 
 export type FxRefusalCode = (typeof FX_REFUSAL_CODES)[number];

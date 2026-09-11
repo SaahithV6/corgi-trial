@@ -42,8 +42,10 @@ import { rootLogger } from "@/lib/log";
 
 import {
   decideMove,
+  isPotNegativeRefusal,
   moveDescription,
   moveIdempotencyKey,
+  POT_NEGATIVE_CODE,
   transferLegs,
   type MoveDirection,
   type RefusalCode,
@@ -176,7 +178,19 @@ export type MoveResult =
   | { readonly kind: "posted"; readonly receipt: MoveReceipt }
   | {
       readonly kind: "refused";
-      readonly code: RefusalCode | "NO_SUCH_POT" | "MOVE_FAILED";
+      readonly code:
+        | RefusalCode
+        | "NO_SUCH_POT"
+        /**
+         * The 0057 constraint trigger refused the COMMIT. Distinct from
+         * `MOVE_FAILED` on purpose: `MOVE_FAILED` says "a database error
+         * happened, here is its text", which a caller can do nothing with;
+         * this one says which invariant was broken and therefore what to do.
+         * Reaching it means the write bypassed `decideMove()` — see
+         * `POT_NEGATIVE_CODE` in `./model`.
+         */
+        | typeof POT_NEGATIVE_CODE
+        | "MOVE_FAILED";
       readonly reason: string;
       readonly requestedCents: bigint;
       readonly coverCents: bigint;
@@ -361,6 +375,29 @@ export async function movePotFunds(
     });
   } catch (thrown) {
     const message = thrown instanceof Error ? thrown.message : String(thrown);
+
+    // Migration 0057's floor, reached rather than the decision above. That is
+    // worth its own log line and its own code: it means this transaction
+    // offered the ledger a write that `decideMove()` would not have allowed,
+    // so either the balance moved under the lock (it cannot) or the write did
+    // not come from here. Either way it is a defect, not a customer error.
+    if (isPotNegativeRefusal(message)) {
+      log.error("pot move refused by the ledger's negative-pot guard", {
+        potId: args.potId,
+        code: POT_NEGATIVE_CODE,
+        message,
+      });
+      return {
+        kind: "refused",
+        code: POT_NEGATIVE_CODE,
+        reason: message.slice(0, 300),
+        requestedCents: args.amountCents,
+        coverCents: 0n,
+        shortfallCents: 0n,
+        snapshot: null,
+      };
+    }
+
     log.error("pot move failed", { potId: args.potId, message });
     return {
       kind: "refused",

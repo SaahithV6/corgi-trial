@@ -50,11 +50,32 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import { requestPayment } from "@/lib/approvals/instructions";
-import { currentActor } from "@/lib/approvals/session";
 import { PAYOUT_RAILS, type PaymentDestination } from "@/lib/approvals/types";
 import { formatUsd } from "@/lib/format/money";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the module for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 import { rootLogger } from "@/lib/log";
+
+/**
+ * WHY `instructions` AND `session` ARE NOT IMPORTED AT THE TOP OF THIS FILE.
+ *
+ * Both reach `@/lib/ledger/db` -> `@/lib/env`, which parses `process.env` at
+ * module scope and throws `EnvironmentError` without `APP_DATABASE_URL`.
+ * `PaymentForm` imports `raisePaymentAction` from here and `PaymentsView`
+ * imports `PaymentForm` — so on a deployment with no database this module's
+ * imports are a second static route from the page to a throw, beside the one
+ * that was actually measured. Under the app router the client boundary at
+ * `PaymentForm` usually stops the server from evaluating it; "usually" is not a
+ * property a screen should depend on to render the words "no database
+ * configured", and nothing outside a bundler stops it at all.
+ *
+ * They are imported inside the action instead, on the branch that has already
+ * established there is a database to write to. The action is a POST, and a POST
+ * to this screen on a deployment with no database is refused below with a code
+ * rather than an exception — see `PAYMENTS_NO_DATABASE` — because a server
+ * action that throws gives an operator an error boundary and no sentence.
+ */
 
 /* -------------------------------------------------------------------------- */
 /* What the form gets back                                                    */
@@ -332,6 +353,27 @@ export async function raisePaymentAction(
       receipt: null,
     };
   }
+
+  if (!hasDatabase()) {
+    // Unreachable from the screen — with no database `/payments` draws the
+    // refusal panel and no form, so there is no button to press. It is
+    // reachable by a hand-assembled POST, which is the whole reason a server
+    // action re-checks everything, and the honest answer is that nothing was
+    // written because there was nowhere to write it.
+    return {
+      status: "refused",
+      code: "PAYMENTS_NO_DATABASE",
+      message:
+        "No database is configured for this deployment, so no instruction was raised, no account was checked against the KYB gate and no policy version was pinned. Nothing was written.",
+      issues: null,
+      receipt: null,
+    };
+  }
+
+  const [{ requestPayment }, { currentActor }] = await Promise.all([
+    import("@/lib/approvals/instructions"),
+    import("@/lib/approvals/session"),
+  ]);
 
   const actor = await currentActor();
   if (actor === null) {

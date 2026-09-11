@@ -1,17 +1,18 @@
 import { NextResponse } from "next/server";
 
 import { authoriseScheduled, REFUSAL_HEADERS, unauthorisedBody } from "@/app/api/cron/_auth";
+import { sweepLapsedCommitments } from "@/lib/fx/hold";
 import { sweepMaturedUnclearedCredits } from "@/lib/holds/availability";
 import { sweepIncompleteHoldPostings } from "@/lib/holds/completion";
 import { sweepExpiredHolds } from "@/lib/holds/expiry";
 import { newRequestId, requestIdFrom } from "@/lib/log";
 
-// All three sweeps post through `ledger_append()` and hold a database connection.
+// Every sweep here posts through `ledger_append()` and holds a database connection.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * The three hold sweeps, on one schedule.
+ * The four hold sweeps, on one schedule.
  *
  * The first two existed and **neither was scheduled** — `sweepExpiredHolds()` since
  * DECISIONS 046, `sweepIncompleteHoldPostings()` since migration 0036. A sweep
@@ -109,6 +110,7 @@ async function run(req: Request): Promise<NextResponse> {
     const completion = await sweepIncompleteHoldPostings();
     const expiry = await sweepExpiredHolds();
     const availability = await sweepMaturedUnclearedCredits();
+    const fxCommitments = await sweepLapsedCommitments();
     return NextResponse.json(
       {
         requestId,
@@ -127,6 +129,10 @@ async function run(req: Request): Promise<NextResponse> {
         completion: { ...completion, withheldCents: completion.withheldCents.toString() },
         expiry: { ...expiry, releasedCents: expiry.releasedCents.toString() },
         availability: { ...availability, releasedCents: availability.releasedCents.toString() },
+        fxCommitments: {
+          ...fxCommitments,
+          releasedCents: fxCommitments.releasedCents.toString(),
+        },
       },
       { status: 200, headers: { "cache-control": "no-store", "x-request-id": requestId } },
     );

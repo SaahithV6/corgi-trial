@@ -23,7 +23,10 @@
 
 import type { Gate } from "@/lib/approvals/gate";
 import type { ActorKind } from "@/lib/approvals/types";
+import type { FixtureOrigin } from "@/lib/home/fixture-businesses";
 import type { ErrorShape, Result } from "@/lib/result";
+
+export type { FixtureOrigin };
 
 /** Integer minor units (US cents), exactly as the `int8` column holds them. */
 export type Cents = bigint;
@@ -61,10 +64,17 @@ export type AccountPosition = {
   readonly activeHoldsCents: Cents;
   /** Credits received but not yet available under the funds-availability policy. */
   readonly unclearedCreditsCents: Cents;
+
+  /**
+   * Non-null when this account belongs to a TEST FIXTURE rather than a
+   * customer — see `@/lib/home/fixture-businesses`. The row still renders in
+   * full; it is labelled, and it is kept out of the customer-money headline.
+   */
+  readonly fixture: FixtureOrigin | null;
 };
 
-/** The book, folded. Every field is a sum over `positions` and nothing else. */
-export type BookTotals = {
+/** A ledger/available/withheld triple over some subset of the positions. */
+export type PositionTotals = {
   readonly ledgerCents: Cents;
   readonly availableCents: Cents;
   /** `ledger − available`, folded per account then summed. */
@@ -73,6 +83,21 @@ export type BookTotals = {
   readonly businesses: number;
   /** Accounts whose available balance is below zero. */
   readonly negativeAvailable: number;
+};
+
+/**
+ * The book, folded — and folded THREE ways, because two of them are not the
+ * same question.
+ *
+ * `live` is customer money. `fixture` is what test suites have posted to this
+ * database. `all` is their sum and is still published, because suppressing it
+ * would make this fold the thing it exists to prevent: a screen that quietly
+ * disagrees with `SELECT sum(...) FROM account`. The console prints `live` as
+ * the headline and `fixture` beside it with its own label; nothing is dropped.
+ */
+export type BookTotals = PositionTotals & {
+  readonly live: PositionTotals;
+  readonly fixture: PositionTotals;
 };
 
 /* -------------------------------------------------------------------------- */

@@ -1375,3 +1375,235 @@ report this section would be to have measured before those runs landed.
   view has the rows (`SELECT * FROM v_card_control_coverage WHERE cover =
   'uncontrolled'`); the panel renders the newest six cards of a business and a
   count. A "show me the unjudged ones" filter is week two.
+
+---
+
+## 11. The other half of the finding: an approval that judged nothing looked exactly like one that did
+
+§10 closed the *cause* — new cards are born under a control version. It did
+nothing about the *evidence*, and the evidence was the finding.
+
+### 11.1 Re-measured, and the numbers moved inside a day
+
+Every figure in §10 was true when it was written and is not true now. Re-run
+`2026-09-11T16:05Z` against the same book:
+
+```
+SELECT source, outcome, rule, count(*) FROM card_auth_decision GROUP BY 1,2,3;
+
+  145 decisions, 81 of them source = 'provider'.
+  Of 63 provider-lane APPROVALS:
+      no_controls_configured   44
+      card_not_under_control   11
+      within_controls           8
+
+SELECT cover, count(*) FROM v_card_control_coverage GROUP BY 1;
+
+  936 cards.  under_control 45,  member_only 137,  uncontrolled 756.
+```
+
+The share improved (94% → 87%) and the **absolute count of unjudged approvals
+went up, 48 → 55**, because every suite that registers a card directly through
+`registerCard()` adds another uncontrolled one faster than issuance adds
+controlled ones. Two things follow, and the second is the more useful:
+
+1. **A figure in a comment is a measurement with a timestamp, not a fact.**
+   Re-measure before quoting. The numbers in §10, in `src/lib/cards/defaults.ts`
+   and in `docs/WOW.md` are all the earlier reading and are all now low.
+2. **`p50 14.2 ms` is not reproducible over the whole provider lane.**
+   `decision_latency_us` across all 81 provider rows has a p50 of **125 ms** and
+   a p95 of **508 ms**, because the lane includes the deliberate fail-closed
+   rows that sat out the full 600 ms control-read budget. 14.2 ms was a true
+   statement about one burst of ten transactions and is a false one about the
+   lane. Quote it with its population or not at all.
+
+### 11.2 The defect: one column carrying two different facts
+
+All 63 approvals say `outcome = 'approve'` and nothing else. A card with no
+controls is **indistinguishable, in the approval log, from a card whose controls
+said yes** — so every reader that counts approvals as evidence that card
+controls work counts 63 when the honest number is 8. That is this repository's
+recurring failure in its most ordinary form: the guard reports healthy because
+the population it excluded is shaped exactly like the failure it exists to
+catch.
+
+Neither branch that produces those approvals is a bug. `no_controls_configured`
+and `card_not_under_control` are deliberate fail-opens, argued at length in §5
+and in `decide()`'s header, and **neither is changed**. What changed is that the
+verdict now says which kind of approval it is.
+
+### 11.3 `judged`, and the definition it rests on
+
+> A decision is **judged** when at least one control this book holds — a card
+> control version, or a member's terms — was compared with the request **and
+> could have refused it**.
+
+Five of the sixteen rules are unjudged. Three approve, one declines, and one has
+no rows yet:
+
+| rule | outcome | rows | why it is unjudged |
+|---|---|---:|---|
+| `no_controls_configured` | approve | 44 | predicate is literally `controls IS NULL AND member IS NULL` |
+| `card_not_under_control` | approve | 11 | the token is not in this book at all |
+| `control_store_unavailable` | decline | 9 | nothing was read, so nothing was compared |
+| `balance_inquiry_not_a_purchase` | approve | 0 | fires at position 3, **before** `card_frozen` at 7 — approved on a frozen card |
+| `credit_not_a_purchase` | approve | 0 | same position, same reason |
+
+The two not-a-purchase rules are the interesting ones, and they are on the list
+because of the **ordering**, not because of a taste for a bigger number: a
+balance inquiry on a card the customer has frozen is approved, so no control
+could have refused it, so counting it as evidence that a control worked would be
+the same over-claim in miniature. `src/lib/cards/judged.test.ts` asserts the
+ordering claim directly rather than asserting the classification alone.
+
+`control_store_unavailable` is on the list although it **declines**. `judged` is
+a statement about whether a control ran, not about which way the answer went,
+and keeping it orthogonal to `outcome` is what makes "a decline nobody judged"
+countable too.
+
+### 11.4 No column, no backfill — and why that is the stronger answer
+
+The obvious implementation is `card_auth_decision.judged boolean`. It was not
+done:
+
+* **The fact is already in the row.** `rule` is `NOT NULL` and has been written
+  on every decision this log has ever taken, and the classification is *total*
+  over the closed rule set — every rule is wholly one or the other, by its own
+  predicate. So all 145 existing rows classify correctly with no backfill, and a
+  backfill that cannot be wrong is a backfill that need not exist.
+* **A stored column can disagree with the rule beside it.** Two statements of
+  one fact in one row is how a log starts lying.
+* **`card_auth_decision` has writers other than the application.**
+  `scripts/dbcheck.mjs` inserts into it directly to prove its own invariants. A
+  `NOT NULL` column with no default breaks those; a default of `true` records
+  the exact over-claim this work removes.
+
+What the decision function *does* now write is `inputs.judged` — its own
+statement, on rows taken from this build onward, so a dispute six months from
+now reads the verdict's words rather than a reader's classification of them.
+`v_card_auth_decision_judged.judged_recorded` exposes it beside the derivation
+and the integration suite asserts they never disagree.
+
+Where it is stated, and what stops the two statements drifting:
+
+| statement | file | read by |
+|---|---|---|
+| `UNJUDGED_RULES` | `src/lib/cards/types.ts` | `decide()`, `listDecisions()`, both screens, the MCP surface |
+| the `NOT IN` list | `db/migrations/0053_card_auth_judged.sql` | `v_card_auth_decision_judged` and everything built on it |
+
+`src/lib/cards/judged.integration.test.ts` reads the SQL list back out of the
+**deployed** view with `pg_get_viewdef` and asserts it is the same *set* as the
+TypeScript one. Not a count, not a spot check.
+
+### 11.5 Every reader that now reflects it
+
+| reader | before | after |
+|---|---|---|
+| `listDecisions()` | `outcome`, `rule` | `judged`, derived once from `rule` so no screen re-derives it |
+| `/accounts` decision table | green `approve` badge on all 63 | `approve · unjudged` in a quiet tone, plus a line above the table: *"N of M approval(s) below were judged against a control"* |
+| `/accounts` `?controls=empty` | an empty decision table | one real unjudged approval — the state whose whole subject is an uncontrolled card now shows what an uncontrolled card *does* |
+| `/client` cards screen | green `approved` badge | `approved · nothing checked it`, with the reason verbatim underneath |
+| `list_card_controls` (MCP) | `counts.declines` | `counts.approvals` and `counts.unjudged_approvals`, plus `judged` on every decision row and a sentence in the summary |
+| SQL | nothing | `v_card_auth_decision_judged`, `v_card_auth_judged_census`, `v_card_auth_approval_unjudged` (migration 0053) |
+
+The census, on the live book:
+
+```
+SELECT * FROM v_card_auth_judged_census ORDER BY source, outcome, judged;
+
+  source    outcome  judged  decisions  amount_cents
+  harness   approve  t              29        429000
+  harness   decline  f               5          3500
+  harness   decline  t              30        150000
+  provider  approve  f              55        219509     <- the finding
+  provider  approve  t              10         45500
+  provider  decline  f               4          8500
+  provider  decline  t              14         81000
+```
+
+### 11.6 Cost on the ASA path
+
+Nothing was added to the control read. No query, no second round trip, no change
+to `readControlsAndSpend()`. `decide()` gained one field per return site and one
+object spread, measured A/B against the unmodified function, 1,000,000 calls per
+round, five interleaved rounds, medians:
+
+| verdict | before | after | delta |
+|---|---:|---:|---:|
+| `no_controls_configured` (5 `inputs` keys) | 0.0368 µs | 0.0535 µs | **+0.017 µs** |
+| `within_controls` (19 `inputs` keys — the widest in the module) | 0.2821 µs | 0.3160 µs | **+0.034 µs** |
+
+Thirty-four nanoseconds, worst case. For scale, measured on the same machine
+over the pooled Neon URL, the single control read this path already makes takes
+**66–84 ms, median 72**, against a 600 ms deadline and a 6000 ms provider
+ceiling. The added cost is about 5 × 10⁻⁷ of the read.
+
+### 11.7 A controls backfill: what it would do, and why it is not done here
+
+The 756 uncontrolled cards are the population a backfill would touch.
+`applyDefaultControls()` accepts an `actorId` and a `note` override for exactly
+this, and `defaults.test.ts` already carries a `RUN_CARD_CONTROL_BACKFILL=1`
+block that enumerates five named cards. **Nothing was backfilled by this work.**
+
+What it would do, precisely:
+
+* **757 cards** would gain a version 1: `card_state active`, per-transaction
+  ceiling **$5,000.00**, no daily limit, no monthly limit, no blocked
+  categories. (The 143 `member_only` cards are *not* in scope — they are already
+  judged, by their holder's terms.)
+* **Historic authorisations it would have declined: zero.** Every one of the 43
+  decisions ever taken on an uncontrolled card is **$50.00 or less** (`p50` and
+  `max` are both 5000 cents). The ceiling is two orders of magnitude above the
+  busiest one.
+* **Future authorisations it would newly decline: any single purchase over
+  $5,000.00 on those cards.** There have been none, which is evidence and not a
+  guarantee.
+* **The log would change shape**: 44 `no_controls_configured` approvals per
+  wave become `within_controls` with a pinned control version, and the provider
+  lane's unjudged share would fall from 87% toward the `card_not_under_control`
+  floor.
+
+**The recommendation is: do not run it as one sweep, and the reason is not
+caution about the ceiling — it is that the population is not what it looks
+like.**
+
+| what the 757 actually are | cards |
+|---|---:|
+| `Holds Integration Fixture Co.` | 362 |
+| `Hold Fuzzer Fixture Co.` | 142 |
+| `Kettle & Crumb Bakery LLC` | 136 |
+| `Ridgeline Robotics, Inc.` | 66 |
+| Live-fire attack 7 (provider outage) | 26 |
+| Live-fire attack 3 (bitemporal correction) | 25 |
+
+Two-thirds of the estate is test fixtures, and **459 of the 757 carry a
+synthetic `provider_card_token`** (`test-…`, `fuzz-…`, `completion-…`,
+`asa-…`) — they were registered through `registerCard()` directly and have no
+Lithic card object behind them at all.
+
+That matters because the *entire* safety argument for the $5,000 default (§10)
+is that it **equals the `spend_limit` both issuance paths already declare to
+Lithic**, so it cannot decline anything the issuer would not already have
+declined. For a card that was never created at Lithic, **there is no
+provider-side ceiling for it to equal**, and the default stops being provably
+behaviour-neutral and becomes merely probably harmless. That is a different
+claim, and this book cannot tell the two populations apart on its own: a
+uuid-shaped token proves nothing either, because the fixtures generate uuids
+too.
+
+So the honest split, for a human to decide:
+
+1. **Provably a no-op, and the only part worth doing as a sweep:** the cards a
+   human can confirm were issued through `issueCardAction` or
+   `issueCardForMember` — those carry Lithic's own `spend_limit: 500000` with
+   `spend_limit_duration: "TRANSACTION"`, verifiable one `GET /v1/cards/{token}`
+   at a time. Confirm the ceiling at the provider, then backfill *that* list,
+   enumerated by token, the way `defaults.test.ts` already does for five.
+2. **Leave the fixtures uncontrolled.** They are uncontrolled because they are
+   fixtures, `no_controls_configured` is a branch this system must keep being
+   able to reach (§10's trigger argument), and `?controls=empty` and
+   `cards.integration.test.ts` both depend on such a card existing.
+3. **Neither is urgent now**, because the thing the backfill was going to buy —
+   an honest count — has been bought without moving any money. The unjudged
+   approvals are counted, listed with their cards, and visible on both screens.
+   Backfilling changes what the system will approve; counting does not.

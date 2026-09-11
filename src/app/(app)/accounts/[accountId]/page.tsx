@@ -13,7 +13,10 @@ import {
 import { AccountSkeleton, AccountView } from "@/components/account/AccountView";
 import { DemoStateBar } from "@/components/account/DemoStateBar";
 import { parseDemoView } from "@/components/account/demo-state";
-import { isLiveView } from "@/components/account/fixtures";
+import { getAccountDataSource, isLiveView } from "@/components/account/fixtures";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 export const metadata: Metadata = {
   title: "Account · Corgi ops console",
@@ -44,6 +47,15 @@ type AccountPageProps = {
  *   ?state=edge     available is negative after an over-capture
  *   ?auth=pending   lands a $50.00 fuel-pump authorisation, as a fixture
  *
+ * ...and one state the URL cannot ask for: NO DATABASE CONFIGURED. It is not a
+ * sixth demo state, because it is not a demonstration of anything — it is what
+ * this deployment is. The badge reads NO DATABASE, the panel below names the
+ * condition, and no balance, hold or posting is drawn. It used to arrive here
+ * as `LEDGER_READ_FAILED` with `retryable: true` — the code for a query that
+ * did not come back, over a case where no query was ever issued — under the
+ * words "Retrying is safe." beside a live Retry button. See
+ * `src/components/account/unreadable.ts`.
+ *
  * THIS SCREEN DOES NOT TIME TRAVEL, and says so when asked to. It reads
  * through `AccountDataSource`, whose live implementation
  * (`src/components/account/live-data-source.ts`) takes its own snapshot
@@ -71,7 +83,13 @@ export default async function AccountPage({
   const { accountId } = await params;
   const resolved = await searchParams;
   const view = parseDemoView(resolved);
-  const live = isLiveView(view);
+  // ONE VALUE, TWO SURFACES. The badge below and the source `AccountView` reads
+  // through both come from these two lines, so they cannot disagree about what
+  // this screen read. `isLiveView` already worked that way for the badge and
+  // the fixture switch; `noDatabase` is the question it could not ask.
+  const noDatabase = !hasDatabase();
+  const live = isLiveView(view) && !noDatabase;
+  const source = getAccountDataSource(view, noDatabase);
 
   // Parsed only to detect that a point was ASKED FOR. With neither parameter
   // present this is `absent`, nothing extra renders, and the page is exactly
@@ -84,7 +102,14 @@ export default async function AccountPage({
       {asked ? <NotTravelledHere accountId={accountId} resolved={resolved} /> : null}
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        {live ? (
+        {noDatabase ? (
+          <Badge
+            tone="negative"
+            title="No APP_DATABASE_URL is set for this deployment. Nothing on this screen was read from the journal."
+          >
+            NO DATABASE
+          </Badge>
+        ) : live ? (
           <Badge tone="positive" title="Read from the journal at request time.">
             live ledger
           </Badge>
@@ -96,10 +121,12 @@ export default async function AccountPage({
             fixture
           </Badge>
         )}
-        <p className="text-xs text-muted">
-          {live
-            ? "Every figure below is a fold over journal lines, taken as of one instant and one booking watermark. No balance is stored anywhere in this schema."
-            : "Demo data behind the same interface the live ledger implements. The query string is the only thing that selects it, and nothing here was written to the database."}
+        <p className="max-w-prose text-xs text-muted">
+          {noDatabase
+            ? "No database is configured for this deployment, so no balance was folded and no hold or posting was read for this account. The panel below says so; it is not this account's balances."
+            : live
+              ? "Every figure below is a fold over journal lines, taken as of one instant and one booking watermark. No balance is stored anywhere in this schema."
+              : "Demo data behind the same interface the live ledger implements. The query string is the only thing that selects it, and nothing here was written to the database."}
         </p>
       </div>
 
@@ -109,7 +136,7 @@ export default async function AccountPage({
         key={`${view.state}:${String(view.authPending)}`}
         fallback={<AccountSkeleton />}
       >
-        <AccountView accountId={accountId} view={view} />
+        <AccountView accountId={accountId} view={view} source={source} />
       </Suspense>
     </div>
   );

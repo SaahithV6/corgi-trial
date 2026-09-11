@@ -14,8 +14,12 @@ import { StatementTimeTravel } from "./time-travel";
 import { StatementStateBar } from "@/components/statements/StatementStateBar";
 import { StatementsSkeleton, StatementsView } from "@/components/statements/StatementsView";
 import { createFixtureStatementsScreen } from "@/components/statements/screen-fixtures";
+import { createUnreadableStatementsScreen } from "@/components/statements/unreadable";
 import { parseStatementFilter } from "@/components/statements/view-state";
 import type { StatementsScreenSource } from "@/components/statements/data-contract";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 export const metadata: Metadata = {
   title: "Statements · Corgi ops console",
@@ -74,11 +78,17 @@ type StatementsPageProps = {
  * and prove nothing. `edge` is live for a sharper reason still: the edge state
  * IS the corrected day, and a corrected day rendered from typed-in numbers is
  * the one thing on this screen that would be worth nothing. It falls back to
- * the fixture only when there is no database or no correction on the book —
- * and says `FIXTURE DATA` on its face when it does. `loading`, `empty` and
- * `error` stay fixtures because the writes behind this screen — closing a day,
- * issuing a document — are append-only and permanent. There is no undo to demo
- * with.
+ * the fixture when the book has no correction to find, and says `FIXTURE DATA`
+ * on its face when it does. `loading`, `empty` and `error` stay fixtures
+ * because the writes behind this screen — closing a day, issuing a document —
+ * are append-only and permanent. There is no undo to demo with.
+ *
+ * And one state the URL cannot ask for: NO DATABASE CONFIGURED. It is not a
+ * sixth demo state, because it is not a demonstration of anything — it is what
+ * this deployment is. The badge on the state bar reads NO DATABASE, the
+ * document is replaced by the refusal panel, and no reading, watermark,
+ * version or hash is drawn. See `selectSource` below for what this used to do
+ * instead, which on THIS screen was the worst of the six.
  *
  * The Suspense boundary is what makes the loading state honest: `StatementsView`
  * is an async server component, the fallback is the real skeleton, and
@@ -138,12 +148,21 @@ export default async function StatementsPage({ searchParams }: StatementsPagePro
       : { ...resolved, day: parsed.request.asOfValueDate };
 
   const filter = parseStatementFilter(forFilter);
-  const source = await selectSource(filter.state);
-  const travelling = !parsed.request.absent;
+  // ONE VALUE, THREE SURFACES. The state bar's badge, the view's refusal
+  // wording and whether the time-travel panel renders at all all come from this
+  // line, so they cannot disagree about what this screen read.
+  const noDatabase = !hasDatabase();
+  const source = await selectSource(filter.state, noDatabase);
+  // The `asKnownAt` panel issues its own reads through `ledgerConnection()`.
+  // With no database there is nothing for it to read and it would throw inside
+  // a boundary whose fallback is `null` — a panel that silently vanishes on the
+  // one screen whose claim is that a past belief can be reproduced. The refusal
+  // below says what happened instead.
+  const travelling = !parsed.request.absent && !noDatabase;
 
   return (
     <div className="space-y-6">
-      <StatementStateBar filter={filter} />
+      <StatementStateBar filter={filter} noDatabase={noDatabase} />
 
       {travelling ? (
         <Suspense fallback={null}>
@@ -160,30 +179,60 @@ export default async function StatementsPage({ searchParams }: StatementsPagePro
         key={`${filter.state}:${filter.accountId ?? ""}:${filter.businessDate ?? ""}:${filter.version ?? ""}:${filter.anchor ?? ""}`}
         fallback={<StatementsSkeleton />}
       >
-        <StatementsView source={source} filter={filter} />
+        <StatementsView source={source} filter={filter} noDatabase={noDatabase} />
       </Suspense>
     </div>
   );
 }
 
 /**
- * Live for `default` and `edge`, fixture for the rest — and fixture for both of
- * those too when there is no database to read.
+ * Live for `default` and `edge`, fixture for the rest — and a REFUSAL for both
+ * of those when there is no database to read.
  *
  * The live module is imported dynamically because importing it evaluates
  * `src/lib/env.ts`, which refuses to load without a full set of keys. That is
  * the right behaviour for the app and the wrong behaviour for a page that must
- * be able to render the words "no database configured".
+ * be able to render the words "no database configured" — so the import happens
+ * only on the branch that has already established there is a database to read.
+ *
+ * WHAT THIS FUNCTION USED TO DO, AND WHY IT IS THE WORST OF THE SIX. Unlike
+ * the other five screens in this pass, the guard here DID run: this page's
+ * module graph happens not to reach `@/lib/env` at module scope, so the
+ * `await import("./live-source")` above it survived. It was still the
+ * unreachable shape, and it survived on luck — one new import in
+ * `live-source.ts` would have turned this screen into the framework error page
+ * without anybody touching this file.
+ *
+ * What it did when it ran was the defect. Measured with `APP_DATABASE_URL`
+ * deleted, `createFixtureStatementsScreen("default")` rendered a complete
+ * statement: a named business, a closing balance of $19,006.55 read twice, a
+ * day close at seq 485, a version history, and the sentences
+ *
+ *     "It was re-derived from the ledger on this page load and hashed to the
+ *      stored value"
+ *     "HASH REPRODUCED"
+ *
+ * on a deployment that had opened no connection. The entire claim of this
+ * screen is that the two figures are derived at request time and that the hash
+ * proves it. A FIXTURE DATA badge twelve lines further down does not withdraw
+ * that sentence.
+ *
+ * With no database the answer is now a REFUSAL, from
+ * `@/components/statements/unreadable`, which `StatementsView` renders the same
+ * way it renders a failed read: no readings, no document, no hash.
  */
-async function selectSource(state: string): Promise<StatementsScreenSource> {
+async function selectSource(
+  state: string,
+  noDatabase: boolean,
+): Promise<StatementsScreenSource> {
   if (state === "loading" || state === "empty" || state === "error") {
+    // A demo state stays a fixture whether or not a database is configured:
+    // those three are drawn on purpose, and "no database" does not make a
+    // drawing any more or less drawn.
     return createFixtureStatementsScreen(state);
   }
 
-  const { hasDatabase } = await import("./live-source");
-  if (!hasDatabase()) {
-    return createFixtureStatementsScreen(state === "edge" ? "edge" : "default");
-  }
+  if (noDatabase) return createUnreadableStatementsScreen();
 
   const { loadStatementsScreen } = await import("./live-source");
   return { load: loadStatementsScreen };

@@ -1,4 +1,3 @@
-import { createLivePaymentsSource } from "@/app/(app)/payments/live-source";
 import { ROLE_LABEL, readRole } from "@/components/app-shell/role";
 import {
   Badge,
@@ -9,7 +8,6 @@ import {
   TH_CLASS,
   TableScroll,
 } from "@/components/ui/primitives";
-import { currentActor } from "@/lib/approvals/session";
 import { formatDate, formatTimestamp } from "@/lib/format/datetime";
 import { isErr } from "@/lib/result";
 
@@ -17,26 +15,45 @@ import { ErrorPanel } from "./ErrorPanel";
 import { PaymentForm } from "./PaymentForm";
 import { PaymentsSkeleton } from "./PaymentsSkeleton";
 import type {
+  ActorSource,
   ActorView,
   PaymentsDataSource,
   PaymentsSnapshot,
   Prefill,
   SourceAccountView,
 } from "./data-contract";
-import { isLiveState, type PaymentsView as View } from "./demo-state";
-import { createFixtureSource } from "./fixtures";
+import type { SourceClaim, PaymentsView as View } from "./demo-state";
 
 export { PaymentsSkeleton };
+
+/** The refusal wording, for the cause that is not a failed read. */
+const NO_DATABASE_TITLE = "The payment form was not drawn";
+const NO_DATABASE_DESCRIPTION =
+  "No database is configured for this deployment, so the account list, the KYB gate and the threshold policy were not read. The form is not drawn, for the same reason it is not drawn after a failed read: a form assembled from an account list nobody fetched would offer a source account nobody checked and quote a threshold nobody looked up.";
 
 /**
  * `/payments` — where a payment instruction is originated.
  *
- * An async server component behind the page's Suspense boundary. It resolves
- * WHO THIS SESSION IS on the server — never from anything the browser sent
- * beyond the role cookie, and even that is resolved by predicate against the
- * `actor` table — then reads the account list, the KYB gate and the threshold
- * policy through `PaymentsDataSource` and knows nothing about where they came
- * from.
+ * An async server component behind the page's Suspense boundary. It reads the
+ * account list, the KYB gate and the threshold policy through
+ * `PaymentsDataSource`, and this session's identity through `ActorSource`, and
+ * knows nothing about where either came from — which is the point. Identity is
+ * still resolved on the server and never from anything the browser sent beyond
+ * the role cookie, and even that is resolved by predicate against the `actor`
+ * table; what changed is that the seam is chosen in `page.tsx`, where the live
+ * implementations are reached only through `await import(...)` on the branch
+ * that has established there is a database to read.
+ *
+ * IT USED TO CHOOSE THEM ITSELF, and that is the defect this screen carried.
+ * Line 1 of this file was `import { createLivePaymentsSource } from
+ * "@/app/(app)/payments/live-source"`, and `currentActor` was imported beside
+ * it, so the page module reached `@/lib/ledger/db` -> `@/lib/env` before it
+ * reached its own first line and threw without `APP_DATABASE_URL`. The three
+ * fixture states went down with it, having asked for no database at all.
+ *
+ * ONE COMPONENT DRAWS BOTH OUTCOMES. The refusal is a failed `Result` from a
+ * source, not a second rendering path, so there is no branch on which this
+ * form could be drawn from nothing.
  *
  * This is the sibling of `/approvals`, and the pair is the whole loop: a maker
  * raises here, a different human checks there, and the money moves on Release.
@@ -47,39 +64,45 @@ export { PaymentsSkeleton };
  *
  * `default` and `edge` are the live database; the other three states are
  * fixtures so a slow read, a failed read and an empty book can each be shown on
- * demand without arranging one.
+ * demand without arranging one. With no database configured the two live states
+ * refuse and the three fixtures still draw — see `selectSource` in `page.tsx`.
  */
-export async function PaymentsView({ view }: { readonly view: View }) {
+export async function PaymentsView({
+  view,
+  claim,
+  source,
+  actorSource,
+}: {
+  readonly view: View;
+  readonly claim: SourceClaim;
+  readonly source: PaymentsDataSource;
+  readonly actorSource: ActorSource;
+}) {
   const role = await readRole();
-  const live = isLiveState(view.state);
+  const live = claim === "LIVE";
+  const refusing = claim === "NO DATABASE";
 
   // Identity is resolved even in the fixture states, because the initiator this
   // form would attribute an instruction to is a true fact about whoever is
   // reading the screen, not part of the demo data.
-  const session = await currentActor();
-  const actor: ActorView | null =
-    session === null
-      ? null
-      : {
-          id: session.id,
-          displayName: session.displayName,
-          kind: session.kind,
-          canApprove: session.canApprove,
-        };
-
-  const source: PaymentsDataSource = live
-    ? createLivePaymentsSource()
-    : // Narrowed by `isLiveState`; the fixture source has no case for the two
-      // live states because writing one would be writing a fake payment form.
-      createFixtureSource(view.state as "loading" | "empty" | "error");
+  const actor: ActorView | null = await actorSource.current();
 
   const result = await source.getFormData(actor);
 
   if (isErr(result)) {
     return (
       <div className="space-y-6">
-        <Header role={role} actor={actor} live={live} asOf={null} />
-        <ErrorPanel error={result.error} />
+        <Header role={role} actor={actor} claim={claim} asOf={null} />
+        {refusing ? (
+          <ErrorPanel
+            error={result.error}
+            title={NO_DATABASE_TITLE}
+            description={NO_DATABASE_DESCRIPTION}
+            offerExit={false}
+          />
+        ) : (
+          <ErrorPanel error={result.error} />
+        )}
       </div>
     );
   }
@@ -88,7 +111,7 @@ export async function PaymentsView({ view }: { readonly view: View }) {
 
   return (
     <div className="space-y-6">
-      <Header role={role} actor={actor} live={live} asOf={snapshot.asOf} />
+      <Header role={role} actor={actor} claim={claim} asOf={snapshot.asOf} />
 
       <Note title="Submitting this form does not move money, and cannot">
         <p>
@@ -118,7 +141,7 @@ export async function PaymentsView({ view }: { readonly view: View }) {
           id="raise"
           title="Raise a payment instruction"
           description="One form, one server action, one entry point. The MCP write tool calls the same requestPayment() with the same schema and lands in the same queue under the same policy version — there is no second path, and this screen is not a privileged one."
-          actions={<Badge tone={live ? "positive" : "quiet"}>{live ? "LIVE" : "FIXTURE"}</Badge>}
+          actions={<Badge tone={live ? "positive" : "quiet"}>{claim}</Badge>}
         >
           <PaymentForm
             accounts={snapshot.accounts}
@@ -150,22 +173,34 @@ export async function PaymentsView({ view }: { readonly view: View }) {
 /* Header                                                                     */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The board's heading.
+ *
+ * THE BADGE IS DROPPED WHEN THE CLAIM IS "NO DATABASE", and that is not
+ * tidiness. One screen makes one claim about its data source. On a deployment
+ * with nothing to read the claim is carried by the demo-state bar above, whose
+ * badge reads NO DATABASE; a second badge here would be the board saying
+ * something about a form it did not draw. Both are derived from the same
+ * `sourceClaim()` call in `page.tsx`, so they cannot drift apart.
+ */
 function Header({
   role,
   actor,
-  live,
+  claim,
   asOf,
 }: {
   readonly role: "staff" | "approver";
   readonly actor: ActorView | null;
-  readonly live: boolean;
+  readonly claim: SourceClaim;
   readonly asOf: string | null;
 }) {
   return (
     <header>
       <div className="flex flex-wrap items-baseline gap-3">
         <h1 className="text-lg font-semibold tracking-tight">Payments</h1>
-        <Badge tone={live ? "positive" : "quiet"}>{live ? "LIVE" : "FIXTURE"}</Badge>
+        {claim === "NO DATABASE" ? null : (
+          <Badge tone={claim === "LIVE" ? "positive" : "quiet"}>{claim}</Badge>
+        )}
       </div>
       <p className="mt-0.5 text-sm text-muted">
         Money out, originated. The maker&rsquo;s half of §16; the checker&rsquo;s half is

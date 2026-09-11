@@ -381,7 +381,19 @@ export type ClosureSource =
   /** A human overriding the model. 0011 §3: the operator wins. */
   | "operator"
   /** A test writing against this shared book on purpose. */
-  | "test_harness";
+  | "test_harness"
+  /**
+   * An accepted FX quote funded its payout (`src/lib/fx/hold.ts`), so the
+   * commitment hold it placed comes off for good. Added by migration 0053,
+   * which also widened `hold_closure_source_known` to admit it.
+   *
+   * The LAPSE of a commitment deliberately writes no row at all: the clock
+   * frees the money through `hold.available_at`, derived, because a permanent
+   * row saying "released because the window closed" can be overtaken by a
+   * settlement that was already in flight, and the correction to an
+   * append-only row is another row. `src/lib/fx/hold.ts` has the argument.
+   */
+  | "fx_settlement";
 
 /**
  * Close a hold. `PRIMARY KEY (hold_id)` makes this exactly-once BY

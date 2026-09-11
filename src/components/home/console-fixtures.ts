@@ -67,6 +67,7 @@ const OVERDRAWN: AccountPosition = {
   availableCents: -63_800n,
   activeHoldsCents: 105_000n,
   unclearedCreditsCents: 0n,
+  fixture: null,
 };
 
 const HEALTHY: AccountPosition = {
@@ -78,8 +79,18 @@ const HEALTHY: AccountPosition = {
   availableCents: 1_874_143n,
   activeHoldsCents: 31_000n,
   unclearedCreditsCents: 30_000n,
+  fixture: null,
 };
 
+/**
+ * `fixture: null` on both, and that is not a contradiction.
+ *
+ * That flag marks a TEST-SUITE BUSINESS sitting on the live book among real
+ * customers, which is a distinction only the live screen has to draw. These
+ * two are invented customers on a screen that already carries `live: false`
+ * and prints FIXTURE across the whole panel — labelling them a second time
+ * inside a screen that is entirely a fixture would say nothing.
+ */
 const EDGE_POSITIONS: readonly AccountPosition[] = [OVERDRAWN, HEALTHY];
 
 /* -------------------------------------------------------------------------- */

@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { Badge, FOCUS_RING, Panel, TD_CLASS, TH_CLASS } from "@/components/ui/primitives";
+import { isRetryable } from "@/components/ui/error-detail";
 import { RetryButton } from "@/components/ui/RetryButton";
 import type { ErrorShape } from "@/lib/result";
 
@@ -167,19 +168,40 @@ export function ConsoleSkeleton() {
 }
 
 /**
- * A failed read.
+ * A failed read, and the refusal that is not one.
  *
  * The retry is a real one — `router.refresh()` re-issues the same queries — and
  * the copy states the thing an operator most needs to hear about a read
  * failure on an append-only ledger: nothing moved, because a SELECT cannot
  * move anything.
+ *
+ * THE RETRY IS NOW CONDITIONAL, and the flag it is conditional on is printed.
+ * `actions={<RetryButton label="Retry the read" />}` was unconditional, so
+ * this panel offered to re-run a read for every failure it could be handed,
+ * including `ACCOUNTS_NO_DATABASE` — a deployment with no database to read
+ * from, which no number of refreshes configures. A control that cannot work is
+ * worse than a missing one: the operator spends the outage pressing it.
+ *
+ * `title` and `description` default to the failed-read wording and are
+ * overridden for the cause that is not a failed read. Both refuse identically:
+ * no business, no card, no hold, no balance.
  */
-export function ConsoleErrorPanel({ error }: { readonly error: ErrorShape }) {
+export function ConsoleErrorPanel({
+  error,
+  title = "The console could not be read",
+  description = "A read failed. No card was issued, no authorisation was simulated and no money moved.",
+}: {
+  readonly error: ErrorShape;
+  readonly title?: string;
+  readonly description?: string;
+}) {
+  const retryable = isRetryable(error);
+
   return (
     <Panel
-      title="The console could not be read"
-      description="A read failed. No card was issued, no authorisation was simulated and no money moved."
-      actions={<RetryButton label="Retry the read" />}
+      title={title}
+      description={description}
+      actions={retryable ? <RetryButton label="Retry the read" /> : null}
     >
       <div className="px-5 py-5">
         <table className="w-full border-collapse text-sm">
@@ -197,6 +219,14 @@ export function ConsoleErrorPanel({ error }: { readonly error: ErrorShape }) {
               </th>
               <td className={`${TD_CLASS} max-w-prose`}>{error.message}</td>
             </tr>
+            <tr>
+              <th scope="row" className={TH_CLASS}>
+                Retryable
+              </th>
+              <td className={`${TD_CLASS} font-mono text-xs`}>
+                {retryable ? "yes" : "no"}
+              </td>
+            </tr>
           </tbody>
         </table>
 
@@ -206,6 +236,9 @@ export function ConsoleErrorPanel({ error }: { readonly error: ErrorShape }) {
           than disabled while the read is failing: a card-issuing button on top
           of a screen that cannot tell you the balance is an invitation to act
           blind.
+          {retryable
+            ? ""
+            : " No retry is offered either, for the same reason: this failure is a fact about the deployment, and the same request would produce the same answer."}
         </p>
       </div>
     </Panel>
@@ -213,29 +246,121 @@ export function ConsoleErrorPanel({ error }: { readonly error: ErrorShape }) {
 }
 
 /**
- * The label that says which side of the line this render is on.
+ * Where each region of this page got its figures.
  *
- * A console that shows seeded demo money in the same chrome as a customer's
- * real balance, with nothing to tell them apart, is one screenshot away from a
- * very bad meeting.
+ * ============================================================================
+ * THIS LINE USED TO MAKE A PAGE-WIDE CLAIM THAT WAS NOT TRUE OF THE PAGE.
+ * ============================================================================
+ *
+ * It took one boolean — `isLiveConsole(view)` — and on `?state=edge` printed
+ * `fixture` above the sentence "nothing here was read from or written to the
+ * database, and the controls are inert", at the top of a page which, further
+ * down, ran `listLiveAccounts()` under an unconditional `live ledger` badge
+ * and mounted the card-control panel with live write forms on a SEPARATE
+ * `?controls=` axis under a third badge from a third predicate.
+ *
+ * Three predicates, three claims, one render, and no reader could tell which
+ * of them the page meant. It was wrong with a database configured and it would
+ * have been wrong without one.
+ *
+ * `/accounts` is genuinely three regions with three sources — that is the
+ * design, and the deposit directory being live while the console is posed is
+ * the point of having both. So the fix is not one badge over a mixed page: it
+ * is to stop generalising. Each region is named, each carries the badge its
+ * OWN source predicate produced, and every one of those predicates is resolved
+ * once in `page.tsx` and handed both to this line and to the component that
+ * reads. They cannot disagree because there is nothing left to disagree with.
+ *
+ * With no database configured there is only one thing to say and this line
+ * says it once. The regions below are refusals, and a refusal badges nothing.
  */
-export function ProvenanceLine({ live }: { readonly live: boolean }) {
+export type ConsoleProvenance = {
+  /** The card & hold console: live on `default` and `loading`. */
+  readonly console: boolean;
+  /** The deposit directory: live whenever there is a book to fold. */
+  readonly directory: boolean;
+  /** The card-control panel, on its own `?controls=` axis. */
+  readonly controls: boolean;
+};
+
+const REGION_LABEL: Record<keyof ConsoleProvenance, string> = {
+  console: "Card & hold console",
+  directory: "Every deposit account",
+  controls: "Card controls",
+};
+
+const REGION_NOTE: Record<keyof ConsoleProvenance, { live: string; fixture: string }> = {
+  console: {
+    live: "Real cards on a real Lithic program, real holds, and balances folded from journal lines at one instant and one booking watermark. Its controls reach the provider.",
+    fixture:
+      "A drawing, selected by ?state=. Nothing in it was read from or written to the database and its controls are inert.",
+  },
+  directory: {
+    live: "Every 2100 deposit account on the book, folded at request time. Same fold as the per-account screen each row links to.",
+    fixture:
+      "Not read. This region has no fixture — when it cannot read the book it refuses rather than drawing one.",
+  },
+  controls: {
+    live: "Control versions and authorisation decisions read from the book, and the append and replay forms write.",
+    fixture:
+      "A drawing, selected by ?controls=. It reads nothing, and its append and replay buttons are disabled rather than pressable.",
+  },
+};
+
+export function ProvenanceLine({
+  provenance,
+  noDatabase = false,
+}: {
+  readonly provenance: ConsoleProvenance;
+  readonly noDatabase?: boolean;
+}) {
+  if (noDatabase) {
+    return (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <Badge
+          tone="negative"
+          title="No APP_DATABASE_URL is set for this deployment. Nothing on this screen was read from a book."
+        >
+          NO DATABASE
+        </Badge>
+        <p className="max-w-prose text-xs text-muted">
+          No database is configured for this deployment. The console, the
+          deposit directory and the card controls below all refuse rather than
+          draw: no balance was folded, no card was listed and no control version
+          was read. The demo table at the foot of the page is a drawing and says
+          so.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-      {live ? (
-        <Badge tone="positive" title="Read from Neon at request time.">
-          live ledger
-        </Badge>
-      ) : (
-        <Badge tone="quiet" title="Fixture. Nothing on this view was read from the database.">
-          fixture
-        </Badge>
-      )}
-      <p className="text-xs text-muted">
-        {live
-          ? "Every figure below is a fold over journal lines taken as of one instant and one booking watermark, and every control below reaches a real provider."
-          : "Fixture data behind the same components the live console uses. The query string is the only thing that selects it; nothing here was read from or written to the database, and the controls are inert."}
-      </p>
+    <div className="space-y-1.5">
+      {(["console", "directory", "controls"] as const).map((region) => {
+        const live = provenance[region];
+        return (
+          <div key={region} className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="w-44 shrink-0 text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+              {REGION_LABEL[region]}
+            </span>
+            {live ? (
+              <Badge tone="positive" title="Read from Neon at request time.">
+                live ledger
+              </Badge>
+            ) : (
+              <Badge
+                tone="quiet"
+                title="Fixture. Nothing in this region was read from the database."
+              >
+                fixture
+              </Badge>
+            )}
+            <p className="max-w-prose text-xs text-muted">
+              {live ? REGION_NOTE[region].live : REGION_NOTE[region].fixture}
+            </p>
+          </div>
+        );
+      })}
     </div>
   );
 }

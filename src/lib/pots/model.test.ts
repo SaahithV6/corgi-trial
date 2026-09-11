@@ -4,8 +4,10 @@ import {
   decideMove,
   identityOf,
   isMoveDirection,
+  isPotNegativeRefusal,
   moveDescription,
   moveIdempotencyKey,
+  POT_NEGATIVE_CODE,
   transferLegs,
   type Availability,
 } from "./model";
@@ -300,5 +302,57 @@ describe("moveDescription and isMoveDirection", () => {
     expect(isMoveDirection("out")).toBe(true);
     expect(isMoveDirection("sideways")).toBe(false);
     expect(isMoveDirection(undefined)).toBe(false);
+  });
+});
+
+describe("isPotNegativeRefusal — migration 0057's floor, recognised by name", () => {
+  /**
+   * A database refusal becomes a NAMED refusal by naming itself. This is the
+   * `pot_name_unique` test in `openPot` one layer up, and it matches on the
+   * CODE TOKEN rather than the prose around it, so rewording the sentence a
+   * human reads cannot quietly turn `POT_WOULD_GO_NEGATIVE` back into
+   * `MOVE_FAILED`.
+   */
+  const real =
+    'POT_WOULD_GO_NEGATIVE: pot "Payroll — October" ' +
+    "(a94a4e92-19af-4004-8fc9-d3b77f23df0c) would hold -98800000 cents, " +
+    "which is less than nothing";
+
+  it("recognises the message the trigger actually raised", () => {
+    expect(isPotNegativeRefusal(real)).toBe(true);
+    expect(real).toContain(POT_NEGATIVE_CODE);
+  });
+
+  it("recognises it wrapped in whatever the driver prepends", () => {
+    expect(isPotNegativeRefusal(`PostgresError: ${real}`)).toBe(true);
+  });
+
+  it("does not claim every other database error", () => {
+    // The three that matter: a different structural refusal, the replay
+    // constraint, and the refusal `decideMove()` raises itself. None of them
+    // is this one, and treating them as it would report the wrong fix.
+    expect(
+      isPotNegativeRefusal(
+        "journal entry 3ab2aa97 has lines in the wrong book/entity/currency, or posts to a rollup account",
+      ),
+    ).toBe(false);
+    expect(
+      isPotNegativeRefusal(
+        'duplicate key value violates unique constraint "pot_name_unique"',
+      ),
+    ).toBe(false);
+    expect(isPotNegativeRefusal("INSUFFICIENT_POT")).toBe(false);
+    expect(isPotNegativeRefusal("")).toBe(false);
+  });
+
+  it("is not fooled by the prose alone — the token is the contract", () => {
+    // The sentence without its code is NOT this refusal. If the trigger ever
+    // stops emitting the token, this must go red rather than keep passing on
+    // a phrase that happens to survive.
+    expect(
+      isPotNegativeRefusal(
+        'pot "Payroll — October" would hold -98800000 cents, which is less than nothing',
+      ),
+    ).toBe(false);
   });
 });

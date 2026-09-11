@@ -22,7 +22,7 @@ import {
 const NOW = new Date('2026-09-11T05:20:00.000Z');
 
 function row(over: Partial<ProcessingRow> = {}): ProcessingRow {
-  return {
+  const base = {
     provider: 'increase',
     lastConsumedAt: null,
     lastDeliveryAt: null,
@@ -34,6 +34,22 @@ function row(over: Partial<ProcessingRow> = {}): ProcessingRow {
     deadReason: null,
     deadSinceConsumedCount: 0,
     ...over,
+  };
+  // The two fault columns default to the UNNARROWED numbers, not to zero.
+  //
+  // Every case below this line was written before the refusal/fault split
+  // existed, so each one means "this many unsuperseded deaths, cause not
+  // measured". Defaulting the fault count to 0 would silently restate all of
+  // them as "measured, and none was a fault" — turning absent evidence of a
+  // fault into proof of a refusal, which is the exact inversion that made the
+  // first draft of the narrowing wrong and that these fixtures caught. An
+  // unmeasured death is a drop until something proves otherwise, so the
+  // default mirrors the number it is narrowing.
+  return {
+    ...base,
+    deadDroppedSinceConsumedCount:
+      over.deadDroppedSinceConsumedCount ?? base.deadSinceConsumedCount,
+    deadFaultNewestAt: over.deadFaultNewestAt ?? base.deadNewestAt,
   };
 }
 
@@ -208,7 +224,16 @@ describe('the other branches', () => {
 
   describe('"dying now" versus "died once and was never cleared"', () => {
     /** The state the 167 Increase dead letters were actually in at 09:04Z. */
-    const cleared = row({
+    // A set of OVERRIDES, deliberately not a materialised row.
+    //
+    // It used to be `row({...})`, which baked in the derived fault columns —
+    // so the two cases below that spread it and then raise
+    // `deadSinceConsumedCount` were carrying a stale
+    // `deadDroppedSinceConsumedCount: 0` from the original. The derived field
+    // silently contradicted the field it was derived from, and both cases
+    // read `refused` while asserting `dropping`. Keeping it a Partial means
+    // the derivation runs once, against the final numbers.
+    const cleared: Partial<ProcessingRow> = {
       provider: 'increase',
       // Consumed 33 seconds ago; the newest death was two and a half hours
       // before that. The consumer demonstrably works.
@@ -219,14 +244,14 @@ describe('the other branches', () => {
       deadOldestAt: new Date('2026-09-11T03:58:18.202Z'),
       deadReason: "dead-lettered after 8 failed attempts: no consumer registered for provider 'increase'",
       deadSinceConsumedCount: 0,
-    });
+    };
 
     it('does NOT degrade the deployment when every death predates a later success', () => {
       // This is the whole fix. The newest death is 2,034s old — well inside
       // Increase's 30h alarm window — so recency alone still calls it
       // `dropping`, and the deployment reads `degraded` for a fault that was
       // fixed hours ago and can never be un-fixed by waiting.
-      const health = webhookProcessingHealth(read(cleared), NOW);
+      const health = webhookProcessingHealth(read(row(cleared)), NOW);
       const r = find(health, 'increase');
       expect(r.verdict).toBe('superseded');
       expect(r.degradesDeployment).toBe(false);
@@ -234,7 +259,7 @@ describe('the other branches', () => {
     });
 
     it('still publishes the rows in full, so a cleared alarm is not a hidden one', () => {
-      const r = find(webhookProcessingHealth(read(cleared), NOW), 'increase');
+      const r = find(webhookProcessingHealth(read(row(cleared)), NOW), 'increase');
       expect(r.deadLettered.count).toBe(167);
       expect(r.deadLettered.sinceLastConsumed).toBe(0);
       expect(r.deadLettered.supersededByConsumption).toBe(true);

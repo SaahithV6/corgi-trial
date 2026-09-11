@@ -31,9 +31,11 @@ export { StandingSkeleton };
 export async function StandingView({
   source,
   filter,
+  noDatabase = false,
 }: {
   readonly source: StandingDataSource;
   readonly filter: StandingFilter;
+  readonly noDatabase?: boolean;
 }) {
   const result = await source.load({
     ...(filter.standingOrderId === null ? {} : { standingOrderId: filter.standingOrderId }),
@@ -44,7 +46,15 @@ export async function StandingView({
     return (
       <div className="space-y-6">
         <Header />
-        <StandingErrorPanel error={result.error} />
+        {noDatabase ? (
+          <StandingErrorPanel
+            error={result.error}
+            title="This screen cannot see the schedule"
+            description="No database is configured for this deployment, so no mandate was listed, no occurrence was read and no invariant was counted. Nothing here says the schedule is healthy; nothing here could. An invariant tile reading zero would have said exactly that, which is why none is shown."
+          />
+        ) : (
+          <StandingErrorPanel error={result.error} />
+        )}
       </div>
     );
   }
@@ -73,12 +83,17 @@ export async function StandingView({
         </Badge>
       </div>
 
+      {/* "or no database is configured" used to be the second half of the
+          sentence below. It stopped being true when the refusal landed: with no
+          database this screen draws no board at all, so a fixture here means
+          one thing and the sentence now says only that thing. A note offering a
+          reader two possible causes when the code can produce one is a small
+          version of the defect the refusal was written for. */}
       {view.source === "fixture" ? (
         <p className="max-w-prose text-xs leading-relaxed text-muted">
-          These figures are a fixture. Either a demo state other than{" "}
-          <code>default</code> is selected, or no database is configured — see
-          the state bar above. Nothing on this screen is a statement about a
-          real mandate.
+          These figures are a fixture, because a demo state other than{" "}
+          <code>default</code> is selected — see the state bar above. Nothing on
+          this screen is a statement about a real mandate.
         </p>
       ) : null}
 

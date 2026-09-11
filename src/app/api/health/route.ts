@@ -49,6 +49,7 @@ import {
   type EnvBag,
 } from '@/lib/webhooks/route-handler';
 
+import { itemsUnavailable, plaidItemHealth, readPlaidItems } from './item-health';
 import {
   processingUnavailable,
   readWebhookProcessing,
@@ -180,6 +181,27 @@ export async function GET(request: Request): Promise<Response> {
               ),
             )
           : readWebhookProcessing(client(deliveryUrl));
+
+    // THE FOURTH QUESTION: can we actually do the thing the slot is named
+    // after. Started here with the other two so its wall time hides inside the
+    // probes' 4s, and it runs on the same warmed connection.
+    //
+    // This exists because the `open_banking` slot was reporting `live` on the
+    // evidence `POST /institutions/get -> 200` — a CATALOGUE lookup, which is
+    // answerable with no linked bank in existence — while this deployment held
+    // exactly three Plaid item ids, all of them broken, none of them readable.
+    // The probe was not lying; it was measuring credentials and standing in for
+    // capability. See ./item-health.ts.
+    const itemRead =
+      deliveryUrl === undefined
+        ? Promise.resolve(itemsUnavailable('APP_DATABASE_URL is not set'))
+        : !database.reachable
+          ? Promise.resolve(
+              itemsUnavailable(
+                `database unreachable: ${database.error ?? 'no detail given'}`,
+              ),
+            )
+          : readPlaidItems(client(deliveryUrl));
 
     // The actual verdict, earned by a real authenticated call per provider.
     //
@@ -332,6 +354,13 @@ export async function GET(request: Request): Promise<Response> {
     // argument in ./processing.ts.
     const webhookProcessing = webhookProcessingHealth(await processingRead, new Date());
 
+    // The fourth question, folded. It takes no liveness context and no delivery
+    // context at all, deliberately: it is answered entirely from what Plaid
+    // itself said about each item, recorded at the moment it said it
+    // (migration 0056). A field that asked the probe what it thought would be
+    // the same second opinion this endpoint keeps removing.
+    const plaidItems = plaidItemHealth(await itemRead, new Date());
+
     // `not_configured` integrations do NOT make the deployment degraded: a
     // provider we have not wired is a scope decision, not an outage. An
     // unreachable database is, because nothing can be stored without it.
@@ -406,6 +435,23 @@ export async function GET(request: Request): Promise<Response> {
         // verified and then dropped with `no consumer registered`. A third
         // disjoint vocabulary, so no reader has to resolve the three.
         webhookProcessing,
+        // Per-ITEM open-banking capability: whether this deployment actually
+        // holds a usable funding source, read from Plaid's own words rather
+        // than from a credential probe standing in for them.
+        //
+        // A fourth disjoint vocabulary — healthy / needs_reauth / revoked /
+        // orphaned / absent / unread — so `open_banking: live` and
+        // `plaidItems: absent` read as the two independent facts they are:
+        // the key works, and nothing is linked. Those were indistinguishable
+        // before, and they are opposite operational situations.
+        //
+        // It NEVER degrades the deployment, and that is argued rather than
+        // assumed: `needs_reauth`'s exit condition is a person logging into
+        // their bank, so degrading on it would make the status red for days
+        // with nothing broken and nothing an operator could do — the exact
+        // cry-wolf the database timeout and the delivery alarm window above
+        // were each tuned to avoid.
+        plaidItems,
         // Slots the brief requires to be genuinely live that currently are not.
         // Surfaced rather than buried so it cannot be forgotten before the
         // debrief: a simulated integration presented as live fails the trial.

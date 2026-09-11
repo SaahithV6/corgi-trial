@@ -54,11 +54,32 @@ import { randomUUID } from "node:crypto";
 import { rootLogger } from "@/lib/log";
 
 import { decide } from "./decide";
+// FROM `./default-controls`, NOT FROM `./defaults`, AND THAT IS THE FIX FOR A
+// DEFECT THIS FILE HAD. `./defaults` imports `server-only` and
+// `@/lib/ledger/db`, and `@/lib/ledger/db` parses the environment at module
+// scope and throws when `APP_DATABASE_URL` is absent. So this static import
+// made the WHOLE SUITE throw while being loaded on any machine without
+// credentials — every CI runner — and a suite that throws on import is counted
+// in neither the passed number nor the skipped number. Verbatim, before:
+//
+//     EnvironmentError: Environment is invalid. 1 problem(s):
+//       APP_DATABASE_URL: APP_DATABASE_URL is required
+//      ❯ src/lib/env.ts:57:25
+//      ❯ src/lib/ledger/db.ts:18:1
+//
+//     1 SUITE(S) RAN NO TESTS AT ALL — they failed while being loaded
+//
+// Four assertions about the one equality that makes the program default safe
+// to apply were therefore INVISIBLE rather than failing, which is this
+// repository's own defining failure wearing this file's clothes. The figures
+// now live in a module that reaches no database; `./defaults` re-exports them,
+// so nothing else changed. `applyDefaultControls()` is still imported
+// dynamically, below, inside the gated block that needs a database.
 import {
   DEFAULT_CONTROLS,
   DEFAULT_CONTROL_ACTOR_ID,
   DEFAULT_PER_TXN_LIMIT_CENTS,
-} from "./defaults";
+} from "./default-controls";
 import type * as DefaultsModule from "./defaults";
 import type * as StoreModule from "./store";
 import type { AuthRequest, CardControls, ControlLookup } from "./types";

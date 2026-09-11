@@ -265,7 +265,17 @@ export const REFUSALS: readonly Refusal[] = [
   {
     section: 11,
     operation: "Overriding a payee name-match warning",
-    absentTools: ["acknowledge_warning", "override_name_match", "confirm_payee"],
+    // `acknowledge_payee_warning` is the name docs/AGENT-LIMITS.md §11 itself
+    // uses, and it was missing here: a model that guessed it got the bare
+    // `unknown tool "acknowledge_payee_warning"` this whole file exists to
+    // stop — indistinguishable from a typo, and an invitation to guess again.
+    // Measured on 2026-09-11 by calling every tool name the document names.
+    absentTools: [
+      "acknowledge_payee_warning",
+      "acknowledge_warning",
+      "override_name_match",
+      "confirm_payee",
+    ],
     why:
       "An acknowledgement is the record of a human having looked at a mismatch and accepted it anyway. It is the evidence, not the formality. An agent that can write one converts the confirmation-of-payee control into a checkbox the agent ticks on its own behalf, and the payment that follows carries a signed-looking claim that somebody checked the beneficiary when nobody did.",
     guarantee: "capability-absent",
@@ -277,7 +287,17 @@ export const REFUSALS: readonly Refusal[] = [
   {
     section: 12,
     operation: "Adding, re-checking or archiving a payee",
-    absentTools: ["add_payee", "save_payee", "archive_payee", "recheck_payee"],
+    // `propose_payee` is named by docs/AGENT-LIMITS.md §12 and was missing
+    // here, for the same reason as §11 above: it is the FIRST name a model
+    // reaches for once `add_payee` is refused, because the section's own
+    // argument ("the honest version is a payee_candidate queue") suggests it.
+    absentTools: [
+      "add_payee",
+      "propose_payee",
+      "save_payee",
+      "archive_payee",
+      "recheck_payee",
+    ],
     why:
       "The payee book is read by the gate that decides whether a payment may be made, so writing to it is not queueing a request — it is editing a control. The honest version of this feature is a payee_candidate queue with its own screen, which is a real feature and not a tool; a proposal table with nothing rendering it would be worse than nothing.",
     guarantee: "capability-absent",

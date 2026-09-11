@@ -59,7 +59,12 @@ N("H12", "Register webhook URLs in all four provider dashboards", "human-gate", 
   risk="cannot be done until a stable prod URL exists. sequencing trap", status="done")
 N("H13", "Capture evidence pack: dashboard screenshots + webhook delivery logs", "human-gate", 40,
   ["LF01","LF02","LF03"], "human", ["evidence"])
-N("H14", "Record the 5-minute video", "human-gate", 45, ["O10","O07"], "human", ["video"])
+N("H14", "Record the 5-minute video", "human-gate", 45, ["O10","O07"], "human", ["video"],
+  status="cut",
+  risk="CUT BY SAAHITH at 10:0x — 'Remove the video part from the graph and the "
+       "related stuff, just work on the product.' the submission still asks for "
+       "it; this records that the PRODUCT was chosen over the artefact about "
+       "the product, deliberately, with the cost known")
 N("H15", "Send T+24h money-moves email", "human-gate", 10, ["C02"], "human", ["thread"], status="done")
 N("H16", "Send freeze submission email", "human-gate", 15, ["C03"], "human", ["thread"])
 
@@ -480,13 +485,13 @@ def _iter3():
       "finish", 15, [], "human", ["ops/chain"],
       risk="the brief names this explicitly as worth far more than a slide; blocked on a faucet, not code", status="done")
     N("Z08", "Record the five-minute video", "submission", 60, [], "human", ["submission"],
-      risk="largest unstarted submission item; a scored requirement regardless of the code")
+      risk="CUT BY SAAHITH at 10:0x — 'Remove the video part from the graph and the related stuff, just work on the product.' ORIGINAL: DUPLICATE of H14, which owns this. largest unstarted submission item; a scored requirement regardless of the code", status="cut")
     N("Z09", "Capture the evidence pack (Lithic + Increase delivery logs)",
       "submission", 40, [], "human", ["submission"],
-      risk="the two screenshots with no in-repo equivalent")
+      risk="DUPLICATE of H13, which owns this. the two screenshots with no in-repo equivalent", status="cut")
     N("Z10", "business_registry off simulated (needs Persona or Connect)",
       "finish", 60, [], "human", ["lib/kyb"],
-      risk="re-measured today: Stripe Connect still 400, no Persona key exists", status="done")
+      risk="re-measured today: Stripe Connect still 400, no Persona key exists", status="cut")
 _iter3()
 
 # --- iteration 5: what the loop turned up after gas landed ---
@@ -583,11 +588,13 @@ def _finish():
       "stretch", 110, [], "agent", ["lib/rails/stablecoin"],
       risk="first item on the stretch ladder and the only unbuilt one that is cheap", status="done")
     N("F05", "Five-minute video walking the money path", "submission", 60, [], "human", ["submission"],
-      risk="a scored requirement no amount of code substitutes for; still 0% started")
+      risk="CUT BY SAAHITH at 10:0x — 'Remove the video part from the graph and the related stuff, just work on the product.' ORIGINAL: DUPLICATE of H14, which owns this. a scored requirement no amount of code substitutes for; still 0% started", status="cut")
     N("F06", "Evidence pack: Lithic + Increase + Circle delivery logs",
-      "submission", 40, [], "human", ["submission"])
+      "submission", 40, [], "human", ["submission"], status="cut",
+      risk="DUPLICATE of H13, which owns this")
     N("F07", "Final submission email: four things, both roles, links",
-      "submission", 20, ["F05","F06"], "human", ["submission"])
+      "submission", 20, ["F05","F06"], "human", ["submission"], status="cut",
+      risk="DUPLICATE of H16, which owns this")
 _finish()
 
 # --- Post-compliance. The checker found three violations on its first run. ---
@@ -686,9 +693,17 @@ def apply_delegation():
                           # review behind, and five of them sat on the zero-
                           # slack path pretending to be the bottleneck.
                           status=n["status"], risk=None))
-    # rewire: anything that depended on the drafted node now waits for the review
+    # rewire: anything that depended on the drafted node now waits for the review.
+    #
+    # Keyed on the reviews ACTUALLY CREATED, not on DELEGATE. A node already
+    # owned by an agent or a human is skipped by the loop above and gets no
+    # review node — but the old rewire pointed at one anyway, so E02, E03 and
+    # E05 each left a dangling 'E0Nrv' that ten downstream nodes waited on.
+    # Ten nodes depending on a node that does not exist: the validator caught
+    # it, cpm() did not, and the critical path was computed through a hole.
+    reviewed = {a["id"][:-2] for a in added}
     for n in NODES:
-        n["deps"] = [d + "rv" if d in DELEGATE and n["id"] != d + "rv" else d
+        n["deps"] = [d + "rv" if d in reviewed and n["id"] != d + "rv" else d
                      for d in n["deps"]]
     NODES.extend(added)
 
@@ -726,8 +741,7 @@ N("V05", "Interest + wires reachable from the console, not just the API",
   "rollback", 40, ["V01", "V02"], "claude", ["app/ui/payments", "app/ui/accruals"], status="done")
 N("V06", "Re-earn live fire and the core loop against whatever V01-V04 ship",
   "rollback", 45, ["V01", "V02", "V03", "V04"], "claude", ["test/livefire"],
-  risk="the number rots. it is only true against the commit it ran on")
-
+  risk="DUPLICATE of J2f, which owns this. the number rots. it is only true against the commit it ran on", status="cut")
 # ---------------------------------------------------------------------------
 # V07 — found while settling attack 2 (DECISIONS 049/050). Not a cut-list item
 # and not planned: a declined authorisation places a full hold, because
@@ -843,9 +857,8 @@ N("W2H", "DEPLOY the tip: production still holds money against declined auths",
        "created by the deployed build DURING the repair", status="done")
 N("W2I", "Re-earn core loop + live fire against the DEPLOYED tip, not the repo",
   "correctness", 45, ["W2H"], "claude", ["test/livefire"],
-  risk="live fire's 2 failures are production, not the tests. they should go "
-       "green on deploy - and if they do not, that is the real finding")
-
+  risk="DUPLICATE of J2f, which owns this. live fire's 2 failures are production, not the tests. they should go "
+       "green on deploy - and if they do not, that is the real finding", status="cut")
 # ---------------------------------------------------------------------------
 # W2J — added 22:35 after the graph came back SATURATED: every other buildable
 # node was done or owned, and inventing work to keep six agents busy would be
@@ -950,12 +963,12 @@ N("GV", "Re-earn all ten on the DEPLOYED url in one pass, with real ids",
   risk="ten items proven at ten different times is not a system. one run, one "
        "timestamp, one commit sha, or the claim rots between them")
 N("GW", "CUT-LIST.md is stale: it still says wires and the public API are cut",
-  "submission", 50, [], "agent", ["docs/cutlist"], "doing",
+  "submission", 50, [], "agent", ["docs/cutlist"], "done",
   risk="honest labelling is GRADED. a cut list that understates what shipped "
        "is as wrong as one that overstates it, and this one is both")
 N("GX", "Video script, shot by shot, against the deployed URL",
-  "submission", 45, ["GV"], "agent", ["video"], "doing",
-  risk="Saahith records it; a script naming a screen that does not exist "
+  "submission", 45, ["GV"], "agent", ["video"], "cut",
+  risk="CUT BY SAAHITH at 10:0x — 'Remove the video part from the graph and the related stuff, just work on the product.' ORIGINAL: Saahith records it; a script naming a screen that does not exist "
        "wastes the take. every shot must name a URL and a real figure")
 
 # ---------------------------------------------------------------------------
@@ -1005,9 +1018,8 @@ N("H2G", "Raise the Lithic daily cap", "real-gap", 2, [], "human", ["providers"]
        "topology and invalidates the evidence pack to dodge one command", status="done")
 N("H2H", "Final pass: gate, deploy, re-earn live fire + core loop on the TIP",
   "submission", 50, ["H2A", "H2C", "H2D"], "claude", ["deploy"],
-  risk="every number in the submission must trace to ONE commit and ONE "
-       "timestamp. ten proven at ten moments is ten anecdotes")
-
+  risk="DUPLICATE of J2f, which owns this. every number in the submission must trace to ONE commit and ONE "
+       "timestamp. ten proven at ten moments is ten anecdotes", status="cut")
 # ---------------------------------------------------------------------------
 # D — DEFECTS. Every one measured tonight, none speculative, each with the file
 # and line that produced it. Ordered by what it costs to leave.
@@ -1103,34 +1115,41 @@ N("E05", "holds.integration.test.ts still commits to the production book",
 # the only item on this board where a customer has been paid the wrong amount
 # on the wrong side of the ledger, permanently.
 # ---------------------------------------------------------------------------
-N("F01x", "Interest priced mid-day paid 498c to an account that closed $858,941 OVERDRAWN",
-  "money-wrong", 70, [], "agent", ["lib/accrual", "db/migrations/0049"], "doing",
-  risk="interest_day is UNIQUE, so the property making it exactly-once makes a "
-       "mid-day guess PERMANENT. 5 days, $25.20, wrong amount and wrong side. "
-       "the horizon fix is in the tree and NOT deployed")
+N("F01x", "Interest priced mid-day: a guess made permanent by a UNIQUE constraint",
+  "money-wrong", 70, [], "agent", ["lib/accrual", "db/migrations/0049"], "done",
+  risk="TITLE CORRECTED BY MEASUREMENT. it used to read 'paid 498c to an account "
+       "that closed $858,941 OVERDRAWN'. that is false: all five days were priced "
+       "against a POSITIVE basis, +$147,044.16 falling to +$145,315.17, at "
+       "watermarks 2245-2265, decided 04:21Z. the first unpaired force-post is at "
+       "watermark 4907 — 2,642 sequences and seven hours LATER. the account went "
+       "overdrawn long after the price was taken. the real total is $27.05 "
+       "(604+604+504+495+498), not $25.20. this makes the finding SHARPER: the "
+       "price was not wrong because the balance was bad, it was wrong because a "
+       "mid-day price is a guess, and interest_day being UNIQUE is exactly what "
+       "makes the guess permanent. repair-0049 names the row and correctly "
+       "refuses to run before the date closes")
 N("F02x", "Deploy: three fixes are in the tree and not on the box",
-  "money-wrong", 25, [], "claude", ["deploy"], "doing",
+  "money-wrong", 25, [], "claude", ["deploy"], "done",
   risk="the ASA responder can still DOUBLE-RECORD a decision — on an approve "
        "that spends the limit twice. plus the interest horizon and the "
        "preconfirmation-is-not-a-reorg fix")
 N("F03x", "v_pot_negative DETECTS but does not PREVENT; the impure guard reads a label",
-  "guards", 60, [], "agent", ["db/migrations/0050", "lib/pots"], "doing",
+  "guards", 60, [], "agent", ["db/migrations/0050", "lib/pots"], "done",
   risk="the negative-pot probe posted cleanly through ledger_append() with "
        "every trigger armed. and $50 left a pot under an `ach:` key with all "
        "three guards reading 0 — the population is the WRITER'S OWN LABEL")
 N("F04x", "The FX quote is not in content_hash, so the approver never sees the rate",
-  "correctness", 55, [], "agent", ["lib/approvals", "lib/fx"], "doing",
-  risk="two humans approve an amount and a beneficiary but NOT the rate — the "
+  "correctness", 55, [], "agent", ["lib/approvals", "lib/fx"], "cut",
+  risk="DUPLICATE of J2e, which owns this. SAME FINDING AS J2e, which owns it. two humans approve an amount and a beneficiary but NOT the rate — the "
        "one term a checker is uniquely placed to question")
 N("F05x", "Client surface: what a customer sees, not what staff sees",
-  "product", 110, [], "agent", ["app/ui/client", "components/client"], "doing",
+  "product", 110, [], "agent", ["app/ui/client", "components/client"], "done",
   risk="19 screens are all STAFF tools. the brief's customer holds a balance, "
        "sends payments and gets a card — and has nowhere to do any of it")
 N("F06x", "Dashboard: the operator's one screen, not nineteen",
-  "product", 90, [], "agent", ["app/ui/dashboard", "components/dashboard"], "doing",
+  "product", 90, [], "agent", ["app/ui/dashboard", "components/dashboard"], "done",
   risk="an operator opening this build has to know which of 19 screens holds "
        "the thing that is wrong. nothing answers 'what needs me now'")
-
 # ---------------------------------------------------------------------------
 # G2 — PROBLEMS ONLY. Wow-factor work is CUT: the feasibility pass measured the
 # book and the answer on a spend model was a clean no (128 decisions, 2 MCCs,
@@ -1141,23 +1160,479 @@ N("F06x", "Dashboard: the operator's one screen, not nineteen",
 # work are switched on for almost nothing.
 # ---------------------------------------------------------------------------
 N("G2A", "48 of 51 approvals were approved by a rule that judged nothing",
-  "product", 90, [], "agent", ["lib/cards", "app/ui/accounts"], "doing",
+  "product", 90, [], "agent", ["lib/cards", "app/ui/accounts"], "done",
   risk="card controls are proven — 10 real transactions, p50 14.2ms, every "
        "kind of decline — and 31 of 911 cards carry any control version. "
        "no_controls_configured approved 38, card_not_under_control 10")
 N("G2B", "The payee confirmation STEP has no UI at all",
-  "product", 70, [], "agent", ["app/ui/payees", "components/payees"], "doing",
+  "product", 70, [], "agent", ["app/ui/payees", "components/payees"], "done",
   risk="confirmPayee() has no caller in src/app; ConfirmationStep.tsx has no "
        "importer; /payees is read-only. PAYEE_WARNING_UNACKNOWLEDGED tells an "
        "operator to do something the console does not offer")
-N("G2C", "A fixture business sits at -$858,941.45 on the live book",
-  "demo-hazard", 60, [], "agent", ["lib/home", "test"], "doing",
-  risk="it was $144,196.35 at 09:12Z. any screen showing a rebuilt balance "
-       "beside a live one will disagree with itself on camera")
+N("G2C", "The front door summed fixture accounts into customer money", "demo-hazard",
+  60, [], "agent", ["lib/home", "test"], "done",
+  risk="RESTATED AFTER MEASUREMENT. the -$858,941.45 was real but the stated "
+       "hazard was not: rebuild.mjs and the live book agree TO THE CENT, and no "
+       "screen renders a rebuilt balance at all. cause was holds.integration "
+       "§4b force-posting $500k and refunding it — 22 runs, 20 pairs net to "
+       "zero, EXACTLY TWO unpaired, so -$1,000,000 against +$141,058.55 of real "
+       "lines. the actual camera hazard was worse and elsewhere: the front door "
+       "summed 5 fixture accounts into 'Customer money on this book' and printed "
+       "-$196,505.08 — the bank appearing to owe customers negative money, while "
+       "customers held $105,600.67. fixed by classifying on the EIN, which "
+       "cannot go stale: every real business carries nine bare digits, every "
+       "test-opened one carries 00-000000N. nothing is filtered, both halves "
+       "print and reconcile, zero rows written")
 N("G2D", "Deploy: ASA can still double-record, interest still prices mid-day",
-  "money-wrong", 25, [], "claude", ["deploy"], "doing",
+  "money-wrong", 25, [], "claude", ["deploy"], "done",
   risk="on an APPROVE a double-recorded decision spends the limit twice")
 N("G2E", "Wow factor", "stretch", 0, [], "human", ["wow"], "cut",
   risk="CUT BY SAAHITH at 15:10 — 'hold off on the cherry on top for now'. "
        "docs/WOW.md holds the feasibility pass and the ranked candidates if "
        "there is time later")
+
+# ---------------------------------------------------------------------------
+# J2 — what the deployment verification found at T+40h, after 225f00d shipped.
+#
+# Every one of these is the same shape the audit has now catalogued 26 times:
+# a guard that reports healthy because what it EXCLUDED was shaped exactly like
+# the failure it existed to catch. J2b is instance 26 itself. J2c and J2d are
+# the mirror defect — a guard that cries wolf four times, which teaches the
+# reader to skip the fifth line, the one that is real.
+# ---------------------------------------------------------------------------
+N("J2a", "coreloop facts() disagrees with its own step assertions by $31,199.60",
+  "correctness", 60, ["G2C"], "claude", ["scripts/coreloop.mjs"], status="done",
+  risk="a grader runs this script first. two different numbers for one quantity, "
+       "seconds apart, in the script that exists to prove the loop works")
+N("J2b", "dashboard all-clears when it cannot read the book (instance 26)",
+  "correctness", 90, ["G2C"], "claude",
+  ["src/app/(app)/dashboard", "src/components/dashboard"], status="done",
+  risk="selectSource() returns ok() on !hasDatabase() while TriageView twelve "
+       "lines away refuses that exact condition. the one screen whose job is to "
+       "say when something is wrong says nothing is wrong when it is blind")
+N("J2c", "compliance.mjs reports four violations and none of them is real",
+  "honesty", 60, ["G2C"], "claude", ["scripts/compliance.mjs"], status="done",
+  risk="four wrong reds is worse than no script: it trains the reader to ignore it")
+N("J2d", "the four dbcheck reds print as bare alarms with no argument",
+  "honesty", 90, ["G2C"], "claude",
+  ["scripts/dbcheck.mjs", "src/lib/chaos/invariants.ts"], status="done",
+  risk="v_hold_expiry_drift prints no rationale subline at all, so a known and "
+       "argued condition is indistinguishable from a fire. also carries the "
+       "unshipped structural pot guard v_pot_line_provenance")
+N("J2e", "REFUTED: FX quote absent from content_hash", "correctness", 90, ["G2C"],
+  "claude", ["src/lib/fx"], "cut",
+  risk="MEASURED AND WRONG. there is no quote ON an instruction to put in the "
+       "hash: currency is z.literal('USD'), fxQuoteId is stripped by the parse, "
+       "and a cross-border payout never enters the approvals queue, so there is "
+       "no 'approved at rate A' moment to defeat. the rate is pinned HARDER than "
+       "a hash would pin it — GENERATED ALWAYS STORED columns, SELECT+INSERT "
+       "grants, quote_id as PRIMARY KEY. no attack was constructible, so nothing "
+       "was changed. the finding named a missing BINDING as a defeated guard")
+N("J2g", "accepting an FX quote reserves no money: N quotes, one balance",
+  "money-wrong", 90, ["J2e"], "agent",
+  ["src/lib/fx", "src/app/(app)/payouts", "src/lib/approvals", "src/lib/mcp"],
+  status="done",
+  risk="found while refuting J2e. nothing holds the funds between acceptance and "
+       "settlement, so every accepted quote clears against the same balance. this "
+       "is an overdraft path with no guard on it, and the hold model that would "
+       "close it already exists and is order-independent by construction")
+N("J2h", "accepting a rate commitment has no maker-checker", "governance", 60,
+  ["J2g"], "agent", ["src/lib/fx"], "blocked",
+  risk="BLOCKED UPSTREAM, not skipped. accepted_by is the SYSTEM actor ledger-poster because this deployment cannot authenticate a person, and it will not write a human name onto a commitment it cannot prove they made. a second signature from an actor the system already admits is not a real human is ceremony, not control. fix the session boundary first. ORIGINAL: acceptQuote writes accepted_by from quoteActorId() — one actor. every "
+       "other money-moving action in this build needs a second human under a "
+       "policy version. committing to a rate does not")
+N("J2i", "the no-database guard is UNREACHABLE, on seven pages", "correctness", 80,
+  ["J2b"], "agent",
+  ["app/transactions", "app/statements", "app/disputes", "app/pots",
+   "app/standing-orders", "app/reconciliation", "docs/DASHBOARD.md"],
+  status="done",
+  risk="hasDatabase() returns false exactly when APP_DATABASE_URL is unset, but "
+       "the dynamic import ABOVE it reaches @/lib/env, which parses at module "
+       "scope and throws on that same condition. the guard written to handle "
+       "'no database' can only run when there IS one. worse than instance 26: "
+       "the dashboard did not draw a false all-clear, it threw the framework "
+       "error page while its own comment claimed it could render the words")
+N("J2j", "docs/DASHBOARD.md documents the defect as the design", "honesty", 15,
+  ["J2i"], "agent", ["docs/DASHBOARD.md"], status="done",
+  risk="line 301 says default falls back to the empty fixture badged FIXTURE, "
+       "'never a confident triage board drawn from nothing'. both halves false: "
+       "it threw rather than fell back, and the fallback it described WAS a "
+       "board drawn from nothing")
+N("J2k", "invariant count hardcoded: coreloop asserts passed === 14", "correctness",
+  25, ["J2a"], "agent", ["scripts/coreloop.mjs", "docs/CORE-LOOP.md"], status="done",
+  risk="a count cannot tell 'an invariant was added' from 'an invariant stopped "
+       "running'. opposite facts, same red. dbcheck moved 42->43 and coreloop "
+       "now exits 1 on 7 PASS. must name the required set, not count it")
+N("J2l", "INSTANCE 27: a balance guard only catches a foreign write that breaks a balance",
+  "correctness", 75, ["J2d"], "agent", ["scripts/dbcheck.mjs", "db/migrations"],
+  status="done",
+  risk="found by accident. the pot proof seeded on a pot drained to $0.00, so "
+       "moving $50 out tripped v_pot_negative and the proof failed. that is not "
+       "a counter-example, it is the lesson: drain the pot first, or move LESS "
+       "than it holds, and the identical unauthorized write is invisible. the "
+       "balance views ask about the NUMBER; none of them asks WHO WROTE THE "
+       "LINE. v_pot_line_provenance closes it for pots. the open question is "
+       "how many other guards on this book are balance-shaped and therefore "
+       "dodgeable by choosing a smaller amount")
+N("J2m", "the graph itself was triple-counting the human column", "planning", 10,
+  [], "claude", ["plan/graph.py"], "done",
+  risk="the video was tracked as F05, H14 AND Z08; the evidence pack as F06, "
+       "H13 and Z09; the submission email as F07 and H16; 're-run the "
+       "scoreboards against the tip' as V06, W2I, H2H and J2f. nine duplicate "
+       "nodes, so every projection of human time was inflated and the human "
+       "critical path was never right. collapsed onto one canonical node each")
+N("J2n", "live fire books standing-order credits value-dated 2027", "correctness",
+  40, ["J2a"], "agent", ["test/livefire", "lib/standing"], "done",
+  risk="TWO MECHANISMS, NOT ONE — confirmed by triangulating two agents. the "
+       "holds fixture at -$858,941.45 has ZERO rows with value_date > today and "
+       "zero LF6 refs; its cause was a force-post pair. Ridgeline carries 136 "
+       "lines value-dated 2027, refs LF6-*, +$32,135.30 credit and -$2,500.00 "
+       "debit, growing +$935.70 PER LIVE-FIRE LEG-6 BATCH. the reader is now "
+       "correct — facts() calls ledger_availability() and excludes them — so "
+       "this is no longer a wrong NUMBER. the open question is whether a "
+       "standing order firing today should book a credit dated a year out at "
+       "all, or whether leg 6 is generating schedules it would never generate "
+       "in production. low priority: it is visible, argued, and harmless to "
+       "every figure now that one definition does the reading")
+N("J2o", "the dropping verdict was itself the defect", "correctness", 60, [],
+  "agent", ["lib/webhooks", "api/health"], "done",
+  risk="37 Increase dead letters and ZERO are fault deaths — all 37 are "
+       "refusals that parked the full 12-rung ladder. Lithic carries 53 of the "
+       "IDENTICAL shape and reads backlogged. the only discriminator was "
+       "dead_lettered_at > max(processed_at), i.e. whether UNRELATED traffic "
+       "was consumed in between, so a verdict about a provider flipped on that "
+       "provider's traffic VOLUME. and it was stuck, not flapping: one death "
+       "pinned degraded for 30 hours. narrowed to fault deaths only, with "
+       "unmeasured defaulting to dropping — absent evidence of a fault must "
+       "never read as proof of a refusal")
+N("J2p", "two published numbers do not survive measurement", "honesty", 30, [],
+  "agent", ["docs"], "done",
+  risk="'p50 14.2ms' for the ASA decision is not reproducible — over all 81 "
+       "provider rows it is p50 125ms, p95 508ms; 14.2ms was ONE burst of ten, "
+       "generalised. and the unjudged-approval count ROSE 48->55 during the "
+       "session while its percentage improved 94%->83%, because every suite "
+       "registering a card adds an uncontrolled one faster than issuance adds "
+       "a controlled one. reporting the percentage alone would be true and "
+       "misleading")
+N("J2q", "$10,000 inbound ACH that nothing on the book can attribute", "money-wrong",
+  0, [], "human", ["ops"], "todo",
+  risk="a real credit from CORGI TREASURY against the programme's shared FBO "
+       "number, which is not among the 7 mapped virtual account numbers. it is "
+       "unbooked and it needs A PERSON, not a redrive. mapping the account "
+       "number would be GUESSING WHOSE MONEY IT IS, which is the one thing "
+       "these consumers exist to refuse. dur=0 because no engineering closes it")
+N("J2r", "/statements printed HASH REPRODUCED with no database open", "correctness",
+  0, [], "agent", ["app/statements"], "done",
+  risk="THE WORST FINDING OF THE BUILD. with APP_DATABASE_URL deleted the "
+       "statements screen drew a COMPLETE statement from nothing — Ridgeline "
+       "Robotics, closing balance $19,006.55 read twice, day close seq 485, "
+       "version history — and printed 'It was re-derived from the ledger on "
+       "this page load and hashed to the stored value' followed by HASH "
+       "REPRODUCED, on a deployment that opened no connection. a screen whose "
+       "ENTIRE PURPOSE is reproducibility, claiming cryptographic verification "
+       "of a document it never read. five of six pages were broken; only "
+       "/transactions refused, and it carried two badges both reading live "
+       "plus a Retry button beside retryable:false")
+N("J2s", "$250,000 moved between customers past NINE green balance guards",
+  "correctness", 0, ["J2l"], "agent", ["db/migrations/0054"], "done",
+  risk="THE DODGE THAT MATTERS. one customer's 2100 into another customer's, "
+       "$250,000.00, as corgi_app through ledger_append(), no trigger "
+       "disabled: v_deposit_control_drift, v_book_not_zero, v_entry_unbalanced, "
+       "v_balance_definition_drift, v_pot_identity_drift, v_pot_negative, "
+       "v_internal_transfer_impure, v_pot_line_provenance and "
+       "v_value_date_unexplained ALL 0->0. not a tolerance problem — a "
+       "POPULATION problem: both sides of the drift view count the same "
+       "accounts, so a movement INSIDE the population moves both sides "
+       "equally, FOR ANY AMOUNT. the view reaches 11 accounts; its new "
+       "companion reaches 3,059 entries, and the gap is where the money went. "
+       "also $85,000 of withholding posted to one customer's memo account "
+       "under ANOTHER customer's hold, landing in neither side of the "
+       "comparison. verdict: 15 guards turn on a quantity, 11 dodgeable, 4 not")
+N("J2t", "STRUCTURAL DOES NOT MEAN SOUND", "correctness", 0, ["J2s"], "agent",
+  ["docs/INVARIANTS.md"], "done",
+  risk="the correction to my own framing. I sent the agent looking for "
+       "balance-shaped guards on the assumption that structural ones were "
+       "safe. v_internal_transfer_impure is structural and is the WEAKEST "
+       "guard in the table, because its population is the WRITER'S OWN "
+       "IDEMPOTENCY KEY — a guard whose reach is chosen by the thing it "
+       "guards against. the axis that matters is not balance-vs-structural, "
+       "it is whether the population can be chosen by the writer")
+N("J2u", "customer money out to a house account that is not 2100", "correctness",
+  60, ["J2s"], "agent", ["db/migrations"], "active",
+  risk="largest remaining hole, ranked by the agent that found the others. "
+       "one customer, one entry, passes everything. v_pot_line_provenance "
+       "reports this shape FOR POTS; nothing reports it for a plain 2100. the "
+       "trap is closing it with an account-code whitelist, which would be "
+       "v_internal_transfer_impure's defect wearing a different hat")
+N("J2v", "the ASA latency has NO STABLE p50 — my own correction was wrong too",
+  "honesty", 0, ["J2p"], "agent", ["docs"], "done",
+  risk="I told Saahith the real figure was 125ms after the published 14.2ms "
+       "failed to reproduce. BOTH are readings of an unstable statistic. the "
+       "provider lane is BIMODAL — 38 decisions under 30ms, 42 between 30 and "
+       "200ms, 5 over 200 — so the median sits ON the mode boundary and reads "
+       "17.0ms or 162.3ms depending on the hour. 14.2, 24.6 and 134.6 were all "
+       "honest. replaced with bounds that survive re-measurement: max 601.5ms "
+       "across all 159 decisions, p50 125.1 / p95 177.5 over the 81 excluding "
+       "fail-closed. the lesson is not 'the number was wrong', it is that a "
+       "median over a bimodal population is not a fact about the system")
+N("J2w", "the stablecoin CAN send — documents said it could not", "honesty", 0, [],
+  "agent", ["docs", "lib/rails/stablecoin"], "done",
+  risk="CUT-LIST said '20 USDC, zero gas, it can read the chain and cannot "
+       "send' and named a faucet visit as the fix. false: health reports 13.05 "
+       "USDC AND gas, and a second on-chain transfer was verified directly "
+       "(0x92b3..., block 0x2c85537). the brief says in terms that a testnet "
+       "payout which actually confirms is worth far more than a slide about "
+       "one — this build had one and was telling graders it did not")
+N("J2x", "two $1.00 instructions left at requested by the gate probe", "ops", 0, [],
+  "human", ["ops"], "todo",
+  risk="disclosed, not hidden. proving the public-API payee gate live needed "
+       "three real POST /api/v1/payments calls. two created $1.00 instructions "
+       "(42f33bda, a086c548), BOTH still requested — never approved, never "
+       "released, no money moved. the third was refused and wrote nothing. "
+       "they are real rows on a real book and a grader may see them; better "
+       "they are in the decision log than discovered")
+N("J2y", "INSTANCE 28: Plaid reads live+quiet while its only 3 events were errors",
+  "correctness", 70, [], "agent",
+  ["lib/rails/plaid", "api/health", "db/migrations/0056"], status="done",
+  risk="health says the feed has been silent 64,899s, verdict 'stale', does not "
+       "degrade. the inbox says Plaid has delivered EXACTLY THREE webhooks "
+       "ever, all ITEM.ERROR, all ITEM_LOGIN_REQUIRED, all consumed cleanly "
+       "with no processing_error, 17 and 32 minutes apart on 09-10 then "
+       "nothing. no %plaid%/%item%/%funding% table exists, so the item state "
+       "was processed and forgotten three times. meanwhile the open_banking "
+       "slot reports LIVE on evidence 'POST /institutions/get -> 200' — a call "
+       "that succeeds with nothing but an API key and proves NOTHING about "
+       "whether an item exists. three surfaces, none individually false, which "
+       "together read healthy: a probe measuring credentials instead of "
+       "capability, a verdict vocabulary with no word for 'we heard only "
+       "errors', and consumed events with nowhere to be recorded")
+N("J2z", "two migration numbers were each claimed twice", "hygiene", 0, [],
+  "claude", ["db/migrations"], "done",
+  risk="0053 and 0054 each exist twice — card_auth_judged vs "
+       "fx_commitment_hold, and deposit_and_memo_provenance vs "
+       "fx_commitment_regime_immutable. HARMLESS AND MUST NOT BE RENAMED: "
+       "migrate.mjs keys on FILENAME with a sha256 immutability check and a "
+       "lexical sort, so each is tracked separately and the order is "
+       "deterministic. verified statically that the sort satisfies every "
+       "dependency — 0053_fx creates fx_commitment_regime before 0054_fx arms "
+       "it, and 0054_deposit creates both views before 0055 reads them. a "
+       "rename would read as a NEW unapplied migration and re-run against "
+       "objects that already exist. my fault: I hand out numbers to agents and "
+       "handed the same ones twice")
+N("J3a", "the value-date band cannot see 116 of the 136 rows it was cited for",
+  "correctness", 45, ["J2n"], "agent", ["db/migrations/0047"], "todo",
+  risk="v_value_date_out_of_band's band is [2025-09-10, 2028-03-11]. LF6 dates "
+       "itself today+365+(stamp%90), at most today+455 days — three months "
+       "INSIDE the ceiling. so only 12 of the 136 entries are visible to it, "
+       "the legacy 2002-dated ones; the 116 forward-dated ones are in-band and "
+       "invisible, and 0047's LF6- declared-writer registration is INERT for "
+       "them. 'the book can distinguish deliberately future-dated from "
+       "misdated' was simply not true. the reported one-day dodge is just the "
+       "lower edge and is what a threshold IS; the real weakness is that the "
+       "ceiling is book_date(now()) + 18 months, so ANY writer can put money 15 "
+       "months out and no guard in the book has an opinion. a plausibility "
+       "filter, not an anomaly detector")
+N("J3b", "a misattribution I wrote travelled three hops unchallenged", "process",
+  0, [], "claude", ["docs/EVALUATION.md"], "done",
+  risk="I wrote 'written by the live-fire suite's own standing orders' into "
+       "EVALUATION.md. the coreloop agent repeated it. I then put it in the "
+       "brief for a third agent as established fact. it was wrong: the writer "
+       "is attack 6, the recon planted-break test, and a standing order could "
+       "not have done it in principle — they write NO journal lines and "
+       "listDue() bounds the window above by the book date. it survived "
+       "because each reader trusted the previous sentence instead of the code. "
+       "both copies now corrected in place, with the chain named")
+# ---------------------------------------------------------------------------
+# J3 — "Evaluate everything, because I don't want these phantom errors showing
+# up out of the blue. Make sure every feature works, and is callable in the
+# demo because I'm not sure if I want to do both from client side and dashboard
+# side or one or the other." Saahith, ~10:05.
+#
+# The video is cut. The product is the whole job now.
+# ---------------------------------------------------------------------------
+N("J3c", "feature reachability matrix: every capability x client/operator/API/MCP",
+  "product", 110, [], "agent",
+  ["app/client", "components/client", "components/app-shell", "docs/FEATURES.md"],
+  status="done",
+  risk="this answers the actual question — can he demo from the client side, "
+       "the dashboard, or does a convincing demo need both. measured by DRIVING "
+       "each capability, never by reading a route file: a capability that "
+       "exists in src/lib with no caller in src/app is NOT PRESENT, and this "
+       "build already shipped exactly that shape when confirmPayee() had no "
+       "caller and a payment gate pointed at a screen that did not exist")
+N("J3d", "server side: call every endpoint, prove every auth gate, enforce AGENT-LIMITS",
+  "product", 100, [], "agent", ["api/v1", "api/cron", "middleware", "lib/mcp", "docs/API.md"],
+  status="done",
+  risk="an anonymous cron exploit already shipped here once (200 -> 401). the "
+       "highest-value find is any operation AGENT-LIMITS.md says is never "
+       "handed to an autonomous agent that the CODE does not actually refuse — "
+       "a written policy the code does not enforce is the exact phantom he is "
+       "worried about. MCP once carried a FIFTH definition of availability")
+N("J3e", "operator screens: does any of them show a number it did not earn",
+  "product", 120, [], "agent", ["app/(app)/*", "components/*"], status="active",
+  risk="/statements printed HASH REPRODUCED with no connection open; /pots "
+       "would have called difference $0.00 AGREEMENT having read nothing; "
+       "/reconciliation would have shown Breaks 4 from no data. four states per "
+       "screen — live, fixture, empty, failing read — and every one of "
+       "verified/reproduced/reconciled/confirmed/live is a CLAIM that must be "
+       "earned on the render that prints it")
+N("J3f", "a legitimate payout and a theft are the SAME TRANSACTION", "correctness",
+  0, ["J2u"], "agent", ["docs/INVARIANTS.md"], "done",
+  risk="the sentence the whole guard programme turns on. customer liability "
+       "down, house asset down, two balanced lines — beside a real cited ACH "
+       "payout a $500,000 theft differs in NOTHING a balance or a chart shape "
+       "can see. the difference is not in the money, it is in whether anybody "
+       "ASKED for it, and that is a row in another table. proved by D-I': the "
+       "same theft one account over, into 1110 FBO settlement, which any "
+       "whitelist MUST contain because 145 legitimate entries use it. an "
+       "account whitelist would have shipped GREEN with a passing proof")
+N("J3g", "303 card settlements have real provenance and no foreign key",
+  "correctness", 45, ["J2u"], "agent", ["db/migrations", "lib/cards"], "todo",
+  risk="the SOUND version of the deposit-outflow guard — requiring the FK arm "
+       "alone — is RED at 406 rows / $20,696,710.17, and 303 of those are card "
+       "settlements whose provenance is real but unrepresentable in this "
+       "schema. correctly NOT shipped: a guard that arrives red on correct "
+       "behaviour teaches people to ignore reds. needs a RED_REGISTER argument "
+       "from the card book's owner, or an FK — and an FK on a live book hours "
+       "from freeze is the riskier of the two")
+N("J3h", "probes carrying a literal amount go BLOCKED within the hour", "process",
+  0, [], "agent", ["docs/INVARIANTS.md"], "done",
+  risk="both 0055 probes hardcoded $500,000.00 and were blocked inside an hour "
+       "because other suites commit to this live book — the richest account "
+       "fell from $527,828.87 to $494,469.33 underneath them. now rule 7: draw "
+       "the amount from the seed's own balance. same family as the pot proof "
+       "that seeded on a drained pot and proved something else")
+N("J3i", "SELF-INFLICTED: the pot race probe committed two rows it cannot take back",
+  "money-wrong", 0, ["F03x"], "agent", ["db/migrations/0057"], "done",
+  risk="proving the concurrency claim needed a writer that actually COMMITS — a "
+       "rolled-back probe is invisible to a concurrent transaction. the WINNER "
+       "was posted foreign: booking_seq 11785 and 11787, unlabelled pot writes, "
+       "money net zero, every balance invariant green, but no pot: key. "
+       "v_pot_line_provenance reports them CORRECTLY — it caught us. "
+       "journal_entry is append-only, pot is append-only, idempotency_key is "
+       "immutable: THERE IS NO REPAIR. dbcheck goes 47/5 and the fifth red is "
+       "ours forever. the agent refused to write an exemption into 0052, which "
+       "would have been migration 0026's anti-pattern — excluding your own bug "
+       "from the guard that caught it. correct call. the fix it identified: "
+       "post the winner through movePotFunds() and make only the LOSER "
+       "foreign, because a refused write leaves no residue")
+N("J3j", "cross-customer contamination is DETECTED and not PREVENTED", "money-wrong",
+  75, ["J3i"], "agent", ["db/migrations/0058"], "active",
+  risk="STOPPED ON TIME, NOT ON THE BOUNDARY — and the boundary worry was WRONG. a payout moves a customer 2100 down and a HOUSE ASSET down, and house assets are not inside the deposit subtree, so a payout reads as one customer and passes. the predicate is GREEN OVER 3,053 ENTRIES, the book's entire history, every rail and key prefix. stopped because migrations are immutable once applied and the window did not cover writing it, exercising it AND room to be wrong. fully specified in docs/INVARIANTS.md. ORIGINAL: dbcheck:3416 in its own words: $250,000 from one customer's 2100 "
+       "straight into another's, and 'Every trigger on this book accepts it.' "
+       "v_deposit_cross_customer detects it; nothing refuses it. best remaining "
+       "work in the build for two reasons: the population is ALREADY "
+       "structural, and unlike a negative pot it is NOT AMOUNT-DODGEABLE — "
+       "cross-customer contamination is wrong at every amount, so a prevention "
+       "here has no calibration to beat. RISK: a cited payout and a theft are "
+       "the same transaction, so if the predicate cannot separate them without "
+       "an authorisation reference the agent is to STOP rather than ship "
+       "something that refuses correct behaviour")
+N("J3k", "card controls were built entirely operator-side; they are a CUSTOMER feature",
+  "product", 45, [], "agent", ["app/client", "components/client"], status="active",
+  risk="SAAHITH'S DOMAIN CORRECTION at 10:30 — 'when it said card controls "
+       "that's all user side I'm pretty sure', and he is right. a business "
+       "owner setting a spend limit, blocking an MCC or freezing a card on "
+       "their own team's card is the CUSTOMER doing their job; the operator "
+       "only needs to SEE what was set. verified: every writer is under "
+       "components/accounts + app/(app)/accounts/actions.ts, and "
+       "components/client/CardsView.tsx is READ-ONLY. we had the polarity "
+       "backwards. this is also the direct fix for the 55-of-67 unjudged "
+       "approvals — a customer who can finally set controls is why a rule has "
+       "something to judge. both surfaces must write through the SAME "
+       "src/lib/cards function; two copies of the logic is the wrong fix")
+# ---------------------------------------------------------------------------
+# J4 — "you said you built it but not on the user side for card controls for
+# example." Saahith, 10:50. He is right and the criticism generalises.
+#
+# I reported six stretch-ladder items as BUILT. Every one was built operator-
+# side only. The client surface has five screens and ZERO action files. That is
+# the same over-claim this project has been hunting in its own code for two
+# days — a capability reported healthy because the population it was measured
+# over (the operator console) was not the population the claim was about.
+# Instance 29, and the first one in my own reporting rather than the code.
+#
+# The brief's own verbs are customer verbs: an FX quote "the customer accepts",
+# "dispute INTAKE", card controls a business owner sets on their team's cards.
+# ---------------------------------------------------------------------------
+N("J4a", "client pots: create, fund, move — the customer half", "product", 50, [],
+  "agent", ["app/client/pots", "components/client/pots"], status="active",
+  risk="'sub-accounts or pots, with instant internal transfers that are pure "
+       "ledger moves' — built at /pots for the operator, nothing for the "
+       "customer whose money it is. must reach for src/lib/pots, never the "
+       "operator action file: one library serving both surfaces is correct, a "
+       "second copy of the logic is the wrong fix")
+N("J4b", "client dispute INTAKE: the customer raises it, not the operator",
+  "product", 50, [], "agent", ["app/client/disputes", "components/client/disputes"],
+  status="active",
+  risk="the brief says dispute INTAKE. intake IS the customer raising it. we "
+       "built the operator's view of deciding them — 29 cases, 25 provisional "
+       "credits — and the customer who was actually charged cannot raise one. "
+       "HARD RULE: the customer must not grant their own provisional credit; "
+       "filing raises a case, granting is an operator decision under "
+       "maker-checker")
+N("J4c", "client FX: the customer accepts the quote", "product", 50, [], "agent",
+  ["app/client/payouts", "components/client/payouts"], status="active",
+  risk="'the cross-border USDC payout with an FX quote THE CUSTOMER ACCEPTS "
+       "first' — the accepting is the whole point, it is what makes the rate a "
+       "commitment rather than a surprise. built operator-side only. the form "
+       "posts a quote id, never a rate: a form that could name its own rate "
+       "would be the whole feature undone")
+N("J4d", "INSTANCE 29: I over-claimed six features the way the code over-claims",
+  "honesty", 0, [], "claude", ["reporting"], "done",
+  risk="I told Saahith the stretch ladder was built. all six were operator-side "
+       "only. that is precisely the defect this project has catalogued 28 times "
+       "in its own code — a claim reports healthy because the population it was "
+       "measured over is not the population the claim is about. I measured "
+       "'does the capability exist' and reported 'the feature is built'. the "
+       "guard against it is the same one I have been imposing on every agent: "
+       "drive the thing on the surface the claim is about, never infer from a "
+       "library's existence")
+N("J4e", "0057's lock does NOT carry over to the cross-customer trigger",
+  "correctness", 0, ["J3j"], "agent", ["docs/INVARIANTS.md"], "done",
+  risk="the find that will save whoever ships J3j. 0057 locks the customer's "
+       "deposit family because its aggregate spans all history; the "
+       "cross-customer aggregate spans ONE ENTRY, so that race does not exist "
+       "in that form. the race that DOES: corgi_app can append lines to an "
+       "already-COMMITTED entry — --prove's own v_entry_unbalanced probe does "
+       "exactly that — so two transactions each appending a balanced "
+       "single-customer pair to one entry both pass while the END STATE spans "
+       "two customers. lock_business_deposits() cannot close it: two writers "
+       "take two DIFFERENT business locks and never meet. correct lock is "
+       "SELECT 1 FROM journal_entry WHERE id = NEW.entry_id FOR UPDATE. also "
+       "37 financial accounts sit at depth 3, so membership must be decided by "
+       "walking UP via parent_id, not 0054's recursive walk down")
+N("J4f", "/team renders a skeleton and nothing else — the brief's FIRST LINE",
+  "product", 40, [], "agent", ["app/(app)/team", "components/team"], status="active",
+  risk="'Customers hold a balance, send and receive payments, and get A CARD "
+       "FOR EACH PERSON ON THE TEAM.' that is the opening sentence of the brief "
+       "and the screen is dead. TEAM_IDLE is exported as a plain object from a "
+       "'use server' module, so everything exported becomes a SERVER REFERENCE "
+       "and TeamForms.tsx:52 throws on result.facts. add member, set terms, end "
+       "membership and issue-a-card-to-a-team-member are ALL unreachable. the "
+       "page returns HTTP 200, which is exactly why nothing caught it — a 200 "
+       "is not proof, and that is the 29-instance pattern again")
+N("J4g", "two gauntlet items cannot be driven from any surface", "product", 60, [],
+  "agent", ["app/standing-orders", "app/reconciliation"], status="active",
+  risk="gauntlet 8 (standing orders) — createStandingOrder has NO CALLER in "
+       "src/app, src/components or seed.mjs, so a grader cannot create a "
+       "mandate, and the API/MCP refusal copy points at a console screen THAT "
+       "DOES NOT EXIST. gauntlet 9 (scheme reconciliation) — the breaks screen "
+       "SHOWS results but nothing on any surface RUNS a reconciliation, and the "
+       "graders have said in terms 'we will plant one'")
+N("J4h", "THE ANSWER: he needs both surfaces", "product", 0, ["J3c"], "claude",
+  ["docs/FEATURES.md"], "done",
+  risk="37 capabilities x 4 surfaces, every cell measured by driving it — 27 "
+       "pages read as rendered text, writes replayed and confirmed against "
+       "Neon, all 8 API endpoints called with a real bearer, all 11 MCP tools "
+       "invoked. money out works on ALL FOUR surfaces so nothing forces the "
+       "dashboard for the headline flow — BUT add-a-payee is absent on the "
+       "client and /client/pay refuses without a confirmed payee, so a "
+       "client-only demo can only pay someone the dashboard already knows. and "
+       "card controls now work client-side and BELONG there, so a "
+       "dashboard-only demo shows an operator doing the customer's job")
+N("J2f", "deploy and re-run every scoreboard against one sha",
+  "release", 20, ["J2a", "J2b", "J2c", "J2d", "J2e"], "claude", [], status="todo",
+  risk="the honesty tools check documents against the DEPLOYMENT and never checked "
+       "the deployment against the tree. 225f00d is live; the next commit must be too")
+

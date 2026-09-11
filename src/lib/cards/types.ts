@@ -283,6 +283,103 @@ export const DECISION_RULES = [
 
 export type DecisionRule = (typeof DECISION_RULES)[number];
 
+/* -------------------------------------------------------------------------- */
+/* 4b. Was anything actually compared?                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The rules under which NOTHING THIS BOOK HOLDS WAS COMPARED WITH THE REQUEST.
+ *
+ * ─── WHY THIS EXISTS ────────────────────────────────────────────────────────
+ *
+ * Measured on the live book, whole history of the provider lane:
+ *
+ *     63 provider-lane approvals
+ *       44  no_controls_configured   — no control version, no holder
+ *       11  card_not_under_control   — the token is not in this book
+ *        8  within_controls          — a rule ran and said yes
+ *
+ * Fifty-five of sixty-three approvals — 87% — were produced by a branch that
+ * returned `outcome: "approve"` WITHOUT CONSULTING A SINGLE CONTROL. Both
+ * branches are correct, deliberate and documented (see `decide()`'s header);
+ * neither is a defect. The defect is that the LOG could not tell them apart
+ * from `within_controls`: three rows, one `outcome` value, and the only way to
+ * know which of them was actually gated by a limit was to read the `rule`
+ * column and already know what each rule means.
+ *
+ * That is the shape this repository has catalogued over and over — a guard
+ * that reports healthy because the population it excluded is indistinguishable,
+ * in the evidence it emits, from the failure it exists to catch. "51 approvals"
+ * is not evidence that card controls work if 48 of them were approved by a rule
+ * that judged nothing.
+ *
+ * ─── THE DEFINITION, AND IT IS DELIBERATELY STRICT ──────────────────────────
+ *
+ *     A decision is JUDGED when at least one control this book holds — a card
+ *     control version, or a member's terms — was compared with this request and
+ *     COULD HAVE REFUSED IT.
+ *
+ * "Could have refused it" is the operative half, and it is what puts the two
+ * not-a-purchase rules on this list even though they are neither gaps nor
+ * defects. `balance_inquiry_not_a_purchase` and `credit_not_a_purchase` fire at
+ * positions 3 and 4 of `RULE_ORDER`, BEFORE `card_frozen` at 7 — so a balance
+ * inquiry on a FROZEN card is approved, and no control could have stopped it.
+ * Counting those as evidence that a control worked would be the same
+ * over-claim in miniature, so they are counted as what they are.
+ *
+ * `control_store_unavailable` is on the list for the same reason and is not an
+ * exception to it: it DECLINES, and it declines precisely because nothing could
+ * be compared. `judged` is a statement about whether a control ran, not about
+ * which way the answer went, and keeping it orthogonal to `outcome` is what
+ * makes "a decline nobody judged" countable too.
+ *
+ * ─── WHY IT IS A FUNCTION OF THE RULE AND NOT A SEPARATE FACT ───────────────
+ *
+ * Every rule in the closed set is wholly one or the other, and that is a
+ * property of the predicates rather than a convenience:
+ *
+ *   - `no_controls_configured`'s predicate is literally `controls === null &&
+ *     member === null`, so it CANNOT fire where something existed to compare.
+ *   - `within_controls` is reachable only when that predicate was false, so it
+ *     CANNOT fire unless a card control version or a member's terms existed.
+ *   - every other judged rule names the control it compared in its own name.
+ *
+ * So the classification is total, mechanical and checkable, `decide()` states
+ * it at every return site rather than deriving it, and `decide.test.ts` asserts
+ * the two agree for every rule in `DECISION_RULES`. Deriving it in one place
+ * would be smaller; stating it at each site and checking is what stops a rule
+ * added next year from defaulting to "judged" because true is the easy value.
+ *
+ * THE DECISION LOG ALREADY CARRIES ENOUGH TO RECOVER THIS FOR EVERY HISTORIC
+ * ROW, which is why no column was added to `card_auth_decision` and no backfill
+ * was needed: `rule` is stored on every row that has ever been written, so the
+ * 145 rows already in the book classify under exactly this list. Migration 0053
+ * mirrors it in SQL for set-based readers, and a test asserts the mirror.
+ */
+export const UNJUDGED_RULES = [
+  "control_store_unavailable",
+  "card_not_under_control",
+  "no_controls_configured",
+  "balance_inquiry_not_a_purchase",
+  "credit_not_a_purchase",
+] as const;
+
+export type UnjudgedRule = (typeof UNJUDGED_RULES)[number];
+
+/**
+ * Whether a rule compared a control with the request.
+ *
+ * Takes a `string` and not a `DecisionRule`, because its most important callers
+ * read a `rule` column out of the database, where the type is `text` and the
+ * value could in principle be a rule a newer deploy wrote. An unrecognised rule
+ * is reported as JUDGED, which is the direction that leaves the number honest:
+ * over-reporting the unjudged count would manufacture a finding, and a rule
+ * this build has never heard of is one it cannot claim judged nothing.
+ */
+export function isJudgedRule(rule: string): boolean {
+  return !UNJUDGED_RULES.some((unjudged) => unjudged === rule);
+}
+
 /**
  * What the decision function returns.
  *
@@ -294,6 +391,14 @@ export type Verdict = {
   readonly outcome: DecisionOutcome;
   readonly result: AsaResult;
   readonly rule: DecisionRule;
+  /**
+   * Whether any control this book holds was compared with this request.
+   *
+   * NOT a synonym for `outcome === "approve"` and not derivable from it: an
+   * approval can be judged or unjudged, and so can a decline. See
+   * `UNJUDGED_RULES` above for the definition and for why it exists.
+   */
+  readonly judged: boolean;
   /** One sentence, safe to show a cardholder. Never contains a token. */
   readonly reason: string;
   readonly inputs: Readonly<Record<string, string | number | boolean | null>>;
@@ -363,6 +468,16 @@ export type DecisionRecord = {
   readonly outcome: DecisionOutcome;
   readonly resultCode: string;
   readonly rule: string;
+  /**
+   * Whether a control was compared with this authorisation.
+   *
+   * DERIVED FROM `rule` BY `isJudgedRule()` at read time, not stored: `rule` is
+   * on every row this log has ever written, so every historic decision — the
+   * 145 in the book when this was added — classifies without a migration, a
+   * backfill, or a column that could disagree with the rule beside it. The
+   * store fills it in; a screen must not compute it a second time.
+   */
+  readonly judged: boolean;
   readonly reason: string;
   readonly inputs: Readonly<Record<string, unknown>>;
   readonly decisionLatencyUs: number;

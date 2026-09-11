@@ -152,39 +152,66 @@ export function TeamView({
 
       {edgeOnly === undefined ? null : <EdgeExplanation members={edgeOnly} />}
 
-      <Panel
-        title="What the database refuses"
-        description={`${screen.invariants.length} invariant${
-          screen.invariants.length === 1 ? "" : "s"
-        }, counted on this request. A guard nobody queries is a comment, so the screen is one more place that queries them. The count is derived rather than written down, because this caption has twice named a number the list had already moved past.`}
-      >
-        <TableScroll>
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="border-t border-border">
-                <th scope="col" className={TH_CLASS}>View</th>
-                <th scope="col" className={TH_CLASS}>Must be empty because</th>
-                <th scope="col" className={TH_CLASS}>Rows</th>
-              </tr>
-            </thead>
-            <tbody>
-              {screen.invariants.map((invariant) => (
-                <tr key={invariant.view} className="border-t border-border">
-                  <td className={`${TD_CLASS} font-mono text-xs`}>{invariant.view}</td>
-                  <td className={`${TD_CLASS} text-xs text-muted`}>{invariant.claim}</td>
-                  <td className={TD_CLASS}>
-                    <Badge tone={invariant.rows === 0 ? "positive" : "negative"}>
-                      {invariant.rows}
-                    </Badge>
-                  </td>
+      <Panel title="What the database refuses" description={invariantCaption(screen)}>
+        {screen.invariants.length === 0 ? (
+          <div className="border-t border-border px-5 py-8">
+            <p className="max-w-prose text-sm text-muted">
+              {screen.live
+                ? "No invariant view answered this request, so nothing was counted. That is not a clean bill — a count of nothing is not a count of nought."
+                : "This state read no rows, so nothing was counted. The guards are real and the live screen queries every one of them on every request; a green nought printed here would be a pass nobody obtained."}
+            </p>
+          </div>
+        ) : (
+          <TableScroll>
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="border-t border-border">
+                  <th scope="col" className={TH_CLASS}>View</th>
+                  <th scope="col" className={TH_CLASS}>Must be empty because</th>
+                  <th scope="col" className={TH_CLASS}>Rows</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </TableScroll>
+              </thead>
+              <tbody>
+                {screen.invariants.map((invariant) => (
+                  <tr key={invariant.view} className="border-t border-border">
+                    <td className={`${TD_CLASS} font-mono text-xs`}>{invariant.view}</td>
+                    <td className={`${TD_CLASS} text-xs text-muted`}>{invariant.claim}</td>
+                    <td className={TD_CLASS}>
+                      <Badge tone={invariant.rows === 0 ? "positive" : "negative"}>
+                        {invariant.rows}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableScroll>
+        )}
       </Panel>
     </div>
   );
+}
+
+/**
+ * The caption over the invariant panel, derived from whether anything was read.
+ *
+ * IT USED TO SAY "counted on this request" UNCONDITIONALLY. On `?state=empty`
+ * that sentence sat over two green noughts drawn by `./fixtures.ts`, which runs
+ * no query and cannot — so the screen certified two guards on a render that
+ * queried nothing. A green nought in that column is how this console says a
+ * guard held; it is the strongest claim on the page, and it is the one claim a
+ * fixture has no standing to make.
+ *
+ * The count stays derived from the list rather than written down, for the
+ * reason it always was: this caption has twice named a number the list had
+ * already moved past.
+ */
+function invariantCaption(screen: TeamScreen): string {
+  if (!screen.live) {
+    return "This state is a fixture, so nothing was counted. A guard nobody queries is a comment — which is why the live screen queries every one of them, and why this one prints no row rather than a row reading nought.";
+  }
+  const n = screen.invariants.length;
+  return `${n} invariant${n === 1 ? "" : "s"}, counted on this request. A guard nobody queries is a comment, so the screen is one more place that queries them. The count is derived rather than written down, because this caption has twice named a number the list had already moved past.`;
 }
 
 /**

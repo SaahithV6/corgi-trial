@@ -1068,3 +1068,237 @@ better than the brief asks for. Do not let them be graded through a stale deploy
 
 *Every figure in this report carries the command and the time it was produced. Nothing was
 fixed, edited or tidied; two defects in §9 were left exactly where they were found.*
+
+---
+
+## Iteration — Fri 09:1x PDT, T+40h
+
+`225f00d` is deployed and `/api/health` confirms the sha. The six screens that
+404'd an hour ago — `/client`, `/client/activity`, `/client/cards`,
+`/client/pay`, `/client/approvals`, `/dashboard` — all answer 200. The payee
+confirmation UI shipped inside that commit, which closes the worst product hole
+in the build: `PAYEE_WARNING_UNACKNOWLEDGED` was refusing payments and telling
+an operator to acknowledge a warning through a screen that did not exist.
+
+### What the deployment check found that no test did
+
+`/api/health` reads **degraded**, and everything visible on it is green:
+database reachable at 13ms, integrations 7 of 7 live, `webhookHealth.degradedBy`
+empty. The cause is one field deeper — `webhookProcessing.degradedBy =
+["increase"]`, verdict `dropping`, `degradesDeployment: true`. In this
+codebase's vocabulary `dropping` is deliberately NOT a stale dead letter: a
+provider whose every dead letter predates a later successful consumption reads
+`superseded` and is excluded. So this says deliveries are dying in the present
+tense. Lithic reads `backlogged` beside it.
+
+This is the endpoint every document in the repo defers to. It was saying
+something true and specific, and nothing in the test suite was listening.
+
+### The allocator was computing its critical path through a hole
+
+`plan/schedule.py`'s `apply_delegation()` rewired every dependency on a
+delegated node to point at that node's `+rv` review — but it only CREATED the
+review when the owner was still `claude`. Three nodes that were already
+delegated (E02, E03, E05) therefore got no review node while ten downstream
+nodes were repointed at one. The validator listed all ten; `cpm()` did not care,
+because a missing predecessor contributes no length. So the critical path was
+being computed across a gap for as long as those nodes have existed.
+
+Fixed by keying the rewire on the reviews actually created rather than on the
+delegate list. This is the second real defect found in the scheduler itself —
+the first was `cpm()` costing completed nodes at full duration while
+`simulate()` honoured status.
+
+### A finding measured and refuted
+
+**J2e — "the FX quote is absent from `payment_instruction.content_hash`" — is
+wrong, and nothing was changed.** The literal half is true: the preimage is
+`corgi.payment.v1` over account, rail, amount, currency, value_date and
+destination, with no quote. The consequence does not follow. There is no quote
+ON an instruction to substitute: `currency` is `z.literal("USD")`, an
+`fxQuoteId` is stripped by `requestPaymentSchema`'s parse, `payment_instruction`
+has no such column, and a cross-border payout never enters the approvals queue
+at all — `scripts/payout-usdc.mjs` contains zero occurrences of `instruction`,
+`approval` or `maker`. There is no "approved at rate A, executed at rate B"
+moment to defeat, so the attack was not constructible against the old code.
+
+Where the rate does live it is pinned harder than a hash would pin it:
+`fx_quote` derives `fee_cents`, `customer_rate_scaled` and `buy_minor` as
+`GENERATED ALWAYS ... STORED`, grants are `SELECT, INSERT` with `REVOKE UPDATE,
+DELETE, TRUNCATE`, and `fx_quote_acceptance.quote_id` is the primary key.
+
+The finding named a **missing binding** as a defeated guard. Those are different
+claims and only the first is true. `docs/FX.md` §11.1 already specifies the
+binding as future work.
+
+### The real bug that refutation turned up
+
+**Accepting an FX quote reserves no money.** Nothing holds funds between
+acceptance and settlement, so N accepted quotes all clear against the same
+balance. That is an overdraft path with no guard on it, and the hold model that
+closes it already exists and is order-independent by construction. Now `J2g`,
+on the critical path, with the missing maker-checker on `acceptQuote` behind it
+as `J2h` — committing to a rate is the only money-moving action in this build
+that one actor can do alone.
+
+### `facts()` was a sixth definition of balance
+
+`scripts/coreloop.mjs` printed two different numbers for one quantity eleven
+lines apart: `$90,408.21` and `$60,772.91`. The cause, decomposed rather than
+guessed: **136 journal lines value-dated 2027**, refs `LF6-*` — +$32,135.30
+credit, −$2,500.00 debit.
+
+**Correction, added later: "written by the live-fire suite's own standing
+orders" was wrong, and it was written here first.** It then travelled into
+`scripts/coreloop.mjs` and into the brief for a third agent before anyone
+re-derived it. The writer is attack 6, the reconciliation planted-break test,
+which forward-dates its settlements deliberately so the run is reachable from
+the breaks screen — that screen orders runs by business date, so a back-dated
+run cannot be seen. A standing order could not have done this in any case:
+they write no journal lines at all, and `listDue()` bounds the due-date window
+above by the book date, so the catch-up window extends only backwards. The
+misattribution survived three hops because each reader trusted the previous
+sentence instead of the code.
+Lines above the booking watermark: zero, so the value date was the entire cause.
+
+The reason it survived this long is the interesting part. Leaving the 2027 debit
+inside the ledger sum subtracts it once; lifting it out and subtracting it as
+`pending_outbound_cents` subtracts it once. **The two errors cancelled to the
+cent** on the available figure, so the number that gets looked at was right for
+two compensating wrong reasons. Its hold terms were similarly wrong by
+construction — no value-date gate, no release clock, no `manual` bucket, and an
+`ABS()` that turns a malformed hold into more money withheld — and measured
+$0.00 of difference, because this book happens to carry no manual holds.
+
+`facts()` is now a call to `ledger_availability()` and contains no money
+arithmetic at all. Every figure it prints names its definition and states what
+it includes and excludes. A zero-tolerance `agree()` runs at all ten call sites
+holding two independent bodies equal; it was made to go red on purpose before
+being trusted.
+
+### Open
+
+Eight agents working: the dashboard all-clear (instance 26), `compliance.mjs`'s
+four unreal violations, the four `dbcheck` reds printing as bare alarms plus the
+structural pot guard, the drifting fixture business, 48 of 51 card approvals
+that judged nothing, the Increase `dropping` verdict, and the FX hold.
+
+`pnpm typecheck` is red mid-flight on `CardControlsPanel.tsx` — one agent's
+work-in-progress, tracked, not a regression.
+
+---
+
+## Delta — Fri 09:45 PDT, T+40.4h, measured 16:15Z–16:45Z against commit `225f00d`
+
+Appended, not rewritten. Everything above stands as written at the time it was
+written. This entry records what moved, because the previous iteration closed
+with eight agents mid-flight and seven of those items have since landed.
+
+**Note on this file specifically, recorded in `DECISIONS.md` 059.2:** a dead
+Plaid sandbox token is in three pushed commits of *this document*, from 09-10
+09:47→09:55, because the leak report quoted the credential in the act of
+reporting it. It is dead, it grants access only to fabricated data, and the
+decision is to disclose rather than force-push a rewrite of 71 commits hours
+before freeze. `compliance.mjs` AF5 fails on it every run and is not being tuned.
+
+### The scoreboard moved
+
+| | previous | **now** | when |
+|---|---|---|---|
+| `dbcheck` | 36 passed, 4 failed | **43 passed, 4 failed** | 16:23:07Z |
+| `compliance.mjs` | 24 · 6 · 0 · 4 · 7 of 41 | **28 · 2 · 0 · 4 · 7 of 41** | 16:25:43Z |
+| `coreloop.mjs` | PASS 6 · FAIL 1 | **PASS 7 · FAIL 0 · SKIP 0 of 7** | 16:28:26Z |
+| `/api/health` | degraded, 7/7 live | **degraded, 7/7 live** — unchanged | 16:15:22Z |
+| page routes | 23 | **29**; 27 probed, all 200 | 16:23:42Z |
+
+`compliance.mjs` went 6 → 2 by resolving five (AF1, AF2, AF3, NN9, G1) and
+acquiring one (G2). Stated as arithmetic rather than as a sweep, because a
+scoreboard that improves without explaining itself is the thing this document
+exists to distrust. The two that remain are AF5 (above) and G2, which fails
+because four `dbcheck` card-hold invariants are red — and names all four, which
+means two independent checkers now agree on exactly which.
+
+### Seven of the eight open items closed
+
+- **`GUARD REACH` computes the view's population.** It prints `ranges over N of
+  M`, the percentage outside, and for `v_hold_closure_not_terminal` a breakdown
+  by declared writer with the excluded money priced at $2,551.00 and $132.00.
+- **`--prove` reaches all 31 views**, up from 2. Its closing line now says
+  *"make EVERY invariant view FAIL on purpose"*.
+- **The four `dbcheck` reds print `ON THE REGISTER — a standing red with a
+  written argument. Still a FAIL, still counted.`** They are no longer bare
+  alarms and the run still does not go green.
+- **The structural pot guard shipped.** `v_pot_line_provenance`, reach *"20
+  journal entries with a line on a pot account — the structural population,
+  whatever the writer called the entry"*. Keyed on where money landed, not on
+  what the writer called it.
+- **`compliance.mjs`'s unreal violations are gone**, and NN9 was fixed by
+  anchoring the pattern rather than by switching the check off.
+- **The nav completeness test shipped.** `NavLinks.test.ts` asserts the
+  relationship in both directions and opens by naming itself *"the twenty-second
+  instance of this codebase's defining failure."*
+- **The Increase `dropping` verdict is diagnosed.** Measured 16:35:12Z: **zero of
+  37 dead letters are fault deaths** — 12 outbound wires with a `corgi-itest-…`
+  key naming no instruction, the rest unattributable inbound transfers. Lithic
+  holds 53 of the identical shape and reads `backlogged`. The discriminator was
+  arrival timing, not disposition. Patch in tree, tests passing, **not deployed**.
+
+The eighth — the FX hold on acceptance — is not something this pass verified.
+
+### The card-approval item got better and worse at once
+
+Previously *"48 of 51 card approvals that judged nothing"*. At 16:33:42Z, in the
+provider lane: **67 approvals, 55 unjudged (82%)**, `within_controls` 3 → 12,
+and **55 of 962 cards** carry a control version, up from 31 of 911.
+
+**The ratio improved and the absolute count got worse**, because `registerCard()`
+mints uncontrolled cards faster than issuance mints controlled ones. Reporting
+either alone is misleading. The fix is at the registration path; the decision
+path is correct and fails closed.
+
+### A published statistic that does not survive re-measurement
+
+**The card-auth p50 should not be quoted.** Documents carry 14.2 ms; `docs/WOW.md`
+carried 24.6 ms for the provider lane; at 16:33Z that same lane reads 134.6 ms.
+All three are honest. Bucketed at 16:42:09Z the lane is **bimodal — 38 decisions
+under 30 ms, 42 between 30 and 200 ms, 5 over 200 ms** — so the median sits on the
+boundary between the modes and flips with the sample. By hour it reads 124.8,
+138.8, **17.0**, 147.1, 162.3 ms.
+
+What survives: **max 601.5 ms across all 159 decisions**, inside a 1,400 ms
+handler budget and a 6,000 ms cap; and excluding the deliberate fail-closed rows,
+81 decisions at p50 125.1 ms / p95 177.5 ms. `docs/WOW.md` and
+`docs/CUT-LIST.md` are corrected; other documents quoting 14.2 ms are not mine.
+
+### Three capability claims that were stale in the flattering direction
+
+- **The stablecoin wallet can send.** `/api/health` 16:15:30Z: *"13.05 USDC and
+  68384981507408 wei gas — a transfer is fundable"*. **Two** real Base Sepolia
+  transfers now carry ledger entries; the second (`0x92b3…d58d`, block
+  `0x2c85537`, 1.979521 USDC) was verified on chain at 16:22:57Z by this pass.
+  Every document saying "20 USDC and zero gas, it can read and cannot send" is
+  stale.
+- **The re-drive exists.** `scripts/redrive.mjs` took Increase from 167 dead / 52
+  consumed to **37 / 207**, and ledger entries sourced from Increase deliveries
+  from **2 to 16**.
+- **The Lithic cap was raised by the principal** after the permission classifier
+  blocked the agent `PATCH` and the agent escalated instead of routing around.
+  `coreloop` leg 4 went green with no change to the leg. `DECISIONS.md` 059.3.
+
+### One finding of this pass, refuted
+
+The −$858,941.45 account was briefed as a hazard on the grounds that *"a rebuilt
+balance beside a live one will disagree"*. **That hazard does not exist**:
+`rebuild.mjs` and the live book agree to the cent and no screen renders a rebuilt
+balance. The cause is `holds.integration.test.ts` §4b — 22 runs, 20 force-post
+pairs netting to zero, exactly two unpaired. The real hazard was elsewhere and
+worse: the front door summed five fixture accounts into *"Customer money on this
+book"* and printed **−$196,505.08** while customers held **$105,600.67**. Fixed
+by classifying on the EIN, **zero rows written**. The arithmetic was right; the
+population was wrong — which is this document's own thesis, one more time.
+
+### Still open at T+40.4h
+
+The video is unrecorded and is the largest remaining item; `livefire.mjs` has not
+been re-run since 08:23:58Z; the health patch is not deployed; and whether the
+T+24h checkpoint email was actually sent could not be established from the repo.

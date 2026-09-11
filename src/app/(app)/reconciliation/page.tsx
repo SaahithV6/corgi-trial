@@ -4,8 +4,12 @@ import type { Metadata } from "next";
 import { ReconSkeleton, ReconView } from "@/components/recon/ReconView";
 import { ReconStateBar } from "@/components/recon/ReconStateBar";
 import { createFixtureReconSource } from "@/components/recon/fixtures";
+import { createUnreadableReconSource } from "@/components/recon/unreadable";
 import { parseBreakFilter } from "@/components/recon/view-state";
 import type { ReconDataSource } from "@/components/recon/data-contract";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 export const metadata: Metadata = {
   title: "Reconciliation · Corgi ops console",
@@ -48,9 +52,13 @@ type ReconciliationPageProps = {
  * has to be a real query against a real book — a fixture would answer the
  * question by construction and prove nothing. The other four exist to be shown
  * in order in front of a panel without writing a row, which a live query
- * cannot do on demand. When no database is configured at all, `default` falls
- * back to the fixture and the screen SAYS SO on its face; see `ReconSource` in
- * the data contract.
+ * cannot do on demand.
+ *
+ * And one state the URL cannot ask for: NO DATABASE CONFIGURED. It is not a
+ * sixth demo state, because it is not a demonstration of anything — it is what
+ * this deployment is. The badge on the state bar reads NO DATABASE, the board
+ * is replaced by the refusal panel, and no run, break or age bucket is drawn.
+ * See `selectSource` below for what this used to do instead.
  *
  * The Suspense boundary is what makes the loading state honest: `ReconView` is
  * an async server component, the fallback is the real skeleton, and
@@ -62,33 +70,64 @@ export default async function ReconciliationPage({
   searchParams,
 }: ReconciliationPageProps) {
   const filter = parseBreakFilter(await searchParams);
-  const source = await selectSource(filter.state);
+  // ONE VALUE, TWO SURFACES. The state bar's badge and the view's refusal
+  // wording both come from this line, so they cannot disagree about what this
+  // screen read.
+  const noDatabase = !hasDatabase();
+  const source = await selectSource(filter.state, noDatabase);
 
   return (
     <div className="space-y-6">
-      <ReconStateBar filter={filter} />
+      <ReconStateBar filter={filter} noDatabase={noDatabase} />
 
       <Suspense
         key={`${filter.state}:${filter.runId ?? ""}:${filter.selected ?? ""}`}
         fallback={<ReconSkeleton />}
       >
-        <ReconView source={source} filter={filter} />
+        <ReconView source={source} filter={filter} noDatabase={noDatabase} />
       </Suspense>
     </div>
   );
 }
 
 /**
- * Live for `default`, fixture for everything else — and fixture for `default`
- * too when there is no database to read.
+ * Live for `default`, fixture for everything else — and a REFUSAL for
+ * `default` when there is no database to read.
  *
  * The live module is imported dynamically because importing it evaluates
  * `src/lib/env.ts`, which refuses to load without a full set of keys. That is
  * the right behaviour for the app and the wrong behaviour for a page that must
- * be able to render the words "no database configured".
+ * be able to render the words "no database configured" — so the import happens
+ * only on the branch that has already established there is a database to read.
+ *
+ * WHAT THIS FUNCTION USED TO DO, AND WHY IT IS THE DEFECT THIS SCREEN CARRIED.
+ * It asked `hasDatabase()` by importing `@/lib/recon/screen`, which reaches
+ * `@/lib/ledger/db` -> `@/lib/env` and throws `EnvironmentError` without
+ * `APP_DATABASE_URL`. The guard was therefore unreachable in the one case it
+ * was written for: the import above it only succeeds when a database IS
+ * configured. Measured with the variable deleted, this page did not render
+ * "no database configured" — the render threw and the operator got the
+ * framework's error page.
+ *
+ * If it HAD run, it returned `createFixtureReconSource("default")`: last
+ * night's file, a run number, a booking watermark, a break list and an age
+ * histogram, on a deployment that had not read a row. This is the screen the
+ * graders use to check that a deleted settlement line was found. It would have
+ * shown them a found break that nothing found.
+ *
+ * With no database the answer is now a REFUSAL, from `@/components/recon/unreadable`,
+ * which `ReconView` renders the same way it renders a failed read: no run, no
+ * breaks, no counts. "I cannot see the file" and "the file reconciled clean"
+ * are different screens.
  */
-async function selectSource(state: string): Promise<ReconDataSource> {
+async function selectSource(
+  state: string,
+  noDatabase: boolean,
+): Promise<ReconDataSource> {
   if (state !== "default") {
+    // A demo state stays a fixture whether or not a database is configured:
+    // those four are drawn on purpose, and "no database" does not make a
+    // drawing any more or less drawn.
     return createFixtureReconSource(
       state === "loading" || state === "empty" || state === "error" || state === "edge"
         ? state
@@ -96,8 +135,7 @@ async function selectSource(state: string): Promise<ReconDataSource> {
     );
   }
 
-  const { hasDatabase } = await import("@/lib/recon/screen");
-  if (!hasDatabase()) return createFixtureReconSource("default");
+  if (noDatabase) return createUnreadableReconSource();
 
   const { loadReconView } = await import("@/lib/recon/screen");
   return { load: loadReconView };

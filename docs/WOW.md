@@ -67,6 +67,32 @@ SELECT count(DISTINCT card_id) FROM card_control_version;  --   31
 **31 of 911 cards carry any control version at all.** The real-time path is
 live, correct, fast and — on the overwhelming majority of traffic — *silent*.
 
+> ### Re-measured 2026-09-11T16:33:42Z — and the direction matters
+>
+> The readings above are true of 14:55Z and this file said to re-run before
+> quoting. Re-run:
+>
+> | | 14:55Z | **16:33Z** |
+> |---|---|---|
+> | provider-lane approvals | 51 | **67** |
+> | …approved by a rule that judged nothing | 48 (**94%**) | **55** (**82%**) |
+> | …approved by `within_controls` | 3 | **12** |
+> | cards | 911 | **962** |
+> | cards with any control version | 31 | **55** |
+>
+> **Both numbers moved and they moved in opposite directions.** The *proportion*
+> of unjudged approvals improved from 94% to 82%, because controlled cards are
+> being issued and `within_controls` went 3 → 12. The *absolute count* of
+> unjudged approvals got worse, 48 → 55, because every suite that registers a
+> card through `registerCard()` mints an uncontrolled one faster than issuance
+> mints a controlled one.
+>
+> Reporting either alone is misleading — the ratio alone reads as progress, the
+> count alone reads as decay, and the true statement is that **the decision path
+> is fine and the registration path is outrunning it.** §3's argument is
+> unaffected and is arguably strengthened: the system still has no opinion on the
+> overwhelming majority of its traffic.
+
 ## 1.2 Cards, businesses, MCCs actually observed
 
 ```sql
@@ -285,6 +311,32 @@ induced outage, at its 600 ms deadline). Excluding the three outage rows: 65
 rows, p50 **21.1 ms**, max 508 ms. **Zero of 128 decisions exceeded the 1,400 ms
 handler budget, Lithic's 3,000 ms recommendation, or the 6,000 ms timeout.**
 
+> ### Re-measured 2026-09-11T16:42:09Z — do not quote a p50 for this lane
+>
+> At 16:33Z the provider lane reads **85 rows, p50 134.6 ms** — five times the
+> figure above, from the same query against the same column. Elsewhere this build
+> publishes **14.2 ms** for the same path. All three are honest readings and the
+> spread is the finding, not an error in any of them.
+>
+> **The lane is bimodal.** Bucketed at 16:42:09Z: **38 decisions under 30 ms, 42
+> between 30 and 200 ms, 5 over 200 ms.** 38 against 42 puts the median exactly on
+> the boundary between the two modes, so it flips with the sample. By hour, the
+> provider-lane p50 reads 124.8 ms, 138.8 ms, **17.0 ms**, 147.1 ms, 162.3 ms.
+>
+> So the p50 of this path is not a stable statistic and should not be quoted as
+> one — including the 24.6 ms above. What survives re-measurement:
+>
+> * **Max 601.5 ms across all 159 decisions ever taken**, against a 1,400 ms
+>   handler budget, a 3,000 ms recommendation and a 6,000 ms cap. The worst case
+>   is inside the tightest ceiling by a factor of four, and that claim does not
+>   depend on a median.
+> * **Excluding the deliberate fail-closed rows: 81 decisions, p50 125.1 ms, p95
+>   177.5 ms.** The over-200 ms bucket is `control_store_unavailable` spending its
+>   600 ms budget before declining — a designed behaviour, not a slow query.
+>
+> §2's latency argument is unchanged: the headroom is in the thousands of
+> milliseconds and the score's inputs ride the same single statement.
+
 ---
 
 ## 2. The verdict on a credit or spend-optimisation model
@@ -372,13 +424,16 @@ explainable, versioned and **currently decides nothing**.
 
 ### Why this one is first
 
-§1.1 is the argument. **48 of 51 provider-lane approvals were approved by a rule
-that judged nothing**, and 31 of 911 cards carry any control at all. The ASA path
-is live, enrolled, measured and, on the traffic it actually sees, *mute*. This is
-the only candidate that puts an opinion where the system currently has none.
+§1.1 is the argument. **55 of 67 provider-lane approvals were approved by a rule
+that judged nothing** (48 of 51 when this was first written), and 55 of 962 cards
+carry any control at all. The ASA path is live, enrolled, measured and, on the
+traffic it actually sees, *mute*. This is the only candidate that puts an opinion
+where the system currently has none — and the absolute number of mute approvals
+has grown since the proposal was written, which strengthens it.
 
-The latency objection is already answered by measurement: p50 **24.6 ms**
-against a 600 ms control-read deadline, a 1,400 ms handler ceiling and a 6,000 ms
+The latency objection is already answered by measurement, and by the bound rather
+than the median: **max 601.5 ms across every decision ever taken**, against a
+600 ms control-read deadline, a 1,400 ms handler ceiling and a 6,000 ms
 provider cap — and migration 0033 already proved the shape, adding the
 per-member velocity as a second `CROSS JOIN LATERAL` aggregate in the **same
 single statement**, costing no round trip and no second deadline. The score's
@@ -407,8 +462,9 @@ Roughly a migration, ~150 lines, and two integration scenarios.
 ### What could go wrong in a demo
 
 * **It declines nothing, so it looks like it does nothing.** Mitigated by
-  showing the score on a decision the controls approved — which is 48 of 51 rows
-  — and pointing at the policy row that says why it did not act.
+  showing the score on a decision the controls approved — which is 55 of 67
+  provider-lane rows — and pointing at the policy row that says why it did not
+  act.
 * Flipping `mode` to `enforcing` live would be a one-word change to the most
   consequential path in the build. **Do not.**
 * The panel asks what the weights are worth. The answer must be "nothing yet,

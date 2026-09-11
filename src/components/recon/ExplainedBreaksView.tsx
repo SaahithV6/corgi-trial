@@ -55,13 +55,22 @@ import {
  * The screen is a second READING of the same breaks `/reconciliation` lists,
  * never a second LIST. Its row count equals the engine's, always, and the
  * header says so with the number printed rather than claimed.
+ *
+ * `noDatabase` is resolved ONCE, in `page.tsx`, and handed to the state bar as
+ * well. It is not re-derived here. Two predicates answering three-quarters of
+ * the same question is how a screen ends up badging LIVE above a board badging
+ * FIXTURE. The flag chooses the refusal's wording and nothing else: the refusal
+ * itself arrives as a failed read, from `./explain-unreadable.ts`, down the
+ * path below.
  */
 export async function ExplainedBreaksView({
   source,
   filter,
+  noDatabase = false,
 }: {
   readonly source: ExplainedDataSource;
   readonly filter: ExplainFilter;
+  readonly noDatabase?: boolean;
 }) {
   const result = await source.load({
     ...(filter.runId === null ? {} : { runId: filter.runId }),
@@ -72,7 +81,15 @@ export async function ExplainedBreaksView({
     return (
       <div className="space-y-6">
         <Header />
-        <ReconErrorPanel error={result.error} />
+        {noDatabase ? (
+          <ReconErrorPanel
+            error={result.error}
+            title="This screen cannot see the file or the journal"
+            description="No database is configured for this deployment, so no run was read and no correction was reconstructed. Nothing here says a break is explained; nothing here could. Four class tiles reading nought would have said exactly that, which is why none is shown."
+          />
+        ) : (
+          <ReconErrorPanel error={result.error} />
+        )}
       </div>
     );
   }

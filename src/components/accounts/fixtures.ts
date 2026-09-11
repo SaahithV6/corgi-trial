@@ -34,7 +34,14 @@
  */
 
 import { fail, ok, type ErrorShape, type Result } from "@/lib/result";
-import { holdState, type CardEvent } from "@/lib/holds";
+// `@/lib/holds` — the barrel — is a VALUE import of `./store` and
+// `./availability`, both of which value-import `sql` from `@/lib/ledger/db`,
+// which reads `@/lib/env` at module scope and throws without
+// `APP_DATABASE_URL`. So importing the barrel here made this file — the
+// DRAWINGS, which want no database and read no row — the fourth static chain
+// that killed `/accounts` while the page module was still loading. `holdState`
+// and `CardEvent` are both declared in `./model`, which imports nothing.
+import { holdState, type CardEvent } from "@/lib/holds/model";
 
 import type {
   ConsoleBusiness,

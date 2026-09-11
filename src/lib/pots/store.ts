@@ -377,6 +377,8 @@ export const POT_INVARIANT_VIEWS = [
   "v_pot_negative",
   "v_pot_orphan",
   "v_internal_transfer_impure",
+  "v_pot_line_provenance",
+  "v_pot_guard_disarmed",
   "v_entry_unbalanced",
   "v_book_not_zero",
 ] as const;

@@ -341,12 +341,24 @@ if (flag("quote-accept")) {
   if (!accepted.ok) {
     kv("REFUSED", accepted.error.code);
     console.log(`\n  ${accepted.error.message}`);
-    console.log("\nNothing was written. The expiry is decided by the database, not by this script.");
+    console.log(
+      "\nNothing was written. Both refusals on this path belong to the database, not to this\n" +
+      "script: the expiry is a trigger, and the funds check runs under an advisory lock on the\n" +
+      "customer's deposit account so two acceptances cannot both pass it.",
+    );
     await sql.end();
     process.exit(1);
   }
   printQuote(accepted.value);
-  console.log(`\nWe are committed. Nothing is on the ledger: a commitment is not a transaction.`);
+  // The FINANCIAL book, and the word matters since migration 0053. An
+  // acceptance places a memo hold for the committed price -- one entry, in the
+  // memo book, off balance sheet -- so the customer's available balance now
+  // reflects the commitment they just made. What has NOT moved is their money.
+  console.log(
+    `\nWe are committed. Nothing is on the FINANCIAL ledger: a commitment is not a transaction.` +
+      `\nTheir available balance has fallen by the committed price - that is the memo hold` +
+      `\n(9300, migration 0053), which is why they cannot commit the same dollars twice.`,
+  );
   console.log(`  node scripts/payout-usdc.mjs --quote ${accepted.value.quoteRef}`);
   await sql.end();
   process.exit(0);

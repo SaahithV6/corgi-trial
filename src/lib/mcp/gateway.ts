@@ -762,6 +762,7 @@ export function liveGateway(options: GatewayOptions = {}): Gateway {
             outcome: d.outcome,
             resultCode: d.resultCode,
             rule: d.rule,
+            judged: d.judged,
             reason: d.reason,
             controlVersion: d.controlVersion,
             decisionLatencyUs: d.decisionLatencyUs,

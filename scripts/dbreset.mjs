@@ -43,6 +43,16 @@ await s2.unsafe(`GRANT SELECT, INSERT ON journal_entry, journal_line, card_autho
   card_auth_event, hold, hold_closure, book_day, statement, scheme_file, scheme_file_row,
   recon_match, recon_break_note, payment_instruction, payment_instruction_event TO corgi_app`);
 await s2.unsafe("GRANT SELECT, INSERT, UPDATE ON webhook_inbox TO corgi_app");
+// 0056's four tables. Append-and-retire, never rewrite — so SELECT+INSERT
+// broadly, and the two column-level UPDATEs 0056 §12 argues for, and nothing
+// else. Named here because the list above is hardcoded and this script has
+// already eaten one migration's grants for exactly that reason; the tables
+// cannot be derived from the catalogue without undoing the immutability
+// argument the comment below makes.
+await s2.unsafe(`GRANT SELECT, INSERT ON plaid_item, plaid_item_secret,
+  plaid_item_account, plaid_item_event TO corgi_app`);
+await s2.unsafe("GRANT UPDATE (retired_at) ON plaid_item_secret TO corgi_app");
+await s2.unsafe("GRANT UPDATE (fundable, observed_at) ON plaid_item_account TO corgi_app");
 await s2.unsafe(`GRANT SELECT ON business, actor, account, book_entity,
   funds_availability_policy, rail_event_semantics, approval_policy TO corgi_app`);
 

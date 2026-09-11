@@ -50,21 +50,12 @@ import { endMembership, issueCardToMember, reinstateMember } from "@/lib/team/li
 import { MEMBER_STATES, TEAM_ROLES } from "@/lib/team/roles";
 import { addMember, setMemberTerms, readMember } from "@/lib/team/store";
 
-export type TeamActionResult = {
-  readonly status: "idle" | "ok" | "failed";
-  readonly code: string | null;
-  readonly message: string;
-  readonly facts: readonly { readonly label: string; readonly value: string; readonly mono?: boolean }[];
-  readonly at: string | null;
-};
-
-export const TEAM_IDLE: TeamActionResult = {
-  status: "idle",
-  code: null,
-  message: "",
-  facts: [],
-  at: null,
-};
+// The shape and its idle value live in a PLAIN module, not here. A
+// `"use server"` file may only export async functions: every other export
+// becomes a server reference, so a client importing `TEAM_IDLE` from this file
+// got a callable stub instead of the object and `/team` rendered nothing but
+// its skeleton. See `@/components/team/action-result` for the full account.
+import type { TeamActionResult } from "@/components/team/action-result";
 
 function fail(code: string, message: string, facts: TeamActionResult["facts"] = []): TeamActionResult {
   return { status: "failed", code, message, facts, at: new Date().toISOString() };

@@ -340,8 +340,10 @@ export async function acceptQuoteAction(
       `committed to delivering ` +
       `${formatMinorUnits(quote.buyMinor, quote.buyExponent, quote.buyCurrency)} for ` +
       `${formatUsd(quote.sellCents)}, whatever the market does before ` +
-      `${quote.settleBy ?? "the window closes"}. Nothing has been posted to the ledger: a ` +
-      "commitment is not a transaction.",
+      `${quote.settleBy ?? "the window closes"}. Nothing has been posted to the FINANCIAL ` +
+      "ledger — a commitment is not a transaction — but their available balance has fallen " +
+      `by ${formatUsd(quote.sellCents)}: since migration 0053 an accepted quote places a memo ` +
+      "hold for the price it commits, so the same dollars cannot be committed twice.",
     issues: null,
     quoteRef: quote.quoteRef,
   };

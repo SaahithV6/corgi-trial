@@ -48,13 +48,14 @@ export const FIXTURE_READ_FAILURE: ErrorShape = {
   details: { retryable: true, source: "timetravel.transactions", fixture: true },
 };
 
-/** No database configured at all. A different fact from a failed read. */
-export const NO_DATABASE: ErrorShape = {
-  code: "NO_DATABASE",
-  message:
-    "No database is configured for this deployment, so there is no book to travel through. This is a configuration state, not a ledger failure.",
-  details: { retryable: false, source: "timetravel.transactions" },
-};
+/*
+ * `NO_DATABASE` used to be the next export in this file. It has moved to
+ * `./unreadable.ts` as `TRANSACTIONS_NO_DATABASE`, because it is not a fixture
+ * and a file named `fixtures.ts` is the wrong place to learn that. A fixture is
+ * a drawing of a book; that constant is a refusal to draw one, and the five
+ * other screens in this console lost the distinction by keeping the two
+ * together.
+ */
 
 /**
  * The value date the `empty` state pins to.

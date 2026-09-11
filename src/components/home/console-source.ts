@@ -11,6 +11,8 @@ import {
   type Sql,
 } from "@/lib/ledger/queries";
 import { createLiveAccountDataSource } from "@/components/account/live-data-source";
+import { fixtureOriginOf } from "@/lib/home/fixture-businesses";
+import { listBusinesses } from "@/lib/ledger/readers";
 import { err, fail, ok } from "@/lib/result";
 import type { ErrorShape, Result } from "@/lib/result";
 
@@ -108,6 +110,24 @@ async function readPositions(conn: Sql): Promise<readonly AccountPosition[]> {
   const rows = await listDepositAccounts(conn);
   const source = createLiveAccountDataSource({ conn });
 
+  // WHICH OF THESE BUSINESSES IS A CUSTOMER.
+  //
+  // Three of the seven deposit accounts on this book were opened by test
+  // suites with raw SQL, and one of them sits at -$858,941.45 after two
+  // $500,000.00 force-posts whose refund was never reached. Folded into the
+  // headline unlabelled, this panel reported that the bank held NEGATIVE
+  // $196,505.08 of customer money.
+  //
+  // The classification is a pure function of the business's own EIN --
+  // `@/lib/home/fixture-businesses`, which is also where the argument for
+  // labelling these rows rather than filtering, deleting or reversing them is
+  // written out. The EIN comes from `listBusinesses()`, the ledger's own
+  // reader: one extra SELECT against `business`, no new SQL in this file, and
+  // no second opinion about any balance.
+  const ein = new Map(
+    (await listBusinesses(conn)).map((b) => [b.businessId, b.ein]),
+  );
+
   const positions: AccountPosition[] = [];
   for (const row of rows) {
     const summary = await source.getAccountSummary({ accountId: row.accountId });
@@ -124,6 +144,10 @@ async function readPositions(conn: Sql): Promise<readonly AccountPosition[]> {
       availableCents: BigInt(summary.value.availableCents),
       activeHoldsCents: BigInt(summary.value.activeHoldsCents),
       unclearedCreditsCents: BigInt(summary.value.unclearedCreditsCents),
+      fixture: fixtureOriginOf({
+        businessId: row.businessId,
+        ein: ein.get(row.businessId) ?? null,
+      }),
     });
   }
 

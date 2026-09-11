@@ -360,14 +360,27 @@ made by it. Nothing is torn down: the money tables are append-only by design and
 `corgi_app` holds no `DELETE` on them. The run writes real rows and says so.
 
 **The database is read only.** Every statement in the script is a `SELECT`. The
-`availableBalance()` derivation is re-expressed rather than imported, because
-importing it would put application code in the call stack — it is the yardstick,
-not a second opinion the app is consulted for.
+availability derivation is neither imported nor re-expressed: `facts()` is a
+`SELECT` against `ledger_availability()` (migration 0022), the one definition,
+reached over the wire exactly as the deployed screens reach it. Importing
+`availableBalance()` would put application code in the call stack; *copying* its
+arithmetic into this script was worse, and did the damage 0022 was written to
+end — the copy had no value-date predicate, so the run printed a ledger of
+$89,158.21 where the book said $59,522.91, and contradicted its own step
+assertions by $29,635.30 in the same leg. The five terms the script prints are
+the function's five columns, carried unchanged, each with the predicate that
+produced it printed beneath. A second reading, `balanceAsOf()`, is held equal to
+the ledger term on every call; a cent between them stops the run.
 
 **Invariants are checked, not assumed.** The run finishes by shelling out to
 `scripts/dbcheck.mjs` — which connects as `corgi_app` and attempts `UPDATE`,
-`DELETE` and `TRUNCATE` on the money tables — and requires **14 passed, 0
-failed**. Anything else fails the run.
+`DELETE` and `TRUNCATE` on the money tables — and requires a **named set** of
+invariants to be present and green, listed by view name in `coreloop.mjs`. Not a
+count: a count cannot tell an invariant that was *added* from one that *stopped
+running*, and the old `14 passed, 0 failed` called both of those the same red. A
+required view missing from dbcheck's output fails the run. The four standing
+reds are excused **by name**, on the argument dbcheck's own `RED_REGISTER`
+carries. Anything else red is printed and is not this script's business.
 
 ---
 

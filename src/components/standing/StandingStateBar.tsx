@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { FOCUS_RING } from "@/components/ui/primitives";
+import { Badge, FOCUS_RING } from "@/components/ui/primitives";
 
 import {
   DEMO_STATES,
@@ -9,6 +9,18 @@ import {
   standingQuery,
   type StandingFilter,
 } from "./view-state";
+
+/**
+ * What the state bar says when there is nothing to read.
+ *
+ * One sentence, used in two places — the line under the links, and the
+ * tooltip on every state that would otherwise have read the database. The
+ * tooltip mattered: it carried the `default` hint, which promises live rows,
+ * and left that promise hoverable on a screen whose badge says NO DATABASE.
+ * One screen, one claim, includes the claims a reader has to hover to find.
+ */
+const NO_DATABASE_HINT =
+  "No database is configured for this deployment. No mandate was listed, no occurrence was read and no schedule is drawn below — the absence of a refused occurrence on this screen is not a statement that there is none.";
 
 /**
  * Live switch between the screen's five states.
@@ -22,8 +34,23 @@ import {
  * fixtures even when a database is configured, so they can be shown in order in
  * front of a panel without firing a payment — and so the state where a real
  * refusal has to be found is unambiguously the live one.
+ *
+ * ONE SCREEN, ONE CLAIM ABOUT ITS DATA SOURCE. `noDatabase` comes from
+ * `page.tsx`, which resolved it once with `hasDatabase()` and handed the same
+ * value to `StandingView`. When it is set, this bar carries the screen's only
+ * source badge — the board below it is a refusal and badges nothing — and the
+ * `default` hint, which promises live mandates, is replaced rather than left
+ * standing over a screen that read nothing.
  */
-export function StandingStateBar({ filter }: { readonly filter: StandingFilter }) {
+export function StandingStateBar({
+  filter,
+  noDatabase = false,
+}: {
+  readonly filter: StandingFilter;
+  readonly noDatabase?: boolean;
+}) {
+  const refusing = noDatabase && filter.state === "default";
+
   return (
     <aside
       aria-label="Demo states"
@@ -45,7 +72,7 @@ export function StandingStateBar({ filter }: { readonly filter: StandingFilter }
                 // explain the emptiness with the wrong reason.
                 href={`/standing-orders${standingQuery({ state })}`}
                 aria-current={current ? "page" : undefined}
-                title={DEMO_STATE_HINTS[state]}
+                title={noDatabase && (state === "default") ? NO_DATABASE_HINT : DEMO_STATE_HINTS[state]}
                 className={`rounded px-2 py-1 text-xs ${FOCUS_RING} ${
                   current
                     ? "bg-surface-raised font-medium text-text shadow-[inset_0_0_0_1px_var(--color-border-strong)]"
@@ -57,10 +84,14 @@ export function StandingStateBar({ filter }: { readonly filter: StandingFilter }
             );
           })}
         </div>
+
+        {refusing ? <Badge tone="negative">NO DATABASE</Badge> : null}
       </div>
 
       <p className="mt-2 max-w-prose text-[11px] leading-relaxed text-muted">
-        {DEMO_STATE_HINTS[filter.state]}
+        {refusing
+          ? NO_DATABASE_HINT
+          : DEMO_STATE_HINTS[filter.state]}
       </p>
     </aside>
   );

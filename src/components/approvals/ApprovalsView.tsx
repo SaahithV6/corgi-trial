@@ -1,7 +1,5 @@
 import { ROLE_LABEL, readRole } from "@/components/app-shell/role";
 import { Badge, MetaList, Note } from "@/components/ui/primitives";
-import { currentActor } from "@/lib/approvals/session";
-import { createLiveApprovalsSource } from "@/lib/approvals/screen";
 import { formatTimestamp } from "@/lib/format/datetime";
 import { isErr } from "@/lib/result";
 
@@ -9,53 +7,75 @@ import { ApprovalsSkeleton } from "./ApprovalsSkeleton";
 import { ErrorPanel } from "./ErrorPanel";
 import { PolicyPanel } from "./PolicyPanel";
 import { QueueList } from "./QueueList";
-import type { ActorView, ApprovalsDataSource } from "./data-contract";
-import { createFixtureSource } from "./fixtures";
-import type { ApprovalsView as View } from "./demo-state";
+import type { ActorSource, ActorView, ApprovalsDataSource } from "./data-contract";
+import type { SourceClaim } from "./demo-state";
 
 export { ApprovalsSkeleton };
+
+/** The refusal wording, for the cause that is not a failed read. */
+const NO_DATABASE_TITLE = "The approvals queue was not read";
+const NO_DATABASE_DESCRIPTION =
+  "No database is configured for this deployment, so nothing below was read: not the queue, not the policy table, not the actor this session would be acting as. Nothing was approved, rejected or released either — but that is true of every state of this screen, and it is not the reassurance here. The reassurance you are not getting is that anyone has looked at what is waiting.";
 
 /**
  * The approvals screen.
  *
- * An async server component behind the page's Suspense boundary. It resolves
- * WHO THIS SESSION IS on the server — never from anything the browser sent
- * beyond the role cookie, and even that is resolved by predicate against the
- * actor table — then reads the queue through `ApprovalsDataSource` and knows
- * nothing about where the rows came from.
+ * An async server component behind the page's Suspense boundary. It reads the
+ * queue through `ApprovalsDataSource` and this session's identity through
+ * `ActorSource`, and knows nothing about where either came from — which is the
+ * point. Both seams are chosen in `page.tsx`, where the live implementations
+ * are reached only through `await import(...)` on the branch that has
+ * established there is a database to read.
  *
- * `default` is the live database. The other four states are fixtures, so the
- * error and edge cases can be shown on demand without breaking anything.
+ * IT USED TO CHOOSE THEM ITSELF, and that is the defect this screen carried.
+ * `createLiveApprovalsSource` and `currentActor` were static imports here, so
+ * the page module reached `@/lib/ledger/db` -> `@/lib/env` before it reached
+ * its own first line and threw without `APP_DATABASE_URL`. The four fixture
+ * states went down with it, having asked for no database at all.
+ *
+ * IT TAKES NO `view`. Which demo state is showing is already folded into
+ * `claim`, and a component that could read `view.state` could disagree with the
+ * claim it was handed — which is the exact shape of the two-badge defect this
+ * repair exists to close.
+ *
+ * ONE COMPONENT DRAWS BOTH OUTCOMES. The refusal is a failed `Result` from a
+ * source, not a second rendering path, so there is no branch on which this
+ * screen could be drawn from nothing.
  */
-export async function ApprovalsView({ view }: { readonly view: View }) {
+export async function ApprovalsView({
+  claim,
+  source,
+  actorSource,
+}: {
+  readonly claim: SourceClaim;
+  readonly source: ApprovalsDataSource;
+  readonly actorSource: ActorSource;
+}) {
   const role = await readRole();
-  const live = view.state === "default";
+  const live = claim === "LIVE";
+  const refusing = claim === "NO DATABASE";
 
   // Identity is resolved even in fixture states: the edge state's row is
   // initiated by whoever is signed in, which is what makes it a true statement
   // about the person reading the screen rather than a picture of one.
-  const session = await currentActor();
-  const actor: ActorView | null =
-    session === null
-      ? null
-      : {
-          id: session.id,
-          displayName: session.displayName,
-          kind: session.kind,
-          canApprove: session.canApprove,
-        };
-
-  const source: ApprovalsDataSource = live
-    ? createLiveApprovalsSource()
-    : createFixtureSource(view.state);
+  const actor: ActorView | null = await actorSource.current();
 
   const result = await source.getQueue(actor);
 
   if (isErr(result)) {
     return (
       <div className="space-y-6">
-        <Header role={role} actor={actor} live={live} asOf={null} />
-        <ErrorPanel error={result.error} />
+        <Header role={role} actor={actor} claim={claim} asOf={null} />
+        {refusing ? (
+          <ErrorPanel
+            error={result.error}
+            title={NO_DATABASE_TITLE}
+            description={NO_DATABASE_DESCRIPTION}
+            offerExit={false}
+          />
+        ) : (
+          <ErrorPanel error={result.error} />
+        )}
       </div>
     );
   }
@@ -64,7 +84,7 @@ export async function ApprovalsView({ view }: { readonly view: View }) {
 
   return (
     <div className="space-y-6">
-      <Header role={role} actor={actor} live={live} asOf={snapshot.asOf} />
+      <Header role={role} actor={actor} claim={claim} asOf={snapshot.asOf} />
 
       <Note title="Maker-checker on money out, and where it is actually enforced">
         <p>
@@ -97,22 +117,34 @@ export async function ApprovalsView({ view }: { readonly view: View }) {
   );
 }
 
+/**
+ * The board's heading.
+ *
+ * THE BADGE IS DROPPED WHEN THE CLAIM IS "NO DATABASE", and that is not
+ * tidiness. One screen makes one claim about its data source. On a deployment
+ * with nothing to read, the claim is carried by the demo-state bar above, whose
+ * badge reads NO DATABASE; a second badge here would be the board saying
+ * something about rows it does not have, and both are derived from the same
+ * `sourceClaim()` call in `page.tsx` so they cannot drift apart.
+ */
 function Header({
   role,
   actor,
-  live,
+  claim,
   asOf,
 }: {
   readonly role: "staff" | "approver";
   readonly actor: ActorView | null;
-  readonly live: boolean;
+  readonly claim: SourceClaim;
   readonly asOf: string | null;
 }) {
   return (
     <header>
       <div className="flex flex-wrap items-baseline gap-3">
         <h1 className="text-lg font-semibold tracking-tight">Approvals</h1>
-        <Badge tone={live ? "positive" : "quiet"}>{live ? "LIVE" : "FIXTURE"}</Badge>
+        {claim === "NO DATABASE" ? null : (
+          <Badge tone={claim === "LIVE" ? "positive" : "quiet"}>{claim}</Badge>
+        )}
       </div>
       <p className="mt-0.5 text-sm text-muted">
         Money out, requested and checked by two different people. §16 of the ledger design.

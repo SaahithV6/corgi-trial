@@ -36,6 +36,7 @@ import { isMemberState, isTeamRole } from "@/lib/team/roles";
 import { CONTROL_READ_BUDGET_MS, DECISION_APPEND_BUDGET_MS, withDeadline } from "./budget";
 import {
   PURCHASE_STATUSES,
+  isJudgedRule,
   type AuthRequest,
   type CardControls,
   type CardControlsDraft,
@@ -801,6 +802,10 @@ export async function listDecisions(params: {
     outcome: row.outcome,
     resultCode: row.result_code,
     rule: row.rule,
+    // DERIVED HERE, ONCE, so no screen has to know the taxonomy. `rule` is on
+    // every row this append-only log has ever written, which is why this needed
+    // no column and no backfill — see `UNJUDGED_RULES` in ./types.ts.
+    judged: isJudgedRule(row.rule),
     reason: row.reason,
     inputs: row.inputs,
     decisionLatencyUs: row.decision_latency_us,

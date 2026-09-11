@@ -74,11 +74,16 @@ const INVARIANT_MEANING: Record<string, string> = {
     "The 2100 subtree equals what we report as total customer money — pots included. This is the one a new account level was most likely to break, and it did break it: see docs/POTS.md §1.",
   v_pot_identity_drift:
     "main + Σ pots equals a recursive walk of the customer's deposit subtree, for every customer.",
-  v_pot_negative: "No pot holds a negative balance. A pot cannot be overdrawn.",
+  v_pot_negative:
+    "No pot holds a negative balance. READ THIS AS A SECOND LINE, NOT THE FIRST: until migration 0057 it DETECTED and did not PREVENT — the probe posted a −$988,000.00 pot cleanly through ledger_append() with every trigger armed, and this view noticed afterwards. 0057 puts a deferred constraint trigger on journal_line (POT_WOULD_GO_NEGATIVE) that refuses the commit instead. The view stays because prevention that is never checked is the same claim in a different place.",
   v_pot_orphan:
     "Every pot's account is a liability leaf parented directly on that business's own 2100 deposit account.",
   v_internal_transfer_impure:
     "Every pot transfer is exactly two lines, both inside one customer's deposit subtree. READ ITS POPULATION: WHERE rail = 'internal' AND idempotency_key LIKE 'pot:%' — the WRITER'S OWN LABEL, not the chart. Probed 2026-09-11: $50.00 posted out of a pot onto 1000 Cash at bank under an ach: key moved the pot balance and left this view, v_pot_identity_drift and v_deposit_control_drift all at zero. The structural form — every line ON a pot account, whatever its entry calls itself — belongs in a migration as v_pot_line_provenance; see docs/POTS.md §10.",
+  v_pot_line_provenance:
+    "The STRUCTURAL form of the line above it: every journal entry with a line ON a pot account — the population is pot.account_id, which is UNIQUE, NOT NULL and append-only, so no writer can opt out by choosing a different key — judged against what a pot operation is. This is the guard that sees the $50.00 ach: probe all four of 0015's missed.",
+  v_pot_guard_disarmed:
+    "The 0057 negative-pot trigger is present on journal_line and armed for ordinary writes. It reads pg_trigger, so the one thing a view over the money cannot see — the guard being switched off — becomes visible rather than silent. Only the table owner can disarm it; corgi_app cannot express ALTER TABLE at all.",
   v_entry_unbalanced: "Every journal entry sums to zero, per currency.",
   v_book_not_zero: "Each book nets to zero, per entity and currency, exactly.",
 };

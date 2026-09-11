@@ -51,6 +51,33 @@ export const DEMO_STATE_HINTS: Record<DemoState, string> = {
     "$2,500.00 on ACH — exactly the threshold, where the rule is >= and equal crosses it. The source business is verified on SIMULATED evidence, so the same payment is refused under the stricter policy.",
 };
 
+/**
+ * What this screen may claim about where its form came from.
+ *
+ * ONE VALUE, THREE SURFACES. The badge in the board's header, the badge on the
+ * form panel and the badge and note on the demo-state bar are all derived from
+ * `sourceClaim()`, so they cannot disagree about what was read.
+ */
+export type SourceClaim = "LIVE" | "FIXTURE" | "NO DATABASE";
+
+/**
+ * Which claim a state is entitled to make.
+ *
+ * `default` and `edge` read Neon, so they claim LIVE — unless there is no
+ * database to read, in which case they claim neither LIVE nor FIXTURE. NO
+ * DATABASE is not a sixth demo state: it is not a demonstration of anything, it
+ * is what this deployment is, and the URL cannot ask for it.
+ *
+ * The other three are fixtures whether or not a database is configured. They
+ * read nothing and never did, so "no database" does not make a drawing any more
+ * or less drawn — and until the import defect was fixed they were unreachable
+ * anyway, because they lived behind a page module that could not load.
+ */
+export function sourceClaim(state: DemoState, noDatabase: boolean): SourceClaim {
+  if (!isLiveState(state)) return "FIXTURE";
+  return noDatabase ? "NO DATABASE" : "LIVE";
+}
+
 function first(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }

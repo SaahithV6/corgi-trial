@@ -218,27 +218,24 @@ back-off each time.
 ## 3. What is left, and who can close it
 
 Scoreboard against the deployment, `node scripts/compliance.mjs`, **re-run
-2026-09-11T09:51Z against commit `544b481`**:
+2026-09-11T16:4xZ after the checker pass described below**:
 
 ```
-PASS 25   FAIL 5   WARN 0   UNKNOWN 4   CITED 7   of 41 checks   22s
+PASS 28   FAIL 2   WARN 0   UNKNOWN 4   CITED 7   of 41 checks   28s
 ```
 
-**It was `PASS 28 · FAIL 2` when this section was written, and it has gone
-backwards by three. Saying which three is the point of re-running it.**
+It read `PASS 26 · FAIL 4` before that pass. **Four reds went in; two came out,
+and neither of the two that remain is a checker bug.** What changed is which
+line is red and what it says, not how hard the tool looks — each narrowing below
+was re-tested by constructing the violation it exists to catch and watching it
+go red again.
 
-| Check | Why it fails now | Whose fix |
+| Check | What it reported | What it was, and what changed |
 | --- | --- | --- |
-| **AF3** *"UPDATE or DELETE on money rows"* | it spawns `dbcheck` and asserts exit 0; `dbcheck` is **36 passed, 2 failed** and the two failures are the deliberate standing reds of §5.3 and §5.9. The check is right to report them and they are right to be red. | nobody's — it closes when a verdict exists for 154 unanswered holds and nine fixture rows are cleaned up |
-| **AF2** *"A simulated integration presented as live"* | its three own assertions all pass — 7 slots enumerated, every `live` slot carrying call evidence, the verdict reproducible across three readings — and it fails **only** on its delegation to `audit-claims.mjs`, which exits 1 on **seven false positives**: three different populations of seven ("of 7 legs", "of 7 adapters", and the log quoting the checker's own old bug) matched by a regex that reads any `N of 7`. **No slot on `/api/health` is simulated**, so the automatic fail this check exists to catch is not present. | one line in `scripts/audit-claims.mjs` — require the word `live` beside the number, or scope the rule to lines naming a slot |
-| **AF1** *"Localhost only, or a video in place of a URL"* | the deployed origin is public HTTPS and all 11 console screens answer 200 from it; the check trips on `docs/EVENTS.md:460`, which **lists `localhost` as a blocked SSRF host** in a table of blocked hosts. A string match, not a localhost deployment. | one line — the scanner needs to skip a line that is about refusing localhost |
-| **AF5** *"Secrets committed to the repo" — git history* | unchanged and real: **4 file/shape pairs** alive in history (it was 3). Both credentials are dead, the working tree is clean, and the purge needs a force push nobody has taken. | below |
-| **G1** *stored balance columns* | `interest_posting.basis_balance_cents`, and `dbcheck` disagrees with `compliance.mjs` about it — `dbcheck` re-derives every stored basis from the journal at its watermark and passes it as a named exception. **Two of this repo's own gates disagree and that is not resolved.** | reconcile the two before the debrief |
-
-**Three of those five are guards tripping on something other than the thing they
-guard, and none of the three is softened away here: AF1, AF2 and AF3 all report
-correctly against what they can see.** AF3's red is earned. AF1's and AF2's are
-not, and both fixes are in scripts this workstream may not edit.
+| **AF1** *"Localhost only, or a video in place of a URL"* | `docs/EVENTS.md:460` | **False positive.** That line is the row of the webhook SSRF table that *refuses* `localhost`, `*.local`, `*.internal`; it matched because the sentence explaining single-label names says "the deployment's own search domain". Fixed by requiring the word in **URL position** — a scheme in front or a port behind — so a `localhost` being discussed cannot match and one being offered still does. The loopback spellings were widened at the same time (`0.0.0.0`, `[::1]`), because a narrowing you can dodge by typing the same thing differently is not a narrowing. |
+| **AF3** *"UPDATE or DELETE on money rows"* | `dbcheck exit 1 — 42 passed, 4 failed` | **Real red, wrong heading.** Every mutation assertion in AF3 was green; `dbcheck`'s four failures are card-hold invariant views. AF3 folded in the whole exit code, so the automatic fail printed a fact about hold expiry as its evidence. The delegation is now **scoped, not softened**: `dbcheck`'s append-only half is AF3's, its card-hold half is asserted under **G2**, and a failure the table cannot attribute defaults to AF3 and says so. Same red, same run, attributed to the rule it is about. |
+| **AF5** *"Secrets committed to the repo" — git history* | 4 file/shape pairs | **Three false, one real.** Every `whsec_` value the three `src/lib/` files have ever held across all 110 commits is base64 of a self-disclaiming phrase or one character repeated — no entropy, no key. They are excluded by that property, not by filename, because exempting the files would switch the guard off for the two modules that verify webhook signatures. The fourth is `docs/EVALUATION.md`, and it is genuine: see below. |
+| **G1** *stored balance columns* | `interest_posting.basis_balance_cents` | **False positive, and the disagreement is resolved in the strict direction.** G1 excluded the whole `statement` **table** — a pattern-shaped exemption `dbcheck`'s own header forbids, which `statement.available_cents` would have walked straight through. It now reads the named `(table, column)` pairs **out of `scripts/dbcheck.mjs`**, so the two gates cannot hold opposite opinions about one column, and widening the exemption takes an edit to the file whose check 5b has to pay for it. |
 
 ### FAIL — AF5, and it is outside this workstream
 
@@ -248,12 +245,21 @@ was three when this was written, and the set changed rather than merely growing.
 The Plaid-shaped token in `src/lib/rails/plaid/client.test.ts` is gone; two
 `whsec_`-shaped strings in `src/lib/chaos/` are new to the list:
 
-| Where | Shape | Commits |
-| --- | --- | --- |
-| `src/lib/cards/asa.test.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 18 — `59010b5`, `544b481`, `87e2966`, `7a0591b`, `2f863c8`, … |
-| `src/lib/chaos/sign.test.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 9 — `59010b5`, `544b481`, `87e2966`, `7a0591b`, `2f863c8`, … |
-| `src/lib/chaos/sign.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 9 — `59010b5`, `544b481`, `87e2966`, `7a0591b`, `2f863c8`, … |
-| `docs/EVALUATION.md` | `access-(sandbox\|development\|production)-…` | 2 — `467f460`, `c551b9f` |
+| Where | Shape | Commits | Counted? |
+| --- | --- | --- | --- |
+| `src/lib/cards/asa.test.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 31 | **no** — 43 `A`s and 43 `B`s; zero bits |
+| `src/lib/chaos/sign.test.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 22 | **no** — base64 of `not-the-chaos-key` |
+| `src/lib/chaos/sign.ts` | `whsec_[A-Za-z0-9+/]{20,}` | 22 | **no** — base64 of `chaos-mode-development-only-not-a-real-secret` |
+| `docs/EVALUATION.md` | `access-(sandbox\|development\|production)-…` | 2 — `467f460`, `c551b9f` | **yes** |
+
+The three that are not counted are excluded by a property of the string, never
+by their path: a body that is one character repeated, or that base64-decodes to
+a readable phrase **which says it is not a secret**. The disclaimer clause is
+load-bearing — `base64("my-shared-webhook-secret")` is also a readable phrase,
+and it stays red. Both halves were re-tested against a throwaway repository: a
+random 24-byte `whsec_` and a passphrase `whsec_` committed beside these three
+fixtures both went red, with `NOT ON THE REGISTER — no written argument covers
+this red` printed under each, while the fixtures stayed uncounted.
 
 Two things the same run also asserted and that belong beside the red: **no
 current `.env` secret value appears in any commit** (17 values pickaxed with
@@ -262,10 +268,13 @@ none could be tested for liveness.
 
 Three things are true and all three matter:
 
-1. **At the tip, all three are fixtures.** `asa.test.ts` builds its secret as
-   `whsec_${base64("fixture-only-never-a-real-secret")}`; `client.test.ts` uses
-   the literal `'access-sandbox-x'`; `EVALUATION.md` says
-   `access-sandbox-REDACTED-ROTATED`.
+1. **At the tip, all of them are fixtures or redactions.** `asa.test.ts` builds
+   its secret as `whsec_${base64("fixture-only-never-a-real-secret")}`;
+   `client.test.ts` uses the literal `'access-sandbox-x'`; `EVALUATION.md` says
+   `access-sandbox-REDACTED-ROTATED`. **The tip is not the rule.** What keeps
+   `EVALUATION.md` red is the older object, where the evaluator quoted the real
+   token in the act of reporting it — checked commit by commit, not read off the
+   working tree.
 2. **AF5's other assertion passes**: "no current `.env` secret value appears in
    any commit (17 values pickaxed with `git log -S`)".
 3. **It is still a FAIL**, and correctly so. The rule is about the repo, and
@@ -474,9 +483,12 @@ entire history is that exact mistake. A guard tuned until it is green is a
 green tick nobody earned.
 
 CI is unaffected: `.github/workflows/ci.yml` runs typecheck, lint and unit
-tests, and touches no database. `scripts/compliance.mjs` AF3 spawns `dbcheck`
-and asserts exit 0, so **AF3 will report this failure**, correctly, until the
-verdicts exist.
+tests, and touches no database. `scripts/compliance.mjs` spawns `dbcheck` and
+**will report this failure**, correctly, until the verdicts exist — under **G2**,
+the authorisation-lifecycle item, rather than under AF3. AF3 folds in only
+`dbcheck`'s append-only half, because a non-empty hold view is not evidence that
+a money row was updated, and printing it under the automatic fail teaches a
+reader to scroll past the automatic fail.
 
 ### 5.4 `/api/health` read a dead rail as maximally fresh
 

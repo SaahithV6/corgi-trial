@@ -16,7 +16,38 @@ import {
   type EconomicsFilter,
 } from "./view-state";
 
-export function EconomicsStateBar({ filter }: { readonly filter: EconomicsFilter }) {
+/**
+ * What the bar says when there is nothing to read.
+ *
+ * `default` is the only state that reads the database, so it is the only one
+ * this replaces. It matters that it replaces the tooltip too: `STATE_DESCRIPTION`
+ * for `default` promises a live read, and leaving that hoverable over a screen
+ * badged NO DATABASE is a second claim about the data source that a reader has
+ * to hover to find.
+ */
+const NO_DATABASE_NOTE =
+  "No database is configured for this deployment. No settlement was priced, no rate card was resolved and no guard was counted below — a page with no figures on it here is not a programme that has yet to earn any.";
+
+/**
+ * ONE SCREEN, ONE CLAIM ABOUT ITS DATA SOURCE. `noDatabase` comes from
+ * `page.tsx`, which resolved it once with `hasDatabase()` and used the same
+ * value to decide whether to load the board at all. When it is set, this bar
+ * carries the screen's only source badge.
+ *
+ * It used to carry NONE in that case: the `fixture` badge below renders only
+ * when the state is not `default`, so on the no-database path the screen made
+ * no claim about where its numbers came from while asserting that no card had
+ * ever settled.
+ */
+export function EconomicsStateBar({
+  filter,
+  noDatabase = false,
+}: {
+  readonly filter: EconomicsFilter;
+  readonly noDatabase?: boolean;
+}) {
+  const refusing = noDatabase && filter.state === "default";
+
   return (
     <div className="rounded-lg border border-border bg-surface px-5 py-4">
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
@@ -35,7 +66,11 @@ export function EconomicsStateBar({ filter }: { readonly filter: EconomicsFilter
                 key={state}
                 href={economicsHref({ state })}
                 aria-current={active ? "page" : undefined}
-                title={STATE_DESCRIPTION[state]}
+                title={
+                  noDatabase && state === "default"
+                    ? NO_DATABASE_NOTE
+                    : STATE_DESCRIPTION[state]
+                }
                 className={`rounded border px-2 py-1 text-[11px] ${FOCUS_RING} ${
                   active ? "border-border-strong text-text" : "border-border text-muted"
                 }`}
@@ -46,7 +81,12 @@ export function EconomicsStateBar({ filter }: { readonly filter: EconomicsFilter
           })}
         </nav>
       </div>
-      {filter.state === "default" ? null : (
+      {refusing ? (
+        <p className="mt-3 text-xs text-muted">
+          <Badge tone="negative">NO DATABASE</Badge>{" "}
+          <span className="ml-1">{NO_DATABASE_NOTE}</span>
+        </p>
+      ) : filter.state === "default" ? null : (
         <p className="mt-3 text-xs text-muted">
           <Badge tone="neutral">fixture</Badge>{" "}
           <span className="ml-1">{STATE_DESCRIPTION[filter.state]}</span>{" "}

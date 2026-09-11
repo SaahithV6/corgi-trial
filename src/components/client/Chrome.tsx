@@ -56,6 +56,27 @@ export const STATE_HINTS: Record<ClientScreenHref, Record<ClientState, string>> 
     error: "FIXTURE. The preflight read failed, so the form is not drawn.",
     edge: "LIVE, prefilled at exactly the approval threshold — one cent under is unattended, this is not.",
   },
+  "/client/pots": {
+    default: "Live. This business's own pots, their balances, and the identity that must hold: main + every pot = the whole account.",
+    loading: "The real skeleton, held open by a genuinely slow read.",
+    empty: "FIXTURE. A customer who has not opened a pot yet.",
+    error: "FIXTURE. The read failed. No pot was affected \u2014 this state only reads.",
+    edge: "LIVE. A pot drained to exactly $0.00. Zero is a legal, ordinary state; one cent past it is refused by the database, not by the form.",
+  },
+  "/client/disputes": {
+    default: "Live. This business's settled card charges, what is still unclaimed on each, and every case already raised.",
+    loading: "The real skeleton, held open by a genuinely slow read.",
+    empty: "FIXTURE. A customer with nothing to dispute.",
+    error: "FIXTURE. The read failed. No claim was affected.",
+    edge: "LIVE. Only the charges already claimed \u2014 filing again returns the case that exists rather than opening a second.",
+  },
+  "/client/payouts": {
+    default: "Live. A real rate from frankfurter.dev, and every commitment this business is already standing behind.",
+    loading: "The real skeleton, held open by a genuinely slow read.",
+    empty: "FIXTURE. A customer who has never asked for a quote.",
+    error: "FIXTURE. The rate could not be read, so no quote is offered \u2014 a quote with no rate behind it would be the whole feature undone.",
+    edge: "LIVE. A business whose available balance is already committed to a standing quote, so the next acceptance is refused rather than overdrawn.",
+  },
   "/client/approvals": {
     default: "Live. The policy in force, and the payment named by ?payment= if there is one.",
     loading: "The real skeleton, held open by a genuinely slow read.",

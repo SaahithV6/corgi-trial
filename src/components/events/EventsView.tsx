@@ -30,7 +30,10 @@
  * this service has never connected to anything internal.
  */
 
+import { isRetryable } from "@/components/ui/error-detail";
+
 import type { DeliveryState, DeliveryView, EndpointView, EventsView } from "./data-contract";
+import { EVENTS_LOG_UNREADABLE } from "./unreadable";
 import {
   Badge,
   FieldLabel,
@@ -391,16 +394,54 @@ export function EventsSkeleton() {
   );
 }
 
-export function EventsError({ code, message }: { readonly code: string; readonly message: string }) {
+/**
+ * The failure state, for both causes this screen has.
+ *
+ * `retryable` is now STATED rather than implied. It used to say only that
+ * nothing was lost, which is true of a query that timed out and true of a
+ * deployment with no database, and left a reader no way to tell whether coming
+ * back in a minute would help. The badge carries the screen's only source claim
+ * when the cause is that there is nothing to read: the counters are not drawn
+ * at all, so there is no second claim for it to disagree with.
+ *
+ * `retryable` is read off `details` with `isRetryable`, which defaults to yes —
+ * a failure that says nothing about retrying is the ordinary case and has
+ * always been worth another go. The badge is keyed on the CODE that actually
+ * arrived rather than on a flag passed down beside it, so a fixture failure
+ * shown on a machine with no database still reports itself as the fixture
+ * failure it is instead of being announced as a configuration problem.
+ */
+export function EventsError({
+  code,
+  message,
+  details,
+}: {
+  readonly code: string;
+  readonly message: string;
+  readonly details?: unknown;
+}) {
+  const retryable = isRetryable({ code, message, details });
+  const noDatabase = code === EVENTS_LOG_UNREADABLE.code;
+
   return (
     <div className="space-y-6">
-      <h1 className="text-lg font-semibold tracking-tight">Outbound events</h1>
+      <div className="flex flex-wrap items-baseline gap-3">
+        <h1 className="text-lg font-semibold tracking-tight">Outbound events</h1>
+        {noDatabase ? <Badge tone="negative">NO DATABASE</Badge> : null}
+      </div>
       <Note emphasis title={`Could not load the delivery log (${code})`}>
         <p>{message}</p>
         <p className="mt-2">
           <FieldLabel>Nothing was lost</FieldLabel>{" "}
           Every queued delivery is a durable row with its own retry schedule. This is a read failing, not a
           queue draining — the next drain picks up exactly where it left off.
+        </p>
+        <p className="mt-2">
+          <FieldLabel>Retryable</FieldLabel>{" "}
+          <span className="font-mono text-xs">{retryable ? "yes" : "no"}</span>
+          {retryable
+            ? " — the same query can be issued again."
+            : " — no retry is offered, because re-issuing the same query would fail in the same way."}
         </p>
       </Note>
     </div>

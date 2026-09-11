@@ -118,3 +118,20 @@ export interface ApprovalsDataSource {
   /** The pending queue plus everything needed to explain it. One call. */
   getQueue(actor: ActorView | null): Promise<Result<ApprovalsSnapshot, ErrorShape>>;
 }
+
+/**
+ * How the screen learns who this session is acting as.
+ *
+ * A seam for the same reason `ApprovalsDataSource` is one, and added for the
+ * same defect. `ApprovalsView` used to call `currentActor()` directly, which
+ * meant it imported `@/lib/approvals/session` at module scope, which reaches
+ * `@/lib/ledger/db` -> `@/lib/env` and throws without `APP_DATABASE_URL` — so
+ * the page module could not be loaded on a deployment with no database, and
+ * neither could the four fixture states parked behind it. The live
+ * implementation is now reached through `await import(...)` in `page.tsx`, on
+ * the branch that has established there is a database; `unreadable.ts` holds
+ * the one that resolves nobody.
+ */
+export interface ActorSource {
+  current(): Promise<ActorView | null>;
+}

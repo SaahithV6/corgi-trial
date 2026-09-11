@@ -298,9 +298,39 @@ in the `grown` band (twelve rows argued for, the thirteenth not), and
 shows it**, ranked above the decided four. No URL state is needed. That is the
 design working, not a gap in it.
 
-With no database configured at all, `default` falls back to the **empty**
-fixture with the badge reading FIXTURE — never a confident triage board drawn
-from nothing.
+### With no database configured at all
+
+The badge reads **NO DATABASE**, the board is replaced by the refusal panel, and
+no count, no queue and no tick is drawn. The failure carries the code
+`TRIAGE_NO_DATABASE` and `retryable: false`, so the panel drops its retry
+control: a refresh does not configure a database.
+
+This paragraph used to say that `default` fell back to the empty fixture with
+the badge reading FIXTURE, and both halves of that were false.
+
+It did not fall back — it threw. The guard read
+`const { hasDatabase } = await import("./live-source")` on one line and
+`if (!hasDatabase())` on the next, and importing `./live-source` reaches
+`@/lib/ledger/db` → `@/lib/env`, which parses `process.env` at module scope and
+throws `EnvironmentError` when `APP_DATABASE_URL` is absent. The import only
+succeeds when a database IS configured; the predicate only returns false when
+one is not. The guard was unreachable in exactly the case it was written for,
+and the operator got the framework's error page.
+
+And the fallback it described was itself the failure. The empty fixture is four
+invariant views holding, no queue, nothing refused, under the headline
+"Nothing new." — a clean shift, rendered by a deployment that had not read a
+row. The one screen whose job is to say when something is wrong said nothing
+was, precisely when it could see nothing at all. That is instance 26 of this
+repository's catalogued failure, and it was documented here as the design.
+
+The predicate now lives in `has-database.ts`, a file that imports nothing, so
+asking whether there is a database cannot be the thing that crashes for not
+having one. The refusal lives in `unreadable.ts` and is deliberately NOT in
+`fixtures.ts`: a fixture is a drawing of a book, and this is a refusal to draw
+one. `no-database.test.ts` renders the real page with `APP_DATABASE_URL`
+deleted and asserts all of it — ungated, because CI is a machine with no
+database, which is exactly the deployment it describes.
 
 ---
 
@@ -308,11 +338,14 @@ from nothing.
 
 ```
 src/app/(app)/dashboard/page.tsx          the route, the five states, source selection
+src/app/(app)/dashboard/has-database.ts   the predicate, in a file that imports nothing
 src/app/(app)/dashboard/live-source.ts    the ONLY file behind /dashboard that knows a database exists
 src/components/dashboard/decided.ts       the register, the reach limits, the comparator (no imports)
 src/components/dashboard/decided.test.ts  the comparator, proved without a database
 src/components/dashboard/data-contract.ts what the components render, and nothing else
 src/components/dashboard/fixtures.ts      the four non-default states
+src/components/dashboard/unreadable.ts    TRIAGE_NO_DATABASE — a refusal, not a fixture
+src/components/dashboard/no-database.test.ts  the refusal, rendered with no database, ungated
 src/components/dashboard/TriageView.tsx   the shell, the error panel, the skeleton
 src/components/dashboard/WrongNow.tsx        section 1
 src/components/dashboard/WaitingOnAHuman.tsx section 2

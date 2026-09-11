@@ -19,6 +19,7 @@ import type {
   BookTotals,
   Cents,
   Movement,
+  PositionTotals,
 } from "./console-contract";
 
 /* -------------------------------------------------------------------------- */
@@ -26,7 +27,7 @@ import type {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Sum the positions.
+ * Sum one set of positions.
  *
  * `withheld` is folded per account (`ledger − available`) and then summed,
  * rather than computed once from the two totals. Identical arithmetic on any
@@ -34,9 +35,9 @@ import type {
  * against another — which is the kind of change that turns a shortcut into a
  * wrong number six months after somebody took it.
  */
-export function foldTotals(
+function sumPositions(
   positions: readonly AccountPosition[],
-): BookTotals {
+): PositionTotals {
   let ledgerCents = 0n;
   let availableCents = 0n;
   let withheldCents = 0n;
@@ -58,6 +59,43 @@ export function foldTotals(
     accounts: positions.length,
     businesses: businesses.size,
     negativeAvailable,
+  };
+}
+
+/**
+ * Sum the positions — whole book, customers only, and fixtures only.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SPLIT IS THE POINT, AND THE UNSPLIT TOTAL IS STILL PUBLISHED.
+ * ---------------------------------------------------------------------------
+ *
+ * Three of the seven deposit accounts on this book belong to test suites, and
+ * one of them — `Holds Integration Fixture Co.` — sits at -$858,941.45 after
+ * two $500,000.00 force-posts whose refund was never reached. Summed in
+ * silently, this fold reported that the bank held **-$196,505.08** of customer
+ * money (measured 2026-09-11T16:00Z). It does not: customers held $105,600.67
+ * and test fixtures held -$302,105.75, both true at that one instant. The
+ * customer half moves as the demo book moves. The sign of the headline was
+ * the defect, and that does not move.
+ *
+ * `all` is the arithmetic sum of the other two and is deliberately kept. A
+ * fold that suppressed it would be the failure it was written to remove — a
+ * console quietly disagreeing with `SELECT sum(...)` run by hand — and the
+ * three totals reconcile by construction, which `console-derive.test.ts`
+ * asserts rather than trusts.
+ *
+ * Classification happens in `console-source.ts`, once, from the business's own
+ * EIN; this file only reads the flag it was handed. See
+ * `@/lib/home/fixture-businesses` for why the rows are labelled instead of
+ * filtered, deleted or reversed.
+ */
+export function foldTotals(
+  positions: readonly AccountPosition[],
+): BookTotals {
+  return {
+    ...sumPositions(positions),
+    live: sumPositions(positions.filter((p) => p.fixture === null)),
+    fixture: sumPositions(positions.filter((p) => p.fixture !== null)),
   };
 }
 

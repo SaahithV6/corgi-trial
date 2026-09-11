@@ -6,7 +6,12 @@ import type { TriageDataSource } from "./data-contract";
 import { WaitingOnAHuman } from "./WaitingOnAHuman";
 import { WhileYouWereAway } from "./WhileYouWereAway";
 import { WrongNow } from "./WrongNow";
-import type { DashboardViewState } from "./view-state";
+import {
+  sourceBadge,
+  sourceIsLive,
+  type DashboardViewState,
+  type SourceClaim,
+} from "./view-state";
 
 /**
  * The triage board.
@@ -29,18 +34,47 @@ import type { DashboardViewState } from "./view-state";
  * number is either a queue depth (which goes down when somebody does the work)
  * or a comparison against something written down (which is either matched or
  * not). "1,439 webhooks processed" is wallpaper and it is deliberately absent.
+ *
+ * THE BADGE COMES FROM `claim`, which `page.tsx` resolved once and gave to the
+ * state bar as well. It used to come from `triage.live` while the bar above it
+ * used the URL state, and on a deployment with no database the two rendered
+ * opposite words on one screen. The snapshot's own `live` field is still
+ * checked against the claim below, and a disagreement is a refusal rather than
+ * a casting vote.
  */
 export async function TriageView({
   source,
   view,
+  claim,
 }: {
   readonly source: TriageDataSource;
   readonly view: DashboardViewState;
+  readonly claim: SourceClaim;
 }) {
   const result = await source.read();
 
-  if (!result.ok) return <TriageErrorPanel error={result.error} />;
+  if (!result.ok) {
+    return claim.kind === "unreadable" ? (
+      <TriageErrorPanel
+        error={result.error}
+        title="This screen cannot see the book"
+        description="No database is configured for this deployment, so no view was read and no board is drawn. Nothing here says the ledger is fine; nothing here could."
+      />
+    ) : (
+      <TriageErrorPanel error={result.error} />
+    );
+  }
   const triage = result.value;
+
+  if (triage.live !== sourceIsLive(claim)) {
+    return (
+      <TriageErrorPanel
+        error={CONTRADICTION(claim, triage.live)}
+        title="The screen and its source disagree about what was read"
+        description="Two claims about one read. Neither is shown as the answer, because a screen that picks one is a screen that can pick the wrong one."
+      />
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -48,8 +82,8 @@ export async function TriageView({
         title="Start of shift"
         description="One read, one instant. Everything below describes the book as of the watermark on this line."
         actions={
-          <Badge tone={triage.live ? "positive" : "negative"}>
-            {triage.live ? "LIVE" : "FIXTURE"}
+          <Badge tone={sourceIsLive(claim) ? "positive" : "negative"}>
+            {sourceBadge(claim)}
           </Badge>
         }
       >
@@ -64,9 +98,9 @@ export async function TriageView({
               { label: "state", value: view.state },
             ]}
           />
-          {triage.live ? null : (
+          {claim.kind !== "fixture" ? null : (
             <Note emphasis title="Nothing on this screen is a statement about a real book">
-              This is the <code>{view.state}</code> fixture. The invariant counts, the
+              This is the <code>{claim.state}</code> fixture. The invariant counts, the
               queues and the traces below are drawn, not read. The claim section 1 makes
               is &ldquo;nothing new is wrong with the ledger&rdquo;, and a screenshot of a
               fixture making that claim would be the most misleading artefact this
@@ -85,7 +119,7 @@ export async function TriageView({
 }
 
 /**
- * The read failed.
+ * The book was not read, for whatever reason, and this is the whole screen.
  *
  * It says so, with the driver's own code, and it does NOT fall back to a
  * fixture. A triage board that quietly served drawn data when the database was
@@ -93,19 +127,39 @@ export async function TriageView({
  * question it exists to answer is "is anything wrong", and an unread book
  * rendering as an all-clear is the same failure as an unreadable invariant
  * counting as a pass.
+ *
+ * `title` and `description` default to the failed-read wording and are
+ * overridden for the two causes that are not a failed read — no database
+ * configured, and a screen that disagrees with its own source. All three
+ * refuse identically: no board, no counts, no tick.
+ *
+ * The retry control is dropped when the failure says it is not retryable. A
+ * button offering to re-run a read that cannot succeed — there is no database
+ * to refresh into existence — sits next to the words "retryable: no" and
+ * contradicts them.
  */
-export function TriageErrorPanel({ error }: { readonly error: ErrorShape }) {
+export function TriageErrorPanel({
+  error,
+  title = "The triage board could not be read",
+  description = "No board is drawn from nothing. This is not an all-clear.",
+}: {
+  readonly error: ErrorShape;
+  readonly title?: string;
+  readonly description?: string;
+}) {
+  const retryable = detail(error, "retryable");
+
   return (
     <Panel
-      title="The triage board could not be read"
-      description="No board is drawn from nothing. This is not an all-clear."
-      actions={<RetryButton />}
+      title={title}
+      description={description}
+      {...(retryable === "no" ? {} : { actions: <RetryButton /> })}
     >
       <div className="space-y-3 px-5 py-4">
         <MetaList
           items={[
             { label: "code", value: <span className="money">{error.code}</span> },
-            { label: "retryable", value: detail(error, "retryable") ?? "—" },
+            { label: "retryable", value: retryable ?? "—" },
             { label: "source", value: detail(error, "source") ?? "—" },
           ]}
         />
@@ -118,6 +172,29 @@ export function TriageErrorPanel({ error }: { readonly error: ErrorShape }) {
       </div>
     </Panel>
   );
+}
+
+/**
+ * The screen resolved one source and was handed a snapshot claiming another.
+ *
+ * Unreachable as this file is written — the live source sets `live: true`, the
+ * fixtures set `live: false`, and `page.tsx` picks between them from the same
+ * claim it hands this component. It is checked anyway because the failure it
+ * would produce is the one this repository keeps finding: a screen showing a
+ * drawn board under a LIVE badge, with nothing on the page admitting which of
+ * the two values was believed. A refusal loses a demo; picking one loses the
+ * operator's ability to trust the badge at all.
+ */
+function CONTRADICTION(claim: SourceClaim, live: boolean): ErrorShape {
+  return {
+    code: "TRIAGE_SOURCE_CONTRADICTION",
+    message: `The page resolved this screen's source as ${sourceBadge(claim)} and the snapshot it was handed reports live=${String(live)}. One of the two is wrong and this screen cannot tell which, so it shows neither. The board is not drawn.`,
+    details: {
+      retryable: false,
+      source: "dashboard.triage",
+      operation: "the source claim",
+    },
+  };
 }
 
 /**

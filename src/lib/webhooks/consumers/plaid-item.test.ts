@@ -1,16 +1,29 @@
 /**
  * The Plaid consumer.
  *
- * Entirely decision-half: this consumer touches no database and no network by
- * design, because there is nothing for it to touch (see its header). The
- * payloads are the REAL dead-lettered `ITEM`/`ERROR` bodies out of
- * `webhook_inbox`, copied verbatim.
+ * Entirely decision-half, and it stays that way after migration 0056: the
+ * consumer now WRITES item state, but the recorder is injected (see
+ * `ItemObservationRecorder` in ./plaid-item.ts), so these tests prove the
+ * decisions — which families are recognised, what an operator is told, what
+ * reaches storage and what deliberately does not — with no database and no
+ * network. The write itself is proven against a live database by
+ * `src/lib/rails/plaid/item-store.test.ts`.
+ *
+ * The payloads are the REAL `ITEM`/`ERROR` bodies out of `webhook_inbox`,
+ * copied verbatim.
  */
 import { describe, expect, it } from "vitest";
 
-import type { ConsumerContext } from "../dispatch";
+import type { RecordObservationArgs } from "@/lib/rails/plaid/item-store";
+
+import type { ConsumerContext, WebhookConsumer } from "../dispatch";
 import type { InboxEvent } from "../inbox";
-import { asPlaidFacts, describeItemEvent, plaidItemConsumer } from "./plaid-item";
+import {
+  asPlaidFacts,
+  createPlaidItemConsumer,
+  describeItemEvent,
+  plaidItemConsumer,
+} from "./plaid-item";
 
 const NULL_LOGGER: ConsumerContext["logger"] = {
   info: () => {},
@@ -67,6 +80,7 @@ describe("asPlaidFacts", () => {
       webhookCode: "ERROR",
       itemId: "8MppL6n1rKTdJXD5Dkd8sRjPd5dm4vixgGNRZ",
       errorCode: "ITEM_LOGIN_REQUIRED",
+      errorType: "ITEM_ERROR",
       errorMessage: expect.stringContaining("login details of this item have changed"),
     });
   });
@@ -83,17 +97,84 @@ describe("describeItemEvent — written for an operator, not for Plaid", () => {
 });
 
 describe("the consumer", () => {
-  it("acknowledges item health and says why nothing could be done with it", async () => {
-    const result = await plaidItemConsumer.handle(inboxEvent(ITEM_ERROR, "ITEM.ERROR"), ctx);
+  /**
+   * A recorder that remembers what it was asked to write and answers the way
+   * `UNIQUE (inbox_id)` does: true the first time, false on a redelivery.
+   */
+  function spyRecorder(): {
+    readonly consumer: WebhookConsumer;
+    readonly writes: RecordObservationArgs[];
+  } {
+    const writes: RecordObservationArgs[] = [];
+    const seen = new Set<string>();
+    const consumer = createPlaidItemConsumer({
+      record: (args) => {
+        writes.push(args);
+        const key = args.inboxId ?? "";
+        if (seen.has(key)) return Promise.resolve(false);
+        seen.add(key);
+        return Promise.resolve(true);
+      },
+    });
+    return { consumer, writes };
+  }
+
+  it("RECORDS the item state instead of describing it and forgetting", async () => {
+    const { consumer, writes } = spyRecorder();
+    const event = inboxEvent(ITEM_ERROR, "ITEM.ERROR");
+
+    const result = await consumer.handle(event, ctx);
+
     expect(result.status).toBe("ignored");
-    expect(result.status === "ignored" && result.reason).toContain("no plaid_item table");
+    expect(result.status === "ignored" && result.reason).toContain("plaid_item_event");
+    // The whole point: Plaid's own words reached durable storage, with the
+    // delivery they came from cited.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      itemId: "8MppL6n1rKTdJXD5Dkd8sRjPd5dm4vixgGNRZ",
+      source: "webhook",
+      webhookCode: "ERROR",
+      errorCode: "ITEM_LOGIN_REQUIRED",
+      errorType: "ITEM_ERROR",
+      inboxId: event.id,
+    });
   });
 
-  it("is idempotent for free: the same delivery twice is the same answer", async () => {
+  it("no longer claims there is nowhere to put an item's state", async () => {
+    const { consumer } = spyRecorder();
+    const result = await consumer.handle(inboxEvent(ITEM_ERROR, "ITEM.ERROR"), ctx);
+    // The sentence migration 0056 removed. If this ever comes back, the
+    // consumer has stopped recording and the health surface has gone blind
+    // again without anything else failing.
+    expect(result.status === "ignored" && result.reason).not.toContain("no plaid_item table");
+  });
+
+  it("a redelivery writes nothing twice and says so", async () => {
+    const { consumer, writes } = spyRecorder();
     const event = inboxEvent(ITEM_ERROR, "ITEM.ERROR");
-    const first = await plaidItemConsumer.handle(event, ctx);
-    const second = await plaidItemConsumer.handle(event, ctx);
-    expect(second).toEqual(first);
+
+    const first = await consumer.handle(event, ctx);
+    const second = await consumer.handle(event, ctx);
+
+    expect(first.status).toBe("ignored");
+    expect(second.status).toBe("ignored");
+    expect(first.status === "ignored" && first.reason).toContain("Recorded in plaid_item_event");
+    expect(second.status === "ignored" && second.reason).toContain("Already recorded");
+    // Both attempts reached the recorder — the index decides, not an `if`.
+    expect(writes).toHaveLength(2);
+  });
+
+  it("refuses to record a delivery that names no item", async () => {
+    const { consumer, writes } = spyRecorder();
+    const noItem = { webhook_type: "ITEM", webhook_code: "ERROR", environment: "sandbox" };
+
+    const result = await consumer.handle(inboxEvent(noItem, "ITEM.ERROR"), ctx);
+
+    expect(result.status).toBe("ignored");
+    expect(result.status === "ignored" && result.reason).toContain("no item_id");
+    // Inventing a placeholder id would put a row in v_plaid_item_state that
+    // refers to nothing.
+    expect(writes).toHaveLength(0);
   });
 
   it("parks a family nobody has decided about, rather than waving it through", async () => {
@@ -115,10 +196,14 @@ describe("the consumer", () => {
   });
 
   it("reads a double-encoded payload written before the ::text::jsonb fix", async () => {
-    const result = await plaidItemConsumer.handle(
+    const { consumer, writes } = spyRecorder();
+    const result = await consumer.handle(
       inboxEvent(JSON.stringify(ITEM_ERROR), "ITEM.ERROR"),
       ctx,
     );
     expect(result.status).toBe("ignored");
+    // And it is recorded, not merely parsed: a delivery stored in the older
+    // encoding still reaches the item log.
+    expect(writes).toHaveLength(1);
   });
 });

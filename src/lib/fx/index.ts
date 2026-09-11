@@ -12,16 +12,19 @@
  *   store.ts       the database — reads, and the four append-only writes
  *   gate.ts        the predicate the payout path calls
  *   settle.ts      the journal entry, through postEntry() and nothing else
+ *   hold.ts        the memo hold an ACCEPTANCE places, and the two ways it
+ *                  comes off — settlement writes the closure row, the
+ *                  settlement window does not. Migration 0053
  *
- * `store.ts`, `gate.ts` and `settle.ts` are `server-only`; the other four are
- * not, so the arithmetic and the vocabulary can be tested, scripted and
- * imported anywhere without dragging a connection along.
+ * `store.ts`, `gate.ts`, `settle.ts` and `hold.ts` are `server-only`; the
+ * other four are not, so the arithmetic and the vocabulary can be tested,
+ * scripted and imported anywhere without dragging a connection along.
  *
- * NOTE that this barrel deliberately does NOT re-export `store.ts`, `gate.ts`
- * or `settle.ts`. All three are `server-only`, and a barrel that mixes them
- * with the pure modules means any import of `formatRate` pulls `postgres` into
- * the graph — which is the bug `src/lib/rails/stablecoin/index.ts` has to work
- * around by exporting its ledger module separately. Import those three by path.
+ * NOTE that this barrel deliberately does NOT re-export the server-only four.
+ * A barrel that mixed them with the pure modules would mean any import of
+ * `formatRate` pulls `postgres` into the graph — which is the bug
+ * `src/lib/rails/stablecoin/index.ts` has to work around by exporting its
+ * ledger module separately. Import those by path.
  */
 
 export {

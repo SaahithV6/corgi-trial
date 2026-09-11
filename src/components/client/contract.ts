@@ -189,6 +189,16 @@ export type DecisionLine = {
   readonly memberName: string | null;
   /** The machine-readable rule that fired. Shown small, beside the sentence. */
   readonly rule: string;
+  /**
+   * Whether a control was actually compared with this authorisation.
+   *
+   * `false` on an `approve` means nothing on this card said yes — nothing said
+   * anything. Carried onto the customer's own screen rather than kept for the
+   * operator console, because "approved" and "nobody had set a rule to check"
+   * are different answers to "why did that go through", and the second one is
+   * the honest one on 44 of this book's 63 provider-lane approvals.
+   */
+  readonly judged: boolean;
   /** The sentence the decision was RECORDED with. Never re-written here. */
   readonly reason: string;
   /** `provider` = a real authorisation from Lithic. `harness` = our own probe. */

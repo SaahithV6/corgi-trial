@@ -71,14 +71,20 @@
  * AND THE LIMIT OF THAT, STATED RATHER THAN DISCOVERED
  * ===========================================================================
  *
- * THE ITEM ID IS PART OF THE KEY, AND THIS PATH LINKS A FRESH ITEM ON EVERY
- * RUN. There is nowhere to persist a Plaid `access_token` in this schema — no
- * `plaid_item` table, and adding one needs a migration this worker does not
- * own — so an Item cannot be re-read on a later request and `/funding` links a
- * new one each time. Two runs therefore carry two different `item_id`s, which
- * means two different external refs, which means two different idempotency
- * keys: the unique indexes above make a funding run replay-safe WITHIN one
- * linked Item, and they cannot see across two.
+ * THE ITEM ID IS PART OF THE KEY. Until migration 0056 there was nowhere to
+ * persist a Plaid `access_token` in this schema — no `plaid_item` table — so
+ * an Item could not be re-read on a later request and `/funding` linked a new
+ * one each time. Two runs therefore carried two different `item_id`s, which
+ * meant two different external refs, which meant two different idempotency
+ * keys: the unique indexes above made a funding run replay-safe WITHIN one
+ * linked Item, and could not see across two.
+ *
+ * 0056 CLOSES THAT, and the closure is opt-in rather than automatic. Pass
+ * `persist` to `linkExternalAccount()` and the Item, its token and its
+ * accounts are stored, so a later run reuses the SAME `item_id` and the unique
+ * indexes reach across runs after all. Without `persist` the old behaviour is
+ * unchanged — which is what the unit tests rely on, and what a diagnostic Item
+ * that is about to be deliberately broken should do.
  *
  * That is a real hazard — it is the double-click that books twice — so it is
  * guarded rather than hoped about. `alreadyFundedReference()` below is a
@@ -97,6 +103,8 @@ import { sql, type Sql } from '@/lib/ledger/db';
 import { postEntry } from '@/lib/ledger/post';
 
 import { PlaidClient, type CreateSandboxPublicTokenRequest } from './client';
+import { recordLinkedItem } from './item-store';
+import { wrapAccessToken } from './secret';
 import {
   scheduleAvailability,
   type AvailabilityPolicy,
@@ -280,6 +288,22 @@ export interface LinkOptions {
   readonly client?: PlaidClient | undefined;
   /** Skip `/link/token/create`. The error probes do, because it teaches nothing there. */
   readonly mintLinkToken?: boolean | undefined;
+  /**
+   * Store the Item, its access token and its accounts (migration 0056).
+   *
+   * ABSENT MEANS DO NOT STORE, and that is the safe default rather than an
+   * oversight: `probeItemLoginRequired()` deliberately breaks the Item it
+   * creates, and an Item that is about to be destroyed must not be written
+   * down as a customer's funding source. The two `/funding` call sites pass
+   * this; the diagnostic probes do not.
+   */
+  readonly persist?:
+    | {
+        readonly businessId: string;
+        readonly conn?: Sql | undefined;
+        readonly purpose?: 'funding' | 'diagnostic' | undefined;
+      }
+    | undefined;
 }
 
 /**
@@ -292,12 +316,14 @@ export interface LinkOptions {
  *   POST /auth/get                      the routing and account numbers
  *
  * THE ACCESS TOKEN NEVER LEAVES THIS FUNCTION. It is used for the two reads
- * and then dropped on the floor. It is not returned, not logged and not
- * persisted — and it is not persisted because there is nowhere to persist it:
- * this schema has no `plaid_item` table and adding one needs a migration.
- * The consequence, stated rather than hidden: an Item cannot be re-read on a
- * later request, so `/funding` links a fresh Item per funding run and the
- * durable record of the linkage is the `external_ref` on the money rows.
+ * and, when `persist` is given, handed to `item-store.ts` — which writes it to
+ * `plaid_item_secret` and never returns it. It is not in `LinkResult`, not
+ * logged, and the only way to read it back is `liveAccessTokenFor()`, which
+ * wraps it in a type whose `toString()` and `toJSON()` are "[redacted]".
+ *
+ * WITHOUT `persist` the token is still dropped on the floor, and the old
+ * consequence still applies: the Item cannot be re-read on a later request and
+ * the durable record of the linkage is the `external_ref` on the money rows.
  */
 export async function linkExternalAccount(opts: LinkOptions): Promise<LinkResult> {
   const client = opts.client ?? new PlaidClient();
@@ -364,6 +390,26 @@ export async function linkExternalAccount(opts: LinkOptions): Promise<LinkResult
       evidence: PLAID_EVIDENCE,
       environment,
     });
+  }
+
+  // 0056. Written AFTER the reads and BEFORE the return, so a caller that
+  // receives a `LinkResult` can rely on the Item being durable — and so that a
+  // failure to store is a failure to link, rather than a linked Item whose
+  // token is lost and which is therefore already `orphaned`.
+  if (opts.persist !== undefined) {
+    await recordLinkedItem(
+      {
+        item: accounts.item,
+        accounts: accounts.accounts,
+        achNumbers,
+        accessToken: wrapAccessToken(accessToken),
+        environment,
+        businessId: opts.persist.businessId,
+        webhookUrl: opts.webhook ?? null,
+        purpose: opts.persist.purpose ?? 'funding',
+      },
+      opts.persist.conn ?? sql,
+    );
   }
 
   return { calls, linkToken, item: accounts.item, fundable, achNumbers };

@@ -36,10 +36,32 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import { approvePayment, rejectPayment } from "@/lib/approvals/decide";
-import { releasePayment } from "@/lib/approvals/release";
-import { currentActor } from "@/lib/approvals/session";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the module for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 import { rootLogger } from "@/lib/log";
+
+/**
+ * WHY `decide`, `release` AND `session` ARE NOT IMPORTED AT THE TOP OF THIS
+ * FILE.
+ *
+ * All three reach `@/lib/ledger/db` -> `@/lib/env`, which parses `process.env`
+ * at module scope and throws `EnvironmentError` without `APP_DATABASE_URL`.
+ * `DecisionForm` imports `decideAction` from here, `QueueList` imports
+ * `DecisionForm`, and `ApprovalsView` imports `QueueList` — so on a deployment
+ * with no database this module's imports are a second static route from the
+ * page to a throw, beside the one that was actually measured. Under the app
+ * router the client boundary at `DecisionForm` usually stops the server from
+ * evaluating it; "usually" is not a property a screen should depend on to
+ * render the words "no database configured", and nothing outside a bundler
+ * stops it at all.
+ *
+ * They are imported inside the action instead, on the branch that has already
+ * established there is a database to write to. The action is a POST, and a POST
+ * to this screen on a deployment with no database is refused below with a code
+ * rather than an exception — see `NO_DATABASE` — because a server action that
+ * throws gives an operator an error boundary and no sentence.
+ */
 
 /** What the form gets back. Serialised to the client, so: no row contents. */
 export type DecisionResult = {
@@ -98,6 +120,28 @@ export async function decideAction(
 
   const { instructionId, contentHash, intent, reason } = parsed.data;
   const log = rootLogger.child({ instructionId, intent });
+
+  if (!hasDatabase()) {
+    // Unreachable from the screen — with no database `/approvals` draws the
+    // refusal panel and no row, so there is no button to press. It is reachable
+    // by a hand-assembled POST, which is the whole reason a server action
+    // re-checks everything, and the honest answer is that nothing was written
+    // because there was nowhere to write it.
+    return {
+      status: "refused",
+      code: "APPROVALS_NO_DATABASE",
+      message:
+        "No database is configured for this deployment, so the decision was not recorded and the payment it names was never read. Nothing was approved, rejected or released.",
+      instructionId,
+    };
+  }
+
+  const [{ approvePayment, rejectPayment }, { releasePayment }, { currentActor }] =
+    await Promise.all([
+      import("@/lib/approvals/decide"),
+      import("@/lib/approvals/release"),
+      import("@/lib/approvals/session"),
+    ]);
 
   const actor = await currentActor();
   if (actor === null) {

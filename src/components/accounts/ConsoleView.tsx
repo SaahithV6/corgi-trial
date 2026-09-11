@@ -194,7 +194,7 @@ function CardsPanel({
 }: {
   readonly snapshot: ConsoleSnapshot;
   readonly live: boolean;
-  readonly actions: ConsoleActions;
+  readonly actions: ConsoleActions | null;
   readonly formKey: string;
 }) {
   const { cards, business } = snapshot;
@@ -210,7 +210,7 @@ function CardsPanel({
         </span>
       }
     >
-      {live ? (
+      {live && actions !== null ? (
         <IssueCardForm
           action={actions.issueCard}
           businessId={business.businessId}
@@ -382,7 +382,7 @@ function HoldsPanel({
 }: {
   readonly snapshot: ConsoleSnapshot;
   readonly live: boolean;
-  readonly actions: ConsoleActions;
+  readonly actions: ConsoleActions | null;
 }) {
   const { holds } = snapshot;
   const active = holds.filter((hold) => hold.remainingCents > 0n).length;
@@ -437,7 +437,7 @@ function HoldsPanel({
                   live={live}
                   businessId={snapshot.business.businessId}
                   asOf={snapshot.asOf}
-                  action={actions.clearing}
+                  action={actions?.clearing ?? null}
                 />
               ))}
             </tbody>
@@ -463,7 +463,8 @@ function HoldRow({
   readonly live: boolean;
   readonly businessId: string;
   readonly asOf: string;
-  readonly action: ConsoleAction;
+  /** `null` on a drawn row, which has no hold to settle and no action to call. */
+  readonly action: ConsoleAction | null;
 }) {
   const overCaptured = hold.clearedCents > hold.authorisedCents;
   const excess = overCaptured ? hold.clearedCents - hold.authorisedCents : 0n;
@@ -477,7 +478,8 @@ function HoldRow({
   // disappears the moment its own action succeeds takes its result panel with
   // it: clear a hold in full and the sentence explaining what just happened
   // unmounts along with the control that produced it.
-  const settleable = live && hold.kind === "card_auth" && hold.providerAuthId !== null;
+  const settleable =
+    live && action !== null && hold.kind === "card_auth" && hold.providerAuthId !== null;
 
   return (
     <tr className={hold.remainingCents === 0n ? "text-muted" : ""}>
@@ -623,7 +625,16 @@ export function ConsoleView({
 }: {
   readonly snapshot: ConsoleSnapshot;
   readonly live: boolean;
-  readonly actions: ConsoleActions;
+  /**
+   * `null` on the drawn states and on a deployment with no database.
+   *
+   * The actions reach `@/lib/ledger/db` through their own module graph, so
+   * `page.tsx` obtains them with `await import("./actions")` on the branch
+   * that has a book — and a branch that has no book passes `null`, which is
+   * the same fact as `live === false` said in the type rather than only in a
+   * `disabled` attribute.
+   */
+  readonly actions: ConsoleActions | null;
   readonly formKey: string;
   readonly view: ConsoleViewState;
   readonly businesses: readonly ConsoleBusiness[];
@@ -673,7 +684,9 @@ export function ConsoleView({
         formKey={formKey}
       />
 
-      {live ? <SimulatorPanel snapshot={snapshot} actions={actions} /> : null}
+      {live && actions !== null ? (
+        <SimulatorPanel snapshot={snapshot} actions={actions} />
+      ) : null}
 
       <HoldsPanel snapshot={snapshot} live={live} actions={actions} />
     </div>

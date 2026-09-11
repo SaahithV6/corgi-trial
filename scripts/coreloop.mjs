@@ -622,49 +622,158 @@ async function waitForDrained(label, read, { attempts = 12, everyMs = 5000 } = {
 let sql = null;
 
 /**
- * Ledger, holds, uncleared and available for one business.
+ * ONE QUANTITY, ONE ANSWER, AND A RUN THAT STOPS WHEN THERE ARE TWO.
  *
- * This is `availableBalance()`'s query, re-expressed here rather than imported,
- * because importing it would put application code in this script's call stack
- * and the whole claim of this file is that there is none. It reads; it is the
- * yardstick the legs measure against, not a second opinion the app consults.
+ * `mine` and `theirs` are two separate bodies asked the same question at the
+ * same point. A cent between them is fatal, and the tolerance is zero because
+ * there is nothing legitimate for a tolerance to absorb: both sides are meant
+ * to be the SAME arithmetic reached by different routes.
  *
- * available = ledger - active card holds - uncleared credits, in cents.
+ * It stops rather than notes, because the failure it exists to catch has
+ * already happened once. Leg 6 printed
+ *
+ *     the REFUND             LEDGER ...
+ *       after            $90,408.21
+ *     at this point the book believes 2026-09-11 closes at $60,772.91
+ *
+ * eleven lines apart, in one run, about one account, and the scoreboard still
+ * said PASS 7. A run that prints two answers to one question has nothing to
+ * say about a bank, so it does not get to finish.
+ */
+function agree(quantity, point, mine, theirs) {
+  if (mine.cents === theirs.cents) return;
+  const gap = mine.cents - theirs.cents;
+  console.log("");
+  console.log(RED(`  MONEY DISAGREEMENT — ${quantity}, at ${point}`));
+  console.log(RED(`    ${mine.from.padEnd(46)}${usd(mine.cents).padStart(16)}`));
+  console.log(RED(`    ${theirs.from.padEnd(46)}${usd(theirs.cents).padStart(16)}`));
+  console.log(RED(`    ${"difference".padEnd(46)}${usd(gap).padStart(16)}`));
+  console.log(RED("    Two bodies, one point, two answers. Nothing here is a tolerance to widen —"));
+  console.log(RED("    one of these two is not computing what it says it is computing."));
+  console.log("");
+  throw new Failed(
+    `${quantity} disagrees by ${usd(gap)} at ${point}: ${mine.from} says ${usd(mine.cents)}, ` +
+      `${theirs.from} says ${usd(theirs.cents)}`,
+  );
+}
+
+/**
+ * One line naming the definition, one naming the predicate. Every money figure
+ * this script prints is one of `ledger_availability()`'s five terms or a delta
+ * between two readings of them, so this is the whole audit trail.
+ */
+const provenance = (f) => [
+  `ledger_availability(value date ${f.valueDate}, booking seq ${f.watermark}) — the one definition, called not copied.`,
+  `INCLUDES lines dated on or before that day and booked at or under that seq, and the holds live then;`,
+  `EXCLUDES later-dated lines — their DEBITS return as PENDING OUT, their CREDITS are not money today.`,
+];
+
+/**
+ * Ledger, holds, uncleared, pending outbound and available for one business.
+ *
+ * THIS IS A CALL TO `ledger_availability()`, NOT A COPY OF IT. Migration 0022
+ * exists because this system once held four answers to "what is available";
+ * the body that used to be here was a fifth, and it was wrong. There is no
+ * arithmetic in this function, deliberately: the five figures it returns are
+ * the five columns the function returns, carried unchanged.
+ *
+ * WHAT THE OLD BODY GOT WRONG, MEASURED ON THE SUBJECT ACCOUNT
+ *
+ *   THE LEDGER TERM summed EVERY line on the 2100 — no value-date predicate,
+ *   no booking watermark. On Ridgeline Robotics that admitted 136 lines value-
+ *   dated in 2027: $32,135.30 of credit and $2,500.00 of committed debit. The
+ *   script printed a ledger of $89,158.21 where the book said $59,522.91 and
+ *   an available of $67,797.03 where the book said $35,661.73. NOTHING was
+ *   above the watermark; every cent of the gap was the missing value date, and
+ *   it grew by $935.70 each time attack 6 appended another forward-dated recon
+ *   settlement. NOT a standing order — that attribution was wrong for three
+ *   hops and is corrected here: standing orders write no journal lines at all,
+ *   and listDue() caps the due-date window at the book date, so one cannot
+ *   future-date even in principle. The writer is the planted-break attack,
+ *   which forward-dates ON PURPOSE so the run is reachable from the breaks
+ *   screen, and its residue is now $5.30 a run rather than $935.70.
+ *   This is migration 0022's own opening paragraph, happening again, here.
+ *
+ *   PENDING OUTBOUND was missing, and for AVAILABLE that is a red herring.
+ *   Leaving the 2027 debit inside the ledger sum subtracts it once; taking it
+ *   out and subtracting it as `pending_outbound_cents` subtracts it once. The
+ *   two errors cancelled to the cent, which is precisely why the first one
+ *   survived. It is not a red herring for the LEDGER figure, which was over by
+ *   $29,635.30 — the $32,135.30 of credit less that same $2,500.00.
+ *
+ *   THE HOLD TERMS had no value-date gate, no card-event fold, no release
+ *   clock, no watermark, no bucket for 'manual', and an ABS() that turns a
+ *   malformed hold into MORE money withheld rather than less. All of it
+ *   measured $0.00 today: this book carries no manual holds at all, and no
+ *   live uncleared credit whose clock has already passed. Wrong by
+ *   construction, right by coincidence — the catalogued shape. Gone, not
+ *   patched.
+ *
+ * No application code enters this script's call stack. `ledger_availability()`
+ * is in Postgres, reached by a SELECT over the wire, which is how the deployed
+ * screens reach it too — a stronger claim than re-expressing it here, not a
+ * weaker one.
  */
 async function facts(businessId) {
   const [row] = await sql`
     WITH deposit AS (
-      SELECT id, normal_side FROM account
-       WHERE code = '2100' AND business_id = ${businessId}::uuid
+      SELECT id FROM account
+       WHERE code = '2100' AND book = 'financial' AND business_id = ${businessId}::uuid
     ),
-    booked AS (
-      SELECT COALESCE(SUM(l.amount_cents), 0)::bigint * d.normal_side AS cents
-        FROM deposit d LEFT JOIN journal_line l ON l.account_id = d.id
-       GROUP BY d.normal_side
-    ),
-    active_holds AS (
-      SELECT h.id, h.kind, COALESCE(SUM(l.amount_cents), 0)::bigint AS cents
-        FROM hold h
-        JOIN account a ON a.id = h.account_id
-        LEFT JOIN journal_entry e ON e.hold_id = h.id
-        LEFT JOIN journal_line  l ON l.entry_id = e.id AND l.account_id = h.memo_account_id
-       WHERE a.business_id = ${businessId}::uuid
-         AND NOT EXISTS (
-           SELECT 1 FROM hold_closure c
-            WHERE c.hold_id = h.id
-              AND NOT EXISTS (SELECT 1 FROM hold_closure_reversal r WHERE r.hold_id = c.hold_id)
-         )
-       GROUP BY h.id, h.kind
+    -- THE LIVE POINT. MATERIALIZED because clock_timestamp() is volatile and
+    -- this must be ONE reading: the value date, the watermark and the instant
+    -- handed to the function have to name the same moment or the five terms
+    -- are not a position. These are v_available_balance's own three numbers.
+    point AS MATERIALIZED (
+      SELECT book_date(clock_timestamp())                                          AS value_date,
+             COALESCE((SELECT MAX(e.booking_seq) FROM journal_entry e), 0)::bigint AS booking_seq,
+             clock_timestamp()                                                     AS as_of
     )
-    SELECT (SELECT COALESCE(cents, 0) FROM booked)                             AS ledger_cents,
-           COALESCE((SELECT SUM(ABS(cents)) FROM active_holds
-                      WHERE kind = 'card_auth'), 0)::bigint                    AS holds_cents,
-           COALESCE((SELECT SUM(ABS(cents)) FROM active_holds
-                      WHERE kind = 'uncleared_credit'), 0)::bigint             AS uncleared_cents`;
-  const ledger = row?.ledger_cents ?? 0n;
-  const holds = row?.holds_cents ?? 0n;
-  const uncleared = row?.uncleared_cents ?? 0n;
-  return { ledger, holds, uncleared, available: ledger - holds - uncleared };
+    SELECT d.id               AS account_id,
+           p.value_date::text AS value_date,
+           p.booking_seq      AS booking_seq,
+           av.ledger_cents,
+           av.hold_cents,
+           av.uncleared_cents,
+           av.pending_outbound_cents,
+           av.available_cents
+      FROM deposit d
+      CROSS JOIN point p
+      CROSS JOIN LATERAL ledger_availability(d.id, p.value_date, p.booking_seq, p.as_of) av`;
+  if (row === undefined) {
+    throw new Failed(`business ${businessId} holds no open 2100 deposit account in the financial book`);
+  }
+
+  const f = {
+    account: row.account_id,
+    valueDate: row.value_date,
+    watermark: cents(row.booking_seq),
+    ledger: cents(row.ledger_cents),
+    holds: cents(row.hold_cents),
+    uncleared: cents(row.uncleared_cents),
+    pendingOut: cents(row.pending_outbound_cents),
+    available: cents(row.available_cents),
+  };
+  const point = `value date ${f.valueDate}, booking seq ${f.watermark}`;
+
+  // TWO BODIES, HELD EQUAL, ON EVERY CALL.
+  //
+  // `balanceAsOf()` is this script's own two-axis sum — the query leg 6 reads
+  // its "as believed" figure out of — and it is a genuinely separate body from
+  // ledger_settled_cents() in Postgres. They are asked at the SAME point, and
+  // the point is safe to re-ask: booking_seq is monotonic, so a row appended
+  // between these two statements is above the watermark and invisible to both.
+  agree("the settled LEDGER balance", point,
+    { from: "ledger_availability(), the one definition", cents: f.ledger },
+    { from: "balanceAsOf(), this script's own two-axis sum", cents: await balanceAsOf(f.account, f.valueDate, f.watermark) });
+
+  // And the five terms re-added in JavaScript. If AVAILABLE is not exactly the
+  // four terms printed beside it, it came from somewhere else.
+  agree("AVAILABLE", point,
+    { from: "ledger_availability().available_cents", cents: f.available },
+    { from: "ledger - holds - uncleared - pending out", cents: f.ledger - f.holds - f.uncleared - f.pendingOut });
+
+  return f;
 }
 
 /**
@@ -690,17 +799,26 @@ async function balanceAsOf(accountId, valueDate, watermark) {
   return cents(row?.cents ?? 0);
 }
 
-/** Two readings of the same four figures, formatted so the money can be followed. */
+/**
+ * Two readings of the same FIVE figures, formatted so the money can be
+ * followed. PENDING OUT is a column rather than a footnote because AVAILABLE
+ * subtracts it: four columns that do not add up to the fifth are how a reader
+ * learns to stop trusting the table.
+ */
 function positionLines(label, before, after) {
-  const cell = (v) => usd(v).padStart(14);
+  const cell = (v) => usd(v).padStart(13);
+  const head = (t) => t.padStart(13);
+  const row = (name, l, h, u, p, a) => `${name.padEnd(20)}${cell(l)}${cell(h)}${cell(u)}${cell(p)}${cell(a)}`;
   return [
-    `${label}                 LEDGER         HOLDS     UNCLEARED     AVAILABLE`,
-    `  before        ${cell(before.ledger)}${cell(before.holds)}${cell(before.uncleared)}${cell(before.available)}`,
-    `  after         ${cell(after.ledger)}${cell(after.holds)}${cell(after.uncleared)}${cell(after.available)}`,
-    `  delta         ${delta(before.ledger, after.ledger).padStart(14)}` +
-      `${delta(before.holds, after.holds).padStart(14)}` +
-      `${delta(before.uncleared, after.uncleared).padStart(14)}` +
-      `${delta(before.available, after.available).padStart(14)}`,
+    `${label.padEnd(20)}${head("LEDGER")}${head("HOLDS")}${head("UNCLEARED")}${head("PENDING OUT")}${head("AVAILABLE")}`,
+    row("  before", before.ledger, before.holds, before.uncleared, before.pendingOut, before.available),
+    row("  after", after.ledger, after.holds, after.uncleared, after.pendingOut, after.available),
+    `${"  delta".padEnd(20)}${delta(before.ledger, after.ledger).padStart(13)}` +
+      `${delta(before.holds, after.holds).padStart(13)}` +
+      `${delta(before.uncleared, after.uncleared).padStart(13)}` +
+      `${delta(before.pendingOut, after.pendingOut).padStart(13)}` +
+      `${delta(before.available, after.available).padStart(13)}`,
+    ...provenance(after),
   ];
 }
 
@@ -1106,7 +1224,9 @@ console.log("");
 
 const opening = await facts(BIZ);
 console.log(`  OPENING POSITION   ledger ${usd(opening.ledger)} · holds ${usd(opening.holds)}` +
-  ` · uncleared ${usd(opening.uncleared)} · available ${usd(opening.available)}`);
+  ` · uncleared ${usd(opening.uncleared)} · pending out ${usd(opening.pendingOut)}` +
+  ` · available ${usd(opening.available)}`);
+for (const line of provenance(opening)) console.log(DIM(`  ${line}`));
 console.log("");
 console.log(DIM("  Every write below is a form POSTed to its server action on the deployed origin."));
 console.log(DIM("  Provider legs wait for the real webhook and nudge POST /api/drain. This takes minutes."));
@@ -1576,8 +1696,10 @@ if (want(4)) {
       `holds are ${usd(afterClear.holds)} after settlement, expected the pre-authorisation ${usd(before.holds)}`,
     );
     t.check(
-      afterClear.available === afterClear.ledger - afterClear.holds - afterClear.uncleared,
-      "available is not exactly ledger - holds - uncleared, so it is a stored number rather than a derived one",
+      afterClear.available ===
+        afterClear.ledger - afterClear.holds - afterClear.uncleared - afterClear.pendingOut,
+      "available is not exactly ledger - holds - uncleared - pending out, so it is a stored number " +
+        "rather than a derived one",
     );
 
     const [entry] = await sql`
@@ -1968,7 +2090,9 @@ if (want(6)) {
       `entry         ${original.value.id}  ${original.value.entry_type}  seq ${original.value.booking_seq}` +
         `  value date ${valueDate}`,
       ...positionLines("the REFUND", before, afterReturn),
-      `at this point the book believes ${valueDate} closes at ${usd(believed)} on this account.`,
+      `at this point the book believes ${valueDate} closes at ${usd(believed)} on this account —`,
+      `lines dated on or before ${valueDate} and booked at or under seq ${believedWatermark}, and nothing`,
+      `else. That is the same body, at the same point, as the LEDGER column above it.`,
     );
 
     /* ---- 2. the merchant takes it back ----------------------------------- */
@@ -2249,8 +2373,69 @@ if (want(7)) {
 }
 
 /* ========================================================================== */
-/* Invariants                                                                 */
+/* Invariants — a NAMED SET, never a count                                    */
 /* ========================================================================== */
+
+/**
+ * THE INVARIANTS THIS RUN STANDS ON, LISTED BY NAME.
+ *
+ * WHY THIS IS NOT A COUNT. It was `passed === 14 && failed === 0`. A COUNT
+ * CANNOT TELL "AN INVARIANT WAS ADDED" FROM "AN INVARIANT STOPPED RUNNING" —
+ * one is growth and the other is a guard that quietly went away, and 14 maps
+ * both to the same red. dbcheck gates 31 views today, so the number was
+ * already stale, and a red that fires on growth is a red nobody reads.
+ *
+ * It is the same defect this run just fixed in `facts()`: a check whose
+ * POPULATION is implicit. dbcheck's own GUARD REACH section states the rule —
+ * "coverage is COMPUTED from the list of things that must be covered, never
+ * from the list of things that happen to be covered", and a name that has gone
+ * missing is a named FAIL rather than a blank. This is that rule carried
+ * across the process boundary.
+ *
+ * THE RULE, IN THREE PARTS
+ *
+ *   REQUIRED  the list below, one line each naming the leg it carries. Each
+ *             must be PRESENT in dbcheck's output AND green. ABSENT IS A
+ *             FAILURE: an invariant that stopped running is the one thing a
+ *             count can never see, and it is the failure this list exists for.
+ *
+ *   EXCUSED   the four standing reds, excluded BY NAME. The argument for each
+ *             is dbcheck's own RED_REGISTER, cited there to documents that
+ *             predate the rows. This script does not restate those arguments
+ *             and must not invent its own. By name and not by predicate: a
+ *             predicate shaped like the failure is how a guard in this repo
+ *             has gone green wrongly twenty-six times, and "NOT LIKE
+ *             'lithic:team-test-%'" is the exact move dbcheck refused.
+ *
+ *   EVERYTHING ELSE  printed, never fatal. A gated view this run does not
+ *             lean on is somebody's business but not this script's, and a new
+ *             one appearing is growth. Growth must not break a run.
+ */
+const REQUIRED_INVARIANTS = [
+  ["v_entry_unbalanced", "double entry itself — every figure above is a SUM over these lines"],
+  ["v_line_denorm_drift", "value_date and booking_seq on the line match their entry — the two columns facts() filters on"],
+  ["v_book_not_zero", "the whole book nets to zero, per entity and book"],
+  ["v_deposit_control_drift", "the deposits subtree equals what this run reported off the 2100"],
+  ["v_balance_definition_drift", "the hold model and ledger_availability() agree at the live point — facts() IS a call to it"],
+  ["v_hold_drift", "leg 4: the memo book equals the fold over card events"],
+  ["v_hold_release_drift", "leg 4: a released hold withholds nothing"],
+  ["v_hold_closure_not_terminal", "leg 4: no permanent closure stands over a hold the fold says is open"],
+  ["v_value_date_unexplained", "leg 6: every value date on this book is explained by a declared writer"],
+  ["v_approved_auth_for_dead_member", "legs 3-4: no authorisation approved without the cardholder's live terms"],
+  ["v_member_approval_without_right", "leg 5: no approval stands from anybody who did not hold the right at the time"],
+];
+
+/**
+ * Red on purpose. The reasoning is dbcheck's RED_REGISTER, which quotes the
+ * documents that predate each row; naming them here is the whole of this
+ * script's claim about them, deliberately.
+ */
+const EXCUSED_INVARIANTS = [
+  "v_refused_auth_hold",
+  "v_hold_expiry_drift",
+  "v_advice_delta_unsound",
+  "v_hold_closure_unexplained",
+];
 
 console.log(THIN);
 console.log("");
@@ -2262,17 +2447,70 @@ const dbcheck = spawnSync(process.execPath, [resolve(ROOT, "scripts", "dbcheck.m
   encoding: "utf8",
   stdio: ["ignore", "pipe", "pipe"],
 });
-const summary = /(\d+)\s+passed,\s+(\d+)\s+failed/.exec(`${dbcheck.stdout ?? ""}${dbcheck.stderr ?? ""}`);
-const invariants =
-  summary === null
-    ? { ok: false, passed: 0, failed: 0, detail: "dbcheck produced no summary line" }
-    : {
-        ok: Number(summary[2]) === 0 && Number(summary[1]) === 14,
-        passed: Number(summary[1]),
-        failed: Number(summary[2]),
-        detail: `${summary[1]} passed, ${summary[2]} failed`,
-      };
+const dbcheckOut = `${dbcheck.stdout ?? ""}${dbcheck.stderr ?? ""}`;
+
+// dbcheck's INVARIANT VIEWS section prints one line per gated view:
+//
+//   "  PASS  v_entry_unbalanced is empty — every entry sums to zero, per currency"
+//   "  FAIL  v_hold_expiry_drift is empty — 12 row(s) — one card hold, one expiry …"
+//
+// Matched narrowly on purpose. GUARD REACH prints "<view> declares its reach"
+// about the SAME view names, and that is a different claim about a different
+// thing; folding the two together would let a reach failure read as an
+// emptiness pass, which is the shape of mistake this whole section is about.
+const gated = new Map();
+for (const m of dbcheckOut.matchAll(/^\s*(PASS|FAIL)\s+(v_[a-z0-9_]+) is empty\b/gm)) {
+  gated.set(m[2], m[1] === "PASS");
+}
+
+const required = new Set(REQUIRED_INVARIANTS.map(([v]) => v));
+const excused = new Set(EXCUSED_INVARIANTS);
+const vanished = REQUIRED_INVARIANTS.filter(([v]) => !gated.has(v)).map(([v]) => v);
+const broken = REQUIRED_INVARIANTS.filter(([v]) => gated.get(v) === false).map(([v]) => v);
+const excusedRed = EXCUSED_INVARIANTS.filter((v) => gated.get(v) === false);
+const excusedGreen = EXCUSED_INVARIANTS.filter((v) => gated.get(v) === true);
+const otherRed = [...gated].filter(([v, green]) => !green && !required.has(v) && !excused.has(v)).map(([v]) => v);
+const tally = /(\d+)\s+passed,\s+(\d+)\s+failed/.exec(dbcheckOut);
+
+const invariants = {
+  ok: gated.size > 0 && vanished.length === 0 && broken.length === 0,
+  detail:
+    gated.size === 0
+      ? "dbcheck printed no invariant verdicts at all — it did not run, or its output shape changed"
+      : vanished.length > 0
+        ? `${vanished.length} REQUIRED INVARIANT(S) HAVE STOPPED RUNNING: ${vanished.join(", ")}`
+        : broken.length > 0
+          ? `${broken.length} required invariant(s) RED: ${broken.join(", ")}`
+          : `${required.size}/${required.size} required held`,
+};
 console.log(invariants.ok ? GREEN(invariants.detail) : RED(invariants.detail));
+
+console.log(
+  DIM(
+    `               ${gated.size} views gated · ${required.size} required by name · ` +
+      `${excusedRed.length} excused on dbcheck's register · ` +
+      `${gated.size - required.size - excusedRed.length} not this run's business` +
+      `${tally === null ? "" : `   (dbcheck's own tally: ${tally[1]} passed, ${tally[2]} failed)`}`,
+  ),
+);
+if (vanished.length > 0) {
+  console.log(RED(`               GONE FROM dbcheck ENTIRELY, not merely red: ${vanished.join(", ")}`));
+  console.log(RED("               A required invariant that no longer runs is why this stopped being a count."));
+}
+for (const view of broken) {
+  const claim = REQUIRED_INVARIANTS.find(([v]) => v === view)?.[1] ?? "";
+  console.log(RED(`               RED and required — ${view}: ${claim}`));
+}
+if (excusedRed.length > 0) {
+  console.log(DIM(`               excused by name, red on purpose: ${excusedRed.join(", ")}`));
+  console.log(DIM("               — the argument for each is dbcheck's RED_REGISTER, not a sentence invented here."));
+}
+for (const view of excusedGreen) {
+  console.log(YELLOW(`               ${view} is excused here but is GREEN — the excuse has outlived its row.`));
+}
+if (otherRed.length > 0) {
+  console.log(YELLOW(`               red, and not on either list — printed, not fatal: ${otherRed.join(", ")}`));
+}
 
 const closing = await facts(BIZ);
 
@@ -2323,13 +2561,16 @@ console.log(
     `    ${providerCalls} to the Lithic sandbox`,
 );
 console.log(
-  `  invariants  ${invariants.ok ? GREEN(`${invariants.passed}/14 held`) : RED(invariants.detail)}`,
+  `  invariants  ${invariants.ok ? GREEN(invariants.detail) : RED(invariants.detail)}` +
+    DIM(`  ·  of ${gated.size} gated, ${excusedRed.length} excused by name on dbcheck's register`),
 );
 console.log(
   `  ${subject.legal_name}   opening ${usd(opening.available)} available` +
     `  ->  closing ${usd(closing.available)} available   (ledger ${usd(closing.ledger)},` +
-    ` holds ${usd(closing.holds)}, uncleared ${usd(closing.uncleared)})`,
+    ` holds ${usd(closing.holds)}, uncleared ${usd(closing.uncleared)},` +
+    ` pending out ${usd(closing.pendingOut)})`,
 );
+for (const line of provenance(closing)) console.log(DIM(`  ${line}`));
 console.log(RULE);
 console.log("");
 console.log(DIM("  A SKIP is not a pass. It means the leg could not be driven through the deployed"));

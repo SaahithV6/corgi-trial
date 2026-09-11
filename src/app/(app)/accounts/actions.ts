@@ -410,7 +410,7 @@ export async function issueCardAction(
             ? "version 1 · program default · $5,000.00 per transaction, no daily or monthly limit, no blocked categories"
             : defaults.kind === "already_controlled"
               ? "already under a control version — left alone"
-              : "NOT APPLIED — this card will be approved by no_controls_configured until somebody sets one below",
+              : "NOT APPLIED — until somebody sets one below, this card's authorisations are approved by no_controls_configured and recorded as judged: false, which is an approval that compared the authorisation with nothing",
       },
     ],
     balances: null,

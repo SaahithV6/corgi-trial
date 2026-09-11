@@ -286,7 +286,7 @@ export async function dispatchOnce(deps: DispatchDeps): Promise<DispatchSummary>
         const parksSoFar = event.parkAttempts + 1;
         if (parksSoFar > policy.maxParkAttempts) {
           await store.deadLetter(event.id, {
-            error: `parked ${event.parkAttempts} times waiting for ${refText(result.waitingFor)}; referent never arrived`,
+            error: parkExhaustedText(event.parkAttempts, result.waitingFor, result.reason),
             now: at,
           });
           summary.deadLettered += 1;
@@ -394,6 +394,39 @@ async function applyFailure(
 
 function refText(ref: EntityRef): string {
   return `${ref.kind}:${ref.ref}`;
+}
+
+/**
+ * What a park-exhaustion dead letter says about itself.
+ *
+ * It used to say only `parked 12 times waiting for
+ * inbound_ach_account_mapping:sandbox_inbound_ach_transfer_07x…; referent
+ * never arrived`. `/api/health` publishes the newest dead letter's
+ * `processing_error` verbatim, so that sentence — two machine identifiers and
+ * no money — was the entire public account of a $10,000.00 inbound ACH credit
+ * that this system deliberately declined to attribute. The consumer's own
+ * reason said the amount, the account number, that NOTHING WAS POSTED, and
+ * that an operator must attribute it by hand or return it to the originator.
+ * It was written to `parked_reason` by `park()` and then never read again by
+ * anything a person looks at.
+ *
+ * This is the same correction `park()` already makes one step earlier (see the
+ * note on `processing_error = null` in src/lib/webhooks/inbox.ts): a correct
+ * refusal described by a leftover machine string reads as a fault to whoever
+ * is on call. Dead-lettering used to undo it.
+ *
+ * The consumer's sentence goes FIRST because the health endpoint truncates at
+ * 200 characters, and the mechanical fact follows in brackets so the reason
+ * the row is dead rather than parked is still on the row. Both halves, in the
+ * order a human needs them.
+ */
+function parkExhaustedText(
+  parkAttempts: number,
+  waitingFor: EntityRef,
+  reason: string | undefined,
+): string {
+  const mechanical = `parked ${parkAttempts} times waiting for ${refText(waitingFor)}; referent never arrived`;
+  return reason === undefined || reason === '' ? mechanical : `${reason} [${mechanical}]`;
 }
 
 function errorText(err: unknown): string {

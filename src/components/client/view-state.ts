@@ -52,6 +52,14 @@ export const CLIENT_SCREENS = [
   { href: "/client/cards", label: "Cards" },
   { href: "/client/pay", label: "Send a payment" },
   { href: "/client/approvals", label: "Approve" },
+  // The three the customer could not reach until 11:00 on the last day. Each
+  // existed operator-side and only operator-side, which meant the console was
+  // doing the customer's job: setting their card limits, raising their
+  // disputes, accepting their exchange rate. The brief's own verbs are the
+  // giveaway — an FX quote "the customer accepts", dispute "intake".
+  { href: "/client/pots", label: "Pots" },
+  { href: "/client/disputes", label: "Disputes" },
+  { href: "/client/payouts", label: "Send abroad" },
 ] as const;
 
 export type ClientScreenHref = (typeof CLIENT_SCREENS)[number]["href"];

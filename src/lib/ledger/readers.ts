@@ -1692,3 +1692,38 @@ export async function readLedgerCensus(conn: Queryable): Promise<LedgerCensus> {
     depositAccounts: row.deposit_accounts,
   };
 }
+
+/**
+ * Does this journal entry touch an account belonging to this business?
+ *
+ * The ownership predicate behind every customer-facing screen that takes an
+ * entry id from a form. It is ONE statement with BOTH columns in it, evaluated
+ * in Postgres, rather than a read followed by a comparison in TypeScript —
+ * because a filter applied after the read is a step somebody can forget, and a
+ * predicate is not.
+ *
+ * It lives here, and not beside the screen that needs it, for the reason
+ * `boundary.test.ts` exists: `journal_entry`, `journal_line` and `account` are
+ * queried through named readers so that the set of places a money table can be
+ * read from stays countable. `/client/disputes` had this query inline and the
+ * ratchet caught it within the hour.
+ *
+ * Returns a boolean and nothing else. A caller that learns "not yours" must not
+ * also learn whether the entry exists — those are the same answer to a customer
+ * and different answers to somebody enumerating ids.
+ */
+export async function entryBelongsToBusiness(
+  entryId: string,
+  businessId: string,
+  conn: Queryable,
+): Promise<boolean> {
+  const rows = await conn<{ one: number }[]>`
+    SELECT 1 AS one
+      FROM journal_entry e
+      JOIN journal_line  l ON l.entry_id = e.id
+      JOIN account       a ON a.id = l.account_id
+     WHERE e.id = ${entryId}::uuid
+       AND a.business_id = ${businessId}::uuid
+     LIMIT 1`;
+  return rows[0] !== undefined;
+}

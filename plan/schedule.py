@@ -258,7 +258,13 @@ def main():
             print(f"  gate {gid} finishes {clock(fin)} (due {clock(due)})  {flag}")
 
     print("\nHUMAN NODES ON THE CLOCK  (only Saahith can do these)")
-    hum = sorted([n for n in graph.NODES if n["owner"]=="human" and n["status"]!="done"],
+    # "not done" is not the same as "still owed". A cut node is settled — it
+    # was decided against, on the record — and listing it here put the mobile
+    # app and the wow factor on Saahith's clock at 0m each, under a heading
+    # that says only he can do them. Both were cut by him. A checklist that
+    # includes items nobody intends to do is a checklist people stop reading.
+    hum = sorted([n for n in graph.NODES
+                  if n["owner"] == "human" and n["status"] not in ("done", "cut")],
                  key=lambda n: start.get(n["id"], 0))
     for n in hum:
         i = n["id"]

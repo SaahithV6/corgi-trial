@@ -160,4 +160,146 @@ export const INVARIANT_VIEWS: readonly (readonly [string, string])[] = [
   ['v_pot_identity_drift', 'every pot is exactly one sub-account, and nothing else lives under it'],
   ['v_pot_negative', 'no pot holds less than nothing'],
   ['v_pot_orphan', 'no pot sub-account exists without the pot that names it'],
+  // 0052's one — the structural pot guard, and the reason the four above are
+  // not it. Each of them compares a BALANCE (identity drift, negative), a fact
+  // about the CHART (orphan), or a shape over a population the writer selected
+  // ITSELF into (impure: `rail = 'internal' AND idempotency_key LIKE 'pot:%'`).
+  // A pot line written by the wrong writer for the right amount passes all
+  // four — measured, not supposed: docs/POTS.md §10.3 moved $50.00 out of a pot
+  // into `1000 Cash at bank` under an `ach:` key and impure, identity drift and
+  // deposit-control drift all stayed at 0.
+  //
+  // This one keys on `journal_line.account_id IN (SELECT account_id FROM pot)`,
+  // a fact about the chart rather than a label, so the only way out of its
+  // population is to not touch a pot account. Mirrored here in the same pass
+  // that added it to `scripts/dbcheck.mjs` — the two lists are asserted equal
+  // by this module's own test, and a sixth side array was not going to be the
+  // thing this file finally tolerated.
+  [
+    'v_pot_line_provenance',
+    'every journal line on a pot account is traceable to a pot operation',
+  ],
+  // 0054's two — 0052's finding generalised past the pot table. Every one
+  // of the thirty-one views above was read as SQL rather than as its own
+  // summary and classified in docs/INVARIANTS.md: fifteen turn on a
+  // quantity, and eleven of those fifteen are dodgeable, each dodge
+  // constructed against the live book in a transaction that was rolled
+  // back. These close the worst two.
+  //
+  // The deposit one is the serious one. `v_deposit_control_drift` is the
+  // ONLY invariant over the whole customer deposit subtree, and both of
+  // its sides count the same accounts — so a movement inside that subtree
+  // moves both equally and the difference stays zero for ANY amount.
+  // $250,000.00 was moved from one customer's `2100` to another's and nine
+  // balance guards stayed green, this dashboard's among them. The memo one
+  // is the same defect one book over: `v_hold_state` folds only
+  // `l.account_id = h.memo_account_id`, so $85,000.00 of withholding
+  // parked on a different customer's memo account appears in neither side
+  // of v_hold_drift's comparison.
+  //
+  // Mirrored here in the same pass that added them to `scripts/dbcheck.mjs`
+  // — the two lists are asserted identical by this module's own test, and a
+  // side array is how five previous additions quietly dropped out of
+  // `--prove`.
+  [
+    'v_deposit_cross_customer',
+    'no single entry moves money between two customers, or onto the house control account',
+  ],
+  [
+    'v_memo_line_placement',
+    'every memo line lies where the hold it names says it does',
+  ],
+  // 0055's one — hole 1, which 0054 ranked as the largest thing it left
+  // open: a customer's money moved out to a house account that is not the
+  // `2100` control. One customer, one entry, so `v_deposit_cross_customer`
+  // passes it. $500,000.00 moved to house `1000 Cash at bank` and twelve
+  // guards stayed green.
+  //
+  // The near miss is the part worth keeping: `1000` receives no real
+  // traffic, so a whitelist of the ten house accounts that do would have
+  // caught that probe and shipped green. The identical theft one account
+  // over — into `1110`, which 145 legitimate entries use — walks through
+  // any such whitelist. A legitimate payout and a theft are THE SAME
+  // TRANSACTION; the difference is not in the money, it is in whether an
+  // instruction exists. So the guard asks for provenance and ranks the
+  // anchors: an FK citation (unfakeable), a retained webhook, a declared
+  // fixture, or `external_ref` alone — which is a label, and is named the
+  // weakest anchor wherever it appears. It catches a writer that forgot,
+  // not an attacker that lied; the attacker-resistant form is red at 406
+  // and left for a RED_REGISTER argument in docs/INVARIANTS.md.
+  //
+  // Mirrored here in the same pass that added it to `scripts/dbcheck.mjs`.
+  [
+    'v_deposit_outflow_unexplained',
+    'customer money never leaves for a house account with nothing saying anybody asked',
+  ],
+  // 0053/0054's FX commitment guard, built by the agent that owns
+  // `src/lib/fx/**` and wired in here because that agent can write
+  // neither this file nor `scripts/dbcheck.mjs`.
+  //
+  // Accepting an FX quote used to reserve nothing: two acceptances of
+  // $21,308.95 each against $35,514.93 available left availability
+  // unmoved and the payout gate cleared both. The repair places an
+  // ordinary `manual` hold through the existing hold model — no second
+  // definition of availability, which is the constraint that matters.
+  //
+  // Its population is acceptances at or after
+  // `fx_commitment_regime.effective_from`; the 35 that predate it hold
+  // nothing. That watermark was attacked before this entry was written —
+  // UPDATE, DELETE, TRUNCATE and a second regime row, as the app role and
+  // as the owner, eight attempts, all refused — so the boundary cannot be
+  // walked forward to empty the guard.
+  //
+  // Green today over an EMPTY population (0 standing of 35 acceptances),
+  // which dbcheck's GUARD REACH prints as EMPTY rather than as evidence.
+  [
+    'v_fx_commitment_unheld',
+    'every standing FX commitment withholds exactly the price it committed',
+  ],
+  // 0056's one — the far side of a threshold. `v_advice_delta_unsound`
+  // asks whether an advice's implied base is BELOW ZERO; 12 of the 13
+  // advices on this book have a base of zero or more and were never
+  // questioned again by any view. The base is not merely supposed to be
+  // non-negative — it is supposed to be the authorisation's own net
+  // immediately before the event, which is one number computed from rows
+  // rather than a tolerance.
+  //
+  // Deliberately scoped: the negative-base and missing-payload arms stay
+  // with 0043's guard, which is red on the single row they cover. Firing
+  // here too would put one defect on the board twice and take the failure
+  // count to five while the number of findings stayed at four. The
+  // migration asserts at commit that the declining guard's owner still
+  // reports every row it declines.
+  [
+    'v_advice_base_drift',
+    "an advice's stored delta reconstructs the authorisation net that stood before it",
+  ],
+  // 0057's third state, and the first invariant on this book that reads the
+  // CATALOGUE rather than the money.
+  //
+  // Every view above asks a question about rows. This one asks whether the
+  // guard that PREVENTS a row is still switched on. 0057 shipped the first
+  // prevention on this build — a DEFERRABLE INITIALLY DEFERRED constraint
+  // trigger refusing any transaction that leaves a pot below zero — and a
+  // prevention has a failure mode detection does not: it can be turned off,
+  // and a view over the money goes on reading green while it is.
+  //
+  // The three ways past it are owner-level (`DISABLE TRIGGER`,
+  // `session_replication_role = replica`, dropping it) and `corgi_app` can do
+  // none of them. What is not acceptable is for one to happen silently, so
+  // this reads `pg_trigger` and reports DISABLED / REPLICA ONLY / ABSENT —
+  // the last arm being a NOT EXISTS, because a view that only inspects rows it
+  // finds cannot report a trigger somebody dropped.
+  //
+  // It does NOT retire `v_pot_negative` above. Prevention and detection are
+  // not substitutes: the trigger refuses the write, `v_pot_negative` says so
+  // if the refusal ever stopped working, and this one says so if the refusal
+  // was switched off rather than defeated.
+  //
+  // Mirrored here in the same pass that added it to `scripts/dbcheck.mjs`; the
+  // two lists are asserted equal by this module's own test.
+  [
+    'v_pot_guard_disarmed',
+    'the 0057 negative-pot guard is present and armed for ordinary writes',
+  ],
 ] as const;

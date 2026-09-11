@@ -31,19 +31,37 @@ function position(over: Partial<AccountPosition> = {}): AccountPosition {
     availableCents: 90_000n,
     activeHoldsCents: 10_000n,
     unclearedCreditsCents: 0n,
+    fixture: null,
     ...over,
   };
 }
 
+/** A position belonging to a test-suite business rather than a customer. */
+function fixturePosition(over: Partial<AccountPosition> = {}): AccountPosition {
+  return position({
+    fixture: {
+      source: "src/lib/holds/holds.integration.test.ts",
+      reason: "Opened by a test suite, never onboarded.",
+    },
+    ...over,
+  });
+}
+
+const ZERO = {
+  ledgerCents: 0n,
+  availableCents: 0n,
+  withheldCents: 0n,
+  accounts: 0,
+  businesses: 0,
+  negativeAvailable: 0,
+};
+
 describe("foldTotals", () => {
   it("folds an empty book to zero, not to nothing", () => {
     expect(foldTotals([])).toEqual({
-      ledgerCents: 0n,
-      availableCents: 0n,
-      withheldCents: 0n,
-      accounts: 0,
-      businesses: 0,
-      negativeAvailable: 0,
+      ...ZERO,
+      live: ZERO,
+      fixture: ZERO,
     });
   });
 
@@ -93,6 +111,78 @@ describe("foldTotals", () => {
     ]);
     expect(totals.accounts).toBe(3);
     expect(totals.businesses).toBe(2);
+  });
+
+  /* ------------------------------------------------------------------------ */
+  /* The fixture split                                                        */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * The measured case this split exists for.
+   *
+   * `Holds Integration Fixture Co.` really does sit at -$858,941.45, because
+   * its integration suite force-posted $500,000.00 twice without reaching the
+   * refund. Folded in unlabelled, the front door reported that the bank held
+   * NEGATIVE customer money. The rows are legitimate history and stay; the
+   * headline stops claiming they are a customer's.
+   */
+  it("keeps a test fixture's half-million-dollar overdraft out of customer money", () => {
+    const totals = foldTotals([
+      position({ accountId: "a", ledgerCents: 6_069_951n, availableCents: 3_558_833n }),
+      position({
+        accountId: "b",
+        businessName: "Kettle & Crumb Bakery LLC",
+        ledgerCents: 4_490_116n,
+        availableCents: -1_116_884n,
+      }),
+      fixturePosition({
+        accountId: "c",
+        businessName: "Holds Integration Fixture Co.",
+        ledgerCents: -85_894_145n,
+        availableCents: -86_322_445n,
+      }),
+    ]);
+
+    // The headline: customers, and only customers.
+    expect(totals.live.ledgerCents).toBe(10_560_067n);
+    expect(totals.live.availableCents).toBe(2_441_949n);
+    expect(totals.live.accounts).toBe(2);
+    expect(totals.live.businesses).toBe(2);
+    expect(totals.live.negativeAvailable).toBe(1);
+
+    // Printed beside it, not dropped.
+    expect(totals.fixture.ledgerCents).toBe(-85_894_145n);
+    expect(totals.fixture.availableCents).toBe(-86_322_445n);
+    expect(totals.fixture.accounts).toBe(1);
+
+    // And the whole book is still published, and still reconciles. A split
+    // that did not add back up would be a second, quieter lie.
+    expect(totals.ledgerCents).toBe(-75_334_078n);
+    expect(totals.accounts).toBe(3);
+  });
+
+  it("reconciles the two halves to the whole book, always", () => {
+    const positions = [
+      position({ accountId: "a", ledgerCents: 41_200n, availableCents: -63_800n }),
+      fixturePosition({ accountId: "b", businessName: "Fixture Co.", ledgerCents: -7n }),
+      position({ accountId: "c", businessName: "Two", ledgerCents: 900n }),
+      fixturePosition({ accountId: "d", businessName: "Other Fixture Co." }),
+    ];
+    const t = foldTotals(positions);
+
+    expect(t.live.ledgerCents + t.fixture.ledgerCents).toBe(t.ledgerCents);
+    expect(t.live.availableCents + t.fixture.availableCents).toBe(t.availableCents);
+    expect(t.live.withheldCents + t.fixture.withheldCents).toBe(t.withheldCents);
+    expect(t.live.accounts + t.fixture.accounts).toBe(t.accounts);
+    expect(t.live.negativeAvailable + t.fixture.negativeAvailable).toBe(
+      t.negativeAvailable,
+    );
+  });
+
+  it("treats a book with no fixtures as entirely customer money", () => {
+    const totals = foldTotals([position({ ledgerCents: 100n, availableCents: 100n })]);
+    expect(totals.fixture).toEqual(ZERO);
+    expect(totals.live.ledgerCents).toBe(totals.ledgerCents);
   });
 });
 

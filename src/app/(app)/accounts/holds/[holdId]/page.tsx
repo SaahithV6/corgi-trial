@@ -6,7 +6,10 @@ import { FOCUS_RING, Panel } from "@/components/ui/primitives";
 import { ConsoleErrorPanel } from "@/components/accounts/ConsoleChrome";
 import { HoldDetailView } from "@/components/accounts/HoldDetailView";
 import { fixtureHoldDetail } from "@/components/accounts/fixtures";
-import { loadHoldDetail } from "@/components/accounts/live-source";
+import { HOLD_NO_DATABASE, unreadableHoldDetail } from "@/components/accounts/unreadable";
+// Imports nothing itself, so asking whether there is a database cannot be the
+// thing that crashes the page for not having one. See its header.
+import { hasDatabase } from "@/lib/has-database";
 
 export const metadata: Metadata = {
   title: "Hold · Corgi ops console",
@@ -33,6 +36,15 @@ export const dynamic = "force-dynamic";
  * drilled into as well — an over-capture is the most interesting event set on
  * the screen and it would be perverse to make it the one you cannot open. A
  * real uuid never matches, so no live hold is ever intercepted.
+ *
+ * AND THAT FIXTURE BRANCH USED TO BE UNREACHABLE WITHOUT A DATABASE, which
+ * defeated the design it is the first line of. `@/components/accounts/live-source`
+ * was imported at the top of this file; it value-imports
+ * `@/lib/ledger/balances` -> `@/lib/ledger/db` -> `@/lib/env`, which throws
+ * `EnvironmentError` at module scope without `APP_DATABASE_URL`. So the module
+ * never finished loading and the drawn hold — which wants no database and reads
+ * no row — died for want of one. The live source is now reached by
+ * `await import(...)`, below the two branches that do not need it.
  */
 export default async function HoldPage({
   params,
@@ -44,8 +56,18 @@ export default async function HoldPage({
   const fixture = fixtureHoldDetail(holdId);
   if (fixture !== null) return <HoldDetailView detail={fixture} />;
 
-  const result = await loadHoldDetail(holdId);
-  if (isErr(result)) return <ConsoleErrorPanel error={result.error} />;
+  const result = await loadDetail(holdId);
+  if (isErr(result)) {
+    return result.error.code === HOLD_NO_DATABASE.code ? (
+      <ConsoleErrorPanel
+        error={result.error}
+        title="This hold could not be read"
+        description="No database is configured for this deployment. No event set was read and H(E) was not folded."
+      />
+    ) : (
+      <ConsoleErrorPanel error={result.error} />
+    );
+  }
 
   if (result.value === null) {
     return (
@@ -74,4 +96,16 @@ export default async function HoldPage({
   }
 
   return <HoldDetailView detail={result.value} />;
+}
+
+/**
+ * The live read, behind the two branches that do not want one.
+ *
+ * `hasDatabase()` is asked BEFORE the import rather than after it, which is
+ * the whole point: the import is what throws when the answer is no.
+ */
+async function loadDetail(holdId: string) {
+  if (!hasDatabase()) return unreadableHoldDetail();
+  const { loadHoldDetail } = await import("@/components/accounts/live-source");
+  return await loadHoldDetail(holdId);
 }

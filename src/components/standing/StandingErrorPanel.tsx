@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { FOCUS_RING } from "@/components/ui/primitives";
+import { isRetryable } from "@/components/ui/error-detail";
 import { RetryButton } from "@/components/ui/RetryButton";
 import type { ErrorShape } from "@/lib/result";
 
@@ -19,8 +20,28 @@ import type { ErrorShape } from "@/lib/result";
  * the payment it raises carries an idempotency key derived from the standing
  * order and the scheduled date, which is UNIQUE in the database. Re-running is
  * not just safe, it is the intended recovery.
+ *
+ * `title` and `description` default to the failed-read wording and are
+ * overridden for the cause that is not a failed read — no database configured
+ * at all. Both refuse identically: no mandate, no occurrence, no invariant
+ * tile. The screen used to answer that cause with the `default` FIXTURE
+ * instead, which printed `unresolved: 0` and `doubleFires: 0` on a deployment
+ * that had counted nothing; see `./unreadable.ts`.
+ *
+ * The retry control is dropped when the failure says it is not retryable. A
+ * button offering to re-run a read that cannot succeed sits next to the words
+ * "retryable: no" and contradicts them, and a refresh does not configure a
+ * database.
  */
-export function StandingErrorPanel({ error }: { readonly error: ErrorShape }) {
+export function StandingErrorPanel({
+  error,
+  title = "The schedule could not be loaded",
+  description = "This is a read failure. Nothing fired, no payment was raised and no occurrence was claimed — rendering this page never fires a standing order, and a firing tick is one transaction per occurrence. Even a tick that died mid-flight cannot pay twice: the instruction it raises is keyed on the standing order and the scheduled date, and that key is UNIQUE. Retrying is safe.",
+}: {
+  readonly error: ErrorShape;
+  readonly title?: string;
+  readonly description?: string;
+}) {
   return (
     <section
       aria-labelledby="standing-error-title"
@@ -31,15 +52,10 @@ export function StandingErrorPanel({ error }: { readonly error: ErrorShape }) {
           id="standing-error-title"
           className="text-sm font-semibold tracking-tight text-negative"
         >
-          The schedule could not be loaded
+          {title}
         </h2>
         <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
-          This is a read failure. Nothing fired, no payment was raised and no
-          occurrence was claimed — rendering this page never fires a standing
-          order, and a firing tick is one transaction per occurrence. Even a
-          tick that died mid-flight cannot pay twice: the instruction it raises
-          is keyed on the standing order and the scheduled date, and that key is
-          UNIQUE. Retrying is safe.
+          {description}
         </p>
       </div>
 
@@ -50,10 +66,13 @@ export function StandingErrorPanel({ error }: { readonly error: ErrorShape }) {
 
           <dt className="text-xs uppercase tracking-[0.08em] text-muted">Message</dt>
           <dd className="max-w-prose text-sm">{error.message}</dd>
+
+          <dt className="text-xs uppercase tracking-[0.08em] text-muted">Retryable</dt>
+          <dd className="font-mono text-xs">{isRetryable(error) ? "yes" : "no"}</dd>
         </dl>
 
         <div className="mt-5 flex flex-wrap items-center gap-3">
-          <RetryButton />
+          {isRetryable(error) ? <RetryButton /> : null}
           <Link
             href="/standing-orders"
             className={`rounded px-2 py-1.5 text-xs text-muted underline underline-offset-4 hover:text-text ${FOCUS_RING}`}

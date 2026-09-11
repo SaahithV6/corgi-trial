@@ -49,6 +49,17 @@
  *  15  no_controls_configured           no card controls AND no member
  *  16  within_controls                  approve
  *
+ * ─── AND WHETHER ANYTHING WAS COMPARED AT ALL ───────────────────────────────
+ *
+ * Rules 1 to 4 and rule 15 return WITHOUT CONSULTING A CONTROL. Three of them
+ * approve. On the live book that was 55 of 63 provider-lane approvals — 87% —
+ * and until this field existed all 63 were `outcome: "approve"` and nothing
+ * else, so the control system's own evidence could not distinguish "a limit
+ * said yes" from "there was no limit". Every verdict therefore carries
+ * `judged`, orthogonal to `outcome`, defined and argued in `UNJUDGED_RULES` in
+ * `./types.ts`. It is stated at each return site below and cross-checked
+ * against that list by `decide.test.ts`.
+ *
  * ─── TWO SCOPES, ONE DECISION, NO SECOND ROUND TRIP ─────────────────────────
  *
  * Rules 5, 6 and 12 to 14 are about the PERSON holding the card, and they cost
@@ -172,8 +183,36 @@ function isPurchase(request: AuthRequest): boolean {
  * America/New_York, the same clock the statements use — because a decision
  * function that reads a clock cannot be replayed, and replaying a decision is
  * how a dispute six months from now gets answered.
+ *
+ * ─── THE ONE THING THIS WRAPPER DOES ────────────────────────────────────────
+ *
+ * It copies `judged` into `inputs`, and it is a wrapper rather than a line at
+ * each of the thirteen return sites for one reason: done here it CANNOT
+ * disagree with the verdict. `inputs` is the jsonb column, so the row in
+ * `card_auth_decision` then carries the decision function's OWN statement about
+ * whether anything was compared — not a classification a reader applied to it
+ * afterwards from a taxonomy it had to know. Readers still derive `judged` from
+ * `rule` (`isJudgedRule()`, and migration 0053 in SQL), because `rule` is on
+ * every row this log has ever written and `inputs.judged` is only on rows
+ * written from this build onward; `decide.test.ts` asserts the two agree, which
+ * is what makes the derivation trustworthy rather than merely convenient.
+ *
+ * COST ON THE HOT PATH: one object spread over an object that already exists,
+ * on a path whose next act is a network round trip to Lithic. Measured in
+ * `decide.test.ts` against the same 40-odd cases: below the resolution of
+ * `performance.now()` per call. No query was added; the header's "< 1 ms pure;
+ * no I/O, no clock" is unchanged.
  */
 export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
+  const verdict = evaluate(request, lookup);
+  return { ...verdict, inputs: { ...verdict.inputs, judged: verdict.judged } };
+}
+
+/**
+ * The rules themselves, first match wins. Private: every caller goes through
+ * `decide()` so that no verdict can escape without `inputs.judged` on it.
+ */
+function evaluate(request: AuthRequest, lookup: ControlLookup): Verdict {
   /* --- 1. The read failed. Fail closed. See the header. ------------------ */
   if (lookup.status === "unavailable") {
     return {
@@ -189,6 +228,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
       // reviewer and treated as a lie.
       result: "VELOCITY_EXCEEDED",
       rule: "control_store_unavailable",
+      judged: false,
       reason:
         "The card control store did not answer inside its deadline, so the controls on this card could not be honoured. This system declines rather than guesses.",
       inputs: {
@@ -207,6 +247,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
       outcome: "approve",
       result: "APPROVED",
       rule: "card_not_under_control",
+      judged: false,
       reason:
         "This card token is not registered in this book, so this system holds no controls to apply to it. Approved without judgement; Lithic's own card limits still apply.",
       inputs: {
@@ -233,6 +274,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
       outcome: "approve",
       result: "APPROVED",
       rule: "balance_inquiry_not_a_purchase",
+      judged: false,
       reason:
         "A balance inquiry moves no money and consumes no limit. Approved.",
       inputs: {
@@ -248,6 +290,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
       outcome: "approve",
       result: "APPROVED",
       rule: "credit_not_a_purchase",
+      judged: false,
       reason:
         "A credit authorisation is money returning to the card. Spending limits gate spend, not refunds, so this is approved regardless of how much the card has spent.",
       inputs: {
@@ -283,6 +326,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
       outcome: "decline",
       result: "CARD_PAUSED",
       rule: removed ? "member_removed" : "member_suspended",
+      judged: true,
       reason: removed
         ? `The person this card belongs to is no longer on this team, so the card no longer authorises. Any authorisation already outstanding still settles.`
         : `The person this card belongs to is suspended, so the card is not authorising at the moment.`,
@@ -321,6 +365,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
         outcome: "decline",
         result: "CARD_PAUSED",
         rule: "card_frozen",
+        judged: true,
         reason: `This card is frozen (control version ${controls.version}). No authorisation is approved while it is off.`,
         inputs: { ...base, card_state: controls.cardState },
       };
@@ -339,6 +384,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
         outcome: "decline",
         result: "UNAUTHORIZED_MERCHANT",
         rule: "mcc_blocked",
+        judged: true,
         reason: `Merchant category ${request.mcc} is blocked on this card (control version ${controls.version}).`,
         inputs: {
           ...base,
@@ -355,6 +401,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
         outcome: "decline",
         result: "VELOCITY_EXCEEDED",
         rule: "per_transaction_limit_exceeded",
+        judged: true,
         reason: `This authorisation is over the per-transaction limit on this card (control version ${controls.version}).`,
         inputs: {
           ...base,
@@ -401,6 +448,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
         outcome: "decline",
         result: "VELOCITY_EXCEEDED",
         rule: "member_per_transaction_limit_exceeded",
+        judged: true,
         reason: `This authorisation is over ${member.displayName}'s own per-transaction limit (member terms version ${member.version}).`,
         inputs: {
           ...memberBase(request, lookup.cardId, controls, member),
@@ -429,6 +477,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
       outcome: "approve",
       result: "APPROVED",
       rule: "no_controls_configured",
+      judged: false,
       reason:
         "No controls have been set on this card and it belongs to no member. Approved. A card with no controls is not a card with a control that failed.",
       inputs: {
@@ -446,6 +495,7 @@ export function decide(request: AuthRequest, lookup: ControlLookup): Verdict {
     outcome: "approve",
     result: "APPROVED",
     rule: "within_controls",
+    judged: true,
     reason:
       member === null
         ? `Within every control on this card (control version ${controls?.version ?? "none"}).`
@@ -521,6 +571,7 @@ function memberVelocity(
     outcome: "decline",
     result: "VELOCITY_EXCEEDED",
     rule: window === "day" ? "member_daily_limit_exceeded" : "member_monthly_limit_exceeded",
+    judged: true,
     reason:
       window === "day"
         ? `This authorisation would take ${member.displayName} past their own daily limit (member terms version ${member.version}).`
@@ -556,6 +607,7 @@ function velocity(
     outcome: "decline",
     result: "VELOCITY_EXCEEDED",
     rule: window === "day" ? "daily_limit_exceeded" : "monthly_limit_exceeded",
+    judged: true,
     reason:
       window === "day"
         ? `This authorisation would take the card past its daily limit (control version ${controls.version}).`

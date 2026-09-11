@@ -31,6 +31,35 @@
  * "secret", so a `log.info("registered", result)` would have been safe — but
  * relying on a redaction list to make a code path safe is how the next field,
  * named something else, gets through.
+ *
+ * ============================================================================
+ * `disableEndpointAction` WAS HERE AND IS DELETED. 2026-09-11.
+ *
+ * It parsed an endpoint id, called `disableEndpoint()` and revalidated
+ * `/events`, and it worked. It had NO CALLER: nothing in `EventsView`,
+ * `RegisterForm` or `page.tsx` rendered a control that posted to it, so no
+ * operator could reach it and no refusal it produced could be read by anybody.
+ *
+ * This is the shape `confirmPayee()` had before it was wired (see the header of
+ * `src/app/(app)/payees/actions.ts`), and that precedent argues for wiring
+ * rather than deleting. It was deleted instead, for two reasons:
+ *
+ *   1. A `"use server"` export is a LIVE PUBLIC POST ENDPOINT whether or not a
+ *      button points at it. An unreachable control is dead weight; an
+ *      unreachable endpoint that stops webhook delivery for a customer is a
+ *      capability with no audience and a blast radius, and the only thing
+ *      guarding it was that nobody had guessed the action id. Deleting it is
+ *      strictly the safer half of the choice.
+ *   2. Nothing is lost. `disableEndpoint()` in `@/lib/events/store` still
+ *      stands and is still exercised by `src/lib/events/roundtrip.live.test.ts`
+ *      at two points. Restoring the action is re-adding twelve lines, and the
+ *      next person to do it should do it together with the control that posts
+ *      to it — that is the point of this note.
+ *
+ * The honest limit on this decision: wiring it would have meant editing the
+ * events SCREEN, which was outside this change's remit. Somebody who owns
+ * `src/components/events/**` should weigh the wiring on its merits; an
+ * endpoint nobody can press is not the way to leave the question open.
  * ============================================================================
  */
 
@@ -168,14 +197,3 @@ export async function drainOutboundAction(): Promise<SimpleResult> {
   };
 }
 
-export async function disableEndpointAction(_previous: SimpleResult, form: FormData): Promise<SimpleResult> {
-  const id = z.string().uuid().safeParse(String(form.get("endpointId") ?? ""));
-  if (!id.success) return { status: "refused", message: "That is not an endpoint id." };
-  const { disableEndpoint } = await import("@/lib/events/store");
-  await disableEndpoint(id.data);
-  revalidatePath("/events");
-  return {
-    status: "done",
-    message: "Endpoint disabled. Nothing further is queued for it; its delivery log is kept.",
-  };
-}
