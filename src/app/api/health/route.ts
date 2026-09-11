@@ -49,6 +49,11 @@ import {
   type EnvBag,
 } from '@/lib/webhooks/route-handler';
 
+import {
+  attributeDeliverySilence,
+  initiationUnavailable,
+  readTransactionInitiation,
+} from './initiation';
 import { itemsUnavailable, plaidItemHealth, readPlaidItems } from './item-health';
 import {
   processingUnavailable,
@@ -203,6 +208,28 @@ export async function GET(request: Request): Promise<Response> {
             )
           : readPlaidItems(client(deliveryUrl));
 
+    // THE FIFTH QUESTION: was there anything for the provider to deliver.
+    // Started here with the others so its wall time hides inside the probes'
+    // 4s, and it runs on the same warmed connection.
+    //
+    // This exists because the delivery field above was measuring TIME SINCE
+    // THE LAST WEBHOOK when the question a `stale` verdict implies is ARE WE
+    // LOSING DELIVERIES. Measured at 17:56Z: Lithic `stale` at 489s,
+    // `degradesDeployment: true`, "treated as an outage" — with the probe
+    // reading `GET /v1/cards -> 200` in the same response, and the real cause
+    // being that a burst of test traffic ended at 17:33 and nobody had swiped
+    // a card since. See ./initiation.ts. Silence is not loss.
+    const initiationRead =
+      deliveryUrl === undefined
+        ? Promise.resolve(initiationUnavailable('APP_DATABASE_URL is not set'))
+        : !database.reachable
+          ? Promise.resolve(
+              initiationUnavailable(
+                `database unreachable: ${database.error ?? 'no detail given'}`,
+              ),
+            )
+          : readTransactionInitiation(client(deliveryUrl));
+
     // The actual verdict, earned by a real authenticated call per provider.
     //
     // These two disagreed in production and the disagreement was the whole
@@ -285,7 +312,7 @@ export async function GET(request: Request): Promise<Response> {
     // one. It is keyed by provider and its verdict vocabulary is disjoint from
     // the liveness vocabulary, so it cannot answer a question the slot table
     // already answered.
-    const webhookHealth = webhookDeliveryHealth(
+    const deliveryMeasurement = webhookDeliveryHealth(
       await deliveryRead,
       webhookReports.map((w) => ({
         provider: w.provider,
@@ -346,6 +373,32 @@ export async function GET(request: Request): Promise<Response> {
       new Date(),
     );
 
+    // WHAT THAT SILENCE MEANS, attributed before it is published.
+    //
+    // `webhookDeliveryHealth` above answers "how long has this provider been
+    // silent" and answers it correctly. It cannot answer "are we losing
+    // deliveries", because the only input it has is a clock: an outage and an
+    // afternoon when nobody swiped a card produce the SAME reading, to the
+    // byte. This deployment published the second one as the first at 17:56Z.
+    //
+    // So the delivery verdict is narrowed, ONCE, here, against the fact that
+    // decides between them — whether a transaction was initiated during the
+    // silence, read from `card_auth_decision` on the synchronous ASA channel
+    // that never touches `webhook_inbox`. The narrowing only ever SUBTRACTS an
+    // alarm, only from `stale`, and only on a counted zero: unmeasured,
+    // unattributable, or any initiation at all after the last delivery and the
+    // alarm stands exactly as it was. See ./initiation.ts, which argues every
+    // clause.
+    //
+    // The two are folded together rather than computed side by side because
+    // `/api/health` must hold ONE opinion per question (DECISIONS 021). What is
+    // published below is the narrowed delivery field, and the evidence for the
+    // narrowing is published beside it in a fifth disjoint vocabulary, so no
+    // reader has to infer from two fields why a `stale` provider is not
+    // degrading the deployment.
+    const { delivery: webhookHealth, initiation: transactionInitiation } =
+      attributeDeliverySilence(deliveryMeasurement, await initiationRead, new Date());
+
     // The third question, folded in the same way and from the same read
     // budget. It takes no liveness context at all, and that is deliberate:
     // `degradesDeployment` on a dropped delivery must not be gated on a probe
@@ -372,6 +425,19 @@ export async function GET(request: Request): Promise<Response> {
     // Anything looser and this endpoint reports degraded overnight because
     // nobody swiped a card, which trains its readers to ignore it — the same
     // mistake the 3s database budget above already made once.
+    //
+    // AND A FIFTH CONDITION, because those four were not enough and the
+    // threshold was never the problem. It reported degraded at 17:56Z on a
+    // rail that was live, for 489 seconds of silence that followed a burst of
+    // test traffic ending at 17:33 — exactly the "nobody swiped a card"
+    // failure the paragraph above names, arriving inside the threshold rather
+    // than outside it, because the guard measured TIME SINCE THE LAST WEBHOOK
+    // when the question is ARE WE LOSING DELIVERIES. The clause is not a
+    // looser clock: 180s is still 180s, and a real outage during a demo is
+    // still caught at 181 seconds. It is that a `stale` provider only degrades
+    // the deployment when something was INITIATED in the silence and never
+    // delivered. Absent that evidence it degrades anyway — see
+    // ./initiation.ts.
     //
     // A DROPPED DELIVERY IS THE THIRD THING, and it needs none of those four
     // conditions, because it is not silence. A dead letter is a delivery we
@@ -424,6 +490,24 @@ export async function GET(request: Request): Promise<Response> {
         // are kept apart deliberately: "we have never heard from this
         // provider" and "this provider has gone quiet" are different facts.
         webhookHealth,
+        // WHY a silent provider is or is not an outage, per provider: whether
+        // a transaction was initiated after its newest delivery, counted from
+        // `card_auth_decision` — the Auth Stream Access request Lithic makes
+        // synchronously while the cardholder waits, which is recorded on a
+        // channel that never touches `webhook_inbox` and is therefore the only
+        // evidence of traffic that survives the feed going dark.
+        //
+        // A fifth disjoint vocabulary — transacting / dormant / uncounted /
+        // unattributable — so `lithic: stale` and `lithic: dormant` read as the
+        // two independent facts they are: the feed has been quiet for 489
+        // seconds, and there was nothing for it to send. That combination is
+        // not a contradiction; it is the false alarm this field exists to
+        // retire. `narrowed` names every provider whose delivery alarm this
+        // field took away, and it is empty unless a counted zero says otherwise
+        // — an unreadable count, a provider with no initiation ledger, or one
+        // single initiation after the last delivery all leave the alarm
+        // standing.
+        transactionInitiation,
         // Per-provider webhook PROCESSING: the newest delivery this system
         // actually CONSUMED, the depth and age of what is parked, and the
         // depth, age and stated reason of what has been dead-lettered.

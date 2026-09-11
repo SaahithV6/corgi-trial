@@ -60,6 +60,8 @@ export const CLIENT_SCREENS = [
   { href: "/client/pots", label: "Pots" },
   { href: "/client/disputes", label: "Disputes" },
   { href: "/client/payouts", label: "Send abroad" },
+  // Last, because it is the only one a viewer WITHOUT an account can use.
+  { href: "/client/open", label: "Open an account" },
 ] as const;
 
 export type ClientScreenHref = (typeof CLIENT_SCREENS)[number]["href"];

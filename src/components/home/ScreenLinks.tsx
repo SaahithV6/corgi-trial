@@ -78,6 +78,14 @@ export const SCREENS: readonly Screen[] = [
     external: false,
   },
   {
+    href: "/client/open",
+    title: "Open a business account",
+    summary:
+      "A business applies \u2014 legal name, EIN, registered address, directors \u2014 and is told what the checks actually said.",
+    why: "The registry leg is a real GET to api.gleif.org on submit, and the answer is folded with strictestOf(), so the application reports the WEAKER of the register and the director check rather than an average \u2014 one unanswered leg holds the whole thing at pending. Approved is unreachable from this screen BY CONSTRUCTION, which is that rule working rather than a missing case. No account is created optimistically: accountOpen is false until a check passes, and this route runs no query at all, because an EIN lookup would be a cross-applicant oracle. It also found its own ceiling \u2014 corgi_app holds SELECT and only SELECT on `business`, so the app cannot open a business row without a definer function that does not exist yet, and the pending panel says so in words rather than pretending.",
+    external: false,
+  },
+  {
     href: "/client/pots",
     title: "Your pots",
     summary:

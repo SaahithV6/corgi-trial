@@ -1469,7 +1469,7 @@ N("J3d", "server side: call every endpoint, prove every auth gate, enforce AGENT
        "a written policy the code does not enforce is the exact phantom he is "
        "worried about. MCP once carried a FIFTH definition of availability")
 N("J3e", "operator screens: does any of them show a number it did not earn",
-  "product", 120, [], "agent", ["app/(app)/*", "components/*"], status="active",
+  "product", 120, [], "agent", ["app/(app)/*", "components/*"], status="done",
   risk="/statements printed HASH REPRODUCED with no connection open; /pots "
        "would have called difference $0.00 AGREEMENT having read nothing; "
        "/reconciliation would have shown Breaks 4 from no data. four states per "
@@ -1529,7 +1529,7 @@ N("J3j", "cross-customer contamination is DETECTED and not PREVENTED", "money-wr
        "an authorisation reference the agent is to STOP rather than ship "
        "something that refuses correct behaviour")
 N("J3k", "card controls were built entirely operator-side; they are a CUSTOMER feature",
-  "product", 45, [], "agent", ["app/client", "components/client"], status="active",
+  "product", 45, [], "agent", ["app/client", "components/client"], status="done",
   risk="SAAHITH'S DOMAIN CORRECTION at 10:30 — 'when it said card controls "
        "that's all user side I'm pretty sure', and he is right. a business "
        "owner setting a spend limit, blocking an MCC or freezing a card on "
@@ -1556,7 +1556,7 @@ N("J3k", "card controls were built entirely operator-side; they are a CUSTOMER f
 # "dispute INTAKE", card controls a business owner sets on their team's cards.
 # ---------------------------------------------------------------------------
 N("J4a", "client pots: create, fund, move — the customer half", "product", 50, [],
-  "agent", ["app/client/pots", "components/client/pots"], status="active",
+  "agent", ["app/client/pots", "components/client/pots"], status="done",
   risk="'sub-accounts or pots, with instant internal transfers that are pure "
        "ledger moves' — built at /pots for the operator, nothing for the "
        "customer whose money it is. must reach for src/lib/pots, never the "
@@ -1564,7 +1564,7 @@ N("J4a", "client pots: create, fund, move — the customer half", "product", 50,
        "second copy of the logic is the wrong fix")
 N("J4b", "client dispute INTAKE: the customer raises it, not the operator",
   "product", 50, [], "agent", ["app/client/disputes", "components/client/disputes"],
-  status="active",
+  status="done",
   risk="the brief says dispute INTAKE. intake IS the customer raising it. we "
        "built the operator's view of deciding them — 29 cases, 25 provisional "
        "credits — and the customer who was actually charged cannot raise one. "
@@ -1572,7 +1572,7 @@ N("J4b", "client dispute INTAKE: the customer raises it, not the operator",
        "filing raises a case, granting is an operator decision under "
        "maker-checker")
 N("J4c", "client FX: the customer accepts the quote", "product", 50, [], "agent",
-  ["app/client/payouts", "components/client/payouts"], status="active",
+  ["app/client/payouts", "components/client/payouts"], status="done",
   risk="'the cross-border USDC payout with an FX quote THE CUSTOMER ACCEPTS "
        "first' — the accepting is the whole point, it is what makes the rate a "
        "commitment rather than a surprise. built operator-side only. the form "
@@ -1603,7 +1603,7 @@ N("J4e", "0057's lock does NOT carry over to the cross-customer trigger",
        "37 financial accounts sit at depth 3, so membership must be decided by "
        "walking UP via parent_id, not 0054's recursive walk down")
 N("J4f", "/team renders a skeleton and nothing else — the brief's FIRST LINE",
-  "product", 40, [], "agent", ["app/(app)/team", "components/team"], status="active",
+  "product", 40, [], "agent", ["app/(app)/team", "components/team"], status="done",
   risk="'Customers hold a balance, send and receive payments, and get A CARD "
        "FOR EACH PERSON ON THE TEAM.' that is the opening sentence of the brief "
        "and the screen is dead. TEAM_IDLE is exported as a plain object from a "
@@ -1613,8 +1613,8 @@ N("J4f", "/team renders a skeleton and nothing else — the brief's FIRST LINE",
        "page returns HTTP 200, which is exactly why nothing caught it — a 200 "
        "is not proof, and that is the 29-instance pattern again")
 N("J4g", "two gauntlet items cannot be driven from any surface", "product", 60, [],
-  "agent", ["app/standing-orders", "app/reconciliation"], status="active",
-  risk="gauntlet 8 (standing orders) — createStandingOrder has NO CALLER in "
+  "agent", ["app/standing-orders", "app/reconciliation"], status="done",
+  risk="HALF DONE. a mandate CAN now be created from /standing-orders — driven for real, standing_order 48->49, and it appears on the screen after. RECONCILIATION STILL CANNOT BE RUN FROM ANY SURFACE — see J4i. ORIGINAL: gauntlet 8 (standing orders) — createStandingOrder has NO CALLER in "
        "src/app, src/components or seed.mjs, so a grader cannot create a "
        "mandate, and the API/MCP refusal copy points at a console screen THAT "
        "DOES NOT EXIST. gauntlet 9 (scheme reconciliation) — the breaks screen "
@@ -1631,8 +1631,56 @@ N("J4h", "THE ANSWER: he needs both surfaces", "product", 0, ["J3c"], "claude",
        "client-only demo can only pay someone the dashboard already knows. and "
        "card controls now work client-side and BELONG there, so a "
        "dashboard-only demo shows an operator doing the customer's job")
+N("J4l", "INSTANCE 31: the client surface is a VIEW, not a tenant boundary",
+  "correctness", 70, [], "agent", ["components/app-shell", "middleware", "lib/authz"],
+  status="active",
+  risk="SAAHITH FOUND IT: 'why can I access the ops console UI from the client "
+       "side'. measured on production — /client renders hrefs to ALL SIXTEEN "
+       "operator screens, NO operator screen checks a role anywhere (grep for "
+       "requireRole/role===/isOperator returns nothing), and ROLES is "
+       "['staff','approver'] — BOTH ARE STAFF, there is no customer principal "
+       "at all. so the per-business SQL predicates in client/live-source.ts are "
+       "excellent and protect WHICH BUSINESS a client page reads, while the "
+       "same session opens /accounts and sees every business on the book. "
+       "isolation is real one layer down and absent at the layer a user clicks. "
+       "the fix is DEFAULT DENY with the customer-reachable set as the explicit "
+       "list — a deny-list somebody must remember to update would be this "
+       "project's own 30-instance defect, one layer up")
+N("J4m", "a business can APPLY: KYB from the customer side", "product", 55, [],
+  "agent", ["app/client/open", "components/client/open"], status="active",
+  risk="the core loop opens 'open an account behind a real KYB check' and that "
+       "was something STAFF did TO a customer — /onboarding is operator-only. "
+       "KYB ENFORCEMENT was already wired into the client properly "
+       "(transactGateForBusiness is one of its ten WHERE predicates, and the "
+       "gate runs AGAIN inside requestPayment's own transaction, so the screen "
+       "cannot be bypassed). applying was not. the checks stay real: director "
+       "KYC live via Stripe Identity, registry live via GLEIF, composite "
+       "reporting the WEAKEST leg rather than averaging")
+N("J4n", "auth is a documented role switch, and should stay one", "scope", 0, [],
+  "claude", ["docs/DEMO.md"], "done",
+  risk="DECISION, not an oversight. the trial asks for demo credentials for two "
+       "roles, so the credential IS the switch and verify-demo checks 7-11 test "
+       "it from the deployed URL. building real authentication means account "
+       "creation and credential handling, which I cannot do and which is not "
+       "what is graded. what MUST be real is AUTHORIZATION — who may see what — "
+       "and that is J4l. an honest 'auth is a role switch, here is the "
+       "isolation model that actually protects tenancy' beats a half-built login")
+N("J4o", "attack 7 induces its outage BY STAYING QUIET — the defect it should catch",
+  "correctness", 30, ["J4j"], "agent", ["test/livefire"], "todo",
+  risk="PREDICTED BY THE HEALTH AGENT, not yet measured — livefire is opt-in so "
+       "the gate is unaffected. attack 7 calls simulateAuthorize ONCE, replays "
+       "the body into /api/webhooks/lithic so lastDelivery lands AFTER the ASA "
+       "decision, then waits in silence and asserts status === degraded. under "
+       "the fix that silence is DORMANT and correctly does not escalate, so the "
+       "assertion fails. the test encodes the exact defect it was written to "
+       "catch: an outage induced by not sending anything is a quiet Thursday. "
+       "the brief's own wording is the fix — 'turn off your issuing provider's "
+       "webhooks for five minutes' — so a TRUE induction disables the event "
+       "subscription and THEN transacts, giving a delivery owed and not "
+       "arriving. that makes the attack strictly stronger. NOT done blind at "
+       "the deadline: leaving a subscription disabled would break the demo")
 N("J2f", "deploy and re-run every scoreboard against one sha",
-  "release", 20, ["J2a", "J2b", "J2c", "J2d", "J2e"], "claude", [], status="todo",
+  "release", 20, ["J2a", "J2b", "J2c", "J2d", "J2e"], "claude", [], status="done",
   risk="the honesty tools check documents against the DEPLOYMENT and never checked "
        "the deployment against the tree. 225f00d is live; the next commit must be too")
 

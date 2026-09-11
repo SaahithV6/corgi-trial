@@ -56,6 +56,13 @@ export const STATE_HINTS: Record<ClientScreenHref, Record<ClientState, string>> 
     error: "FIXTURE. The preflight read failed, so the form is not drawn.",
     edge: "LIVE, prefilled at exactly the approval threshold — one cent under is unattended, this is not.",
   },
+  "/client/open": {
+    default: "Live. The registry leg is a real call to GLEIF on submit; the answer you see is the register's own.",
+    loading: "The real skeleton, held open by a genuinely slow read.",
+    empty: "FIXTURE. The blank form, before anything has been submitted.",
+    error: "FIXTURE. The register could not be reached, so no answer is claimed \u2014 an application cannot be approved by a check that did not run.",
+    edge: "FIXTURE. An application the register declined. No account was opened and none will be on this application.",
+  },
   "/client/pots": {
     default: "Live. This business's own pots, their balances, and the identity that must hold: main + every pot = the whole account.",
     loading: "The real skeleton, held open by a genuinely slow read.",
