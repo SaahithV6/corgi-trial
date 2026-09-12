@@ -1,0 +1,220 @@
+1
+00:00:00,000 --> 00:00:01,796
+The customer's own screen.
+
+2
+00:00:01,796 --> 00:00:04,076
+One business, Ridgeline Robotics.
+
+3
+00:00:04,076 --> 00:00:07,461
+Availability here is not a column anybody writes.
+
+4
+00:00:07,461 --> 00:00:22,729
+It's five terms, subtracted in front of you: sixty-
+seven seven fifty-nine booked, less twenty-four six
+ten waiting to settle, less twenty-nine seven-oh-one
+
+5
+00:00:22,729 --> 00:00:25,769
+Ten thousand nine forty-seven, ninety-three.
+
+6
+00:00:25,769 --> 00:00:32,539
+Read the line under it — that figure is the
+database's own answer, not a total this page added
+up.
+
+7
+00:00:32,539 --> 00:00:37,858
+If the page and the ledger disagreed, the page would
+be the one that's wrong.
+
+8
+00:00:37,858 --> 00:00:40,000
+So the page doesn't get a vote.
+
+9
+00:00:40,000 --> 00:00:43,246
+A fuel pump authorises fifty dollars.
+
+10
+00:00:43,246 --> 00:00:46,228
+It settles at seventy-three forty.
+
+11
+00:00:46,228 --> 00:00:58,772
+The row says exactly that: held fifty when it was
+authorised, took seventy-three forty when it settled
+— twenty-three forty more than expected.
+
+12
+00:00:58,772 --> 00:01:05,526
+The customer doesn't reconcile anything; the
+difference is named on the line.
+
+13
+00:01:05,526 --> 00:01:16,228
+Above it, the same clearing taken back and re-
+presented — a reversal tagged as a correction, and
+the refund leg beside it.
+
+14
+00:01:16,228 --> 00:01:20,000
+Three rows, one story, nothing overwritten.
+
+15
+00:01:20,000 --> 00:01:21,686
+The twenty-fifth of July.
+
+16
+00:01:21,686 --> 00:01:24,250
+A day that closed, then got corrected.
+
+17
+00:01:24,250 --> 00:01:33,558
+Four legs: the funding credit, the original
+clearing, the reversal that took it back, the re-
+presentation at a hundred ninety-eight fifty.
+
+18
+00:01:33,558 --> 00:01:41,653
+Now the three hashes — rebuilt just now, rebuilt
+again a moment later, and the fingerprint stored the
+day it was issued.
+
+19
+00:01:41,653 --> 00:01:42,327
+Identical.
+
+20
+00:01:42,327 --> 00:01:50,826
+The day is frozen at booking position nine eighty-
+two, so rebuilding from the ledger there gives the
+same document every time.
+
+21
+00:01:50,826 --> 00:01:55,413
+And both earlier versions of this day, still issued,
+still readable.
+
+22
+00:01:55,413 --> 00:02:00,000
+A corrected statement is a new document, not an edit
+of the old one.
+
+23
+00:02:00,000 --> 00:02:01,721
+Same window, same tab.
+
+24
+00:02:01,721 --> 00:02:03,599
+This is the ops console.
+
+25
+00:02:03,599 --> 00:02:08,841
+Priya Raman raised the top payment, so Approve and
+Reject are live.
+
+26
+00:02:08,841 --> 00:02:16,743
+Dana Okonkwo raised the one below, and Dana is
+signed in — tagged "that is you" — so both are
+greyed.
+
+27
+00:02:16,743 --> 00:02:17,447
+Read why.
+
+28
+00:02:17,447 --> 00:02:28,792
+The initiator is never the checker, and this is not
+a rule the screen is applying:
+assert_maker_checker() refuses the insert with
+
+29
+00:02:28,792 --> 00:02:32,000
+Turn the UI off and the rule still holds.
+
+30
+00:02:32,000 --> 00:02:34,338
+One break, shown rather than swept.
+
+31
+00:02:34,338 --> 00:02:36,409
+In the ledger, not in the file.
+
+32
+00:02:36,409 --> 00:02:37,211
+Unexplained.
+
+33
+00:02:37,211 --> 00:02:40,017
+Two hundred forty seventy-one outstanding.
+
+34
+00:02:40,017 --> 00:02:51,841
+The age reads four hundred fifty-three days ahead,
+because an unexplained break is aged from its value
+date — how long the book has been wrong, and every
+
+35
+00:02:51,841 --> 00:02:55,983
+A break already under correction is aged from when
+we learned.
+
+36
+00:02:55,983 --> 00:02:59,324
+Two clocks, and the screen says which one it used.
+
+37
+00:02:59,324 --> 00:03:04,000
+"The engine reported one; this screen classifies
+them and hides none."
+
+38
+00:03:04,000 --> 00:03:04,854
+Webhooks off.
+
+39
+00:03:04,854 --> 00:03:06,101
+Settlement delayed.
+
+40
+00:03:06,101 --> 00:03:07,545
+Deliveries duplicated.
+
+41
+00:03:07,545 --> 00:03:13,783
+Settlement arriving before the authorisation it
+belongs to — each armed against our own outbox.
+
+42
+00:03:13,783 --> 00:03:22,581
+Below them, the invariants: the same views dbcheck
+asserts, each of which must return zero rows,
+measured live rather than remembered.
+
+43
+00:03:22,581 --> 00:03:24,222
+Every entry sums to zero.
+
+44
+00:03:24,222 --> 00:03:26,455
+A released hold withholds nothing.
+
+45
+00:03:26,455 --> 00:03:29,278
+No day re-priced by a rate that came later.
+
+46
+00:03:29,278 --> 00:03:34,662
+And one red, left on screen — three hundred eleven
+rows under v_refused_auth_hold.
+
+47
+00:03:34,662 --> 00:03:43,000
+It's on the register with a written argument, and
+it's showing because a dashboard that only renders
+its greens isn't evidence.
