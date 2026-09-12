@@ -4,7 +4,7 @@ Subject: Work trial: Saahith Veeramaneni, Track 3
 
 Hi both,
 
-Track 3, Neobank. Frozen at commit `ebd4e5b`.
+Track 3, Neobank. Frozen at commit `FROZEN_SHA`.
 
 **1 · Deployed URL**
 
